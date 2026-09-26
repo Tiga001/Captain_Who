@@ -298,6 +298,27 @@
   font-size: var(--mc-font-size-sm);
   overflow-wrap: anywhere;
 }
+.workflow-record--unavailable {
+  border-style: dashed;
+}
+.workflow-record--unavailable .workflow-record__title > svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--mc-color-text-muted);
+}
+.workflow-error-detail {
+  margin-top: 8px;
+}
+.workflow-error-detail summary {
+  cursor: pointer;
+}
+.workflow-error-detail pre {
+  margin: 8px 0 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .workflows-settings__empty {
   display: grid;
   justify-items: center;
@@ -318,6 +339,58 @@
   overflow-wrap: anywhere;
   max-height: 50vh;
   overflow-y: auto;
+}
+.workflow-draft-notice {
+  margin: 0;
+  padding: 9px 24px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-sm);
+}
+.workflow-draft-notice--unavailable {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.workflow-draft-notice--unavailable > span {
+  flex: 1;
+}
+.workflow-draft-notice--unavailable > button {
+  flex-shrink: 0;
+}
+.workflow-template-save-dialog {
+  width: min(500px, calc(100vw - 64px));
+}
+.workflow-template-save-dialog .app-confirm-dialog__actions {
+  flex-wrap: wrap;
+}
+.workflow-template-usage-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  max-height: 32vh;
+  overflow: auto;
+  margin: 4px 0;
+  padding: 12px;
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-md);
+  font-size: var(--mc-font-size-sm);
+}
+.workflow-template-usage-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.workflow-template-usage-list small {
+  flex-basis: 100%;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+}
+.workflow-template-usage-list span {
+  color: var(--mc-color-text-accent);
+  font-size: var(--mc-font-size-xs);
 }
 .workflow-rule {
   display: grid;

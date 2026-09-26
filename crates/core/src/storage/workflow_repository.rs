@@ -1,6 +1,6 @@
 //! Workflow authoring only: graph definitions are persisted without creating executable Agents.
 use crate::storage::now_ms;
-use crate::workflow::{Definition, Record, Request, Response};
+use crate::workflow::{Definition, InvalidRecord, InvalidRecordReason, Record, Request, Response};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashSet;
 
@@ -38,50 +38,53 @@ pub fn request(
     request: Request,
     available_models: &HashSet<String>,
 ) -> Result<Response, Error> {
-    let behavior = match &request {
-        Request::Save { .. } | Request::Delete { .. } | Request::SetEnabled { .. } => {
-            TransactionBehavior::Immediate
-        }
-        _ => TransactionBehavior::Deferred,
-    };
     let transaction = connection
-        .transaction_with_behavior(behavior)
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_error)?;
-    let response = match request {
-        Request::List => Response {
-            records: list(&transaction, available_models)?,
-            issues: vec![],
-        },
-        Request::Validate { definition } => Response {
-            records: vec![],
-            issues: definition
+    let mut response = Response::default();
+    match request {
+        Request::List => {}
+        Request::Validate { definition } => {
+            response.issues = definition
                 .validate(available_models)
-                .map_err(Error::Invalid)?,
-        },
+                .map_err(Error::Invalid)?;
+        }
         Request::Save {
             definition,
             expected_revision,
         } => {
-            // Missing models, incomplete tasks and invalid semantic rules remain editable drafts.
-            let issues = definition
-                .validate(available_models)
-                .map_err(Error::Invalid)?;
-            save(
+            management::publish(
                 &transaction,
                 &definition,
                 expected_revision,
-                issues.is_empty(),
+                None,
+                None,
+                available_models,
             )?;
-            Response {
-                records: list(&transaction, available_models)?,
-                issues: vec![],
-            }
+        }
+        Request::SaveWithUsage {
+            definition,
+            expected_revision,
+            expected_usage_revision,
+            expected_draft_revision,
+        } => {
+            management::publish(
+                &transaction,
+                &definition,
+                expected_revision,
+                expected_usage_revision.as_deref(),
+                expected_draft_revision,
+                available_models,
+            )?;
         }
         Request::Delete {
             id,
             expected_revision,
         } => {
             validate_id(&id)?;
+            if management::template_in_use(&transaction, &id)? {
+                return Err(Error::Conflict("workflow_template_in_use".into()));
+            }
             let expected = revision_to_sql(expected_revision)?;
             if expected == 0 {
                 return Err(Error::Invalid(
@@ -97,10 +100,6 @@ pub fn request(
             if changed != 1 {
                 return Err(revision_conflict());
             }
-            Response {
-                records: list(&transaction, available_models)?,
-                issues: vec![],
-            }
         }
         Request::SetEnabled {
             id,
@@ -114,17 +113,27 @@ pub fn request(
                 expected_revision,
                 available_models,
             )?;
-            Response {
-                records: list(&transaction, available_models)?,
-                issues: vec![],
-            }
         }
-    };
+        Request::Manage(request) => {
+            response.affected_conversation_ids =
+                management::request(&transaction, request, available_models)?;
+        }
+    }
+    (response.records, response.invalid_records) = list(&transaction, available_models)?;
+    response.instances = management::list_instances(&transaction)?;
+    response.usages = management::list_usages(&transaction)?;
+    (response.drafts, response.invalid_drafts) =
+        management::list_drafts(&transaction, available_models)?;
     transaction.commit().map_err(storage_error)?;
     Ok(response)
 }
 
-fn list(connection: &Connection, available_models: &HashSet<String>) -> Result<Vec<Record>, Error> {
+mod management;
+
+fn list(
+    connection: &Connection,
+    available_models: &HashSet<String>,
+) -> Result<(Vec<Record>, Vec<InvalidRecord>), Error> {
     let (count, bytes) = catalog_size(connection)?;
     if count > MAX_DEFINITIONS || bytes > MAX_CATALOG_BYTES {
         return Err(Error::Storage(
@@ -148,24 +157,67 @@ fn list(connection: &Connection, available_models: &HashSet<String>) -> Result<V
             ))
         })
         .map_err(storage_error)?;
-    rows.map(|row| {
+    let mut records = vec![];
+    let mut invalid_records = vec![];
+    for row in rows {
         let (id, json, revision, updated_at, enabled) = row.map_err(storage_error)?;
-        let definition: Definition = serde_json::from_str(&json).map_err(storage_error)?;
-        if definition.id != id || !(1..=MAX_SAFE_REVISION).contains(&revision) || updated_at < 0 {
-            return Err(Error::Storage("Invalid persisted workflow record".into()));
+        if !(1..=MAX_SAFE_REVISION).contains(&revision) || updated_at < 0 {
+            return Err(Error::Storage(
+                "Invalid persisted workflow record metadata".into(),
+            ));
         }
-        let issues = definition
-            .validate(available_models)
-            .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
-        Ok(Record {
-            definition,
-            enabled: enabled && issues.is_empty(),
-            revision: revision as u64,
-            updated_at,
-            issues,
+        match parse_persisted_definition(&json, &id, available_models) {
+            Ok((definition, issues)) => records.push(Record {
+                definition,
+                enabled: enabled && issues.is_empty(),
+                revision: revision as u64,
+                updated_at,
+                issues,
+            }),
+            Err(reason) => invalid_records.push(InvalidRecord {
+                name: recovery_display_name(&json, &id),
+                id,
+                revision: revision as u64,
+                updated_at,
+                reason,
+            }),
+        }
+    }
+    Ok((records, invalid_records))
+}
+
+/// Invalid graph bytes stay untouched and are never exposed as an editable placeholder.
+/// Recovery metadata lets callers explicitly remove a record using its original revision.
+fn parse_persisted_definition(
+    json: &str,
+    id: &str,
+    models: &HashSet<String>,
+) -> Result<(Definition, Vec<crate::workflow::Issue>), InvalidRecordReason> {
+    let definition: Definition =
+        serde_json::from_str(json).map_err(|_| InvalidRecordReason::IncompatibleDefinition)?;
+    if definition.id != id {
+        return Err(InvalidRecordReason::InvalidDefinition);
+    }
+    let issues = definition
+        .validate(models)
+        .map_err(|_| InvalidRecordReason::InvalidDefinition)?;
+    Ok((definition, issues))
+}
+
+fn recovery_display_name(json: &str, id: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(str::to_owned)
         })
-    })
-    .collect()
+        .filter(|name| {
+            !name.trim().is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
+        })
+        .map(|name| name.trim().to_owned())
+        .unwrap_or_else(|| id.to_owned())
 }
 
 fn save(
@@ -278,6 +330,9 @@ fn set_enabled(
     if changed != 1 {
         return Err(revision_conflict());
     }
+    // Availability changes do not alter graph content; keep an existing draft based
+    // on this exact published revision publishable after reopening the editor.
+    connection.execute("UPDATE workflow_editing_drafts SET base_revision=?1 WHERE template_id=?2 AND base_revision=?3",params![next,id,expected]).map_err(storage_error)?;
     Ok(())
 }
 
@@ -316,3 +371,6 @@ fn validate_id(id: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod management_tests;

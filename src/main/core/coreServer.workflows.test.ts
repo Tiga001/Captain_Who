@@ -47,6 +47,27 @@ describe('workflow IPC contract boundary', () => {
       expect(rpcRequest).toHaveBeenLastCalledWith('agent.workflows.request', request)
     }
   })
+  it('preserves isolated recovery entries through the Host boundary for both workflow pages', async () => {
+    const invalid = {
+      id: 'legacy',
+      name: '1234',
+      revision: 2,
+      updatedAt: 42,
+      reason: 'incompatible_definition'
+    }
+    const response = {
+      records: [],
+      issues: [],
+      instances: [],
+      invalidRecords: [invalid],
+      invalidDrafts: [{ ...invalid, baseRevision: 2 }]
+    }
+    rpcRequest.mockResolvedValue(response)
+    const server = new CoreServer()
+    for (const operation of ['list', 'listInstances'] as const) {
+      await expect(server.requestWorkflows({ operation })).resolves.toEqual(response)
+    }
+  })
   it('enforces switch types before RPC and rejects invalid enabled records after RPC', async () => {
     const server = new CoreServer()
     const request = {

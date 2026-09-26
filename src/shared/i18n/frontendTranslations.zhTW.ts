@@ -2199,6 +2199,7 @@ export const zhTWTranslations = {
   'configuration.imageGeneration.error.generic': '无法完成图片生成配置操作。',
   'configuration.imageGeneration.error.loadFailed': '無法載入圖片生成配置。',
   'configuration.save': '儲存',
+  'sidebar.workflows': '工作流程',
   'sidebar.scheduled': '已安排',
   'sidebar.scheduledAttention': '{count} 項自動化需要關注',
   'automation.pageTitle': '已安排',

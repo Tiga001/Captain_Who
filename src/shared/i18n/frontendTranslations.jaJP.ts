@@ -2386,6 +2386,7 @@ export const jaJPTranslations = {
   'configuration.imageGeneration.error.generic': 'イメージ生成構成操作を完了できません。',
   'configuration.imageGeneration.error.loadFailed': 'イメージ生成構成をロードできません。',
   'configuration.save': '保存',
+  'sidebar.workflows': 'ワークフロー',
   'sidebar.scheduled': '予定されている',
   'sidebar.scheduledAttention': '{count} オートメーションには注意が必要です',
   'automation.pageTitle': '予定されている',

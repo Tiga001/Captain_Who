@@ -9,7 +9,8 @@ import '../shell/sidebar/LeftSidebar.css'
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     language: 'en-US',
-    t: (key: string) => (key === 'sidebar.scheduled' ? 'Scheduled' : key)
+    t: (key: string) =>
+      key === 'sidebar.scheduled' ? 'Scheduled' : key === 'sidebar.workflows' ? 'Workflows' : key
   })
 }))
 
@@ -21,12 +22,16 @@ function renderSidebar({
   attentionCount = 0,
   onNewProject = vi.fn().mockResolvedValue(null),
   onOpenScheduled = vi.fn(),
-  selected = false
+  selected = false,
+  onOpenWorkflows,
+  workflowsSelected = false
 }: {
   attentionCount?: number
   onNewProject?: () => Promise<null>
   onOpenScheduled?: () => void
   selected?: boolean
+  onOpenWorkflows?: () => void
+  workflowsSelected?: boolean
 } = {}) {
   return render(
     <div
@@ -73,6 +78,11 @@ function renderSidebar({
         onUiPreferencesChange={noop}
         scheduledAttentionCount={attentionCount}
         scheduledSelected={selected}
+        onOpenWorkflows={onOpenWorkflows}
+        workflowsSelected={workflowsSelected}
+        workflowMemberships={{
+          'conversation-1': { id: 'workflow-1', name: 'Release review', color: '#2478d4' }
+        }}
       />
     </div>
   )
@@ -122,6 +132,31 @@ describe('LeftSidebar scheduled navigation', () => {
 
     await scheduled.click()
     expect(onOpenScheduled).toHaveBeenCalledOnce()
+  })
+
+  it('opens global workflows below Scheduled and makes conversations draggable for binding', async () => {
+    const onOpenWorkflows = vi.fn()
+    const screen = await renderSidebar({ onOpenWorkflows, workflowsSelected: true })
+    const workflows = screen.getByRole('button', { name: 'Workflows', exact: true })
+    const scheduled = screen.getByRole('button', { name: 'Scheduled', exact: true })
+    await expect.element(workflows).toHaveAttribute('aria-current', 'page')
+    expect(workflows.element().getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      scheduled.element().getBoundingClientRect().bottom
+    )
+    await workflows.click()
+    expect(onOpenWorkflows).toHaveBeenCalledOnce()
+    const conversation = screen.getByRole('button', {
+      name: 'Release review Existing conversation'
+    })
+    await expect.element(conversation).toHaveAttribute('draggable', 'true')
+    const transfer = new DataTransfer()
+    conversation
+      .element()
+      .dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }))
+    expect(transfer.getData('application/x-captain-workflow-conversation')).toBe('conversation-1')
+    const marker = screen.container.querySelector<HTMLElement>('.left-sidebar__workflow-marker')!
+    expect(marker.style.backgroundColor).toBe('rgb(36, 120, 212)')
+    expect(screen.container.querySelector('.left-sidebar__projects')).not.toBeNull()
   })
 
   it('hides a zero badge and caps large counts at 99+', async () => {

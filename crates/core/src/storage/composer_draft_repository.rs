@@ -1,5 +1,5 @@
 use crate::storage::models::ComposerDraftRecord;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<ComposerDraftRecord>> {
     let mut statement = connection.prepare(
@@ -11,25 +11,70 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
         ",
     )?;
 
-    let drafts = statement
-        .query_map([], |row| {
-            Ok(ComposerDraftRecord {
-                scope_id: row.get(0)?,
-                message: row.get(1)?,
-                permission_mode: row.get(2)?,
-                permission_mode_version: row.get(3)?,
-                model_id: row.get(4)?,
-                project_id: row.get(5)?,
-                attachments_json: row.get(6)?,
-                folder_references_json: row.get(7)?,
-                skills_json: row.get(8)?,
-                queued_messages_json: row.get(9)?,
-                updated_at: row.get(10)?,
-            })
-        })?
-        .collect();
+    let drafts = statement.query_map([], draft_from_row)?.collect();
 
     drafts
+}
+
+fn draft_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ComposerDraftRecord> {
+    Ok(ComposerDraftRecord {
+        scope_id: row.get(0)?,
+        message: row.get(1)?,
+        permission_mode: row.get(2)?,
+        permission_mode_version: row.get(3)?,
+        model_id: row.get(4)?,
+        project_id: row.get(5)?,
+        attachments_json: row.get(6)?,
+        folder_references_json: row.get(7)?,
+        skills_json: row.get(8)?,
+        queued_messages_json: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+/// Applies the same durable preference change as the composer model/permission menus.
+/// A workflow binding calls this inside its transaction. Existing conversation model metadata,
+/// active Run state and per-message queue snapshots are deliberately not rewritten: normal
+/// submission performs the provider/context transition when the next input is actually sent.
+pub(crate) fn set_composer_configuration(
+    connection: &Connection,
+    conversation_id: &str,
+    model_id: Option<&str>,
+    permission_mode: &str,
+    updated_at: i64,
+) -> rusqlite::Result<()> {
+    let current = connection.query_row(
+        "SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, folder_references_json, skills_json, queued_messages_json, updated_at
+         FROM composer_drafts WHERE scope_id=?1", [conversation_id], draft_from_row,
+    ).optional()?;
+    let mut draft = match current {
+        Some(draft) => draft,
+        None => ComposerDraftRecord {
+            scope_id: conversation_id.into(),
+            message: String::new(),
+            permission_mode: permission_mode.into(),
+            permission_mode_version:
+                crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION,
+            model_id: model_id.map(str::to_owned),
+            project_id: connection.query_row(
+                "SELECT project_id FROM conversations WHERE id=?1",
+                [conversation_id],
+                |row| row.get(0),
+            )?,
+            attachments_json: "[]".into(),
+            folder_references_json: "[]".into(),
+            skills_json: "[]".into(),
+            queued_messages_json: "[]".into(),
+            updated_at: 0,
+        },
+    };
+    draft.model_id = model_id.map(str::to_owned);
+    draft.permission_mode = permission_mode.into();
+    draft.permission_mode_version =
+        crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION;
+    draft.updated_at = updated_at.max(draft.updated_at.saturating_add(1));
+    save_composer_draft(connection, draft)
 }
 
 pub fn save_composer_draft(

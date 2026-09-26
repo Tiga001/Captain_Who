@@ -273,6 +273,13 @@ pub struct Record {
 #[derive(Debug)]
 pub enum Request {
     List,
+    Manage(crate::workflow_management::Request),
+    SaveWithUsage {
+        definition: Definition,
+        expected_revision: u64,
+        expected_usage_revision: Option<String>,
+        expected_draft_revision: Option<u64>,
+    },
     Validate {
         definition: Definition,
     },
@@ -292,6 +299,22 @@ pub enum Request {
 }
 impl<'de> Deserialize<'de> for Request {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if matches!(
+            value.get("operation").and_then(|op| op.as_str()),
+            Some(
+                "listInstances"
+                    | "saveInstance"
+                    | "deleteInstance"
+                    | "saveDraft"
+                    | "deleteDraft"
+                    | "duplicate"
+            )
+        ) {
+            return serde_json::from_value(value)
+                .map(Self::Manage)
+                .map_err(serde::de::Error::custom);
+        }
         #[derive(Deserialize)]
         #[serde(tag = "operation", rename_all = "camelCase", deny_unknown_fields)]
         enum WireRequest {
@@ -301,6 +324,10 @@ impl<'de> Deserialize<'de> for Request {
             },
             Save {
                 definition: Definition,
+                #[serde(default, rename = "expectedUsageRevision")]
+                expected_usage_revision: Option<String>,
+                #[serde(default, rename = "expectedDraftRevision")]
+                expected_draft_revision: Option<u64>,
                 #[serde(rename = "expectedRevision")]
                 expected_revision: u64,
             },
@@ -316,39 +343,78 @@ impl<'de> Deserialize<'de> for Request {
                 expected_revision: u64,
             },
         }
-        Ok(match WireRequest::deserialize(deserializer)? {
-            WireRequest::List {} => Self::List,
-            WireRequest::Validate { definition } => Self::Validate { definition },
-            WireRequest::Save {
-                definition,
-                expected_revision,
-            } => Self::Save {
-                definition,
-                expected_revision,
+        Ok(
+            match serde_json::from_value::<WireRequest>(value).map_err(serde::de::Error::custom)? {
+                WireRequest::List {} => Self::List,
+                WireRequest::Validate { definition } => Self::Validate { definition },
+                WireRequest::Save {
+                    definition,
+                    expected_revision,
+                    expected_usage_revision,
+                    expected_draft_revision,
+                } => {
+                    if expected_usage_revision.is_some() || expected_draft_revision.is_some() {
+                        Self::SaveWithUsage {
+                            definition,
+                            expected_revision,
+                            expected_usage_revision,
+                            expected_draft_revision,
+                        }
+                    } else {
+                        Self::Save {
+                            definition,
+                            expected_revision,
+                        }
+                    }
+                }
+                WireRequest::Delete {
+                    id,
+                    expected_revision,
+                } => Self::Delete {
+                    id,
+                    expected_revision,
+                },
+                WireRequest::SetEnabled {
+                    id,
+                    enabled,
+                    expected_revision,
+                } => Self::SetEnabled {
+                    id,
+                    enabled,
+                    expected_revision,
+                },
             },
-            WireRequest::Delete {
-                id,
-                expected_revision,
-            } => Self::Delete {
-                id,
-                expected_revision,
-            },
-            WireRequest::SetEnabled {
-                id,
-                enabled,
-                expected_revision,
-            } => Self::SetEnabled {
-                id,
-                enabled,
-                expected_revision,
-            },
-        })
+        )
     }
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidRecordReason {
+    IncompatibleDefinition,
+    InvalidDefinition,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InvalidRecord {
+    pub id: String,
+    pub name: String,
+    pub revision: u64,
+    pub updated_at: i64,
+    pub reason: InvalidRecordReason,
+}
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Response {
     pub records: Vec<Record>,
     pub issues: Vec<Issue>,
+    pub instances: Vec<crate::workflow_management::Instance>,
+    pub usages: Vec<crate::workflow_management::Usage>,
+    pub drafts: Vec<crate::workflow_management::EditingDraft>,
+    pub affected_conversation_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalid_records: Vec<InvalidRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalid_drafts: Vec<crate::workflow_management::InvalidEditingDraft>,
 }
 fn issue(out: &mut Vec<Issue>, code: &str, subject: &str) {
     out.push(Issue {

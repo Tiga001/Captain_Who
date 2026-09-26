@@ -17,6 +17,7 @@ export interface SidebarConversation {
   isPending?: boolean
   isWaitingForApproval?: boolean
   messages?: ChatConversation['messages']
+  workflow?: { id: string; name: string; color: string }
   modelId?: string | null
   pinnedAt?: number | null
   projectId: string | null
@@ -54,6 +55,9 @@ export interface LeftSidebarProps {
   onRemoveProject: (projectId: string) => Promise<boolean>
   onRequestRenameConversation?: (conversationId: string) => void
   onRenameConversation: (conversationId: string, title: string) => void
+  onOpenWorkflows?: () => void
+  workflowsSelected?: boolean
+  workflowMemberships?: Readonly<Record<string, { id: string; name: string; color: string }>>
   onOpenScheduled: () => void
   onSelectConversation: (conversationId: string, messageId?: string | null) => void
   onShowProjectInFolder: (projectId: string) => void

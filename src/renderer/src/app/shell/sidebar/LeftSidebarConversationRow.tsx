@@ -48,6 +48,7 @@ interface ConversationRowProps {
   unreadLabel: string
   unpinLabel: string
   waitingApprovalLabel: string
+  workflowDragEnabled?: boolean
   nested?: boolean
 }
 
@@ -70,7 +71,8 @@ export const ConversationRow = memo(function ConversationRow({
   unreadLabel,
   unpinLabel,
   waitingApprovalLabel,
-  nested = false
+  nested = false,
+  workflowDragEnabled = false
 }: ConversationRowProps) {
   const conversationMenuRef = useRef<HTMLDivElement>(null)
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null)
@@ -113,8 +115,23 @@ export const ConversationRow = memo(function ConversationRow({
       <button
         className="left-sidebar__conversation-main"
         type="button"
+        draggable={workflowDragEnabled}
+        onDragStart={(event) => {
+          event.dataTransfer.setData('application/x-captain-workflow-conversation', conversation.id)
+          event.dataTransfer.effectAllowed = 'link'
+          closeConversationMenu()
+        }}
         onClick={() => onSelectConversation(conversation.id)}
       >
+        {conversation.workflow && (
+          <Tooltip content={conversation.workflow.name}>
+            <span
+              className="left-sidebar__workflow-marker"
+              style={{ backgroundColor: conversation.workflow.color }}
+              aria-label={conversation.workflow.name}
+            />
+          </Tooltip>
+        )}
         <span className="left-sidebar__conversation-name">{conversation.title}</span>
       </button>
 

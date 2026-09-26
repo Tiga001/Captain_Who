@@ -2442,6 +2442,7 @@ export const frFRTranslations = {
   'configuration.imageGeneration.error.loadFailed':
     "Impossible de charger la configuration de génération d'image.",
   'configuration.save': 'Enregistrer',
+  'sidebar.workflows': 'Flux de travail',
   'sidebar.scheduled': 'Programmé',
   'sidebar.scheduledAttention':
     '{count} les automatisations nécessitent une attention particulière',

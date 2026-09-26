@@ -139,7 +139,8 @@
 }
 
 .left-sidebar__conversation-main {
-  display: grid;
+  display: flex;
+  gap: 6px;
   align-items: center;
   min-width: 0;
   min-height: var(--mc-layout-sidebar-action-height);
@@ -283,4 +284,16 @@
 .left-sidebar__conversation-pin-icon {
   transform: rotate(45deg);
   transform-origin: center;
+}
+
+.left-sidebar__workflow-marker {
+  display: block;
+  flex: 0 0 3px;
+  width: 3px;
+  height: 16px;
+  border-radius: 3px;
+}
+
+.left-sidebar__conversation-main[draggable='true'] {
+  cursor: grab;
 }

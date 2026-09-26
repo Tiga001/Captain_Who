@@ -2393,6 +2393,7 @@ export const ruRUTranslations = {
   'configuration.imageGeneration.error.loadFailed':
     'Невозможно загрузить конфигурацию создания изображения.',
   'configuration.save': 'Сохранить',
+  'sidebar.workflows': 'Рабочие процессы',
   'sidebar.scheduled': 'Запланировано',
   'sidebar.scheduledAttention': '{count} автоматизация требует внимания',
   'automation.pageTitle': 'Запланировано',

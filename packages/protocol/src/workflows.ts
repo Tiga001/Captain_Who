@@ -102,12 +102,83 @@ export interface WorkflowRecord {
 export type WorkflowRequest =
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
-  | { operation: 'save'; definition: WorkflowDefinition; expectedRevision: number }
+  | {
+      operation: 'save'
+      definition: WorkflowDefinition
+      expectedRevision: number
+      expectedUsageRevision?: string
+      expectedDraftRevision?: number
+    }
   | { operation: 'delete'; id: string; expectedRevision: number }
   | { operation: 'setEnabled'; id: string; enabled: boolean; expectedRevision: number }
+  | { operation: 'listInstances' }
+  | {
+      operation: 'saveInstance'
+      id: string
+      templateId: string
+      name: string
+      color: string
+      bindings: { nodeId: string; conversationId: string | null }[]
+      expectedRevision: number
+      expectedTemplateRevision: number
+    }
+  | { operation: 'deleteInstance'; id: string; expectedRevision: number }
+  | {
+      operation: 'saveDraft'
+      definition: WorkflowDefinition
+      expectedRevision: number
+      expectedDraftRevision: number
+    }
+  | { operation: 'deleteDraft'; id: string; expectedDraftRevision: number }
+  | { operation: 'duplicate'; id: string; expectedRevision: number; newId: string; name: string }
+export interface WorkflowInstanceBinding {
+  nodeId: string
+  conversationId: string
+}
+export interface WorkflowInstance {
+  id: string
+  templateId: string
+  templateRevision: number
+  name: string
+  color: string
+  bindings: WorkflowInstanceBinding[]
+  revision: number
+  updatedAt: number
+  needsReview: boolean
+  /** Reserved authoritative runtime state; no client operation starts execution. */
+  running: boolean
+}
+export interface WorkflowTemplateUsage {
+  templateId: string
+  usageRevision: string
+  instances: { id: string; name: string; running: boolean; projectNames: string[] }[]
+}
+export interface WorkflowEditingDraft {
+  definition: WorkflowDefinition
+  baseRevision: number
+  revision: number
+  updatedAt: number
+}
+/** Readable metadata for a preserved definition that the current editor cannot open. */
+export interface WorkflowInvalidRecord {
+  id: string
+  name: string
+  revision: number
+  updatedAt: number
+  reason: 'incompatible_definition' | 'invalid_definition'
+}
+export interface WorkflowInvalidDraft extends WorkflowInvalidRecord {
+  baseRevision: number
+}
 export interface WorkflowResponse {
   records: WorkflowRecord[]
   issues: WorkflowIssue[]
+  instances?: WorkflowInstance[]
+  usages?: WorkflowTemplateUsage[]
+  drafts?: WorkflowEditingDraft[]
+  invalidRecords?: WorkflowInvalidRecord[]
+  invalidDrafts?: WorkflowInvalidDraft[]
+  affectedConversationIds?: string[]
 }
 export const WORKFLOW_REQUEST_METHOD = 'agent.workflows.request'
 
@@ -312,21 +383,40 @@ function flowSequence(value: unknown): number {
 }
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
-  if (op === 'list') {
+  if (op === 'list' || op === 'listInstances') {
     object(value, ['operation'])
     return { operation: op }
   }
   if (op === 'validate' || op === 'save') {
     const item = object(
       value,
-      op === 'save' ? ['operation', 'definition', 'expectedRevision'] : ['operation', 'definition']
+      op === 'save'
+        ? [
+            'operation',
+            'definition',
+            'expectedRevision',
+            'expectedUsageRevision',
+            'expectedDraftRevision'
+          ]
+        : ['operation', 'definition'],
+      ['expectedUsageRevision', 'expectedDraftRevision']
     )
     const definition = parseWorkflowDefinition(item.definition)
     return op === 'save'
-      ? { operation: op, definition, expectedRevision: integer(item.expectedRevision) }
+      ? {
+          operation: op,
+          definition,
+          expectedRevision: integer(item.expectedRevision),
+          ...(item.expectedUsageRevision !== undefined
+            ? { expectedUsageRevision: text(item.expectedUsageRevision) }
+            : {}),
+          ...(item.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: integer(item.expectedDraftRevision) }
+            : {})
+        }
       : { operation: op, definition }
   }
-  if (op === 'delete') {
+  if (op === 'delete' || op === 'deleteInstance') {
     const item = object(value, ['operation', 'id', 'expectedRevision'])
     return { operation: op, id: text(item.id), expectedRevision: integer(item.expectedRevision, 1) }
   }
@@ -337,6 +427,70 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
       id: text(item.id),
       enabled: boolean(item.enabled),
       expectedRevision: integer(item.expectedRevision, 1)
+    }
+  }
+  if (op === 'saveInstance') {
+    const item = object(value, [
+      'operation',
+      'id',
+      'templateId',
+      'name',
+      'color',
+      'bindings',
+      'expectedRevision',
+      'expectedTemplateRevision'
+    ])
+    return {
+      operation: op,
+      id: text(item.id),
+      templateId: text(item.templateId),
+      name: text(item.name),
+      color: text(item.color),
+      expectedRevision: integer(item.expectedRevision),
+      expectedTemplateRevision: integer(item.expectedTemplateRevision, 1),
+      bindings: array(
+        item.bindings,
+        (value) => {
+          const binding = object(value, ['nodeId', 'conversationId'])
+          return {
+            nodeId: text(binding.nodeId),
+            conversationId: binding.conversationId === null ? null : text(binding.conversationId)
+          }
+        },
+        128
+      )
+    }
+  }
+  if (op === 'saveDraft') {
+    const item = object(value, [
+      'operation',
+      'definition',
+      'expectedRevision',
+      'expectedDraftRevision'
+    ])
+    return {
+      operation: op,
+      definition: parseWorkflowDefinition(item.definition),
+      expectedRevision: integer(item.expectedRevision, 1),
+      expectedDraftRevision: integer(item.expectedDraftRevision)
+    }
+  }
+  if (op === 'deleteDraft') {
+    const item = object(value, ['operation', 'id', 'expectedDraftRevision'])
+    return {
+      operation: op,
+      id: text(item.id),
+      expectedDraftRevision: integer(item.expectedDraftRevision, 1)
+    }
+  }
+  if (op === 'duplicate') {
+    const item = object(value, ['operation', 'id', 'expectedRevision', 'newId', 'name'])
+    return {
+      operation: op,
+      id: text(item.id),
+      expectedRevision: integer(item.expectedRevision, 1),
+      newId: text(item.newId),
+      name: text(item.name)
     }
   }
   throw new Error('Invalid workflow operation')
@@ -352,7 +506,20 @@ function issues(value: unknown): WorkflowIssue[] {
   )
 }
 export function parseWorkflowResponse(value: unknown): WorkflowResponse {
-  const data = object(value, ['records', 'issues'])
+  const data = object(
+    value,
+    [
+      'records',
+      'issues',
+      'instances',
+      'usages',
+      'drafts',
+      'invalidRecords',
+      'invalidDrafts',
+      'affectedConversationIds'
+    ],
+    ['instances', 'usages', 'drafts', 'invalidRecords', 'invalidDrafts', 'affectedConversationIds']
+  )
   const records = array(
     data.records,
     (value) => {
@@ -379,5 +546,141 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
   )
   if (new Set(records.map((record) => record.definition.id)).size !== records.length)
     throw new Error('Duplicate workflow records')
-  return { records, issues: issues(data.issues) }
+  const invalidRecords =
+    data.invalidRecords === undefined
+      ? undefined
+      : array(data.invalidRecords, (value) => parseInvalidWorkflow(value, false), 1000)
+  const invalidDrafts =
+    data.invalidDrafts === undefined
+      ? undefined
+      : array(data.invalidDrafts, (value) => parseInvalidWorkflow(value, true), 1000)
+  if (invalidRecords) {
+    const ids = [
+      ...records.map((record) => record.definition.id),
+      ...invalidRecords.map((record) => record.id)
+    ]
+    if (new Set(ids).size !== ids.length) throw new Error('Duplicate workflow records')
+  }
+  if (
+    invalidDrafts &&
+    new Set(invalidDrafts.map((draft) => draft.id)).size !== invalidDrafts.length
+  )
+    throw new Error('Duplicate invalid workflow drafts')
+  return {
+    records,
+    issues: issues(data.issues),
+    ...(invalidRecords ? { invalidRecords } : {}),
+    ...(invalidDrafts ? { invalidDrafts } : {}),
+    ...(data.instances !== undefined
+      ? { instances: array(data.instances, parseWorkflowInstance, 1000) }
+      : {}),
+    ...(data.usages !== undefined
+      ? {
+          usages: array(
+            data.usages,
+            (value) => {
+              const usage = object(value, ['templateId', 'usageRevision', 'instances'])
+              return {
+                templateId: text(usage.templateId),
+                usageRevision: text(usage.usageRevision),
+                instances: array(
+                  usage.instances,
+                  (value) => {
+                    const instance = object(value, ['id', 'name', 'running', 'projectNames'])
+                    return {
+                      id: text(instance.id),
+                      name: text(instance.name),
+                      running: boolean(instance.running),
+                      projectNames: array(instance.projectNames, text, 1000)
+                    }
+                  },
+                  1000
+                )
+              }
+            },
+            1000
+          )
+        }
+      : {}),
+    ...(data.drafts !== undefined
+      ? {
+          drafts: array(
+            data.drafts,
+            (value) => {
+              const draft = object(value, ['definition', 'baseRevision', 'revision', 'updatedAt'])
+              return {
+                definition: parseWorkflowDefinition(draft.definition),
+                baseRevision: integer(draft.baseRevision, 1),
+                revision: integer(draft.revision, 1),
+                updatedAt: integer(draft.updatedAt)
+              }
+            },
+            1000
+          )
+        }
+      : {}),
+    ...(data.affectedConversationIds !== undefined
+      ? { affectedConversationIds: array(data.affectedConversationIds, text, 1000) }
+      : {})
+  }
+}
+
+function parseInvalidWorkflow(value: unknown, draft: true): WorkflowInvalidDraft
+function parseInvalidWorkflow(value: unknown, draft: false): WorkflowInvalidRecord
+function parseInvalidWorkflow(
+  value: unknown,
+  draft: boolean
+): WorkflowInvalidRecord | WorkflowInvalidDraft {
+  const item = object(value, [
+    'id',
+    'name',
+    'revision',
+    'updatedAt',
+    'reason',
+    ...(draft ? ['baseRevision'] : [])
+  ])
+  if (item.reason !== 'incompatible_definition' && item.reason !== 'invalid_definition')
+    throw new Error('Invalid workflow recovery reason')
+  return {
+    id: text(item.id),
+    name: text(item.name),
+    revision: integer(item.revision, 1),
+    updatedAt: integer(item.updatedAt),
+    reason: item.reason,
+    ...(draft ? { baseRevision: integer(item.baseRevision, 1) } : {})
+  }
+}
+
+function parseWorkflowInstance(value: unknown): WorkflowInstance {
+  const item = object(value, [
+    'id',
+    'templateId',
+    'templateRevision',
+    'name',
+    'color',
+    'bindings',
+    'revision',
+    'updatedAt',
+    'needsReview',
+    'running'
+  ])
+  return {
+    id: text(item.id),
+    templateId: text(item.templateId),
+    templateRevision: integer(item.templateRevision, 1),
+    name: text(item.name),
+    color: text(item.color),
+    revision: integer(item.revision, 1),
+    updatedAt: integer(item.updatedAt),
+    needsReview: boolean(item.needsReview),
+    running: boolean(item.running),
+    bindings: array(
+      item.bindings,
+      (value) => {
+        const binding = object(value, ['nodeId', 'conversationId'])
+        return { nodeId: text(binding.nodeId), conversationId: text(binding.conversationId) }
+      },
+      128
+    )
+  }
 }

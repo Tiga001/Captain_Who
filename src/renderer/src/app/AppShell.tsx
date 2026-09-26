@@ -93,6 +93,8 @@ import { useCollaborationApprovals } from '../features/agentCollaboration/useCol
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 import { hostClient } from '../host/hostClient'
+import { WorkflowsPage } from '../features/workflows/project/WorkflowsPage'
+import { useWorkflowWorkspace, type WorkflowDraftPreferences } from './useWorkflowWorkspace'
 import { ScheduledPageLayer } from '../features/automations/ScheduledPageLayer'
 import { AUTOMATION_DRAWER_DEFAULT_WIDTH } from '../features/automations/automationLayout'
 import { useAutomationAttention } from '../features/automations/useAutomationAttention'
@@ -133,7 +135,7 @@ interface ScheduledExternalNavigationRequest {
 }
 
 export function AppShell() {
-  const { resolvedColorScheme, setColorSchemePreference, t } = useFrontendConfig()
+  const { resolvedColorScheme, setColorSchemePreference, t, language } = useFrontendConfig()
   const { showToast } = useToast()
   const {
     attempt: uiPreferencesStartupAttempt,
@@ -209,6 +211,7 @@ export function AppShell() {
     setSettingsOpen,
     settingsInitialBrowserView,
     settingsInitialPage,
+    settingsInitialTarget,
     settingsOpen
   } = useAppWindowSettings(shellRef)
   const [uiPreferences, setUiPreferences] = useState<UiPreferencesSnapshot>(() =>
@@ -221,6 +224,17 @@ export function AppShell() {
     getRandomNewConversationPromptIndex()
   )
   const [primaryView, setPrimaryView] = useState<PrimaryView>('conversation')
+  const workflowDirtyRef = useRef(false)
+  const workflowBusyRef = useRef(false)
+  const [pendingWorkflowExit, setPendingWorkflowExit] = useState<{ proceed: () => void } | null>(
+    null
+  )
+  const handleWorkflowDirtyChange = useCallback((dirty: boolean) => {
+    workflowDirtyRef.current = dirty
+  }, [])
+  const handleWorkflowBusyChange = useCallback((busy: boolean) => {
+    workflowBusyRef.current = busy
+  }, [])
   const [scheduledDrawerPreferredWidth, setScheduledDrawerPreferredWidth] = useState(
     AUTOMATION_DRAWER_DEFAULT_WIDTH
   )
@@ -717,8 +731,52 @@ export function AppShell() {
     setActiveConversationInitialScrollTop(null)
   }, [])
 
+  const applyWorkflowDraftPreferences = useCallback(
+    async (id: string, preferences: WorkflowDraftPreferences, fallback?: ChatComposerDraft) => {
+      const current = draftsRef.current[id] ?? fallback
+      if (!current) return false
+      updateDraft(id, {
+        ...current,
+        ...preferences,
+        updatedAt: Math.max(Date.now(), current.updatedAt + 1)
+      })
+      await flushDraft(id)
+      return true
+    },
+    [flushDraft, updateDraft]
+  )
+
+  const workflowWorkspace = useWorkflowWorkspace({
+    flushDraft,
+    waitForConversationSaves,
+    setConversations: setConversationsWithRef,
+    applyDraftPreferences: applyWorkflowDraftPreferences
+  })
+
+  const { hasPendingSynchronization, retrySynchronization } = workflowWorkspace
   const requestScheduledExit = useCallback(
     (proceed: () => void) => {
+      if (primaryView === 'workflows') {
+        if (workflowBusyRef.current) return
+        const finish = () => {
+          if (!hasPendingSynchronization()) {
+            proceed()
+            return
+          }
+          void retrySynchronization()
+            .then(proceed)
+            .catch(() =>
+              showToast(
+                language.startsWith('zh')
+                  ? '工作流已保存，但对话同步失败，请在工作流页面重试。'
+                  : 'Workflow saved, but conversation sync failed. Retry from Workflows.'
+              )
+            )
+        }
+        if (workflowDirtyRef.current) setPendingWorkflowExit({ proceed: finish })
+        else finish()
+        return
+      }
       if (primaryView !== 'scheduled') {
         proceed()
         return
@@ -733,7 +791,7 @@ export function AppShell() {
         requestKey: scheduledExternalNavigationRequestKeyRef.current
       })
     },
-    [primaryView]
+    [primaryView, hasPendingSynchronization, retrySynchronization, showToast, language]
   )
 
   const openNewConversation = useCallback(
@@ -814,11 +872,34 @@ export function AppShell() {
   })
 
   const openScheduled = useCallback(() => {
-    conversationOpenRequestKeyRef.current += 1
-    setScheduledExternalNavigationRequest(null)
-    setScheduledOpenRequest(null)
-    setPrimaryView('scheduled')
-  }, [])
+    requestScheduledExit(() => {
+      conversationOpenRequestKeyRef.current += 1
+      setScheduledExternalNavigationRequest(null)
+      setScheduledOpenRequest(null)
+      setPrimaryView('scheduled')
+    })
+  }, [requestScheduledExit])
+
+  const openWorkflows = useCallback(() => {
+    if (primaryView === 'workflows') return
+    requestScheduledExit(() => {
+      conversationOpenRequestKeyRef.current += 1
+      setScheduledOpenRequest(null)
+      setPrimaryView('workflows')
+    })
+  }, [primaryView, requestScheduledExit])
+
+  const openWorkflowTemplate = useCallback(() => {
+    requestScheduledExit(() => {
+      setPrimaryView('conversation')
+      openSettings('workflows', undefined, {
+        page: 'workflows',
+        id: 'workflow-create',
+        view: 'create',
+        revision: Date.now()
+      })
+    })
+  }, [openSettings, requestScheduledExit])
 
   const commitOpenConversationFromScheduled = useCallback(
     (conversationId: string, messageId?: string | null) => {
@@ -850,7 +931,7 @@ export function AppShell() {
 
   const requestOpenConversationFromScheduled = useCallback(
     (conversationId: string, messageId?: string | null) => {
-      if (primaryView !== 'scheduled') {
+      if (primaryView === 'conversation') {
         // Ordinary sidebar navigation activates the metadata row immediately. The navigation
         // hook then hydrates its detail in place, preserving both the loading surface and a
         // single loaded+active lifecycle transition for Host-owned Session reconciliation.
@@ -899,17 +980,19 @@ export function AppShell() {
         return
       }
 
-      scheduledOpenRequestKeyRef.current += 1
-      conversationOpenRequestKeyRef.current += 1
-      setScheduledExternalNavigationRequest(null)
-      setScheduledOpenRequest({
-        automationId: request.automationId,
-        requestKey: scheduledOpenRequestKeyRef.current,
-        runId: request.runId
+      requestScheduledExit(() => {
+        scheduledOpenRequestKeyRef.current += 1
+        conversationOpenRequestKeyRef.current += 1
+        setScheduledExternalNavigationRequest(null)
+        setScheduledOpenRequest({
+          automationId: request.automationId,
+          requestKey: scheduledOpenRequestKeyRef.current,
+          runId: request.runId
+        })
+        setPrimaryView('scheduled')
       })
-      setPrimaryView('scheduled')
     })
-  }, [requestOpenConversationFromScheduled])
+  }, [requestOpenConversationFromScheduled, requestScheduledExit])
 
   useEffect(
     () =>
@@ -927,19 +1010,22 @@ export function AppShell() {
         }
 
         if (request.destination.kind === 'automation') {
-          closeSettings()
-          scheduledOpenRequestKeyRef.current += 1
-          conversationOpenRequestKeyRef.current += 1
-          setScheduledExternalNavigationRequest(null)
-          setScheduledOpenRequest({
-            automationId: request.destination.automationId,
-            requestKey: scheduledOpenRequestKeyRef.current,
-            runId: request.destination.runId
+          const destination = request.destination
+          requestScheduledExit(() => {
+            closeSettings()
+            scheduledOpenRequestKeyRef.current += 1
+            conversationOpenRequestKeyRef.current += 1
+            setScheduledExternalNavigationRequest(null)
+            setScheduledOpenRequest({
+              automationId: destination.automationId,
+              requestKey: scheduledOpenRequestKeyRef.current,
+              runId: destination.runId
+            })
+            setPrimaryView('scheduled')
           })
-          setPrimaryView('scheduled')
         }
       }),
-    [closeSettings, requestOpenConversationFromScheduled]
+    [closeSettings, requestOpenConversationFromScheduled, requestScheduledExit]
   )
 
   const activeProviderTransitionConversationId = activeConversation?.id
@@ -1383,6 +1469,9 @@ export function AppShell() {
               patchConversation(conversationId, { title })
             }
             onEditProject={openEditProjectDialog}
+            onOpenWorkflows={openWorkflows}
+            workflowsSelected={primaryView === 'workflows'}
+            workflowMemberships={workflowWorkspace.memberships}
             onOpenScheduled={openScheduled}
             onSelectConversation={requestOpenConversationFromScheduled}
             onShowProjectInFolder={showProjectInFolder}
@@ -1416,7 +1505,7 @@ export function AppShell() {
         as="main"
         className="main-panel"
         aria-label={t('app.mainWorkspace')}
-        covered={primaryView === 'scheduled' || (rightOpen && rightMaximized)}
+        covered={primaryView !== 'conversation' || (rightOpen && rightMaximized)}
       >
         <MainPanelToolbar
           bottomOpen={bottomOpen}
@@ -1597,7 +1686,7 @@ export function AppShell() {
       <AppShellCoveredRegion
         as="aside"
         className="side-panel side-panel--right"
-        covered={primaryView === 'scheduled'}
+        covered={primaryView !== 'conversation'}
       >
         <RightSidebar
           projects={projects}
@@ -1651,7 +1740,7 @@ export function AppShell() {
       <AppShellCoveredRegion
         as="aside"
         className="side-panel side-panel--bottom"
-        covered={primaryView === 'scheduled' || !bottomOpen}
+        covered={primaryView !== 'conversation' || !bottomOpen}
       >
         <BottomPanel
           activeConversationId={activeConversation?.id}
@@ -1697,12 +1786,62 @@ export function AppShell() {
           )}
         </>
       )}
+      {primaryView === 'workflows' && (
+        <>
+          <div className="workflow-page-layer" data-testid="workflow-page-layer">
+            <WorkflowsPage
+              conversations={conversations}
+              conversationDrafts={drafts}
+              projects={projects}
+              onNewTemplate={openWorkflowTemplate}
+              onBeforeCommit={workflowWorkspace.beforeCommit}
+              onCommitted={workflowWorkspace.committed}
+              onDirtyChange={handleWorkflowDirtyChange}
+              onBusyChange={handleWorkflowBusyChange}
+            />
+          </div>
+          {!leftOpen && (
+            <PanelToggleButton
+              className="panel-toggle panel-toggle--left scheduled-view__left-toggle"
+              hasUnread={hasUnreadConversations}
+              onClick={toggleLeftSidebar}
+              open={false}
+              side="left"
+              t={t}
+            />
+          )}
+        </>
+      )}
+      {pendingWorkflowExit && (
+        <ConfirmationDialog
+          title={
+            language.startsWith('zh')
+              ? '放弃未保存的工作流绑定？'
+              : 'Discard unsaved workflow bindings?'
+          }
+          description={
+            language.startsWith('zh')
+              ? '离开后，这次尚未确认的绑定修改不会保存。'
+              : 'Unconfirmed binding changes will not be saved.'
+          }
+          cancelLabel={language.startsWith('zh') ? '继续编辑' : 'Keep editing'}
+          confirmLabel={language.startsWith('zh') ? '放弃修改' : 'Discard changes'}
+          onCancel={() => setPendingWorkflowExit(null)}
+          onConfirm={() => {
+            workflowDirtyRef.current = false
+            const proceed = pendingWorkflowExit.proceed
+            setPendingWorkflowExit(null)
+            proceed()
+          }}
+        />
+      )}
       {settingsOpen &&
         createPortal(
           <AppShellSettingsView
             conversations={conversations}
             initialBrowserView={settingsInitialBrowserView}
             initialPage={settingsInitialPage}
+            initialTarget={settingsInitialTarget}
             initialProjectId={rightSidebarWorkspaceProject?.id}
             onBack={closeSettings}
             onBeforeConversationDelete={discardDraft}

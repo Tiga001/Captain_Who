@@ -2213,6 +2213,7 @@ export const zhCNTranslations = {
   'configuration.imageGeneration.error.loadFailed': '无法加载图片生成配置。',
   'configuration.save': '保存',
 
+  'sidebar.workflows': '工作流',
   'sidebar.scheduled': '已安排',
   'sidebar.scheduledAttention': '{count} 项自动化需要关注',
   'automation.pageTitle': '已安排',

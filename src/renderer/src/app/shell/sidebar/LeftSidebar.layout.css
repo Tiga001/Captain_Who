@@ -21,6 +21,12 @@
   -webkit-touch-callout: none;
 }
 
+.left-sidebar[data-has-workflows='true'] {
+  --left-sidebar-header-height: calc(
+    var(--left-sidebar-brand-row-height) + 4 * var(--mc-layout-sidebar-action-height) + 22px
+  );
+}
+
 .left-sidebar__header {
   position: absolute;
   top: 0;

@@ -3,6 +3,7 @@ import type { AppWindowState } from '@mycopilot/host-api'
 import { hostClient } from '../host/hostClient'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
 import type { BrowserAutomationView } from '../features/mcp/BrowserAutomationSettingsPage'
+import type { SettingsNavigationTarget } from '../features/settings/settingsSearchNavigation'
 import { DEFAULT_APP_WINDOW_STATE } from './appShellConversationUtils'
 
 export function useAppWindowSettings<T extends HTMLElement>(shellRef: RefObject<T | null>) {
@@ -10,6 +11,8 @@ export function useAppWindowSettings<T extends HTMLElement>(shellRef: RefObject<
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
   const [settingsInitialBrowserView, setSettingsInitialBrowserView] =
     useState<BrowserAutomationView>()
+  const [settingsInitialTarget, setSettingsInitialTarget] =
+    useState<SettingsNavigationTarget | null>(null)
   const [appWindowState, setAppWindowState] = useState<AppWindowState>(DEFAULT_APP_WINDOW_STATE)
   const workspaceFocusBeforeSettingsRef = useRef<HTMLElement | null>(null)
 
@@ -33,12 +36,17 @@ export function useAppWindowSettings<T extends HTMLElement>(shellRef: RefObject<
   }, [])
 
   const openSettings = useCallback(
-    (initialPage: SettingsPageId = 'general', browserView?: BrowserAutomationView) => {
+    (
+      initialPage: SettingsPageId = 'general',
+      browserView?: BrowserAutomationView,
+      target?: SettingsNavigationTarget
+    ) => {
       const activeElement = document.activeElement
       workspaceFocusBeforeSettingsRef.current =
         activeElement instanceof HTMLElement && shellRef.current?.contains(activeElement)
           ? activeElement
           : null
+      setSettingsInitialTarget(target ?? null)
       setSettingsInitialPage(initialPage)
       setSettingsInitialBrowserView(initialPage === 'browser' ? browserView : undefined)
       setSettingsOpen(true)
@@ -63,6 +71,7 @@ export function useAppWindowSettings<T extends HTMLElement>(shellRef: RefObject<
     closeSettings,
     openSettings,
     setSettingsOpen,
+    settingsInitialTarget,
     settingsInitialPage,
     settingsInitialBrowserView,
     settingsOpen

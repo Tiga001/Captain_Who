@@ -315,3 +315,152 @@ describe('logic gate wire contract', () => {
     expect(() => parseWorkflowDefinition({ ...fixture, nodes: [old] })).toThrow()
   })
 })
+
+describe('global workflow instance contract', () => {
+  const save = {
+    operation: 'saveInstance',
+    id: 'instance',
+    templateId: 'template',
+    name: 'Review',
+    color: '#4A82E8',
+    bindings: [{ nodeId: 'agent', conversationId: 'chat' }],
+    expectedRevision: 0,
+    expectedTemplateRevision: 2
+  }
+  it('accepts global cross-project binding requests without a project owner', () => {
+    expect(parseWorkflowRequest(save)).toEqual(save)
+    expect(parseWorkflowRequest({ operation: 'listInstances' })).toEqual({
+      operation: 'listInstances'
+    })
+    expect(
+      parseWorkflowRequest({ ...save, bindings: [{ nodeId: 'agent', conversationId: null }] })
+    ).toMatchObject({ bindings: [{ nodeId: 'agent', conversationId: null }] })
+    for (const extra of [
+      { projectId: 'project' },
+      { running: true },
+      { expectedRevision: -1 },
+      { bindings: [{ nodeId: 'agent' }] }
+    ])
+      expect(() => parseWorkflowRequest({ ...save, ...extra })).toThrow()
+  })
+  it('round-trips usage guards and isolated editing drafts', () => {
+    for (const request of [
+      {
+        operation: 'save',
+        definition: fixture,
+        expectedRevision: 2,
+        expectedUsageRevision: 'usage',
+        expectedDraftRevision: 2
+      },
+      {
+        operation: 'saveDraft',
+        definition: fixture,
+        expectedRevision: 2,
+        expectedDraftRevision: 0
+      },
+      { operation: 'deleteDraft', id: 'template', expectedDraftRevision: 1 },
+      { operation: 'duplicate', id: 'template', expectedRevision: 2, newId: 'copy', name: 'Copy' },
+      { operation: 'deleteInstance', id: 'instance', expectedRevision: 1 }
+    ])
+      expect(parseWorkflowRequest(request)).toEqual(request)
+    const response = {
+      records: [],
+      issues: [],
+      instances: [
+        {
+          id: 'instance',
+          templateId: 'template',
+          templateRevision: 2,
+          name: 'Review',
+          color: '#4A82E8',
+          bindings: [{ nodeId: 'agent', conversationId: 'chat' }],
+          revision: 1,
+          updatedAt: 1,
+          needsReview: false,
+          running: false
+        }
+      ],
+      usages: [
+        {
+          templateId: 'template',
+          usageRevision: 'usage',
+          instances: [
+            {
+              id: 'instance',
+              name: 'Review',
+              running: false,
+              projectNames: ['Project A', 'Project B']
+            }
+          ]
+        }
+      ],
+      drafts: [{ definition: fixture, baseRevision: 2, revision: 1, updatedAt: 1 }],
+      affectedConversationIds: ['chat']
+    }
+    expect(parseWorkflowResponse(response)).toEqual(response)
+    expect(() =>
+      parseWorkflowResponse({
+        ...response,
+        instances: [{ ...response.instances[0], running: 'yes' }]
+      })
+    ).toThrow()
+  })
+})
+
+describe('workflow catalog recovery contract', () => {
+  const invalidRecord = {
+    id: 'old-template',
+    name: 'Legacy template',
+    revision: 2,
+    updatedAt: 123,
+    reason: 'incompatible_definition'
+  }
+  it('keeps incompatible templates and drafts separate from usable definitions', () => {
+    const response = {
+      records: [{ definition: fixture, enabled: false, revision: 1, updatedAt: 123, issues: [] }],
+      issues: [],
+      invalidRecords: [invalidRecord],
+      invalidDrafts: [
+        { ...invalidRecord, id: fixture.id, baseRevision: 1, reason: 'invalid_definition' }
+      ]
+    }
+    expect(parseWorkflowResponse(response)).toEqual(response)
+    expect(parseWorkflowResponse({ records: [], issues: [] })).toEqual({ records: [], issues: [] })
+  })
+  it('rejects malformed recovery metadata without accepting legacy graph fields', () => {
+    for (const invalid of [
+      { ...invalidRecord, reason: 'unknown' },
+      { ...invalidRecord, revision: 0 },
+      { ...invalidRecord, updatedAt: -1 },
+      { ...invalidRecord, name: 123 },
+      { ...invalidRecord, definition: fixture }
+    ]) {
+      expect(() =>
+        parseWorkflowResponse({ records: [], issues: [], invalidRecords: [invalid] })
+      ).toThrow()
+    }
+    expect(() =>
+      parseWorkflowResponse({ records: [], issues: [], invalidDrafts: [invalidRecord] })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowResponse({
+        records: [],
+        issues: [],
+        invalidRecords: [invalidRecord, invalidRecord]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowResponse({
+        records: [{ definition: fixture, enabled: false, revision: 1, updatedAt: 123, issues: [] }],
+        issues: [],
+        invalidRecords: [{ ...invalidRecord, id: fixture.id }]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowDefinition({
+        ...fixture,
+        boundaryPositions: { ...fixture.boundaryPositions, output: { x: 0, y: 0 } }
+      })
+    ).toThrow()
+  })
+})

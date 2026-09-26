@@ -47,6 +47,7 @@ interface SettingsPageProps {
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
   initialProjectId?: string | null
+  initialTarget?: SettingsNavigationTarget | null
   initialPage?: SettingsPageId
   initialBrowserView?: BrowserAutomationView
   uiPreferences: UiPreferencesSnapshot
@@ -427,6 +428,7 @@ export function SettingsPage({
   initialProjectId,
   initialBrowserView,
   initialPage = 'general',
+  initialTarget = null,
   uiPreferences
 }: SettingsPageProps) {
   const { t, language } = useFrontendConfig()
@@ -441,7 +443,7 @@ export function SettingsPage({
   const [workflowDirty, setWorkflowDirty] = useState(false)
   const [workflowSaving, setWorkflowSaving] = useState(false)
   const workflowSavingRef = useRef(false)
-  const [searchTarget, setSearchTarget] = useState<SettingsNavigationTarget | null>(null)
+  const [searchTarget, setSearchTarget] = useState<SettingsNavigationTarget | null>(initialTarget)
   const [locationStatus, setLocationStatus] = useState<'waiting' | 'context' | 'located'>('located')
   const searchRevision = useRef(0)
   const contentRef = useRef<HTMLElement>(null)
@@ -623,6 +625,10 @@ export function SettingsPage({
     if (workflowSavingRef.current) return
     setActivePage(initialPage)
   }, [initialPage])
+
+  useEffect(() => {
+    if (initialTarget) setSearchTarget(initialTarget)
+  }, [initialTarget])
 
   useEffect(() => {
     setBrowserEntryView(initialBrowserView)

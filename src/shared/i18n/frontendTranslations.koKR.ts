@@ -2325,6 +2325,7 @@ export const koKRTranslations = {
   'configuration.imageGeneration.error.generic': '이미지 생성 구성 작업을 완료할 수 없습니다.',
   'configuration.imageGeneration.error.loadFailed': '이미지 생성 구성을 로드할 수 없습니다.',
   'configuration.save': '저장',
+  'sidebar.workflows': '워크플로',
   'sidebar.scheduled': '예정됨',
   'sidebar.scheduledAttention': '{count} 자동화에 주의가 필요함',
   'automation.pageTitle': '예정됨',

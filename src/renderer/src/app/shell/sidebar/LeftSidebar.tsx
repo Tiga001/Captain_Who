@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   Clock3,
+  Workflow,
   Folder,
   FolderOpen,
   MoreHorizontal,
@@ -106,7 +107,8 @@ export function LeftSidebar(props: LeftSidebarProps) {
         projectId: conversation.projectId,
         title: conversation.title,
         unreadAt: conversation.unreadAt,
-        updatedAt: conversation.updatedAt
+        updatedAt: conversation.updatedAt,
+        workflow: props.workflowMemberships?.[conversation.id]
       }
     })
   )
@@ -177,6 +179,8 @@ const LeftSidebarView = memo(function LeftSidebarView({
   onRequestRenameConversation,
   onRenameConversation,
   onOpenScheduled,
+  onOpenWorkflows,
+  workflowsSelected,
   onSelectConversation,
   onShowProjectInFolder,
   onTogglePinConversation,
@@ -692,6 +696,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
       activeConversationId={activeConversationId}
       archiveLabel={t('conversation.archiveConversation')}
       conversation={conversation}
+      workflowDragEnabled={workflowsSelected}
       key={conversation.id}
       language={language}
       markUnreadLabel={t('conversation.markUnread')}
@@ -1050,6 +1055,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
   return (
     <aside
       className="left-sidebar"
+      data-has-workflows={!!onOpenWorkflows || undefined}
       aria-label={t('app.leftSidebar')}
       onContextMenu={(event) => {
         if (!event.defaultPrevented) event.preventDefault()
@@ -1091,6 +1097,18 @@ const LeftSidebarView = memo(function LeftSidebarView({
             </span>
           )}
         </button>
+        {onOpenWorkflows && (
+          <button
+            className="left-sidebar__scheduled-action left-sidebar__workflows-action"
+            type="button"
+            aria-current={workflowsSelected ? 'page' : undefined}
+            data-selected={workflowsSelected || undefined}
+            onClick={onOpenWorkflows}
+          >
+            <Workflow aria-hidden="true" />
+            <span>{t('sidebar.workflows')}</span>
+          </button>
+        )}
       </div>
 
       <div className="left-sidebar__scroll">

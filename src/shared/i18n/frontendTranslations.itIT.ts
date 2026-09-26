@@ -2456,6 +2456,7 @@ export const itITTranslations = {
   'configuration.imageGeneration.error.loadFailed':
     "Impossibile caricare la configurazione di generazione dell'immagine.",
   'configuration.save': 'Salva',
+  'sidebar.workflows': 'Flussi di lavoro',
   'sidebar.scheduled': 'Programmato',
   'sidebar.scheduledAttention': '{count} le automazioni necessitano di attenzione',
   'automation.pageTitle': 'Programmato',

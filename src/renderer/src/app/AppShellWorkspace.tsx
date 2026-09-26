@@ -7,7 +7,7 @@ import {
   type ReactNode
 } from 'react'
 
-export type PrimaryView = 'conversation' | 'scheduled'
+export type PrimaryView = 'conversation' | 'scheduled' | 'workflows'
 
 export function getVisibleActiveConversationId(
   primaryView: PrimaryView,

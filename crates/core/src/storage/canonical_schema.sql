@@ -6811,3 +6811,45 @@ CREATE TABLE workflow_definitions (
 
 -- Workflow availability, schema v55. Existing definitions remain disabled until explicitly enabled.
 ALTER TABLE workflow_definitions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1));
+
+-- Global workflow instances and isolated editing drafts, schema v56.
+CREATE TABLE workflow_instances (
+    instance_id TEXT PRIMARY KEY CHECK (length(instance_id) BETWEEN 1 AND 256),
+    template_id TEXT NOT NULL REFERENCES workflow_definitions(workflow_id) ON DELETE RESTRICT,
+    template_revision INTEGER NOT NULL CHECK (template_revision BETWEEN 1 AND 9007199254740991),
+    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 512),
+    color TEXT NOT NULL CHECK (length(color) = 7 AND substr(color, 1, 1) = '#' AND substr(color, 2) NOT GLOB '*[^0-9a-fA-F]*'),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    needs_review INTEGER NOT NULL DEFAULT 0 CHECK (needs_review IN (0, 1)),
+    running INTEGER NOT NULL DEFAULT 0 CHECK (running IN (0, 1)),
+    last_request_json TEXT NOT NULL CHECK (json_valid(last_request_json))
+) STRICT;
+CREATE TABLE workflow_instance_bindings (
+    instance_id TEXT NOT NULL REFERENCES workflow_instances(instance_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL CHECK (length(node_id) BETWEEN 1 AND 256),
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (instance_id, node_id)
+) STRICT;
+CREATE TABLE workflow_editing_drafts (
+    template_id TEXT PRIMARY KEY REFERENCES workflow_definitions(workflow_id) ON DELETE CASCADE,
+    definition_json TEXT NOT NULL CHECK (json_valid(definition_json) AND length(CAST(definition_json AS BLOB)) <= 2000000),
+    base_revision INTEGER NOT NULL CHECK (base_revision BETWEEN 1 AND 9007199254740991),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+) STRICT;
+CREATE TRIGGER workflow_bound_conversation_before_delete
+BEFORE DELETE ON conversations
+BEGIN
+    UPDATE workflow_instances SET needs_review = 1, revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, OLD.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = OLD.id);
+END;
+CREATE TRIGGER workflow_bound_conversation_archive_changed
+AFTER UPDATE OF archived_at ON conversations
+WHEN NEW.archived_at IS NOT OLD.archived_at
+BEGIN
+    UPDATE workflow_instances SET needs_review = 1, revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, NEW.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = NEW.id);
+END;

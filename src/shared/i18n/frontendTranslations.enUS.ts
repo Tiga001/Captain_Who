@@ -2341,6 +2341,7 @@ export const enUSTranslations = {
     'Unable to load image generation configuration.',
   'configuration.save': 'Save',
 
+  'sidebar.workflows': 'Workflows',
   'sidebar.scheduled': 'Scheduled',
   'sidebar.scheduledAttention': '{count} automations need attention',
   'automation.pageTitle': 'Scheduled',
