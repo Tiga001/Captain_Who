@@ -58,7 +58,7 @@ import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { WorkspaceFileTypeIcon } from '../../../components/files/WorkspaceFileTypeIcon'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ComposerFolderReferences } from './ComposerFolderReferences'
-import { ComposerSelectedSkills } from './ComposerSkillPicker'
+import { ComposerSelectedSkills } from './ComposerSelectedSkills'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import {

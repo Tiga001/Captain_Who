@@ -183,7 +183,7 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 - `crates/core/src/runtime/tests/skill_activation.rs`
 - `crates/core/src/runtime/tests/builtin_capability.rs`
 - `crates/core-server/src/application/agent/tests/skills.rs`
-- `crates/core-server/src/application/agent/tests/pending_actions.rs` 的 Skill 恢复用例
+- `crates/core-server/src/application/agent/tests/pending_actions/skill_workers.rs` 的 Skill 恢复用例
 
 ## 变更检查表
 

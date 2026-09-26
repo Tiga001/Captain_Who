@@ -288,6 +288,7 @@ Browser Artifact 与 durable Browser Download 是不同对象。模型和 Render
 - `src/main/core/browserSurfaceFailures.electron.test.ts`
 - `src/main/mcp/ManagedPlaywrightBridgeHost.test.ts`
 - `src/main/mcp/ManagedPlaywrightMcpHost.test.ts`
+- `src/main/mcp/ManagedPlaywrightMcpHost.*.test.ts`（授权、生命周期、文件/下载、结果预算等场景）
 - `src/main/mcp/managedPlaywrightRound3Stress.test.ts`
 - `src/renderer/src/features/rightSidebar/__tests__/BrowserSurface*.browser.test.tsx`
 - `src/main/browser/fixtures/*.electron.ts`

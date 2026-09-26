@@ -1,18 +1,21 @@
 import { useRef, useState } from 'react'
 import type { ComponentProps } from 'react'
 import type { SkillDescriptor, SkillsListOutput } from '@mycopilot/protocol'
+import type { SkillCatalogState } from '../../features/skills/useSkillCatalog'
 import { userEvent } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 import '../../features/chat/components/ChatComposer.css'
 
-const { draftChangeSpy, listSkillsSpy, submitSpy, translate } = vi.hoisted(() => ({
-  draftChangeSpy: vi.fn(),
-  listSkillsSpy: vi.fn(),
-  submitSpy: vi.fn(),
-  translate: (key: string) => key
-}))
+const { draftChangeSpy, listSkillsSpy, overrideSkillCatalogState, submitSpy, translate } =
+  vi.hoisted(() => ({
+    draftChangeSpy: vi.fn(),
+    listSkillsSpy: vi.fn(),
+    overrideSkillCatalogState: vi.fn<() => SkillCatalogState | undefined>(),
+    submitSpy: vi.fn(),
+    translate: (key: string) => key
+  }))
 
 vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
 
@@ -85,19 +88,25 @@ vi.mock('../../features/skills/skillsClient', () => ({
   listSkills: listSkillsSpy
 }))
 
-const [
-  { ChatComposer },
-  { ComposerSkillPicker },
-  { createComposerDraft },
-  skillCatalog,
-  skillSelection
-] = await Promise.all([
-  import('../../features/chat/components/ChatComposer'),
-  import('../../features/chat/components/ComposerSkillPicker'),
-  import('../chatMessageFactory'),
-  import('../../features/skills/skillCatalog'),
-  import('../../features/skills/skillSelection')
-])
+vi.mock('../../features/skills/useSkillCatalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../features/skills/useSkillCatalog')>()
+  return {
+    ...actual,
+    useSkillCatalog: (...args: Parameters<typeof actual.useSkillCatalog>) => {
+      const result = actual.useSkillCatalog(...args)
+      return { ...result, state: overrideSkillCatalogState() ?? result.state }
+    }
+  }
+})
+
+const [{ ChatComposer }, { createComposerDraft }, skillCatalog, skillSelection] = await Promise.all(
+  [
+    import('../../features/chat/components/ChatComposer'),
+    import('../chatMessageFactory'),
+    import('../../features/skills/skillCatalog'),
+    import('../../features/skills/skillSelection')
+  ]
+)
 
 const auditorSkill: SkillDescriptor = {
   activationScope: 'run',
@@ -313,6 +322,7 @@ function RefPersistedMessageComposer() {
 }
 
 beforeEach(() => {
+  overrideSkillCatalogState.mockReset()
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
   listSkillsSpy.mockImplementation(async (projectId: string | null) => {
@@ -1022,23 +1032,69 @@ describe('ChatComposer Skill picker', () => {
   })
 
   it('never renders a ready catalog from a different project scope', async () => {
+    // Keep the foreign ready state visible to ChatComposer even after effects run:
+    // this checks the live menu's scope guard, not just the catalog hook's cancellation.
+    overrideSkillCatalogState.mockReturnValue({
+      status: 'ready',
+      projectId: 'project-a',
+      output: catalog()
+    })
     const screen = await render(
-      <ComposerSkillPicker
-        catalogState={{ status: 'ready', projectId: 'project-a', output: catalog() }}
-        onClose={vi.fn()}
-        onRefresh={vi.fn()}
-        onSearchChange={vi.fn()}
-        onToggle={vi.fn()}
-        onUseLatest={vi.fn()}
-        projectId="project-b"
-        search=""
-        selections={[]}
+      <TestComposer
+        initialDraft={createComposerDraft({ modelId: 'model-1', projectId: 'project-b' })}
       />
     )
 
+    await screen.getByRole('button', { name: 'chat.addContext' }).click()
+    await expect.element(screen.getByRole('menu', { name: 'chat.addMenuTitle' })).toBeVisible()
+    await expect
+      .poll(() => listSkillsSpy.mock.calls.some(([projectId]) => projectId === 'project-b'))
+      .toBe(true)
     expect(screen.container.textContent).not.toContain(auditorSkill.name)
     expect(screen.container.textContent).not.toContain(testSkill.name)
-    expect(screen.container.querySelector('[role="list"]')).toBeNull()
+    expect(screen.getByRole('menuitem', { name: /^Repository auditor/ }).query()).toBeNull()
+    expect(screen.getByRole('menuitem', { name: /^Test runner/ }).query()).toBeNull()
+  })
+
+  it('ignores a previous project catalog resolving after the current menu is ready', async () => {
+    let resolvePrevious!: (output: SkillsListOutput) => void
+    const previousCatalog = new Promise<SkillsListOutput>((resolve) => {
+      resolvePrevious = resolve
+    })
+    listSkillsSpy.mockImplementation((projectId: string | null) =>
+      projectId === 'project-a' ? previousCatalog : Promise.resolve(catalog([projectBSkill]))
+    )
+    const renderScope = (projectId: string) => (
+      <div style={{ margin: 120, width: 620 }}>
+        <ChatComposer
+          draft={createComposerDraft({ modelId: 'model-1', projectId })}
+          onDraftChange={draftChangeSpy}
+          onSubmitMessage={submitSpy}
+          resetKey="same-conversation"
+        />
+      </div>
+    )
+    const screen = await render(renderScope('project-a'))
+    await screen.getByRole('button', { name: 'chat.addContext' }).click()
+    await expect
+      .poll(() => listSkillsSpy.mock.calls.some(([projectId]) => projectId === 'project-a'))
+      .toBe(true)
+
+    await screen.rerender(renderScope('project-b'))
+    await expect
+      .element(screen.getByRole('menuitem', { name: /^Dependency auditor/ }))
+      .toBeVisible()
+    resolvePrevious(catalog())
+    await previousCatalog
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+
+    expect(screen.getByRole('menuitem', { name: /^Repository auditor/ }).query()).toBeNull()
+    expect(screen.getByRole('menuitem', { name: /^Test runner/ }).query()).toBeNull()
+    await screen.getByRole('menuitem', { name: /^Dependency auditor/ }).click()
+    expect(draftChangeSpy.mock.calls.at(-1)?.[0]).toMatchObject({
+      projectId: 'project-b',
+      skills: [{ id: projectBSkill.id, revision: projectBSkill.revision }]
+    })
   })
 
   it('renders loading, truncated diagnostics, and empty catalog states explicitly', async () => {

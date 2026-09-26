@@ -192,7 +192,7 @@ const smokeSteps = [
       'mycopilot-core-server',
       '--bin',
       'core-server',
-      'application::agent::tests::pending_actions::child_approval_continuation_persists_waiting_to_running_before_runtime',
+      'application::agent::tests::pending_actions::continuation::child_approval_continuation_persists_waiting_to_running_before_runtime',
       '--',
       '--exact',
       '--nocapture'
