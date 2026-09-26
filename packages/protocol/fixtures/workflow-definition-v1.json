@@ -51,6 +51,18 @@
         "required": [],
         "groups": []
       }
+    },
+    {
+      "id": "result",
+      "name": "验收",
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Deliver the result to the selected outgoing flow.",
+      "x": 1120,
+      "y": 180,
+      "kind": "agent",
+      "permissionMode": "default"
     }
   ],
   "flows": [
@@ -97,7 +109,8 @@
         "nodeId": "review-output"
       },
       "target": {
-        "kind": "boundary"
+        "kind": "node",
+        "nodeId": "result"
       }
     },
     {
@@ -133,10 +146,6 @@
   "boundaryPositions": {
     "input": {
       "x": -250,
-      "y": 180
-    },
-    "output": {
-      "x": 1120,
       "y": 180
     }
   }

@@ -6,7 +6,9 @@ export type FlowEnd = 'source' | 'target'
 export function endpointNode(graph: CanvasGraph, endpoint: WorkflowEndpoint, end: FlowEnd) {
   return endpoint.kind === 'node'
     ? graph.nodes.find((node) => node.id === endpoint.nodeId)
-    : graph.boundaryPositions[end === 'source' ? 'input' : 'output']
+    : end === 'source'
+      ? graph.boundaryPositions.input
+      : undefined
 }
 export function normalizeAnchor(
   kind: string | undefined,

@@ -1,17 +1,7 @@
+import { Tooltip } from '../../components/overlay/Tooltip'
 import { AccountAvatar } from '../auth/AccountAvatar'
 import { useAccountAuth } from '../auth/AccountAuthContext'
-import {
-  UserRound,
-  Triangle,
-  ChevronDown,
-  Link2,
-  Hand,
-  Plus,
-  Search,
-  Settings,
-  Trash2,
-  X
-} from 'lucide-react'
+import { UserRound, Triangle, Link2, Hand, Plus, Search, Settings, Trash2, X } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import type {
   WorkflowDefinition,
@@ -208,7 +198,7 @@ export function WorkflowGraphEditor({
     const position =
       x === undefined && y === undefined
         ? nearestOpenPosition(
-            [...graph.nodes, graph.boundaryPositions.input, graph.boundaryPositions.output],
+            [...graph.nodes, graph.boundaryPositions.input],
             desired,
             workflowNodeSize(gateKind ? { kind: gateKind } : undefined)
           )
@@ -318,15 +308,15 @@ export function WorkflowGraphEditor({
       patch.name !== undefined ? { group: `flow:${id}:name` } : undefined
     )
   const flowLabel = (flow: WorkflowFlow) => {
-    const name = (endpoint: WorkflowEndpoint, entry: boolean) =>
+    const name = (endpoint: WorkflowEndpoint) =>
       endpoint.kind === 'boundary'
-        ? text(entry ? 'parentInput' : 'parentOutput')
+        ? text('parentInput')
         : workflowNodeLabel(
             graph.nodes.find((node) => node.id === endpoint.nodeId)!,
             text,
             userName
           )
-    return `${flow.name ? `${flow.name} · ` : ''}${name(flow.source, true)} → ${name(flow.target, false)}`
+    return `${flow.name ? `${flow.name} · ` : ''}${name(flow.source)} → ${name(flow.target)}`
   }
   const nodeOptions = graph.nodes.map((node) => ({
     id: node.id,
@@ -337,24 +327,30 @@ export function WorkflowGraphEditor({
   const selectionActions = (
     <div className="workflow-selection-actions">
       {selectedNode ? (
+        <Tooltip content={text('details')} preferredPlacement="bottom">
+          <button
+            type="button"
+            className="workflow-graph-icon-button"
+            aria-label={text('details')}
+            onClick={() => configureNode(selectedNode.id)}
+          >
+            <Settings aria-hidden="true" />
+          </button>
+        </Tooltip>
+      ) : null}
+      <Tooltip
+        content={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
+        preferredPlacement="bottom"
+      >
         <button
           type="button"
-          className="workflow-graph-toolbar__add"
-          onClick={() => configureNode(selectedNode.id)}
+          className="workflow-graph-icon-button workflow-selection-delete"
+          aria-label={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
+          onClick={deleteSelected}
         >
-          <Settings aria-hidden="true" />
-          {text('details')}
+          <Trash2 aria-hidden="true" />
         </button>
-      ) : null}
-      <button
-        type="button"
-        className="workflow-graph-icon-button workflow-selection-delete"
-        aria-label={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
-        title={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
-        onClick={deleteSelected}
-      >
-        <Trash2 aria-hidden="true" />
-      </button>
+      </Tooltip>
     </div>
   )
 
@@ -390,55 +386,57 @@ export function WorkflowGraphEditor({
     >
       <div className="workflow-graph-editor__topbar">
         <div className="workflow-graph-toolbar" ref={toolbarRef}>
-          <button
-            ref={addButtonRef}
-            className="workflow-graph-toolbar__add"
-            type="button"
-            aria-expanded={panel === 'nodes'}
-            aria-controls={panel === 'nodes' ? panelId : undefined}
-            disabled={graph.nodes.length >= 128}
-            onClick={() => {
-              setPanel(panel === 'nodes' ? null : 'nodes')
-              setQuery('')
-            }}
-          >
-            <Plus aria-hidden="true" />
-            {text('addNode')}
-            <ChevronDown aria-hidden="true" />
-          </button>
+          <Tooltip content={text('addNode')} preferredPlacement="bottom">
+            <button
+              ref={addButtonRef}
+              className="workflow-graph-toolbar__add"
+              type="button"
+              aria-label={text('addNode')}
+              aria-expanded={panel === 'nodes'}
+              aria-controls={panel === 'nodes' ? panelId : undefined}
+              disabled={graph.nodes.length >= 128}
+              onClick={() => {
+                setPanel(panel === 'nodes' ? null : 'nodes')
+                setQuery('')
+              }}
+            >
+              <Plus aria-hidden="true" />
+            </button>
+          </Tooltip>
           <span className="workflow-graph-toolbar__divider" aria-hidden="true" />
-          <button
-            ref={connectButtonRef}
-            className="workflow-graph-toolbar__add workflow-graph-toolbar__connect"
-            type="button"
-            title={text('connectNodes')}
-            aria-label={text('connectNodes')}
-            aria-pressed={connectionMode}
-            disabled={graph.nodes.length === 0 || graph.flows.length >= 512}
-            onClick={() => {
-              setConnectionMode(true)
-              setPanel(null)
-              select(null)
-              cancelConnection()
-            }}
-          >
-            <Link2 aria-hidden="true" />
-            {text('connection')}
-          </button>
-          <button
-            type="button"
-            className="workflow-graph-icon-button"
-            title={text('operateMode')}
-            aria-label={text('operateMode')}
-            aria-pressed={!connectionMode}
-            onClick={() => {
-              setConnectionMode(false)
-              cancelConnection()
-              setPanel(null)
-            }}
-          >
-            <Hand aria-hidden="true" />
-          </button>
+          <Tooltip content={text('connectNodes')} preferredPlacement="bottom">
+            <button
+              ref={connectButtonRef}
+              className="workflow-graph-toolbar__add workflow-graph-toolbar__connect"
+              type="button"
+              aria-label={text('connectNodes')}
+              aria-pressed={connectionMode}
+              disabled={graph.nodes.length === 0 || graph.flows.length >= 512}
+              onClick={() => {
+                setConnectionMode(true)
+                setPanel(null)
+                select(null)
+                cancelConnection()
+              }}
+            >
+              <Link2 aria-hidden="true" />
+            </button>
+          </Tooltip>
+          <Tooltip content={text('operateMode')} preferredPlacement="bottom">
+            <button
+              type="button"
+              className="workflow-graph-icon-button"
+              aria-label={text('operateMode')}
+              aria-pressed={!connectionMode}
+              onClick={() => {
+                setConnectionMode(false)
+                cancelConnection()
+                setPanel(null)
+              }}
+            >
+              <Hand aria-hidden="true" />
+            </button>
+          </Tooltip>
           {panel === 'nodes' ? (
             <div
               className="workflow-node-picker"
@@ -696,14 +694,7 @@ export function WorkflowGraphEditor({
                     targetAnchor: undefined
                   })
                 }
-                options={[
-                  {
-                    id: '',
-                    name: text('parentOutput'),
-                    disabled: selectedFlow.source.kind === 'boundary'
-                  },
-                  ...nodeOptions
-                ].map((option) => ({
+                options={nodeOptions.map((option) => ({
                   ...option,
                   disabled: !workflowConnectionAllowed(
                     graph,
@@ -723,12 +714,6 @@ export function WorkflowGraphEditor({
           {pending ? (
             <div className="workflow-graph-connection-status" role="status">
               <span>{text(pending.kind === 'boundary' ? 'connectingEntry' : 'connecting')}</span>
-              {pending.kind === 'node' &&
-              workflowConnectionAllowed(graph, pending, { kind: 'boundary' }) ? (
-                <button type="button" onClick={() => finishConnection({ kind: 'boundary' })}>
-                  {text('addExit')}
-                </button>
-              ) : null}
               <button
                 type="button"
                 className="workflow-graph-icon-button"
@@ -849,29 +834,21 @@ export function WorkflowGraphEditor({
                           }
                         />
                       </label>
-                      {outgoing.length ? (
-                        <label>
-                          <span>
-                            {text(
-                              outgoing.every((flow) => flow.target.kind === 'boundary')
-                                ? 'finalOutput'
-                                : 'delivers'
-                            )}
-                          </span>
-                          <textarea
-                            rows={3}
-                            maxLength={32768}
-                            value={configuredNode.delivers}
-                            onChange={(event) =>
-                              updateNode(
-                                configuredNode.id,
-                                { delivers: event.currentTarget.value },
-                                `node:${configuredNode.id}:delivers`
-                              )
-                            }
-                          />
-                        </label>
-                      ) : null}
+                      <label>
+                        <span>{text('delivers')}</span>
+                        <textarea
+                          rows={3}
+                          maxLength={32768}
+                          value={configuredNode.delivers}
+                          onChange={(event) =>
+                            updateNode(
+                              configuredNode.id,
+                              { delivers: event.currentTarget.value },
+                              `node:${configuredNode.id}:delivers`
+                            )
+                          }
+                        />
+                      </label>
                     </>
                   )}
                 </div>

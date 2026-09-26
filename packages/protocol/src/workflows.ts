@@ -61,20 +61,18 @@ export interface WorkflowFlow {
 }
 export interface WorkflowBoundaryPositions {
   input: { x: number; y: number }
-  output: { x: number; y: number }
 }
 /** Boundary cards are layout only. They never become executable worker nodes. */
 export function getDefaultWorkflowBoundaryPositions(
   nodes: readonly { x: number; y: number }[]
 ): WorkflowBoundaryPositions {
-  if (!nodes.length) return { input: { x: 80, y: 220 }, output: { x: 760, y: 220 } }
+  if (!nodes.length) return { input: { x: 80, y: 220 } }
   const clamp = (value: number) => Math.max(-100000, Math.min(100000, value))
   const y = clamp(
     (Math.min(...nodes.map((node) => node.y)) + Math.max(...nodes.map((node) => node.y))) / 2
   )
   return {
-    input: { x: clamp(Math.min(...nodes.map((node) => node.x)) - 280), y },
-    output: { x: clamp(Math.max(...nodes.map((node) => node.x)) + 464), y }
+    input: { x: clamp(Math.min(...nodes.map((node) => node.x)) - 280), y }
   }
 }
 export interface WorkflowDefinition {
@@ -166,7 +164,7 @@ function anchor(value: unknown): WorkflowAnchor {
   return { side: item.side as WorkflowAnchor['side'], offset }
 }
 function boundaryPositions(value: unknown): WorkflowBoundaryPositions {
-  const item = object(value, ['input', 'output'])
+  const item = object(value, ['input'])
   const point = (value: unknown) => {
     const position = object(value, ['x', 'y'])
     const x = number(position.x),
@@ -175,7 +173,7 @@ function boundaryPositions(value: unknown): WorkflowBoundaryPositions {
       throw new Error('Invalid workflow boundary coordinate')
     return { x, y }
   }
-  return { input: point(item.input), output: point(item.output) }
+  return { input: point(item.input) }
 }
 function rule(value: unknown): WorkflowRule {
   const item = object(value, ['mode', 'min', 'max', 'required', 'groups'])
@@ -289,11 +287,13 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
         ['id', 'name', 'source', 'target', 'sourceAnchor', 'targetAnchor'],
         ['sourceAnchor', 'targetAnchor']
       )
+      const target = endpoint(flow.target)
+      if (target.kind === 'boundary') throw new Error('The user entry cannot receive flows')
       return {
         id: text(flow.id),
         name: text(flow.name),
         source: endpoint(flow.source),
-        target: endpoint(flow.target),
+        target,
         ...(flow.sourceAnchor !== undefined ? { sourceAnchor: anchor(flow.sourceAnchor) } : {}),
         ...(flow.targetAnchor !== undefined ? { targetAnchor: anchor(flow.targetAnchor) } : {})
       }

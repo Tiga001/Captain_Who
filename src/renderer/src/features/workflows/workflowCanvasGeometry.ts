@@ -49,8 +49,7 @@ function canvasCards(graph: CanvasGraph): CanvasCard[] {
       y: node.y,
       ...workflowNodeSize(node)
     })),
-    { key: 'boundary:input', ...graph.boundaryPositions.input, ...workflowNodeSize() },
-    { key: 'boundary:output', ...graph.boundaryPositions.output, ...workflowNodeSize() }
+    { key: 'boundary:input', ...graph.boundaryPositions.input, ...workflowNodeSize() }
   ]
 }
 function endpointCard(cards: CanvasCard[], endpoint: WorkflowEndpoint, side: 'input' | 'output') {

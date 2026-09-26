@@ -11,7 +11,6 @@ fn graph() -> Definition {
                 x: -180.0,
                 y: 200.0,
             },
-            output: BoundaryPoint { x: 564.0, y: 200.0 },
         },
         schema_version: 1,
         next_flow_sequence: None,
@@ -37,28 +36,16 @@ fn graph() -> Definition {
             x: 100.0,
             y: 200.0,
         }],
-        flows: vec![
-            Flow {
-                source_anchor: None,
-                target_anchor: None,
-                id: "input".into(),
-                name: "Task".into(),
-                source: Endpoint::Boundary,
-                target: Endpoint::Node {
-                    node_id: "review".into(),
-                },
+        flows: vec![Flow {
+            source_anchor: None,
+            target_anchor: None,
+            id: "input".into(),
+            name: "Task".into(),
+            source: Endpoint::Boundary,
+            target: Endpoint::Node {
+                node_id: "review".into(),
             },
-            Flow {
-                source_anchor: None,
-                target_anchor: None,
-                id: "output".into(),
-                name: "Findings".into(),
-                source: Endpoint::Node {
-                    node_id: "review".into(),
-                },
-                target: Endpoint::Boundary,
-            },
-        ],
+        }],
     }
 }
 
@@ -388,7 +375,7 @@ fn invalid_boundary_positions_cannot_replace_persisted_layout() {
     run_migrations(&connection).unwrap();
     save(&mut connection, graph(), 0).unwrap();
     let mut invalid = graph();
-    invalid.boundary_positions.output.y = 100001.0;
+    invalid.boundary_positions.input.y = 100001.0;
     assert!(matches!(
         save(&mut connection, invalid, 1),
         Err(Error::Invalid(_))

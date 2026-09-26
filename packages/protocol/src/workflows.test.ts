@@ -56,14 +56,14 @@ describe('workflow authoring contract', () => {
   it('round-trips manually positioned boundaries and rejects malformed root layout', () => {
     const definition = {
       ...fixture,
-      boundaryPositions: { input: { x: -125.5, y: 80 }, output: { x: 925, y: 410 } }
+      boundaryPositions: { input: { x: -125.5, y: 80 } }
     }
     expect(parseWorkflowDefinition(definition)).toEqual(definition)
     for (const boundaryPositions of [
       null,
       undefined,
       {},
-      { input: { x: 0, y: 0 } },
+      { input: { x: 0, y: 0 }, output: { x: 0, y: 0 } },
       { input: { x: 0, y: 0 }, output: { x: 0, y: 0 }, extra: true },
       { input: { x: 0, y: 0, nodeId: 'worker' }, output: { x: 0, y: 0 } },
       { input: { x: Infinity, y: 0 }, output: { x: 0, y: 0 } },
@@ -126,6 +126,21 @@ describe('workflow authoring contract', () => {
         })
       ).toThrow()
     }
+  })
+
+  it('rejects flows targeting the fixed user entry', () => {
+    expect(() =>
+      parseWorkflowDefinition({
+        ...fixture,
+        flows: [
+          {
+            ...fixture.flows[0],
+            source: { kind: 'node', nodeId: 'review' },
+            target: { kind: 'boundary' }
+          }
+        ]
+      })
+    ).toThrow('cannot receive')
   })
 
   it('preserves boundary flows, cycles, blank nodes and viewport', () => {

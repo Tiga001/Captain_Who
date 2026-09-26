@@ -166,6 +166,7 @@ export function workflowConnectionAllowed(
   excluding?: string
 ): boolean {
   const from = source.kind === 'node' ? graph.nodes.find((n) => n.id === source.nodeId) : null
+  if (target.kind === 'boundary') return false
   const to = target.kind === 'node' ? graph.nodes.find((n) => n.id === target.nodeId) : null
   if ((source.kind === 'node' && !from) || (target.kind === 'node' && !to) || (!from && !to))
     return false
@@ -250,11 +251,7 @@ export function connectWorkflowFlow(
           -99000,
           Math.min(99000, agent.y + NODE_HEIGHT / 2 - workflowNodeSize({ kind }).portY)
         )
-        const occupied = [
-          ...next.nodes,
-          next.boundaryPositions.input,
-          next.boundaryPositions.output
-        ]
+        const occupied = [...next.nodes, next.boundaryPositions.input]
         while (
           occupied.some(
             (n) =>

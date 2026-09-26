@@ -18,7 +18,7 @@ describe('workflow IPC contract boundary', () => {
     const definition = parseWorkflowDefinition(fixture)
     if (definition.nodes[0].kind !== 'agent') throw new Error('Expected agent')
     definition.nodes[0].modelConfigId = 'implementation-model'
-    definition.boundaryPositions = { input: { x: 100, y: 140 }, output: { x: 1100, y: 420 } }
+    definition.boundaryPositions = { input: { x: 100, y: 140 } }
     const response = {
       records: [{ definition, enabled: false, revision: 2, updatedAt: 42, issues: [] }],
       issues: []
@@ -107,7 +107,7 @@ describe('workflow IPC contract boundary', () => {
     ).toThrow('Invalid workflow permission mode')
     expect(rpcRequest).not.toHaveBeenCalled()
     const invalidLayout = parseWorkflowDefinition(fixture)
-    invalidLayout.boundaryPositions.output.x = 100001
+    invalidLayout.boundaryPositions.input.x = 100001
     expect(() =>
       server.requestWorkflows({ operation: 'save', definition: invalidLayout, expectedRevision: 0 })
     ).toThrow()

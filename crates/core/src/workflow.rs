@@ -217,20 +217,17 @@ pub struct BoundaryPoint {
 #[serde(deny_unknown_fields)]
 pub struct BoundaryPositions {
     pub input: BoundaryPoint,
-    pub output: BoundaryPoint,
 }
 impl BoundaryPositions {
     pub fn for_nodes(nodes: &[Node]) -> Self {
         let Some(first) = nodes.first() else {
             return Self {
                 input: BoundaryPoint { x: 80.0, y: 220.0 },
-                output: BoundaryPoint { x: 760.0, y: 220.0 },
             };
         };
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
+        let (mut min_x, mut min_y, mut max_y) = (first.x, first.y, first.y);
         for node in nodes.iter().skip(1) {
             min_x = min_x.min(node.x);
-            max_x = max_x.max(node.x);
             min_y = min_y.min(node.y);
             max_y = max_y.max(node.y);
         }
@@ -238,10 +235,6 @@ impl BoundaryPositions {
         Self {
             input: BoundaryPoint {
                 x: (min_x - 280.0).clamp(-MAX_POSITION, MAX_POSITION),
-                y,
-            },
-            output: BoundaryPoint {
-                x: (max_x + 464.0).clamp(-MAX_POSITION, MAX_POSITION),
                 y,
             },
         }
@@ -399,10 +392,7 @@ impl Definition {
         {
             return Err("Invalid viewport".into());
         }
-        for point in [
-            &self.boundary_positions.input,
-            &self.boundary_positions.output,
-        ] {
+        for point in [&self.boundary_positions.input] {
             if !point.x.is_finite()
                 || !point.y.is_finite()
                 || point.x.abs() > MAX_POSITION
@@ -465,8 +455,8 @@ impl Definition {
             if f.name.len() > MAX_NAME_BYTES {
                 return Err("Flow name exceeds its size limit".into());
             }
-            if f.source.node().is_none() && f.target.node().is_none() {
-                return Err("A flow must connect a node".into());
+            if f.target.node().is_none() {
+                return Err("The user entry cannot receive flows".into());
             }
             if f.source.node().is_some() && f.source.node() == f.target.node() {
                 return Err("A flow cannot connect a node to itself".into());
@@ -490,20 +480,10 @@ impl Definition {
             .filter(|f| f.source.node().is_none())
             .filter_map(|f| f.target.node())
             .collect();
-        let exits: HashSet<_> = self
-            .flows
-            .iter()
-            .filter(|f| f.target.node().is_none())
-            .filter_map(|f| f.source.node())
-            .collect();
         if entries.is_empty() {
             issue(&mut out, "entry", &self.id);
         }
-        if exits.is_empty() {
-            issue(&mut out, "exit", &self.id);
-        }
         let reachable = self.reachable(entries, false);
-        let can_exit = self.reachable(exits, true);
         for n in &self.nodes {
             let incoming: Vec<_> = self
                 .flows
@@ -573,9 +553,6 @@ impl Definition {
             }
             if !reachable.contains(n.id.as_str()) {
                 issue(&mut out, "unreachable", &n.id)
-            }
-            if !can_exit.contains(n.id.as_str()) {
-                issue(&mut out, "noExit", &n.id)
             }
         }
         // Inputs accumulate across executions. An exclusive upstream output can
@@ -732,10 +709,7 @@ mod tests {
             description: "Review the supplied change".into(),
             background: "Shared workflow background".into(),
             nodes: vec![node("review")],
-            flows: vec![
-                flow("entry", None, Some("review")),
-                flow("exit", Some("review"), None),
-            ],
+            flows: vec![flow("entry", None, Some("review"))],
             viewport: Viewport {
                 x: 20.0,
                 y: -20.0,
@@ -838,9 +812,32 @@ mod tests {
             serialized["flows"][0]["target"],
             json!({"kind": "node", "nodeId": "review"})
         );
-        assert_eq!(serialized["flows"][1]["name"], "Named flow exit");
+        assert_eq!(serialized["flows"].as_array().unwrap().len(), 1);
         let restored: Definition = serde_json::from_value(serialized.clone()).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), serialized);
+    }
+
+    #[test]
+    fn user_entry_only_emits_and_terminal_agents_need_no_shared_exit() {
+        let graph = definition();
+        assert!(validate(&graph).is_empty());
+        let mut invalid = graph.clone();
+        invalid
+            .flows
+            .push(flow("return-to-entry", Some("review"), None));
+        assert!(invalid
+            .validate(&HashSet::from(["model-review".into()]))
+            .unwrap_err()
+            .contains("cannot receive"));
+        let mut cycle = gated_graph();
+        cycle
+            .flows
+            .retain(|flow| !flow.id.starts_with("out-") || flow.id == "out-binding");
+        cycle.nodes.retain(|node| !node.id.starts_with("result-"));
+        cycle
+            .flows
+            .push(flow("return", Some("output"), Some("input")));
+        assert!(validate(&cycle).is_empty());
     }
 
     #[test]
@@ -849,7 +846,7 @@ mod tests {
         for position in [
             json!(null),
             json!({}),
-            json!({"input":{"x":0,"y":0}}),
+            json!({"input":{"x":0,"y":0},"output":{"x":0,"y":0}}),
             json!({"input":{"x":0,"y":0},"output":{"x":0,"y":0},"extra":true}),
             json!({"input":{"x":0,"y":0,"nodeId":"worker"},"output":{"x":0,"y":0}}),
         ] {
@@ -858,9 +855,9 @@ mod tests {
             assert!(serde_json::from_value::<Definition>(wire).is_err());
         }
         let mut graph = definition();
-        graph.boundary_positions.output.x = 100001.0;
+        graph.boundary_positions.input.x = 100001.0;
         assert!(graph.validate(&HashSet::new()).is_err());
-        graph.boundary_positions.output.x = 0.0;
+        graph.boundary_positions.input.x = 0.0;
         graph.boundary_positions.input.y = f64::INFINITY;
         assert!(graph.validate(&HashSet::new()).is_err());
     }
@@ -900,7 +897,7 @@ mod tests {
                 .iter()
                 .map(|issue| issue.code.as_str())
                 .collect::<Vec<_>>(),
-            vec!["node_model", "node_model"]
+            vec!["node_model", "node_model", "node_model"]
         );
         // JSON has one number type; normalize its layout values to Rust's f64
         // representation before comparing the serialized wire contract.
@@ -912,7 +909,7 @@ mod tests {
         for field in ["x", "y", "zoom"] {
             fixture["viewport"][field] = json!(fixture["viewport"][field].as_f64().unwrap());
         }
-        for side in ["input", "output"] {
+        for side in ["input"] {
             for field in ["x", "y"] {
                 fixture["boundaryPositions"][side][field] =
                     json!(fixture["boundaryPositions"][side][field].as_f64().unwrap());
@@ -940,13 +937,13 @@ mod tests {
         draft.nodes.clear();
         draft.flows.clear();
         let issues = validate(&draft);
-        for code in ["empty", "entry", "exit"] {
+        for code in ["empty", "entry"] {
             assert!(has_issue(&issues, code, "workflow-1"));
         }
         draft.nodes.push(node("isolated"));
         let issues = validate(&draft);
         assert!(has_issue(&issues, "unreachable", "isolated"));
-        assert!(has_issue(&issues, "noExit", "isolated"));
+        assert!(!has_issue(&issues, "noExit", "isolated"));
         // A zero-degree ALL rule is not itself malformed; reachability diagnoses it.
         assert!(!has_issue(&issues, "inputRule", "isolated"));
     }
@@ -975,7 +972,7 @@ mod tests {
         assert!(graph
             .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
-            .contains("connect a node"));
+            .contains("cannot receive"));
         graph.flows.pop();
         graph.nodes.push(node("review"));
         assert!(graph
@@ -983,7 +980,7 @@ mod tests {
             .unwrap_err()
             .contains("identifiers"));
         graph.nodes.pop();
-        graph.flows.push(flow("exit", Some("review"), None));
+        graph.flows.push(flow("entry", None, Some("review")));
         assert!(graph
             .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
@@ -1206,12 +1203,15 @@ mod tests {
             flow("out-binding", Some("review"), Some("output")),
         ];
         for index in 0..3 {
+            graph.nodes.push(node(&format!("result-{index}")));
             graph
                 .flows
                 .push(flow(&format!("in-{index}"), None, Some("input")));
-            graph
-                .flows
-                .push(flow(&format!("out-{index}"), Some("output"), None));
+            graph.flows.push(flow(
+                &format!("out-{index}"),
+                Some("output"),
+                Some(&format!("result-{index}")),
+            ));
         }
         graph
     }
@@ -1222,7 +1222,9 @@ mod tests {
         graph.nodes[0].config = NodeConfig::User {
             task: "Review and send feedback".into(),
         };
-        graph.nodes.retain(|n| n.id != "output");
+        graph
+            .nodes
+            .retain(|n| n.id != "output" && !n.id.starts_with("result-"));
         graph
             .flows
             .retain(|f| f.source.node() != Some("output") && f.target.node() != Some("output"));
@@ -1231,9 +1233,6 @@ mod tests {
             graph
                 .flows
                 .push(flow(&format!("send-{id}"), Some("review"), Some(id)));
-            graph
-                .flows
-                .push(flow(&format!("exit-{id}"), Some(id), None));
         }
         assert!(validate(&graph).is_empty());
         graph.nodes[0].config = NodeConfig::User {
@@ -1254,7 +1253,7 @@ mod tests {
         graph
             .flows
             .push(flow("forbidden", Some("review"), Some("output")));
-        graph.flows.push(flow("out", Some("output"), None));
+        graph.flows.push(flow("out", Some("output"), Some("a")));
         assert!(has_issue(&validate(&graph), "outputGateBinding", "output"));
     }
 
@@ -1311,7 +1310,9 @@ mod tests {
     fn missing_gate_bindings_and_agent_bypasses_are_saveable_but_not_valid() {
         let mut graph = gated_graph();
         graph.flows.push(flow("bypass-in", None, Some("review")));
-        graph.flows.push(flow("bypass-out", Some("review"), None));
+        graph
+            .flows
+            .push(flow("bypass-out", Some("review"), Some("result-0")));
         let issues = validate(&graph);
         assert!(has_issue(&issues, "inputGateRequired", "review"));
         assert!(has_issue(&issues, "outputGateRequired", "review"));

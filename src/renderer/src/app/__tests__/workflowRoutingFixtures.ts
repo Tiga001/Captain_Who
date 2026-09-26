@@ -26,7 +26,7 @@ export function reviewLoopGraph(): WorkflowDefinition {
     id,
     name: '',
     source: source ? { kind: 'node', nodeId: source } : { kind: 'boundary' },
-    target: target ? { kind: 'node', nodeId: target } : { kind: 'boundary' },
+    target: { kind: 'node', nodeId: target ?? 'result' },
     ...(sourceAnchor ? { sourceAnchor } : {}),
     ...(targetAnchor ? { targetAnchor } : {})
   })
@@ -44,9 +44,10 @@ export function reviewLoopGraph(): WorkflowDefinition {
       gate('input-c', 'inputGate', 420, 515),
       gate('merge', 'inputGate', 620, 220),
       agent('review', 'Review 专家', 735, 250),
-      gate('output', 'outputGate', 1020, 250)
+      gate('output', 'outputGate', 1020, 250),
+      agent('result', '验收', 1190, 250)
     ],
-    boundaryPositions: { input: { x: -280, y: 220 }, output: { x: 1190, y: 250 } },
+    boundaryPositions: { input: { x: -280, y: 220 } },
     flows: [
       edge('entry', null, 'plan'),
       edge('plan-split', 'plan', 'split'),

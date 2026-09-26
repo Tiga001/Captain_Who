@@ -31,19 +31,24 @@ function connection(id: string, source: string | null, target: string | null): W
     id,
     name: id,
     source: source === null ? { kind: 'boundary' } : { kind: 'node', nodeId: source },
-    target: target === null ? { kind: 'boundary' } : { kind: 'node', nodeId: target }
+    target: { kind: 'node', nodeId: target ?? 'result' }
   }
 }
 
 function routingGraph(
   nodes: Array<{ id: string; x: number; y: number }>,
   flows: WorkflowFlow[],
-  boundaryPositions = { input: { x: -250, y: 220 }, output: { x: 1100, y: 220 } }
+  boundaryPositions = { input: { x: -250, y: 220 } }
 ): WorkflowDefinition {
   const base = parseWorkflowDefinition(fixture)
   return {
     ...base,
-    nodes: nodes.map((node) => ({ ...base.nodes[0], ...node, name: node.id })),
+    nodes: [
+      ...nodes.map((node) => ({ ...base.nodes[0], ...node, name: node.id })),
+      ...(flows.some((flow) => flow.target.kind === 'node' && flow.target.nodeId === 'result')
+        ? [{ ...base.nodes[4], x: 1100, y: 220 }]
+        : [])
+    ],
     flows,
     boundaryPositions
   }
@@ -74,7 +79,7 @@ function expectClearRoute(
   geometry: FlowGeometry,
   horizontalPorts = true
 ) {
-  const cards = [...graph.nodes, graph.boundaryPositions.input, graph.boundaryPositions.output]
+  const cards = [...graph.nodes, graph.boundaryPositions.input]
   expect(geometry.points[0]).toEqual(geometry.start)
   expect(geometry.points.at(-1)).toEqual(geometry.end)
   expect(
@@ -279,7 +284,7 @@ describe('workflow canvas geometry', () => {
         ]),
         connection('deliver', 'review', null)
       ],
-      { input: { x: -220, y: 260 }, output: { x: 1000, y: 260 } }
+      { input: { x: -220, y: 260 } }
     )
     for (const flow of graph.flows) {
       const geometry = flowGeometry(graph, flow)!
@@ -323,8 +328,7 @@ describe('workflow canvas geometry', () => {
         ],
         [flow],
         {
-          input: { x: side === 'input' ? 80 : -250, y: 220 },
-          output: { x: side === 'output' ? 760 : 1100, y: 220 }
+          input: { x: side === 'input' ? 80 : -250, y: 220 }
         }
       )
       expectClearRoute(graph, flowGeometry(graph, flow)!)
@@ -392,11 +396,13 @@ describe('workflow canvas geometry', () => {
       y: graph.boundaryPositions.input.y + NODE_HEIGHT / 2
     })
     expect(exit.end).toEqual({
-      x: graph.boundaryPositions.output.x,
-      y: graph.boundaryPositions.output.y + NODE_HEIGHT / 2
+      x: graph.nodes.find((node) => node.id === 'result')!.x,
+      y: graph.nodes.find((node) => node.id === 'result')!.y + NODE_HEIGHT / 2
     })
     expect(bounds.left).toBeLessThanOrEqual(graph.boundaryPositions.input.x)
-    expect(bounds.right).toBeGreaterThanOrEqual(graph.boundaryPositions.output.x + NODE_WIDTH)
+    expect(bounds.right).toBeGreaterThanOrEqual(
+      graph.nodes.find((node) => node.id === 'result')!.x + NODE_WIDTH
+    )
     const origin = canvasOrigin(bounds)
     const viewport = fitViewport(bounds, 1800, 800, origin)
     expect(viewport.zoom).toBe(1)
@@ -421,7 +427,10 @@ describe('workflow canvas geometry', () => {
     expect(anotherPath.path).not.toBe(firstPath.path)
 
     graph.boundaryPositions.input = { x: -180, y: 300 }
-    graph.boundaryPositions.output = { x: 1400, y: 440 }
+    Object.assign(
+      graph.nodes.find((node) => node.id === 'result')!,
+      { x: 1400, y: 440 }
+    )
     expect(flowGeometry(graph, entry)!.start).toEqual({
       x: -180 + NODE_WIDTH,
       y: 300 + NODE_HEIGHT / 2
@@ -437,7 +446,7 @@ describe('workflow canvas geometry', () => {
     const empty = { ...graph, nodes: [], flows: [] }
     const bounds = graphBounds(empty)
     expect(bounds.left).toBeLessThanOrEqual(empty.boundaryPositions.input.x)
-    expect(bounds.right).toBeGreaterThanOrEqual(empty.boundaryPositions.output.x + NODE_WIDTH)
+    expect(bounds.right).toBeGreaterThanOrEqual(empty.boundaryPositions.input.x + NODE_WIDTH)
     const origin = canvasOrigin(bounds)
     const viewport = fitViewport(bounds, 800, 600, origin)
     expect((bounds.left + origin.x) * viewport.zoom - viewport.x).toBeGreaterThanOrEqual(0)
@@ -475,7 +484,7 @@ describe('workflow canvas geometry', () => {
           connection('vertical', 'vertical-source', 'vertical-target'),
           connection('horizontal', 'horizontal-source', 'horizontal-target')
         ],
-        { input: { x: -400, y: 800 }, output: { x: 1300, y: 800 } }
+        { input: { x: -400, y: 800 } }
       )
       const geometries = addFlowCrossingBridges(
         new Map(graph.flows.map((flow) => [flow.id, flowGeometry(graph, flow)]))
@@ -528,7 +537,7 @@ describe('workflow canvas geometry', () => {
         ['upper', 'lower'].map((id) =>
           direction === 'split' ? connection(id, 'center', id) : connection(id, id, 'center')
         ),
-        { input: { x: -400, y: 800 }, output: { x: 1300, y: 800 } }
+        { input: { x: -400, y: 800 } }
       )
       for (const geometry of graphFlowGeometries(graph).values()) {
         expect(geometry!.bridges).toEqual([])
@@ -551,7 +560,7 @@ describe('workflow canvas geometry', () => {
         connection('lower', 'source', 'lower'),
         connection('vertical', 'vertical-source', 'vertical-target')
       ],
-      { input: { x: -400, y: 800 }, output: { x: 1300, y: 800 } }
+      { input: { x: -400, y: 800 } }
     )
     const geometries = addFlowCrossingBridges(
       new Map(graph.flows.map((flow) => [flow.id, flowGeometry(graph, flow)]))

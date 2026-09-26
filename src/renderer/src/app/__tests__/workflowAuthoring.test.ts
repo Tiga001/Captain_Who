@@ -77,7 +77,7 @@ function simpleGraph(): WorkflowDefinition {
   return {
     ...createWorkflow(),
     nodes: ['a', 'b', 'c'].map((id, i) => ({ ...createWorkflowNode(id, 300 + i * 300, 100), id })),
-    flows: [edge('entry', null, 'a'), edge('ab', 'a', 'b'), edge('exit', 'b', null)]
+    flows: [edge('entry', null, 'a'), edge('ab', 'a', 'b'), edge('exit', 'b', 'c')]
   }
 }
 describe('explicit logic gates', () => {
@@ -185,7 +185,7 @@ describe('explicit logic gates', () => {
     const loop = next.flows.find((flow) => flow.id === 'loop')!
     const retargeted = connectWorkflowFlow(next, { ...loop, target: { kind: 'node', nodeId: 'c' } })
     expect(retargeted.flows.find((flow) => flow.id === 'loop')?.name).toBe('S1')
-    expect(retargeted.nextFlowSequence).toBe(4)
+    expect(retargeted.nextFlowSequence).toBe(5)
   })
   it('creates both gates atomically for a loop and preserves existing flow IDs, labels and agent fields', () => {
     const graph = simpleGraph()

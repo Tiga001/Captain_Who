@@ -37,7 +37,7 @@ import {
 } from './workflowModelPresentation'
 import './workflowCanvas.css'
 
-type CardSelection = { kind: 'node'; id: string } | { kind: 'boundary'; id: 'input' | 'output' }
+type CardSelection = { kind: 'node'; id: string } | { kind: 'boundary'; id: 'input' }
 export type WorkflowSelection = CardSelection | { kind: 'flow'; id: string } | null
 export interface WorkflowCanvasChangeOptions {
   group?: string
@@ -399,7 +399,7 @@ export function WorkflowCanvas({
     }
     const endpoint: WorkflowEndpoint =
       target.kind === 'boundary' ? { kind: 'boundary' } : { kind: 'node', nodeId: target.id }
-    if (target.kind === 'boundary' && target.id !== (pending ? 'output' : 'input')) return
+    if (target.kind === 'boundary' && pending !== null) return
     if (pending) onFinish(endpoint)
     else {
       onBegin(endpoint)
@@ -479,7 +479,7 @@ export function WorkflowCanvas({
     if (connectionMode) {
       clickCard(
         flow[end].kind === 'boundary'
-          ? { kind: 'boundary', id: end === 'source' ? 'input' : 'output' }
+          ? { kind: 'boundary', id: 'input' }
           : { kind: 'node', id: (flow[end] as { nodeId: string }).nodeId },
         { x: event.clientX, y: event.clientY }
       )
@@ -675,9 +675,9 @@ export function WorkflowCanvas({
                 ) : null}
               </g>
             </svg>
-            {(['input', 'output'] as const).map((side) => {
+            {(['input'] as const).map((side) => {
               const position = graph.boundaryPositions[side]
-              const label = text(side === 'input' ? 'rootInput' : 'rootOutput')
+              const label = text('rootInput')
               return (
                 <div
                   key={`boundary-${side}`}
@@ -709,9 +709,12 @@ export function WorkflowCanvas({
                   }
                   onKeyDown={(event) => moveCardKey(event, { kind: 'boundary', id: side })}
                 >
+                  <span className="workflow-node__avatar workflow-user-avatar">
+                    <AccountAvatar src={profile?.avatarDataUrl} />
+                  </span>
                   <div className="workflow-node__copy">
-                    <strong>{text('rootAgent')}</strong>
-                    <span>{text(side === 'input' ? 'inputLabel' : 'outputLabel')}</span>
+                    <strong>{userName}</strong>
+                    <span>{text('rootInput')}</span>
                   </div>
                 </div>
               )

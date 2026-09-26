@@ -1,8 +1,7 @@
 import type { WorkflowDefinition, WorkflowEndpoint } from '@mycopilot/protocol'
 import { NODE_HEIGHT, NODE_WIDTH, workflowNodeSize } from './workflowAuthoring'
 
-const INPUT = 'boundary:input',
-  OUTPUT = 'boundary:output'
+const INPUT = 'boundary:input'
 const ROW_GAP = 132,
   COLUMN_GAP = 104,
   GATE_GAP = 32
@@ -56,13 +55,12 @@ export function arrangeWorkflowNodes(graph: WorkflowDefinition): WorkflowDefinit
       items.push({ id, nodeId: node.id, rank: 1, order: 0 })
     }
   }
-  items.push({ id: OUTPUT, rank: 1, order: 0 })
   items.forEach((item, i) => {
     item.order = i
   })
   const byId = new Map(items.map((item) => [item.id, item]))
   const key = (ep: WorkflowEndpoint, input: boolean) =>
-    ep.kind === 'boundary' ? (input ? INPUT : OUTPUT) : owner.get(ep.nodeId)
+    ep.kind === 'boundary' ? (input ? INPUT : undefined) : owner.get(ep.nodeId)
   const edges = new Map<string, { from: string; to: string; back: boolean }>()
   for (const flow of graph.flows) {
     const from = key(flow.source, true),
@@ -139,10 +137,9 @@ export function arrangeWorkflowNodes(graph: WorkflowDefinition): WorkflowDefinit
       if (!indegree.get(next.id)) ready.push(next)
     }
   }
-  byId.get(OUTPUT)!.rank =
-    Math.max(0, ...items.filter((item) => item.id !== OUTPUT).map((item) => item.rank)) + 1
-  const layers = Array.from({ length: byId.get(OUTPUT)!.rank + 1 }, (_, rank) =>
-    items.filter((item) => item.rank === rank)
+  const layers = Array.from(
+    { length: Math.max(...items.map((item) => item.rank)) + 1 },
+    (_, rank) => items.filter((item) => item.rank === rank)
   )
   const rows = () =>
     new Map(
@@ -207,8 +204,8 @@ export function arrangeWorkflowNodes(graph: WorkflowDefinition): WorkflowDefinit
     layer.forEach((item, row) => {
       const cy = baseline + (row - (layer.length - 1) / 2) * ROW_GAP
       const centerX = x + left
-      if (item.id === INPUT || item.id === OUTPUT)
-        rootPositions[item.id === INPUT ? 'input' : 'output'] = {
+      if (item.id === INPUT)
+        rootPositions.input = {
           x: centerX,
           y: cy - NODE_HEIGHT / 2
         }

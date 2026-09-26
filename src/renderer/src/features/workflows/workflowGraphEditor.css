@@ -1,4 +1,5 @@
 .workflow-graph-editor {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -18,7 +19,7 @@
   gap: 12px;
   min-height: 48px;
   padding: 8px 16px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   font-size: 12px;
   font-weight: 400;
   line-height: 18px;
@@ -38,8 +39,8 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 12px 16px;
+  flex-wrap: nowrap;
+  gap: 8px;
   min-width: 0;
   max-width: 100%;
   margin-left: auto;
@@ -66,7 +67,7 @@
 .workflow-selection-field > input,
 .workflow-selection-field > .workflow-template-picker,
 .workflow-selection-field > .workflow-node-model__picker {
-  width: clamp(100px, 11vw, 160px);
+  width: clamp(90px, 10vw, 150px);
   min-width: 0;
 }
 .workflow-selection-controls input,
@@ -88,8 +89,8 @@
 }
 .workflow-selection-controls .model-config-picker__button > svg,
 .workflow-selection-controls .workflow-template-picker__trigger > svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   color: inherit;
 }
 .workflow-selection-controls input:focus {
@@ -107,8 +108,8 @@
   font: inherit;
 }
 .workflow-selection-actions svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   color: inherit;
 }
 .workflow-selection-delete:hover {
@@ -170,12 +171,8 @@
   cursor: pointer;
 }
 .workflow-graph-toolbar__add svg {
-  width: 15px;
-  height: 15px;
-}
-.workflow-graph-toolbar__add svg:last-child {
-  width: 12px;
-  color: var(--mc-color-text-muted);
+  width: 16px;
+  height: 16px;
 }
 .workflow-graph-icon-button {
   display: inline-flex;
@@ -232,8 +229,8 @@
   background: var(--mc-color-surface-input);
 }
 .workflow-node-picker__search svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   color: var(--mc-color-text-muted);
   flex-shrink: 0;
 }
@@ -293,8 +290,8 @@
   height: 24px;
 }
 .workflow-node-picker__icon svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   color: var(--mc-color-text-muted);
 }
 .workflow-node-picker__heading {
@@ -528,8 +525,8 @@
 .workflow-template-picker__trigger > svg,
 .workflow-template-picker__option > svg {
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   color: var(--mc-color-text-muted);
 }
 .workflow-template-picker__identity {
@@ -603,4 +600,37 @@
 }
 .workflow-graph-toolbar button[aria-pressed='true'] svg {
   color: inherit;
+}
+
+.workflow-graph-editor__topbar .workflow-graph-toolbar__add,
+.workflow-graph-editor__topbar .workflow-graph-icon-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.workflow-graph-editor__topbar button > svg {
+  width: 16px;
+  height: 16px;
+}
+.workflow-selection-controls {
+  flex: 1;
+}
+.workflow-selection-controls > .workflow-selection-field {
+  flex: 0 1 auto;
+}
+.workflow-selection-controls > .workflow-selection-field > input,
+.workflow-selection-controls > .workflow-selection-field > .workflow-template-picker,
+.workflow-selection-controls > .workflow-selection-field > .workflow-node-model__picker {
+  max-width: 100%;
+}
+
+.workflow-agent-controls .workflow-template-picker {
+  width: 136px;
+  flex-shrink: 0;
+}
+@container (max-width: 760px) {
+  .workflow-agent-controls .workflow-selection-field > span:not(.workflow-selection-avatar) {
+    display: none;
+  }
 }

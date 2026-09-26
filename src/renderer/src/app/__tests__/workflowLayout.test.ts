@@ -50,7 +50,7 @@ function gateGraph(output = false): WorkflowDefinition {
     flows: ['top', 'bottom', 'middle'].map((id) =>
       output ? flow(id, 'gate', id) : flow(id, id, 'gate')
     ),
-    boundaryPositions: { input: { x: -300, y: 200 }, output: { x: 1000, y: 200 } }
+    boundaryPositions: { input: { x: -300, y: 200 } }
   }
 }
 function noOverlaps(graph: WorkflowDefinition) {
@@ -133,7 +133,6 @@ describe('workflow automatic layout', () => {
       graph.nodes.map((n) => ({ ...n, x: 0, y: 0 }))
     )
     expect(next.boundaryPositions.input.x).toBeLessThan(Math.min(...next.nodes.map((n) => n.x)))
-    expect(next.boundaryPositions.output.x).toBeGreaterThan(Math.max(...next.nodes.map((n) => n.x)))
     const position = (id: string) => next.nodes.find((n) => n.id === id)!
     expect(position('a').x).toBe(position('b').x)
     expect(position('b').x).toBe(position('c').x)
