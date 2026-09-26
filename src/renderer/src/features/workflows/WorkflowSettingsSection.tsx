@@ -3,7 +3,7 @@ import {
   ArrowLeft,
   ChevronRight,
   Copy,
-  GitBranch,
+  Network,
   Pencil,
   Plus,
   Redo2,
@@ -377,52 +377,6 @@ export function WorkflowSettingsSection({
       setMutationBusy(false)
     }
   }
-  const setEnabled = async (record: WorkflowRecord) => {
-    if (
-      busyRef.current ||
-      loading ||
-      conflict ||
-      record.issues.length > 0 ||
-      typeof record.enabled !== 'boolean'
-    )
-      return
-    busyRef.current = true
-    onSavingChange?.(true)
-    setBusy(true)
-    setError(false)
-    setLoadFailure(false)
-    setErrorDetail('')
-    try {
-      const response = await requestWorkflows({
-        operation: 'setEnabled',
-        id: record.definition.id,
-        enabled: !record.enabled,
-        expectedRevision: record.revision
-      })
-      const updated = response.records.find((item) => item.definition.id === record.definition.id)
-      if (!updated) throw new Error('Updated workflow is missing from response')
-      acceptResponse(response)
-      // Enabling changes only saved metadata. Keep a hidden editing draft intact,
-      // while advancing its revision only when it started from this saved record.
-      if (draft?.id === record.definition.id)
-        setRevision((current) => (current === record.revision ? updated.revision : current))
-    } catch (enableError) {
-      setConflict(
-        Boolean(
-          enableError &&
-          typeof enableError === 'object' &&
-          'code' in enableError &&
-          enableError.code === -32009
-        )
-      )
-      setError(true)
-      setErrorDetail(workflowErrorDetail(enableError))
-    } finally {
-      busyRef.current = false
-      onSavingChange?.(false)
-      setBusy(false)
-    }
-  }
   const shortcutActions = useRef({ save, undo, redo, editing, busy, modal: false })
   useLayoutEffect(() => {
     shortcutActions.current = {
@@ -721,7 +675,7 @@ export function WorkflowSettingsSection({
               invalidRecords.length === 0 &&
               invalidDrafts.length === 0 ? (
                 <div className="workflows-settings__empty">
-                  <GitBranch aria-hidden="true" />
+                  <Network aria-hidden="true" />
                   <strong>{text('empty')}</strong>
                 </div>
               ) : null}
@@ -773,31 +727,6 @@ export function WorkflowSettingsSection({
                       }
                     >
                       <Trash2 aria-hidden="true" />
-                    </button>
-                    <button
-                      className="settings-switch workflow-record__enabled"
-                      type="button"
-                      role="switch"
-                      aria-label={`${text('enable')} ${record.definition.name || text('create')}`}
-                      aria-checked={record.issues.length === 0 && Boolean(record.enabled)}
-                      data-state={record.issues.length === 0 && record.enabled ? 'on' : 'off'}
-                      title={
-                        typeof record.enabled !== 'boolean'
-                          ? text('enableRequiresRestart')
-                          : record.issues.length > 0
-                            ? text('enableRequiresValid')
-                            : undefined
-                      }
-                      disabled={
-                        loading ||
-                        busy ||
-                        conflict ||
-                        record.issues.length > 0 ||
-                        typeof record.enabled !== 'boolean'
-                      }
-                      onClick={() => void setEnabled(record)}
-                    >
-                      <span className="settings-switch__thumb" aria-hidden="true" />
                     </button>
                   </div>
                 </article>

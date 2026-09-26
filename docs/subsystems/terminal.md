@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-10
+last_verified: 2026-09-26
 ---
 
 # 内置终端
@@ -23,7 +23,7 @@ Terminal 与 Agent 的 `run_command` Tool/managed command session 是不同子�
 
 ## 会话创建
 
-Terminal page 固定到创建时 workspace，初始 cwd 为该 workspace path。Renderer 创建形如 `terminal-<time>-<random>` 的 session id，并先注册事件订阅，再调用 `createSession`，从而不丢失快速启动输出。
+Terminal page 固定到创建时 workspace。带 `projectId` 创建时，Main 从权威项目记录冻结主/辅助目录及实体身份，并以主文件夹作为初始 cwd，忽略 Renderer 同时提交的 cwd；无 project id 的内部调用才使用请求 cwd。Renderer 创建形如 `terminal-<time>-<random>` 的 session id，并先注册事件订阅，再调用 `createSession`，从而不丢失快速启动输出。
 
 Main 校验 session id 必须匹配 `[A-Za-z0-9._:-]{1,160}`，确保全局不重复，并把 session 临时绑定到：
 
@@ -36,7 +36,13 @@ utility process 按需启动。默认 cwd 是请求值，否则使用 `HOME`/用
 
 macOS 使用 `SHELL`（默认 `/bin/zsh`）；zsh/bash 通过 `-l` 启动登录 shell，让登录配置先初始化 `PATH`，避免从 Finder 启动应用时交互配置找不到 Homebrew 等命令。开发版和打包版使用同一策略，不硬编码工具路径，也不预先启动额外 shell 提取环境。其他 macOS shell 保留原有无参数启动；Windows 仍使用 PowerShell，Linux 保持原有启动方式。
 
-如果 Renderer 在创建响应前销毁或切换 main-frame，Main 会拒绝请求并向 utility 发送 dispose，迟到成功不能重新建立所有权。
+Main 对每次创建生成独立的 utility session identity，避免 Renderer 重用 session id 时串入上一代事件。创建响应为 `created`（携带 session）或 `cancelled`；Renderer 在创建期间销毁或切换 main-frame 时会释放所有权并向 utility 发送 dispose，迟到成功不能重新建立所有权。
+
+## 首次输入前的多目录选择
+
+多文件夹项目在提示符下显示创建快照中的目录 alias、路径提示及 Option/Alt + 数字快捷键。选择调用 `selectSourceDirectory(sessionId, folderId)`，Main 检查 owner，utility 按冻结实体复验 canonical path/device/inode，再向原 PTY 写入正确引用的 `cd --` 或 PowerShell `Set-Location -LiteralPath`。不会重建终端、修改标签或把命令写入误认为目录切换成功。主目录不可用时创建失败；不可用辅助目录不阻止主目录启动，但不能在该会话中选择。
+
+输入门只允许第一次选择：点击选择（包括失败尝试）、键盘、粘贴或 IME 输入会永久收起目录层并关闭后端选择入口；终端自身的协议响应以 `userInitiated=false` 发送，不消耗这一机会。项目配置后续变化不自动切换现有 PTY，也不允许新配置路径替换原冻结目录身份。控制字符路径和未支持的 shell 拒绝生成切目录命令。
 
 ## 输入与 resize
 
@@ -106,6 +112,7 @@ Main 只接受 session owner 的 write、resize、kill 和 ACK。以下任一事
 - utility transport：`src/main/terminal/terminalTransportProtocol.ts`
 - PTY service：`src/main/terminal/terminal-service.ts`
 - shell 启动策略：`src/main/terminal/terminalShell.ts`
+- 源目录冻结、复验与输入门：[terminalSourceDirectories.ts](../../src/main/terminal/terminalSourceDirectories.ts)
 - 输出背压：`src/main/terminal/TerminalOutputFlowController.ts`
 - 退出 drain：`src/main/terminal/TerminalExitDrainController.ts`
 - Renderer lifecycle：`src/renderer/src/features/terminal/useTerminalSession.ts`
@@ -118,6 +125,7 @@ Main 只接受 session owner 的 write、resize、kill 和 ACK。以下任一事
 
 - `src/main/terminal/TerminalBridge.test.ts`
 - `src/main/terminal/terminalShell.test.ts`：平台启动策略，以及隔离 HOME/ZDOTDIR、精简 PATH 下的登录配置回归。
+- [terminalSourceDirectories.test.ts](../../src/main/terminal/terminalSourceDirectories.test.ts)：多源实体、shell 引用与首次输入关闭选择的契约。
 - `src/main/terminal/TerminalOutputFlowController.test.ts`
 - `src/main/terminal/TerminalExitDrainController.test.ts`
 - `src/preload/TerminalEventRouter.test.ts`
@@ -133,6 +141,7 @@ Main 只接受 session owner 的 write、resize、kill 和 ACK。以下任一事
 - [ ] pause/resume、exit drain 和 Renderer 不 ACK 情况有界。
 - [ ] 页面切换保活，页面关闭/WebContents 异常终止 PTY。
 - [ ] Linux/macOS PTY close 与 Windows ConPTY 行为均保持。
+- [ ] 项目 cwd 由 Main 冻结；目录选择复验原实体、只作用于原 PTY，用户输入与协议响应不会混淆。
 
 ## 当前限制
 

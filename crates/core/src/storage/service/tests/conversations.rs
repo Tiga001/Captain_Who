@@ -3,6 +3,56 @@ use std::cell::RefCell;
 
 mod automation_parent_deletion;
 
+#[test]
+fn workflow_instances_are_disabled_when_agent_tree_or_project_teardown_disables_triggers() {
+    for delete_project in [false, true] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        for id in ["workflow-root", "workflow-loose"] {
+            service
+                .save_conversation(conversation(
+                    id,
+                    Some("project-1"),
+                    &format!("message-{id}"),
+                ))
+                .unwrap();
+        }
+        service
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id: "workflow-root-agent".into(),
+                conversation_id: "workflow-root".into(),
+                creation_request_id: "workflow-root-create".into(),
+                task_name: "Workflow root".into(),
+            })
+            .unwrap();
+        {
+            let c = service.state.connection().unwrap();
+            c.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at) VALUES ('template','{\"schemaVersion\":1,\"id\":\"template\"}',1,1)",[]).unwrap();
+            for (id, color) in [("workflow-root", "#AABBCC"), ("workflow-loose", "#001122")] {
+                c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled) VALUES (?1,'template',1,?1,?2,1,1,0,0,'{}',1)",rusqlite::params![id,color]).unwrap();
+                c.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES (?1,'node',?1)",[id]).unwrap();
+            }
+        }
+        if delete_project {
+            service.delete_project("project-1").unwrap();
+        } else {
+            service.delete_conversation("workflow-root").unwrap();
+        }
+        let c = service.state.connection().unwrap();
+        let root: (bool,bool,i64)=c.query_row("SELECT enabled,needs_review,revision FROM workflow_instances WHERE instance_id='workflow-root'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(root, (false, true, 2));
+        let loose: (bool,bool,i64)=c.query_row("SELECT enabled,needs_review,revision FROM workflow_instances WHERE instance_id='workflow-loose'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            loose,
+            if delete_project {
+                (false, true, 2)
+            } else {
+                (true, false, 1)
+            }
+        );
+    }
+}
+
 std::thread_local! {
     static TRACED_STORAGE_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }

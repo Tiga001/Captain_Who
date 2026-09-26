@@ -1,0 +1,56 @@
+.workflow-color-picker__popover {
+  padding: 10px;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: 12px;
+  background: var(--mc-color-surface-card);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 16%);
+}
+
+.workflow-color-picker__colors {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  width: max-content;
+}
+
+.workflow-color-picker__colors button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.workflow-color-picker__colors button:not(:disabled):hover,
+.workflow-color-picker__colors button:focus-visible {
+  outline: 2px solid var(--mc-color-text-primary);
+  outline-offset: 3px;
+}
+
+.workflow-color-picker__colors button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.workflow-color-picker__colors button:disabled::after {
+  position: absolute;
+  width: 22px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--mc-color-text-primary);
+  box-shadow: 0 0 0 1px var(--mc-color-surface-card);
+  content: '';
+  transform: rotate(-45deg);
+}
+
+.workflow-color-picker__colors svg {
+  width: 15px;
+  height: 15px;
+  color: white;
+  stroke-width: 3;
+}

@@ -282,6 +282,10 @@ impl StorageService {
                     transaction,
                     &scope.conversation_ids,
                 )?;
+                invalidate_workflows_before_trigger_disabled_deletion(
+                    transaction,
+                    &scope.conversation_ids,
+                )?;
                 automation_repository::invalidate_automations_before_trigger_disabled_conversation_delete(
                     transaction,
                     &scope.conversation_ids,

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-24
+last_verified: 2026-09-26
 ---
 
 # 右侧栏平台
@@ -155,13 +155,13 @@ AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store �
 
 树图光波是独立的短时展示投影：协作事件的可选 `transmission` 只提供稳定 id、类型、真实源/目标身份（用户端为 null），不暴露通信正文。消息以成功入队事实为准，已应用用户引导复用绑定根 Run 的 `guidance_applied`，完成以真实根 Run 终态为准；光波不表示接收方已读。首次加载、重同步、重开视图不重播历史；按传输 id 去重，过期、隐藏端点和不属于当前树的路径丢弃。临时队列有数量与时效上限，关闭时释放订阅和计时器，减少动态效果偏好停用传输动画。
 
-父 Agent 正在运行时，活动在事件事务中记录其 assistant-message 和 trace boundary，插入对应回复的时间线；该回复结算时保存冻结活动列表，并用可选的 `collaborationFinalResponseBoundary` 保持活动在最终正文前后的顺序；边界之后的活动不会被删除。父 Agent 空闲时，新活动记录在父会话最后一条消息之后；空会话则记录在首条消息之前，后续新轮次不能改变它的位置。渲染按持久事件 sequence 排序，不按通知抵达顺序或墙钟时间猜测位置，也不把深层子 Agent 状态重复展示在根聊天。圆角状态栏仍可进入对应子 Agent 详情，observer 保持只读。
+实际活动 owner 正在运行时，活动在事件事务中记录其 assistant-message 和 trace boundary，插入对应回复的时间线；该回复结算时保存冻结活动列表，并用可选的 `collaborationFinalResponseBoundary` 保持活动在最终正文前后的顺序；边界之后的活动不会被删除。owner 空闲时，新活动记录在其会话最后一条消息之后；空会话则记录在首条消息之前，后续新轮次不能改变它的位置。结构父 Agent 不一定是 Task requester，跨级派发的完成反馈应归属真正请求者。普通 Message 的 updated 属于实际接收方，自动 Result 唤醒的终态由后端语义投影隐藏，Renderer 不能依据后续终态删除真实的早期 updated。渲染按持久事件 sequence 排序，不按通知抵达顺序或墙钟时间猜测位置。圆角状态栏仍可进入对应子 Agent 详情，observer 保持只读。
 
 Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。加载快照同时读取持久 Conversation 与进程内当前回复的完整流式正文，并返回 generation/sequence 游标；Renderer 只追加游标之后的文本，避免中途打开、切回或刷新时丢失前缀。该游标不替代其他事件的持久身份。正文提交或会话删除后释放流式缓存；Core Server 重启后仍以持久 Conversation 和 collaboration event log 为恢复依据。
 
 Agent Center 的设置入口打开通用 Agent template 设置页。模板定义现在是 workspace-wide library，CRUD 不绑定单个 project；每个模板以独立 assignment 关联零到多个 project，只有分配给当前 project 且 enabled 的模板可用于该树。模板保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。表单的 description/instructions 提供 guidance-oriented placeholder，但 placeholder 不会写入空字段。模板编辑或 assignment 变化只影响后续 Agent，现有 Agent 显示创建时快照。
 
-持久化的是 Agent、状态、模板、审批、子 Agent Conversation 和语义事件。Agent Center 当前打开页/detail、折叠和滚动位置不会跨完整 Renderer reload 恢复。当前没有子 Agent 删除、图画布或跨根 Agent dashboard。
+持久化的是 Agent、状态、模板、审批、子 Agent Conversation 和语义事件。Agent Center 当前打开页/detail、折叠和滚动位置不会跨完整 Renderer reload 恢复。Agent Center 不提供子 Agent 删除、可编辑协作图或跨根 Agent dashboard。独立的 [Workflow 画布与只读流程图](./workflow-authoring.md)属于主工作区视图，按模板连接与对话绑定显示，不能与这里的真实父子 Agent 树混为一谈。
 
 ## 增加 React 模块
 

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # Skills 平台
@@ -26,6 +26,14 @@ last_verified: 2026-08-31
 | Installed | `installed:user`                         | 用户 managed store     | user-approved；安装批准不自动批准脚本执行 |
 
 同名 Skill 不应用模糊名称覆盖。Catalog 使用完整 `SkillId`、source kind、provenance 和 content revision；冲突、无效包和预算截断通过结构化 diagnostics 暴露。Workspace Skill 不发布到全局 installed store，离开当前 workspace 后不可发现。
+
+多目录项目的 Workspace Skill 发现仍使用可用主目录；不能因为辅助目录或 Composer 文件夹引用可读，就认为其中的
+`.agents/skills` 已加入 catalog。与之独立的 `workspace.instructions` 会从每个冻结项目根目录读取
+`AGENTS.override.md`/`AGENTS.md`，无需 Skill 激活，但不增加权限或注册 Tool。详见
+[工作区指令](workspace-instructions.md)。
+
+Composer 的 `+` 首页和 `@` 菜单共用资源选择状态，Skill 显式选择继续引用权威发现项；菜单选择不会安装 Skill，
+也不会跳过 Run 内的 revision 验证和激活。输入/队列边界见[会话输入](conversation-inputs.md)。
 
 ## 包格式与目录
 

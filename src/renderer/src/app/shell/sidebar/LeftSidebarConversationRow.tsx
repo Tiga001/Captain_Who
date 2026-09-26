@@ -48,6 +48,7 @@ interface ConversationRowProps {
   unreadLabel: string
   unpinLabel: string
   waitingApprovalLabel: string
+  waitingAnswerLabel?: string
   workflowDragEnabled?: boolean
   nested?: boolean
 }
@@ -71,6 +72,7 @@ export const ConversationRow = memo(function ConversationRow({
   unreadLabel,
   unpinLabel,
   waitingApprovalLabel,
+  waitingAnswerLabel = 'Waiting for interaction',
   nested = false,
   workflowDragEnabled = false
 }: ConversationRowProps) {
@@ -87,6 +89,15 @@ export const ConversationRow = memo(function ConversationRow({
     ) ??
     false
   const showWaitingApprovalBadge = isWaitingForApproval && conversation.id !== activeConversationId
+  const isWaitingForAnswer =
+    conversation.isWaitingForAnswer ??
+    conversation.messages?.some(
+      (message) =>
+        message.role === 'assistant' && message.agentRun?.status === 'waiting_for_user_input'
+    ) ??
+    false
+  const showWaitingAnswerBadge =
+    !showWaitingApprovalBadge && isWaitingForAnswer && conversation.id !== activeConversationId
   const isUnread = Boolean(
     conversation.unreadAt && conversation.id !== activeConversationId && !isPending
   )
@@ -102,6 +113,7 @@ export const ConversationRow = memo(function ConversationRow({
       className={`left-sidebar__conversation-row${nested ? ' left-sidebar__conversation-row--nested' : ''}`}
       data-active={conversation.id === activeConversationId || undefined}
       data-awaiting-approval={showWaitingApprovalBadge || undefined}
+      data-awaiting-answer={showWaitingAnswerBadge || undefined}
       data-menu-open={isConversationMenuOpen || undefined}
       data-pending={isPending || undefined}
       onContextMenu={(event) => {
@@ -142,6 +154,15 @@ export const ConversationRow = memo(function ConversationRow({
               {waitingApprovalLabel}
             </span>
             <span className="mc-processing-spinner" aria-label={processingLabel} />
+          </>
+        ) : showWaitingAnswerBadge ? (
+          <>
+            <span className="left-sidebar__conversation-answer-badge">{waitingAnswerLabel}</span>
+            {isPending ? (
+              <span className="mc-processing-spinner" aria-label={processingLabel} />
+            ) : isUnread ? (
+              <span className="left-sidebar__conversation-unread-dot" aria-label={unreadLabel} />
+            ) : null}
           </>
         ) : isPending ? (
           <span className="mc-processing-spinner" aria-label={processingLabel} />

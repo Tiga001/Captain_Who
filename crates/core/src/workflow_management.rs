@@ -27,6 +27,7 @@ pub struct Instance {
     pub updated_at: i64,
     pub needs_review: bool,
     pub running: bool,
+    pub enabled: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -78,6 +79,11 @@ pub enum Request {
         bindings: Vec<BindingInput>,
         expected_revision: u64,
         expected_template_revision: u64,
+    },
+    SetInstanceEnabled {
+        id: String,
+        enabled: bool,
+        expected_revision: u64,
     },
     DeleteInstance {
         id: String,

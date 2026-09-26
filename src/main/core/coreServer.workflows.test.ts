@@ -29,18 +29,33 @@ describe('workflow IPC contract boundary', () => {
     await expect(server.requestWorkflows(request)).resolves.toEqual(response)
     expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
   })
-  it('forwards the availability switch with its revision and returns the effective record state', async () => {
+  it('forwards the instance switch with its revision', async () => {
     const server = new CoreServer()
     for (const enabled of [true, false]) {
       const request = {
-        operation: 'setEnabled' as const,
+        operation: 'setInstanceEnabled' as const,
         id: fixture.id,
         enabled,
         expectedRevision: 2
       }
       const response = {
-        records: [{ definition: fixture, enabled, revision: 3, updatedAt: 42, issues: [] }],
-        issues: []
+        records: [{ definition: fixture, enabled: true, revision: 1, updatedAt: 42, issues: [] }],
+        issues: [],
+        instances: [
+          {
+            id: fixture.id,
+            templateId: fixture.id,
+            templateRevision: 1,
+            name: 'Review',
+            color: '#4A82E8',
+            bindings: [],
+            revision: 3,
+            updatedAt: 42,
+            needsReview: false,
+            enabled,
+            running: false
+          }
+        ]
       }
       rpcRequest.mockResolvedValue(response)
       await expect(server.requestWorkflows(request)).resolves.toEqual(response)
@@ -71,7 +86,7 @@ describe('workflow IPC contract boundary', () => {
   it('enforces switch types before RPC and rejects invalid enabled records after RPC', async () => {
     const server = new CoreServer()
     const request = {
-      operation: 'setEnabled' as const,
+      operation: 'setInstanceEnabled' as const,
       id: fixture.id,
       enabled: true,
       expectedRevision: 1

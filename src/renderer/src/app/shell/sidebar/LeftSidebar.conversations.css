@@ -173,7 +173,8 @@
   transition: opacity 120ms ease;
 }
 
-.left-sidebar__conversation-approval-badge {
+.left-sidebar__conversation-approval-badge,
+.left-sidebar__conversation-answer-badge {
   display: inline-flex;
   height: 24px;
   align-items: center;
@@ -184,6 +185,11 @@
   font-size: var(--mc-font-size-sidebar-action);
   font-weight: var(--mc-font-weight-heavy);
   line-height: 1;
+}
+
+.left-sidebar__conversation-answer-badge {
+  color: var(--mc-color-icon-accent);
+  background: color-mix(in srgb, var(--mc-color-icon-accent) 12%, transparent);
 }
 
 .left-sidebar__conversation-unread-dot {
@@ -214,7 +220,10 @@
 }
 
 .left-sidebar__conversation-row[data-pending='true']:hover .left-sidebar__conversation-age,
-.left-sidebar__conversation-row[data-pending='true']:focus-within .left-sidebar__conversation-age {
+.left-sidebar__conversation-row[data-pending='true']:focus-within .left-sidebar__conversation-age,
+.left-sidebar__conversation-row[data-awaiting-answer='true']:hover .left-sidebar__conversation-age,
+.left-sidebar__conversation-row[data-awaiting-answer='true']:focus-within
+  .left-sidebar__conversation-age {
   opacity: 1;
 }
 
@@ -226,6 +235,10 @@
 
 .left-sidebar__conversation-row[data-pending='true']:hover .left-sidebar__conversation-item-actions,
 .left-sidebar__conversation-row[data-pending='true']:focus-within
+  .left-sidebar__conversation-item-actions,
+.left-sidebar__conversation-row[data-awaiting-answer='true']:hover
+  .left-sidebar__conversation-item-actions,
+.left-sidebar__conversation-row[data-awaiting-answer='true']:focus-within
   .left-sidebar__conversation-item-actions {
   opacity: 0;
   pointer-events: none;

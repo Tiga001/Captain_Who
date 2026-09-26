@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # IPC 与协议
@@ -53,16 +53,19 @@ Rust Core notification 或 Main service event
 
 所有 Electron channel 名只允许定义在 `packages/host-api/src/channels.ts` 的 `HOST_CHANNELS`。ESLint 禁止在 `src/main` 和 `src/preload` 的生产代码中出现硬编码 `host:` 字面量。
 
-当前领域为：
+当前领域以 [HOST_CHANNELS](../../packages/host-api/src/channels.ts) 为准，包括：
 
 - `core`
 - `app`
 - `agent`
+- `auth`
 - `attachments`
 - `automations`
 - `browser`
 - `git`
+- `humanInteraction`
 - `imageGeneration`
+- `license`
 - `mcp`
 - `notifications`
 - `office`
@@ -71,6 +74,7 @@ Rust Core notification 或 Main service event
 - `skills`（Skill 领域的 channel key）
 - `storage`
 - `terminal`
+- `updates`
 - `workspaceFiles`
 
 重命名 channel 是 Main/Preload 同步变更，不能保留一侧兼容别名而不写迁移测试。
@@ -148,7 +152,7 @@ Automation 在 UI 中名为 `Scheduled`，协议、代码和本文均使用 Auto
 - `AUTOMATION_PERMISSION_MODE_VERSION = 2`；
 - Automation JSON-RPC error code `-32045`，结构化 `data.type = automation`。
 
-这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v49，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
+这些都是 transport/domain envelope 版本，不是 SQLite schema。canonical SQLite schema 由 Rust Core storage 独立校验，版本见[存储与数据生命周期](./storage-and-data-lifecycle.md)；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
 
 Renderer-facing `AutomationsHostApi` 暴露十个 request：
 
@@ -195,11 +199,25 @@ readFileChange / getFileChangeDiff / getFileChangeHistoryDiff
 
 活动 staged transaction 以 transaction id 分页读取内容/diff；已结算历史 diff 以 conversation、assistant message、Run 和 tool call 的精确组合查询 durable action audit。`getFileChangeHistoryDiff` 不重放 Tool，也不授予写权限。UI 获得 workspace-relative 或权限允许的外部 display path、安全状态/统计和有界 patch；private canonical target、execution binding 与 file bytes 不进入 Renderer。历史与活动查询不可互换，也不能把 Git Review snapshot id 当作 FileChange authority。
 
+## Workflow 管理契约
+
+`AgentHostApi.requestWorkflows` 经 `HOST_CHANNELS.agent.workflows` 转发到 `agent.workflows.request`，返回 `HostInvocationResult<WorkflowResponse>`；这是受信 UI 管理 API，不是模型工具或工作流执行入口。[TypeScript parser](../../packages/protocol/src/workflows.ts)、[Rust transport](../../crates/core-server/src/transport/workflow_rpc.rs) 与 [fixture](../../packages/protocol/fixtures/workflow-definition-v1.json)共同约束 definition schema v1 和严格判别字段。
+
+模板操作为 `list / validate / save / delete / duplicate / saveDraft / deleteDraft`；实例操作为 `listInstances / saveInstance / setInstanceEnabled / deleteInstance`。模板是否可选由后端实时校验派生，已经没有模板 `setEnabled` 操作；实例 `enabled` 是独立持久状态。更新使用 revision/CAS，实例保存另有 request id 幂等保护，修改在用模板需要绑定实际实例使用关系的确认信息。请求不能携带前端自行声明的 running 状态绕过保护。
+
+当前响应投影目录、校验问题、隔离的损坏记录、实例与使用关系；活动监视复用 Agent/协作事件和权威树/实例读取，不新增工作流路由事件流。定义中的逻辑门规则、实例开启和 `running` 展示不代表工作流执行器已实现。完整状态与事务边界见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+
+## 输入引用与工作区来源
+
+Composer 附件通过 Host 导入事务生成稳定内容身份，普通提交和引导传引用；文件夹引用由原生选择或拖放路径验证生成，文件夹名称与用户选择的 root path 可进入模型可见投影，Host-only 目录实体身份不得进入模型。它们与托管下载、Artifact 的私有绝对路径边界不同，详见[会话输入与附件](../subsystems/conversation-inputs.md)。
+
+`workspaceFiles.searchMentions` 返回 folder id、alias、相对 path 和展示文本，不能返回任意原生路径或读取文件正文。Files 的 `WorkspaceFileRequest` 另带可选 `folderId` 和 `assistantMessageId`：历史请求由 Rust Core 解析该轮冻结源并复验实体，不能在失败时回退到当前项目根。`@workspace/...` 是逻辑引用，不是路径授权。
+
 ## 原生能力
 
 Renderer 不能提交任意路径来替代原生选择：
 
-- MCP executable/cwd、项目目录、头像、附件和 Skill 安装目录由 Main 打开原生 picker。
+- MCP executable/cwd、项目目录、头像、附件、输入文件夹引用和 Skill 安装目录由 Main 打开原生 picker；拖放路径走对应的受信验证与导入边界。
 - Browser Artifact 导出由 Main 打开 save dialog；Renderer 只提交不可变 Artifact reference。
 - Browser 自动化文件上传先由 Main picker 选择并准备 process-only 路径能力。
 - Browser 手动下载的“每次询问位置”由 Main save dialog 执行；Agent 下载不弹该对话框。下载历史/live center 只携带 path-free reference，copy/reveal/open directory 均由 Main 处理。
@@ -229,7 +247,7 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 7. 订阅必须可解除，迟到事件必须通过身份和 generation 拒绝。
 8. 通用 Notification delivery Host-only RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
 9. Automation event/resync 不是状态或系统通知送达 receipt；业务消费者必须回读 SQLite 派生的权威 snapshot。
-10. Automation DTO schema v1、permission mode v2 和 SQLite schema v49 必须分别命名、分别验证。
+10. Automation DTO schema v1、permission mode v2、Workflow definition schema v1 和 SQLite schema 必须分别命名、分别验证。
 11. Notification active click channel 是 `HOST_CHANNELS.notifications.openRequested`；Automation 同名旧 channel 只作兼容，不能接入第二个 native producer。
 12. Browser 和 FileChange 的安全 DTO 必须绑定 exact instance/revision/owner；Renderer 展示引用不能转换为路径或执行 authority。
 
@@ -259,6 +277,8 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 - Main/Core Server JSON-RPC：`src/main/core/jsonRpcClient.ts`、`src/main/core/coreServer.ts`
 - Rust transport：`crates/core-server/src/transport/`
 - Automation Rust transport：`crates/core-server/src/transport/automation_rpc.rs`
+- Workflow 管理：[workflows.ts](../../packages/protocol/src/workflows.ts)、[workflow_rpc.rs](../../crates/core-server/src/transport/workflow_rpc.rs)、[AgentIpcBridge.ts](../../src/preload/AgentIpcBridge.ts)
+- 输入引用：[attachments.ts](../../packages/protocol/src/attachments.ts)、[workspaceFiles.ts](../../packages/protocol/src/workspaceFiles.ts)
 
 ## 测试与验证
 
@@ -298,6 +318,7 @@ Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`�
 - [ ] Browser/FileChange 变更同步核对 exact owner/instance/revision、分页预算、path-free projection 和 history-vs-live query。
 - [ ] Automation event/resync 的 sequence、startup replay、unsubscribe、Renderer ready handshake 和 authoritative reload 均有测试。
 - [ ] 对应架构或子系统文档已更新。
+- [ ] Workflow 的严格字段、CAS、实例 request id、使用确认、归档/颜色约束在双端保持一致；未把定义 API 暴露成模型执行能力。
 
 ## 当前限制
 

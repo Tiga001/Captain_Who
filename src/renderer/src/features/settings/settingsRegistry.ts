@@ -6,8 +6,8 @@ import {
   Cable,
   Clock,
   Gauge,
-  GitBranch,
   Monitor,
+  Network,
   Settings,
   Shield,
   Sun,
@@ -118,7 +118,7 @@ export const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsN
         id: 'workflows',
         nodes: workflowSettings,
         labelKey: 'settings.page.workflows',
-        icon: GitBranch
+        icon: Network
       }
     ]
   },

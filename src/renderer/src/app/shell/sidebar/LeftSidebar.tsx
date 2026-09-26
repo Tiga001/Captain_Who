@@ -1,10 +1,10 @@
 import {
   ChevronDown,
   Clock3,
-  Workflow,
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Network,
   Plus,
   Search,
   SquarePen
@@ -62,16 +62,19 @@ const sidebarActivityCache = new WeakMap<
 function computeSidebarActivity(conversation: ChatConversation) {
   let isPending = false
   let isWaitingForApproval = false
+  let isWaitingForAnswer = false
 
   for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
     const message = conversation.messages[index]
     isPending ||= isAssistantMessageGenerating(message)
     isWaitingForApproval ||=
       message.role === 'assistant' && message.agentRun?.status === 'waiting_for_approval'
-    if (isPending && isWaitingForApproval) break
+    isWaitingForAnswer ||=
+      message.role === 'assistant' && message.agentRun?.status === 'waiting_for_user_input'
+    if (isPending && isWaitingForApproval && isWaitingForAnswer) break
   }
 
-  return { isPending, isWaitingForApproval }
+  return { isPending, isWaitingForApproval, isWaitingForAnswer }
 }
 
 function getSidebarConversationActivity(conversation: ChatConversation) {
@@ -98,11 +101,14 @@ export function LeftSidebar(props: LeftSidebarProps) {
   const conversationSnapshot = JSON.stringify(
     props.conversations.map((conversation): SidebarConversation => {
       const activity = getSidebarConversationActivity(conversation)
+      const attention = props.conversationAttention?.[conversation.id]
       return {
         archivedAt: conversation.archivedAt,
         createdAt: conversation.createdAt,
         id: conversation.id,
         ...activity,
+        isWaitingForApproval: attention?.waitingApproval ?? activity.isWaitingForApproval,
+        isWaitingForAnswer: attention?.waitingAnswer ?? activity.isWaitingForAnswer,
         pinnedAt: conversation.pinnedAt,
         projectId: conversation.projectId,
         title: conversation.title,
@@ -713,6 +719,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
       unreadLabel={t('sidebar.unreadConversation')}
       unpinLabel={t('conversation.unpinConversation')}
       waitingApprovalLabel={t('sidebar.waitingApproval')}
+      waitingAnswerLabel={t('sidebar.waitingAnswer')}
       justNow={t('sidebar.justNow')}
     />
   )
@@ -1105,7 +1112,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
             data-selected={workflowsSelected || undefined}
             onClick={onOpenWorkflows}
           >
-            <Workflow aria-hidden="true" />
+            <Network aria-hidden="true" />
             <span>{t('sidebar.workflows')}</span>
           </button>
         )}

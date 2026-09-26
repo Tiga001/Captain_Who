@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # 开发环境与启动
@@ -33,8 +33,18 @@ pnpm dev
 该命令先准备 OfficeCLI、Office Renderer、当前平台支持的 Word/PDF Renderer、Artifact Runtime 和开发
 图标，再启动 Electron/Vite。开发模式下 Main 启动 Core Server；首次构建通常比后续启动慢。
 
-应用首次进入后，在“设置 → 配置”中创建 Provider/Model 配置，并按需设置 Tavily、图片生成、MCP 和
-Skills。配置所有权和敏感值规则见[设置与配置](settings-and-configuration.md)。
+首次启动先经过账号恢复/登录与本地数据水合。账号资料验证成功后进入工作区；许可验证独立执行，新用户回合和
+Automation 新回合都需要有效的在线验证结果。保存的登录会话可恢复，但冷启动不会复用磁盘许可。
+本地开发测试使用仓库隔离 fixture；真实账号验收由账号持有人完成，见[账号登录](../subsystems/account-login.md)。
+
+进入后，在“设置 → 配置”中创建 Provider/Model 配置，并按需设置 Tavily、图片生成、MCP 和 Skills。
+新安装的 Model Catalog 为空；模型必须通过 Host 的可执行性投影才能出现在任务选择器中，仅保存名称或启用开关
+不代表连接、Profile 与凭据可用。配置所有权和敏感值规则见[设置与配置](settings-and-configuration.md)。
+
+项目可绑定一个主目录和多个辅助目录，Run 接纳时冻结本轮目录身份。工作区根目录的 `AGENTS.override.md` 或
+`AGENTS.md` 会作为 `workspace.instructions` 加入模型上下文；Composer 文件/目录引用的开发契约见
+[会话输入](../subsystems/conversation-inputs.md)。工作流模板与实例的配置入口见
+[工作流编排](../subsystems/workflow-authoring.md)，保存或启用工作流配置不等于已启动执行。
 
 ## 常用命令
 

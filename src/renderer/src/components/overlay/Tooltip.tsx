@@ -32,6 +32,8 @@ interface TooltipProps {
   children: ReactElement
   content: ReactNode
   delayMs?: number
+  /** Use the hover delay for focus as well, for richer details that should not open on selection. */
+  delayOnFocus?: boolean
   /** Link supplemental tooltip content to the trigger. Leave false when it repeats aria-label. */
   describeTrigger?: boolean
   preferredPlacement?: TooltipPlacement
@@ -47,6 +49,7 @@ export function Tooltip({
   children,
   content,
   delayMs = DEFAULT_DELAY_MS,
+  delayOnFocus = false,
   describeTrigger = false,
   preferredPlacement = 'top'
 }: TooltipProps): ReactNode {
@@ -201,7 +204,8 @@ export function Tooltip({
         }}
         onFocusCapture={() => {
           focusInsideRef.current = true
-          open()
+          if (delayOnFocus) scheduleOpen()
+          else open()
         }}
         onPointerEnter={() => {
           pointerInsideRef.current = true

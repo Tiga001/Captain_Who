@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-08
+last_verified: 2026-09-26
 ---
 
 # 浏览器与自动化
@@ -23,7 +23,7 @@ MCP Tool。这里的“自动化”只指浏览器控制，不是 Scheduled 中�
 | Rust Core               | 内置 capability 启用策略；Agent 授权和敏感 Tool 审批；浏览历史/偏好/下载记录；反向桥请求；风险批准；调用生命周期与持久事件                                       |
 | Managed Playwright Host | 固定、审查过的官方 Tool 目录与执行；只通过 Main 提供的受管 BrowserContext 工作                                                                                   |
 
-Renderer 不获得 guest WebContents id、CDP target id、调试端点、目标绑定 token、原始文件路径或 Artifact 托管路径。Rust Core 不直接控制 Electron WebContents；Main 不自行授予 Agent 权限。
+Renderer 不获得 guest WebContents id、CDP target id、调试端点、目标绑定 token 或 Artifact/下载 Broker 的私有托管路径。用户/Agent 导航的本地 `file:` URL 属于可见页面地址，会进入地址栏与历史；不能与私有托管路径边界混写。Rust Core 不直接控制 Electron WebContents；Main 不自行授予 Agent 权限。
 
 ## 手动 Browser surface
 
@@ -90,7 +90,7 @@ Main 对 guest 强制：
 - 删除 preload；关闭 Node integration、worker/subframe Node、plugins、experimental features 和嵌套 webview。
 - 开启 sandbox、context isolation、webSecurity、safeDialogs；禁止 drag/drop navigation 和不安全内容。
 - 网页权限 check/request 一律拒绝。
-- 页面协议只允许 HTTP/HTTPS；bootstrap `about:blank` 和内部 Chromium PDF viewer 走窄例外。
+- 页面协议允许 HTTP/HTTPS 和本地 `file:`；bootstrap `about:blank` 和内部 Chromium PDF viewer 另走窄例外。
 - 合法 HTTP/HTTPS 和 `about:blank` popup 由 Electron Main 接管原生 child WebContents，以独立受管窗口呈现；保留 Chromium 的 `window.opener`、WindowProxy、`postMessage`、原始 POST 和关闭关系。`noopener`、`noreferrer`、COOP 仍按浏览器规则隔离。网页不能决定 surface identity 或获得主 Renderer 权限。
 - 非法导航/redirect 被阻止；日志不打印可能含 query/credential 的完整 URL。
 
@@ -108,7 +108,13 @@ Main 同步登记 child 并安装 NetworkGuard 的精确页面准入等待，在
 
 ## 浏览历史、偏好与清除数据
 
-Browser data schema 当前为 v1。Rust Core SQLite 持久化用户可见的 HTTP/HTTPS 历史与 app-owned link preference；Main 在 exact surface/incarnation 的成功导航后登记历史，并在随后 title/favicon 到达时更新同一项。内部 bootstrap/error/PDF URL、失败导航和 stale guest 事件不进入历史。
+Browser data schema 当前为 v1。Rust Core SQLite 持久化用户可见的 HTTP/HTTPS/`file:` 历史与 app-owned link preference；Main 在 exact surface/incarnation 的成功导航后登记历史，并在随后 title/favicon 到达时更新同一项。内部 bootstrap/error/PDF viewer URL、失败导航和 stale guest 事件不进入历史；打开本地 PDF 时保留外层原始 file URL。file URL 无 hostname 时使用文件名作为历史搜索/展示字段，URL 本身仍保留路径。
+
+### 本地文件导航边界
+
+地址栏和 `browser_navigate` 均接受 `file:` URL，本地 PDF 继续由内置 Chromium viewer 显示；Host 的 CDP 投影保留外层文档 URL 与 `file://` origin，不向 Agent 暴露内部 viewer Target。官方 Playwright 连接设置 `allowUnrestrictedFileAccess: true` 以支持该导航。
+
+当前 NetworkPolicy 对 file URL 返回允许且没有网络风险项；NetworkGuard 也允许 file 流请求，因为 PDF 读取未必归属于已登记 guest。这条路径当前不经过工作区/文件夹引用的目录授权、FileChange 或 BrowserFileBroker 上传审批，也不要求先打开原生 picker。浏览器本地导航与 `browser_file_upload` 的一次性已授权副本是两条不同能力边界；修改时须同步 URL parser、webview policy、CDP 外层文档投影、history 和相关安全文档。
 
 Browser Settings 是独立 `browser` 页面，而不是 MCP 子页。它组合：
 
@@ -314,7 +320,7 @@ pnpm verify:playwright-round3-release
 - 内置自动化 capability 目前只有 `browser_automation`。
 - 用户配置的 MCP Server 当前仍仅支持本地 stdio；Managed Playwright 是应用内置反向桥，不是通用 HTTP MCP transport。
 - Browser guest 的网页权限请求全部拒绝，摄像头、麦克风、通知、地理位置等站点功能不可用。
-- Browser 页面只支持 HTTP/HTTPS 和窄化的内部 PDF viewer；不支持任意自定义协议。
+- Browser 页面支持 HTTP/HTTPS、本地 `file:` 和窄化的内部 PDF viewer；不支持任意自定义协议。file 导航当前没有按工作区根限制的独立授权层。
 - Artifact 是 Run 生命周期资源，不是永久文档库；需要长期保留时必须显式导出。
 - Browser Download 是本机持久记录而非跨设备文件库；文件可能被用户移动或修改，历史会显示 missing/modified。
 - 当前没有跨设备 Browser history/download/preferences 同步，也不恢复已经结束的 live transfer。

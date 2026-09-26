@@ -154,18 +154,50 @@ describe('workflow authoring contract', () => {
     expect(parseWorkflowResponse(output)).toEqual(output)
   })
 
-  it('sets record availability through a revision-checked request without changing the definition', () => {
+  it('sets instance activation through a revision-checked request without changing the template', () => {
     for (const enabled of [true, false]) {
-      const request = { operation: 'setEnabled', id: fixture.id, enabled, expectedRevision: 2 }
+      const request = {
+        operation: 'setInstanceEnabled',
+        id: fixture.id,
+        enabled,
+        expectedRevision: 2
+      }
       expect(parseWorkflowRequest(request)).toEqual(request)
-      const record = { definition: fixture, enabled, revision: 3, updatedAt: 42, issues: [] }
-      expect(parseWorkflowResponse({ records: [record], issues: [] }).records).toEqual([record])
+      const instance = {
+        id: fixture.id,
+        templateId: fixture.id,
+        templateRevision: 1,
+        name: 'Review',
+        color: '#4A82E8',
+        bindings: [],
+        revision: 3,
+        updatedAt: 42,
+        needsReview: false,
+        enabled,
+        running: false
+      }
+      expect(
+        parseWorkflowResponse({ records: [], issues: [], instances: [instance] }).instances
+      ).toEqual([instance])
     }
     expect(() => parseWorkflowDefinition({ ...fixture, enabled: true })).toThrow()
+    expect(() =>
+      parseWorkflowRequest({
+        operation: 'setEnabled',
+        id: fixture.id,
+        enabled: true,
+        expectedRevision: 1
+      })
+    ).toThrow()
   })
 
   it('rejects malformed availability commands before they can reach storage', () => {
-    const request = { operation: 'setEnabled', id: fixture.id, enabled: true, expectedRevision: 1 }
+    const request = {
+      operation: 'setInstanceEnabled',
+      id: fixture.id,
+      enabled: true,
+      expectedRevision: 1
+    }
     for (const enabled of [null, undefined, 0, 1, 'true', {}, []]) {
       expect(() => parseWorkflowRequest({ ...request, enabled })).toThrow()
     }
@@ -377,6 +409,7 @@ describe('global workflow instance contract', () => {
           revision: 1,
           updatedAt: 1,
           needsReview: false,
+          enabled: true,
           running: false
         }
       ],
@@ -398,6 +431,14 @@ describe('global workflow instance contract', () => {
       affectedConversationIds: ['chat']
     }
     expect(parseWorkflowResponse(response)).toEqual(response)
+    for (const enabled of [undefined, null, 'true', 1]) {
+      expect(() =>
+        parseWorkflowResponse({ ...response, instances: [{ ...response.instances[0], enabled }] })
+      ).toThrow()
+    }
+    const missingEnabled = { ...response.instances[0] } as Record<string, unknown>
+    delete missingEnabled.enabled
+    expect(() => parseWorkflowResponse({ ...response, instances: [missingEnabled] })).toThrow()
     expect(() =>
       parseWorkflowResponse({
         ...response,

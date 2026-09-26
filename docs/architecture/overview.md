@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # 系统架构总览
@@ -26,6 +26,7 @@ Core Server（Rust 应用与传输边界）
   ├─ mycopilot-mcp-client：MCP Registry/Manager/Catalog/transport
   ├─ AutomationService / AutomationScheduler：持久定时任务与 HumanRoot Turn
   ├─ NotificationService：通用通知事实、合并批次、已读/解决与投递恢复
+  ├─ Workflow repository：图定义、编辑草稿、实例和对话绑定（尚无图执行调度）
   └─ adapters：Git、Skill、图片生成、MCP Runtime 等集成
        │
        ├─ SQLite 与受管文件目录
@@ -78,8 +79,11 @@ transport/application → adapters → core/protocol
 - 进程退出会拒绝 Main 中全部未完成请求。当前通用客户端没有逐请求超时；具体子系统必须自行拥有 deadline 或 cancellation。
 - Managed Playwright 是反向命令桥：Core Server 发 `mcp.builtinPlaywright.command`/`mcp.builtinPlaywright.cancel` notification，Main 回 `mcp.builtinPlaywright.complete`/`mcp.builtinPlaywright.dispatchPhase` 请求。`core.shutdown` 期间 request loop 仍接收后两类收口消息。
 - Automation 的任务、Run 和 attention 经普通请求读取；`automation.event`/`automation.resync` 只驱动
-  Renderer 失效重读。legacy Automation outbox 只保留 producer ledger/兼容状态，并在同一事务投影到共享
-  Notification event；共享 event/batch 才是原生投递真源，由 Main-only RPC 领取和确认。
+  Renderer 失效重读。普通任务与 Automation 直接写入共享 Notification event/batch，由 Main-only RPC
+  领取和确认；Automation 专用通知 outbox 与 `automation.notifications.*` 兼容 RPC 已移除。
+- 对话输入中的文件先通过分块导入形成持久 managed 引用，提交只携带引用与元数据。用户选定文件夹
+  形成按需读取授权；工作区 `@` 提及只编码逻辑路径。这三条输入链路的权限和持久化不可混用，见
+  [对话输入与附件](../subsystems/conversation-inputs.md)。
 - FileChange、Notification、Browser data/download 各有独立版本线和窄 DTO；展示 Diff、通知文案、
   下载 display path 都是脱权投影，不能反向构造执行授权或本机绝对路径。
 
@@ -91,9 +95,26 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v56**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v56 增加全局工作流实例、对话绑定和独立编辑草稿；v55 增加工作流启用状态；v54 增加工作流定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
+- 当前 canonical schema 为 **v57**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局工作流实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加工作流定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 空库原子创建 v56；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 保留定义增加默认关闭的工作流开关；exact v53 保留历史增加工作流定义表；exact v52 保留历史新增活动明细且不回填旧活动；exact v51 原样保留历史重建 Mailbox 正文约束后依次升 v52、v53、v54、v55、v56。exact v50 仍须协作事件日志为空，依次升级至 v51、v52、v53、v54、v55、v56。不转换旧协作活动；仍有旧事件时返回 `development_storage_schema_reset_required`，由用户先清理历史或显式开发重建。v49 及更早版本、未知 catalog 或外键不匹配也拒绝升级，启动时不自动清空数据库。
+- 空库原子创建 v57；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 保留定义增加默认关闭的模板 enabled 历史字段；exact v53 保留历史增加工作流定义表；exact v52 保留历史新增活动明细且不回填旧活动；exact v51 原样保留历史重建 Mailbox 正文约束后依次升 v52、v53、v54、v55、v56、v57。exact v50 仍须协作事件日志为空，依次升级至 v51、v52、v53、v54、v55、v56、v57。不转换旧协作活动；仍有旧事件时返回 `development_storage_schema_reset_required`，由用户先清理历史或显式开发重建。v49 及更早版本、未知 catalog 或外键不匹配也拒绝升级，启动时不自动清空数据库。
+
+上述 reset-required 是拒绝启动的错误类别，不保证当前重置工具能恢复该旧库配置。旧源恢复仍受固定目标版本 gate 限制；处理旧历史须使用受支持的旧版应用并先备份，或保留原库、使用隔离数据根继续开发，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。
+
+工作流模板通过校验后自动可选，没有手动模板开关。实例的 `enabled` 独立持久化，以版本校验更新；确认新建或编辑实例会将其开启。仅开启实例占用颜色并阻止绑定对话归档，关闭保留绑定和对话、隐藏颜色标记且不取消当前 Run。正式发布模板更新、绑定对话归档或删除会关闭实例并要求复核；读取时模板校验失效只影响模板可选状态。工作流的消息路由与执行调度尚未实现，详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+
+### 当前开发能力边界
+
+| 能力           | 当前实现                                                             | 开发时必须保留的边界                                       |
+| -------------- | -------------------------------------------------------------------- | ---------------------------------------------------------- |
+| 模型目录       | Host 统一计算可用性，供选择器、Automation、子 Agent 和工作流节点使用 | 已启用不等于可执行；保存配置不证明服务端真实请求成功       |
+| 多文件夹工作区 | 项目主/辅助根、每 Run 冻结成员和目录身份、根部 AGENTS.md             | 修改项目只影响后续 Run；历史文件操作仍使用原冻结根         |
+| 输入与续接     | managed 附件、文件夹引用、工作区提及、持久草稿/队列与引导            | 只带附件或文件夹也可提交；队列设置与当前 Run 独立          |
+| Multi-Agent    | 根 Agent 委派、Mailbox、Wake、直属观察与实时活动投影                 | 结果通过 Mailbox 交付；展示流不能倒写成新的用户消息        |
+| Workflow       | 模板画布、独立实例、对话绑定、启停和只读流程监视                     | 开启实例不执行图，不发送初始化消息；尚无门队列和跨节点调度 |
+| 账号与许可     | Main 拥有账号、许可缓存和短期准入租约                                | 新根 Turn 需要准入；退出登录或许可变化不等于取消已运行任务 |
+
+各能力的源码与专项测试入口见对应子系统文档；本表描述当前工作树，不表示发行版本已包含未提交实现。
 
 ## 5. 启动与关停概览
 
@@ -130,6 +151,10 @@ transport/application → adapters → core/protocol
 - [Multi-Agent 当前架构](multi-agent.md)
 - [MCP 子系统](../subsystems/mcp.md)
 - [FileChange](../subsystems/file-change.md)
+- [对话输入与附件](../subsystems/conversation-inputs.md)
+- [工作流定义与实例](../subsystems/workflow-authoring.md)
+- [工作区指令](../subsystems/workspace-instructions.md)
+- [账号与许可](../subsystems/local-token-usage-and-license.md)
 - [浏览器与自动化](../subsystems/browser-automation.md)
 - [Scheduled Automation](../subsystems/scheduled-automations.md)
 - [通用通知](../subsystems/notifications.md)
@@ -152,6 +177,7 @@ transport/application → adapters → core/protocol
 - Notification：`crates/core-server/src/application/notification.rs`、`crates/core/src/storage/notification_repository.rs`
 - Browser data/download：`src/main/browser/`、`crates/core/src/storage/browser_data_repository.rs`、
   `crates/core/src/storage/browser_download_repository.rs`
+- Workflow：`crates/core/src/workflow.rs`、`crates/core/src/storage/workflow_repository.rs`、`crates/core-server/src/transport/workflow_rpc.rs`
 - 打包边界：`package.json`、`electron-builder.yml`
 
 文档中的版本和限额是便于阅读的快照。代码常量、锁定 manifest 和可执行 gate 与本文冲突时，应先停止发布并更新实现或本文，不能静默选择一方。
@@ -183,7 +209,8 @@ pnpm test:web
 - 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。
 - Automation 真实 Core Server E2E 也不在 `pnpm check`，且尚无定时触发到操作系统通知点击的
   packaged E2E。
-- 仅 exact v47 支持保留历史的 v48 搜索索引事务升级；v46 及更早版本仍要求显式 reset。
+- 当前只对通过精确 catalog 检查的 v50–v56 开发库提供上述有限升级；v50 另要求协作事件日志为空。显式 reset 的可恢复版本由独立 allowlist 决定，不能从启动升级能力推断，见[存储与数据生命周期](storage-and-data-lifecycle.md)。
+- Workflow 仍停留在定义、实例和观察阶段，图中的逻辑门规则尚不驱动 Agent 执行。
 
 ## 11. 变更检查表
 
@@ -194,7 +221,7 @@ pnpm test:web
 - [ ] 新通知是否仍是 invalidation，而非第二份状态真相？
 - [ ] 新 FileChange operation 是否保持 Observation、私有 binding、审计、冲突与恢复边界？
 - [ ] 新原生通知是否由持久 fact/batch 驱动，并在显示前重新校验？
-- [ ] 新后台调度是否定义 occurrence 幂等、配置 snapshot、lease、恢复和原生通知 outbox？
+- [ ] 新后台调度是否定义 occurrence 幂等、配置 snapshot、lease、恢复和共享 Notification event/batch？
 - [ ] 新外部副作用是否定义 dispatch certainty、幂等与 `outcome_unknown`？
 - [ ] 新运行时依赖是否被锁定、校验、打包并加入第三方声明？
 - [ ] 是否更新相关当前态文档、测试矩阵和发布门禁？

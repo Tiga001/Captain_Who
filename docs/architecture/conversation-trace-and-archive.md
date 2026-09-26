@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -126,6 +126,8 @@ v48 的 `conversation_history_index_entries` 是派生身份索引，通过 `ref
 
 Core Server 将 fork 交给单工作线程的有界队列（运行与排队合计最多 4 项），避免在 stdio 请求循环同步执行整个克隆。关闭时未开始的请求明确失败，已开始的事务等待完成；不能把超时当成回滚。Renderer 显示创建中状态并阻止重复点击；稳定边界的失败重试复用 requestId，latest 的源版本或消息边界变化后使用新 identity。所有历史和 SQL 写入仍在原有一致性锁与原子事务下完成，其他需要该连接的数据库操作可能短暂等待。
 
+历史回复上的分支按钮持续绑定用户点击的 assistant message，等待持久保存期间不会悄悄改为最新回复；`latest` 只用于显式最新边界入口。文件夹引用复制的是原 name/path 与 Host 冻结目录身份，当前离线不会阻止历史加载或分支，真正读取时再验证可用性；不会递归复制目录内容或把新目录实体当成原授权。附件复制与 queued guidance 复用仍由独立附件归属和摘要校验，见[会话输入](../subsystems/conversation-inputs.md)。
+
 ## 不变量
 
 1. Trace 是 Provider-neutral、append-only、无隐藏 reasoning 的活动日志。
@@ -180,7 +182,7 @@ Core Server 将 fork 交给单工作线程的有界队列（运行与排队合�
 - [ ] Automation Run 绑定、Approval 恢复与资源删除是否仍由持久 Trace 驱动且原子收口。
 - [ ] FTS/schema 变化保持索引可重建，权威内容不依赖索引。
 - [ ] 防止 `conversation_history` 结果递归归档。
-- [ ] 最终回复开始流式输出时冻结 collaboration timeline，结算/重载/分叉均使用同一快照。
+- [ ] 最终回复开始时记录活动位置边界，Run 结算时冻结回复内列表；结算后活动仍在 owner 会话消息间重放，重载/分叉保持同一位置。
 - [ ] FileChange body、successor observation 和历史 diff 分别保持 Trace omission、model-only 与 action-audit owner 语义。
 
 ## 当前限制
@@ -190,4 +192,4 @@ Core Server 将 fork 交给单工作线程的有界队列（运行与排队合�
 - FTS 查询不是语义向量检索，且旧/损坏索引需要通过启动或维护流程重建。
 - 运行中尚未提交的模型流、Tool 调用和 narration 在进程崩溃时可能只剩活动 Trace/Checkpoint 已覆盖部分。
 - 历史分叉复制的是选中时刻的不可变快照，不会与源会话继续同步。
-- 父回复冻结后到达的子 Agent 活动只在 Agent Center/事件日志可见，不会追写旧消息时间线。
+- Run 结算后到达的协作活动不会追写已冻结回复，而是在实际 owner 会话的持久消息边界单独展示。

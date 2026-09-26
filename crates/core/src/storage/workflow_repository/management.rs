@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
 pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
-    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress')) FROM workflow_instances ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
+    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled FROM workflow_instances ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
     let rows = statement
         .query_map([], |r| {
             Ok(Instance {
@@ -21,6 +21,7 @@ pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
                 updated_at: r.get(6)?,
                 needs_review: r.get(7)?,
                 running: r.get(8)?,
+                enabled: r.get(9)?,
                 bindings: vec![],
             })
         })
@@ -174,7 +175,7 @@ pub(super) fn publish(
                 .map_err(storage_error)?;
             }
         }
-        c.execute("UPDATE workflow_instances SET needs_review=1, revision=revision+1, updated_at=MAX(updated_at+1,?1), last_request_json='{}' WHERE instance_id=?2",params![now_ms(),instance.id]).map_err(storage_error)?;
+        c.execute("UPDATE workflow_instances SET enabled=0, needs_review=1, revision=revision+1, updated_at=MAX(updated_at+1,?1), last_request_json='{}' WHERE instance_id=?2",params![now_ms(),instance.id]).map_err(storage_error)?;
     }
     c.execute(
         "DELETE FROM workflow_editing_drafts WHERE template_id=?1",
@@ -184,17 +185,24 @@ pub(super) fn publish(
     Ok(())
 }
 
-fn template(c: &Connection, id: &str, expected: u64) -> Result<(Definition, bool), Error> {
+fn template(c: &Connection, id: &str, expected: u64) -> Result<Definition, Error> {
     validate_id(id)?;
     revision_to_sql(expected)?;
-    let row:Option<(String,u64,bool)> = c.query_row("SELECT definition_json,revision,enabled FROM workflow_definitions WHERE workflow_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(storage_error)?;
-    let Some((json, revision, enabled)) = row else {
+    let row: Option<(String, u64)> = c
+        .query_row(
+            "SELECT definition_json,revision FROM workflow_definitions WHERE workflow_id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let Some((json, revision)) = row else {
         return Err(revision_conflict());
     };
     if revision != expected {
         return Err(revision_conflict());
     }
-    Ok((serde_json::from_str(&json).map_err(storage_error)?, enabled))
+    serde_json::from_str(&json).map_err(|_| Error::Invalid("workflow_template_unavailable".into()))
 }
 
 pub(super) fn request(
@@ -205,13 +213,84 @@ pub(super) fn request(
     let request_json = serde_json::to_string(&request).map_err(storage_error)?;
     match request {
         ManagementRequest::ListInstances {} => Ok(vec![]),
+        ManagementRequest::SetInstanceEnabled {
+            id,
+            enabled,
+            expected_revision,
+        } => {
+            validate_id(&id)?;
+            let expected = revision_to_sql(expected_revision)?;
+            let current = list_instances(c)?
+                .into_iter()
+                .find(|instance| instance.id == id)
+                .ok_or_else(revision_conflict)?;
+            if current.revision == expected_revision + 1 {
+                let last: String = c
+                    .query_row(
+                        "SELECT last_request_json FROM workflow_instances WHERE instance_id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .map_err(storage_error)?;
+                let receipt: serde_json::Value =
+                    serde_json::from_str(&last).map_err(storage_error)?;
+                if receipt.get("request").and_then(|value| value.as_str())
+                    == Some(request_json.as_str())
+                {
+                    return Ok(vec![]);
+                }
+            }
+            if current.revision != expected_revision {
+                return Err(revision_conflict());
+            }
+            if enabled {
+                if current.needs_review {
+                    return Err(Error::Invalid("workflow_instance_needs_review".into()));
+                }
+                let definition = template(c, &current.template_id, current.template_revision)?;
+                if !definition
+                    .validate(models)
+                    .map_err(Error::Invalid)?
+                    .is_empty()
+                {
+                    return Err(Error::Invalid("workflow_template_unavailable".into()));
+                }
+                let agents: HashSet<_> = definition
+                    .nodes
+                    .iter()
+                    .filter(|node| matches!(node.config, NodeConfig::Agent(_)))
+                    .map(|node| node.id.as_str())
+                    .collect();
+                if current.bindings.len() != agents.len()
+                    || current
+                        .bindings
+                        .iter()
+                        .any(|binding| !agents.contains(binding.node_id.as_str()))
+                {
+                    return Err(Error::Invalid("workflow_bindings_incomplete".into()));
+                }
+                let unavailable: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM workflow_instance_bindings b LEFT JOIN conversations c ON c.id=b.conversation_id WHERE b.instance_id=?1 AND (c.id IS NULL OR c.archived_at IS NOT NULL OR EXISTS(SELECT 1 FROM agent_nodes a WHERE a.conversation_id=c.id AND a.parent_agent_id IS NOT NULL)))",[&id],|row|row.get(0)).map_err(storage_error)?;
+                if unavailable {
+                    return Err(Error::Invalid("workflow_bindings_incomplete".into()));
+                }
+                let occupied: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE instance_id<>?1 AND enabled=1 AND color=?2 COLLATE NOCASE)",params![id,current.color],|row|row.get(0)).map_err(storage_error)?;
+                if occupied {
+                    return Err(Error::Conflict("workflow_color_in_use".into()));
+                }
+            }
+            if current.enabled == enabled {
+                return Ok(vec![]);
+            }
+            c.execute("UPDATE workflow_instances SET enabled=?1,revision=?2,updated_at=MAX(updated_at+1,?3),last_request_json=?4 WHERE instance_id=?5",params![enabled,next_revision(expected)?,now_ms(),serde_json::json!({"request":request_json,"affected":[]}).to_string(),id]).map_err(storage_error)?;
+            Ok(vec![])
+        }
         ManagementRequest::Duplicate {
             id,
             expected_revision,
             new_id,
             name,
         } => {
-            let (mut definition, _) = template(c, &id, expected_revision)?;
+            let mut definition = template(c, &id, expected_revision)?;
             definition.id = new_id;
             definition.name = name;
             let issues = definition.validate(models).map_err(Error::Invalid)?;
@@ -336,12 +415,25 @@ pub(super) fn request(
                     "An instance cannot change its template".into(),
                 ));
             }
-            let (definition, enabled) = template(c, &template_id, expected_template_revision)?;
-            if (current.is_none() && !enabled)
-                || !definition
-                    .validate(models)
-                    .map_err(Error::Invalid)?
-                    .is_empty()
+            // The enclosing immediate transaction serializes competing confirmations. Check
+            // every persisted instance before creating conversations or changing composer state.
+            // Confirming a new or edited binding activates the instance.
+            let enabled = true;
+            let color_in_use: bool = c
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE instance_id<>?1 AND enabled=1 AND color=?2 COLLATE NOCASE)",
+                    params![id, color],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if color_in_use {
+                return Err(Error::Conflict("workflow_color_in_use".into()));
+            }
+            let definition = template(c, &template_id, expected_template_revision)?;
+            if !definition
+                .validate(models)
+                .map_err(Error::Invalid)?
+                .is_empty()
             {
                 return Err(Error::Invalid("workflow_template_unavailable".into()));
             }
@@ -452,7 +544,7 @@ pub(super) fn request(
                     conversation_id,
                 });
             }
-            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string()]).map_err(storage_error)?;
+            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,enabled=excluded.enabled,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled]).map_err(storage_error)?;
             c.execute(
                 "DELETE FROM workflow_instance_bindings WHERE instance_id=?1",
                 [&id],

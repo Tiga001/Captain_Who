@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # Multi-Agent 当前架构
@@ -125,7 +125,7 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 
 不存在 `wait_any` 或第七个协作工具。六个实现由 Runtime extension 注册，以 `agent.collaboration` 动态 capability 整组暴露；它们不属于配置稳定的 Tool 前缀。
 
-Harness 与 `spawn_agent` 描述包含委派时机指引：任务能自然拆成相互独立、边界清晰、交付物明确的子任务时（并行调查、独立复核、只读审查），优先创建子 Agent 并行推进；强依赖或必须串行的步骤不硬拆，单步或很小的工作也不为形式而拆。拆分后由父 Agent 负责分派、跟进与交叉核对，最终结果不能只是简单拼接。
+Harness 的根 Agent 指引在协作开启时默认主动并行：先区分自己推进的关键路径和可独立交付的子任务，复用合适的已有子 Agent；中等以上且可拆解的任务默认同时保持至少两个并行子任务，派发后继续不重叠的工作，仅在关键路径被阻塞时等待。强耦合或单步工作仍在本地完成，最终必须交叉核对并整合。该规则是模型行为契约，不是调度器强制数量；子 Agent 默认自己完成受托任务，不继承“至少两个”要求，只在确有独立工作需要时继续拆分。真源为 [`collaboration_harness_section`](../../crates/core/src/prompts.rs)。
 
 设置的子 Agent 页面提供全局能力开关，默认开启。每个根 Turn 在原子 admission 中冻结设置，Spawn、Followup 和子任务结果所产生的 Wake 在同一事务内继承来源 Run 的策略。已启动的任务树完成本轮协作；后续新根 Turn 使用更新后的设置。`agent_collaboration_run_policies` 和 `agent_collaboration_wake_policies` 是不可改写的 Host 记录，随所属历史删除，Fork 不复制其执行授权。
 
@@ -146,6 +146,8 @@ Host 服务装配也遵守本轮冻结策略：关闭时不创建协作执行服
 ### Selector 目录
 
 Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：每类最多 32 项，总编码后 JSON 最多 16 KiB，并包含后端权威 `imageInput` 能力。模板 selector 的 Host 授权还冻结精确 template ID/revision；模型仍只提交 `agent_type`。目录只是精确 allowlist；过期、被禁用、被解绑、被修改或截断的 selector 必须 fail closed，不按名称猜测。Approval continuation 使用原 checkpoint 的目录，不在恢复时扩大权限。
+
+目录只发布统一 `ModelProjection` 判定为 `Available` 的模型，以及默认模型可执行的关联模板，不再由不同选择器独立判断凭据。构建按 settings revision 复用缓存；spawn admission 在读取当前投影并验证 exact selector 后仍复核模型/连接冻结身份，执行边界再次解析凭据。配置或凭据变化可以让原 selector 被拒绝，不能用缓存目录绕过当前可用性。共同真源见[模型可用性与输出预算](./agent-runtime-and-providers.md#模型可用性与输出预算)。
 
 ## 5. 授权与配额
 
@@ -261,15 +263,17 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v56**。唯一真源：
+当前 canonical storage 是 **v57**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 56;
+pub const STORAGE_SCHEMA_VERSION: i32 = 57;
 ```
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加工作流定义表，v55 增加默认关闭的工作流启用状态。空库原子创建 v56；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留工作流定义并增加启用状态；exact v53 原样保留历史增加工作流定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v56。
+v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加工作流定义表，v55 曾增加默认关闭的模板 enabled 字段。当前忽略此历史字段，模板可用性由实时校验结果派生。空库原子创建 v57；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留工作流定义并增加模板 enabled 历史字段；exact v53 原样保留历史增加工作流定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56、v57；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v57。
+
+工作流模板和实例管理与本章的 Agent tree 协作运行时独立：模板校验通过后自动可选，实例启停通过 `setInstanceEnabled` 和 revision 校验持久化。新建或编辑实例确认后开启；只有开启实例占用颜色并禁止绑定对话归档。关闭保留绑定和对话，不取消已有 Run；正式发布模板变更、绑定对话归档或删除将实例关闭并标记 `needsReview`；读取时模板校验失效只影响模板可选状态。工作流消息路由、逻辑门执行和调度仍未实现，不能将实例开启等同于启动协作任务。详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 
 ## 9. 代码真源
 
@@ -301,7 +305,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 
 ## 11. 当前限制
 
-- 不支持通用 DAG、条件边、图形工作流、自动规划器或把 MCP/Tool/Skill 做成节点。
+- 协作运行时保持 Agent tree，不执行通用 DAG、条件边或工作流图，也不提供自动规划器或将 MCP/Tool/Skill 作为节点；独立的工作流模板画布与实例管理已实现，执行和路由仍待后续设计。
 - 不支持把 Automation destination 直接设为子 Agent Conversation。
 - 用户不能直接编辑或启动子 Agent Conversation；observer 是只读投影。
 - Agent-bound tree 的完整归档/物理删除需要专用生命周期事务，不能借旧单 Conversation 删除入口实现。
@@ -325,5 +329,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] 各层 Timeline 是否按实际 owner 和任务身份展示，排除未消费任务与纯 Result 轮次，并保持冻结位置及当前树隔离？
-- [ ] 是否更新 schema v56 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v57 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

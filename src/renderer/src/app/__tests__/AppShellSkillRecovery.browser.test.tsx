@@ -166,7 +166,8 @@ vi.mock('../../host/hostClient', () => ({
   hostClient: {
     agent: {
       onPromptPreferencesChanged: vi.fn(() => () => undefined),
-      onCollaborationSettingsChanged: vi.fn(() => () => undefined)
+      onCollaborationSettingsChanged: vi.fn(() => () => undefined),
+      requestWorkflows: vi.fn(async () => ({ ok: true, value: { records: [], instances: [] } }))
     },
     app: {
       getWindowState: vi.fn().mockResolvedValue({ isFullScreen: false, isMaximized: false }),
@@ -350,6 +351,9 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
             rename-{conversation.id}
           </button>
           <output data-testid={`title-${conversation.id}`}>{conversation.title}</output>
+          <output data-testid={`unread-${conversation.id}`}>
+            {conversation.unreadAt ? 'true' : 'false'}
+          </output>
           <output data-testid={`archived-${conversation.id}`}>
             {conversation.archivedAt ? 'true' : 'false'}
           </output>
@@ -1309,6 +1313,42 @@ describe('title project editor removal', () => {
 })
 
 describe('scheduled workspace isolation', () => {
+  it.each([false, true])(
+    'marks a completed selected conversation unread only when covered by another page: %s',
+    async (covered) => {
+      mockSuccessfulTurnStarts()
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      if (covered) {
+        await screen.getByRole('button', { name: 'open-scheduled' }).click()
+        await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+      }
+      emitAgentEvent({
+        type: 'done',
+        runId: 'run-1',
+        success: true,
+        status: 'completed',
+        content: 'Finished while this page was open.'
+      })
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+      await expect
+        .element(screen.getByTestId('unread-conversation-a'))
+        .toHaveTextContent(String(covered))
+      if (covered) {
+        await expect
+          .poll(() => testState.persistedConversations.get('conversation-a')?.unreadAt)
+          .toEqual(expect.any(Number))
+        expect(screen.getByTestId('active-conversation-id').element().textContent).toBe(
+          'conversation-a'
+        )
+        await screen.getByRole('button', { name: 'select-conversation-a' }).click()
+        await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+        await expect.element(screen.getByTestId('unread-conversation-a')).toHaveTextContent('false')
+      }
+    }
+  )
+
   it('keeps the selected conversation, composer draft, and right workspace mounted while covered', async () => {
     const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'select-model-2' }).click()
@@ -4001,7 +4041,8 @@ describe('running conversation guidance queue', () => {
       expectedRunId: 'run-1',
       clientMessageId: 'client-queue-second',
       content: 'guide this run',
-      attachments: []
+      attachments: [],
+      folderReferences: []
     })
     expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(preflightsBeforeGuidance)
     expect(testState.startConversationTurn.mock.calls[0]?.[0].modelId).toBe('model-1')
@@ -4237,7 +4278,8 @@ describe('running conversation guidance queue', () => {
       expectedRunId: 'run-1',
       clientMessageId: expect.any(String),
       content: queued.content,
-      attachments: queued.attachments
+      attachments: queued.attachments,
+      folderReferences: []
     })
     emitAgentEvent(rejection)
     await expect
@@ -4306,7 +4348,8 @@ describe('running conversation guidance queue', () => {
         expectedRunId: 'run-1',
         clientMessageId: queued.clientMessageId,
         content: queued.content,
-        attachments: []
+        attachments: [],
+        folderReferences: []
       })
     }
   )

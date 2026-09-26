@@ -89,7 +89,7 @@ mod tests {
                 "operation":"setEnabled","id":"draft","enabled":true,"expectedRevision":2,
             }),
         );
-        assert_eq!(stale_toggle["error"]["code"], -32009);
+        assert_eq!(stale_toggle["error"]["code"], -32602);
         let after_toggle = call(&storage, json!({"operation":"list"}));
         assert_eq!(after_toggle["result"]["records"][0]["revision"], 1);
         assert_eq!(after_toggle["result"]["records"][0]["enabled"], false);

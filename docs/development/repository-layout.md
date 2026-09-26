@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # 仓库结构
@@ -63,20 +63,21 @@ app -> features -> components -> config / host / protocol
 
 - `runtime`、`llm`、`context`：模型运行、Provider 与上下文；
 - `tools`、`file_change`、`command`、`skills`：Agent 能力、FileChange 事务与授权，包括 Automation 专用 `automation_report`；
-- `storage`、`conversation_trace`、`world_state`：持久化与恢复真源，包括 Automation repository；
+- `storage`、`conversation_trace`、`world_state`：持久化与恢复真源，包括 Automation、workflow、模型可用性投影与受管附件导入；
+- `workspace`、`workspace_instructions`：冻结的多目录工作区与根目录指令发现；`workflow`、`workflow_management`：工作流图定义、校验与实例配置；
 - `office`、`artifact_runtime`、`image_generation`、`git_review`、`browser_downloads`：专项能力；
 - `protocol`：依赖 Rust Core 概念的运行时模型，不属于跨语言 transport DTO。
 
 [`crates/core-server/src`](../../crates/core-server/src) 不是通用 handler 集合：`transport` 负责 framing 和
 路由，`application` 负责编排与生命周期（包括 AutomationService/Scheduler），`adapters` 负责 Git、
-MCP、Skills、图片生成等外部实现。详见
+MCP、Skills、图片生成等外部实现。Main 的 `auth`、`attachments` 与 `workspaceFiles` 分别拥有账号/许可、原生文件导入与目录选择、工作区搜索等宿主边界。详见
 [Core Server](../architecture/core-server.md)。
 
 ## Renderer Feature
 
 [`src/renderer/src/features`](../../src/renderer/src/features) 按领域包含 chat、agentRun、
 agentCollaboration、automations、browser、notifications、terminal、files、gitReview、mcp、skills、settings、
-imageGeneration 等。
+imageGeneration、auth、workflows 等。
 共享 UI 放入 `components`；平台级组合、导航和 root-scoped store 放入 `app`。
 
 Feature 不能通过读取另一个 Feature 的内部 store 建立隐式耦合。需要共享的数据应由权威 Host DTO、

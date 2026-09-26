@@ -140,6 +140,7 @@ export const jaJPTranslations = {
   'sidebar.unreadConversation': '新しい返信',
   'sidebar.processingConversation': '処理中',
   'sidebar.waitingApproval': '承認待ち',
+  'sidebar.waitingAnswer': '操作待ち',
   'sidebar.archiveAllChats': 'すべてのチャットをアーカイブする',
   'sidebar.organizeSidebar': 'サイドバーを整理する',
   'sidebar.sortBy': '並べ替え順',
@@ -159,6 +160,8 @@ export const jaJPTranslations = {
   'conversation.renameConversation': 'チャットの名前を変更する',
   'conversation.archiveConversation': 'チャットをアーカイブする',
   'conversation.archiveFailed': 'チャットをアーカイブできませんでした。もう一度試してください。',
+  'conversation.archiveWorkflowActive':
+    'チャットをアーカイブする前にワークフローをオフにしてください。',
   'conversation.markUnread': '未読としてマークする',
   'conversation.renameTitle': 'チャットの名前を変更する',
   'conversation.renameDescription': '短くして認識しやすくする',

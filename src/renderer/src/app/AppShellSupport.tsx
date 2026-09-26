@@ -1,5 +1,5 @@
 // Small constants, queue payload types, and panel toggle controls for AppShell.
-import { MoreHorizontal } from 'lucide-react'
+import { MoreHorizontal, Network } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { TranslationKey } from '../config/frontendTranslations'
 import type { AppProject } from '../config/projectConfig'
@@ -7,6 +7,7 @@ import type { ChatMessage } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../hooks/useDismissOnOutsidePointer'
+import { Tooltip } from '../components/overlay/Tooltip'
 import { isMacOS } from '../lib/platform'
 import { MainPanelBrandMark } from './shell/MainPanelBrandMark'
 import { MainPanelProjectCard } from './shell/MainPanelProjectCard'
@@ -150,6 +151,7 @@ export interface MainPanelProjectCardActions {
 interface MainPanelToolbarProps extends SidebarToggleControlsProps {
   conversationActions?: MainPanelConversationActions
   projectCard?: MainPanelProjectCardActions
+  workflow?: { name: string; color: string; onOpen: () => void }
   title?: string
 }
 
@@ -160,12 +162,14 @@ function MainPanelConversationTitle({
   conversationActions,
   projectCard,
   t,
-  title
+  title,
+  workflow
 }: {
   conversationActions?: MainPanelConversationActions
   projectCard?: MainPanelProjectCardActions
   t: (key: TranslationKey) => string
   title: string
+  workflow?: MainPanelToolbarProps['workflow']
 }) {
   const menuRootRef = useRef<HTMLDivElement>(null)
   const editingConversationIdRef = useRef<string | null>(null)
@@ -217,6 +221,27 @@ function MainPanelConversationTitle({
 
   return (
     <div className="main-panel__title" data-editing={isEditing || undefined}>
+      {workflow ? (
+        <Tooltip
+          anchorClassName="main-panel__workflow"
+          content={workflow.name}
+          preferredPlacement="bottom"
+        >
+          <button
+            className="main-panel__workflow-button"
+            type="button"
+            aria-label={workflow.name}
+            style={{ color: workflow.color }}
+            onClick={() => {
+              closeMenu()
+              closeProjectCard()
+              workflow.onOpen()
+            }}
+          >
+            <Network aria-hidden="true" />
+          </button>
+        </Tooltip>
+      ) : null}
       {projectCard ? (
         <MainPanelProjectCard
           conversationCount={projectCard.conversationCount}
@@ -328,7 +353,8 @@ export function MainPanelToolbar({
   projectCard,
   rightOpen,
   t,
-  title
+  title,
+  workflow
 }: MainPanelToolbarProps) {
   return (
     <div className="main-panel__toolbar" data-drag-region>
@@ -360,6 +386,7 @@ export function MainPanelToolbar({
           projectCard={projectCard}
           t={t}
           title={title}
+          workflow={workflow}
         />
       ) : (
         <MainPanelBrandMark />

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # 命令运行时与 Command Session
@@ -39,7 +39,12 @@ model command + cwd + inputs + expectedOutputs + timeout
 
 ## 输入与运行环境
 
-命令默认在已验证 workspace/cwd 中运行。Attachment、Skill Resource、Generic Artifact 和 durable Browser Download 输入先解析为不可变 `AgentFileInputRef`，再放入私有只读 input root；模型可见 URI/alias/`browser-download:<uuid>` 不直接传为宿主路径。当前最多 16 个输入、单项 64 MiB、合计 128 MiB。
+命令默认在已验证 workspace/cwd 中运行。Attachment、Skill Resource、Generic Artifact 和 durable Browser Download 输入先解析为不可变 `AgentFileInputRef`，再放入私有只读 input root；模型可见 URI/alias/`browser-download:<uuid>` 不直接传为宿主路径。当前最多 16 个输入；普通文件使用流式摘要与复制，不再受统一单项 64 MiB、合计 128 MiB 的旧 mount 上限约束。输入来源、视觉处理和解析器仍各有独立限制，真源见 [`file_input.rs`](../../crates/core/src/file_input.rs)。
+
+多目录项目以当前 Run 的冻结 workspace membership 解析工作目录和文件输入；项目随后增删目录不会扩展本轮
+命令授权。Composer 文件夹引用只授予读取，不因展示了绝对路径就授予写入/命令范围。已导入附件通过持久引用
+进入附件库后再物化，不能把未完成的 import 或 Renderer 提交的路径当作可执行输入。详见
+[工作区与文件](workspace-files.md)及[会话输入](conversation-inputs.md)。
 
 Browser Download materialization 对 Agent 下载先验证当前 conversation/project 或受信 Agent task tree authority；手动下载仅在当前输入策略明确允许 manual download 时接受。随后重新核对 durable record 的 size/hash/文件身份；missing、modified、越权或已替换文件 fail closed。其宿主下载路径只在 Rust Core/Electron Main 私有边界存在，命令看到的是受限 mount。未知 virtual resource prefix 不能回退为普通文件路径。
 

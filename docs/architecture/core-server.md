@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-03
+last_verified: 2026-09-26
 ---
 
 # Core Server 架构与运行时
@@ -62,6 +62,8 @@ mycopilot-core       adapters
 - `request_handler.rs` 与各 `*_rpc.rs`：参数解码、application 调用、DTO/错误映射。
 - `rpc.rs`：安全响应辅助函数。
 - `storage_root.rs`：Host 数据根与独立诊断数据库路径边界。
+- `fork_dispatcher.rs`：分叉事务的单 worker、有界 admission 与关停等待。
+- `workflow_rpc.rs`：工作流模板、草稿、实例和绑定管理；复用 Rust Core 领域校验与存储，不启动工作流执行。
 
 ### `adapters/`
 
@@ -93,7 +95,7 @@ mycopilot-core       adapters
 |    `-32601` | 方法不存在                                                |
 | `-32000` 段 | 领域/Host 错误；部分子系统定义更窄的固定码和 typed `data` |
 
-方法命名空间包括 `core.*`、`agent.*`、`agent.collaboration.*`、`automation.*`、`notifications.*`、`notification.*`、`mcp.*`、`storage.*`、`skills.*`、`git.*`、`office.*`、`imageGeneration.*` 和 `search.*`。完整枚举以 `crates/protocol-rs/src/methods.rs` 为准。Automation 领域错误使用 `-32045` 和 closed typed `data`。`notifications.claim/validate/acknowledge/release/suppress/list/summary` 是 Main 原生投递与点击快照使用的 Host-only 方法；旧 `automation.notifications.*` 仅作兼容，也不应进入 Renderer invoke allowlist。Renderer 只通过窄 Host API 使用 `markSeen`、settings、event/resync 与点击导航；当前没有应用内通知中心。
+方法命名空间包括 `core.*`、`agent.*`、`agent.collaboration.*`、`automation.*`、`notifications.*`、`notification.*`、`mcp.*`、`storage.*`、`skills.*`、`git.*`、`office.*`、`imageGeneration.*` 和 `search.*`。常规方法常量见 [`methods.rs`](../../crates/protocol-rs/src/methods.rs)；工作流管理使用独立的 `agent.workflows.request`，由 [`workflow_rpc.rs`](../../crates/core-server/src/transport/workflow_rpc.rs) 按 closed `operation` 解码。Automation 领域错误使用 `-32045` 和 closed typed `data`。`notifications.claim/validate/acknowledge/release/suppress/list/summary` 是 Main 原生投递与点击快照使用的 Host-only 方法；旧 Automation 专用通知 RPC 已移除。Renderer 只通过窄 Host API 使用 `markSeen`、settings、event/resync 与点击导航；当前没有应用内通知中心。
 
 ### 请求 admission
 
@@ -106,10 +108,13 @@ request loop 当前按风险与阻塞特征分流：
 | 大型图片 Artifact 读取      |                2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                 |
 | Automation/Notification RPC |      无专用 semaphore | Tokio request task 内 `spawn_blocking`；SQLite 串行化，Scheduler 另有独立并发 gate |
 | SQLite/历史等 blocking read | 由方法 allowlist 判定 | `spawn_blocking`，避免阻塞 async loop                                              |
+| Conversation fork           |   运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                         |
 | Git/Skill/图片配置写入      |       各自 dispatcher | 显式队列和独立 shutdown                                                            |
 | 普通响应/notification       |         无界 outbound | 单一 writer 串行刷 stdout                                                          |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
+
+附件导入的 begin/append/finish/cancel 与派生预览也经过 blocking 方法分流。大文件先在 Host 受管存储中形成 durable import，聊天、草稿与引导请求只携带短引用；这与大图片 outbound semaphore 是两个不同边界。契约见[会话输入](../subsystems/conversation-inputs.md)。
 
 ## 4. 启动流程
 
@@ -186,7 +191,7 @@ EOF 或 request-loop 错误没有 shutdown response，但仍走同一幂等清�
 - `CoreJsonRpcClient` 惰性启动 Core Server；开发模式通过 Cargo 运行 workspace binary，打包模式解析 `process.resourcesPath/core-server[.exe]`。
 - Main 冻结 Electron 选择的数据根，删除父环境中任意大小写的 `MYCOPILOT_APP_DATA_ROOT` 和 `MYCOPILOT_STORAGE_DB` 后再安装唯一值。
 - 打包模式从 Resources 解析受管组件路径；开发模式可传入受支持的组件 override。
-- stdin 写失败只拒绝对应请求；进程 error/exit/显式 stop 会拒绝全部 pending request。
+- stdin write callback 失败会拒绝对应请求；stdin 的 `error`（包括启动 ping 时的 EPIPE）、进程 error/exit 或显式 stop 会清理该子进程并拒绝全部 pending request。旧子进程的迟到 error 不得误清理新进程，也不能成为未捕获的 Main 异常。
 - 通知按 method 分发给进程内订阅者；订阅本身不提供持久 replay。
 
 ## 10. 代码真源
@@ -227,7 +232,8 @@ pnpm test:automation-core-e2e
 - 个别源码注释仍保留旧 rollout 轮次描述，不能作为实现状态依据。
 - 当前没有多进程横向扩展协议；数据库实例锁要求一个 exact DB 只有一个 Core Server 生命周期 owner。
 - Automation 没有可配置并发、Run 总超时或 admission 最大尝试次数；长期等待审批和重复容量退避依赖用户处理或后续状态变化。
-- `notifications.*` 的 delivery 子集与 legacy `automation.notifications.*` 的 Host-only 隔离由 Main/Preload invoke allowlist 实现；Core Server stdin 是受信 Main transport，不提供逐请求调用方身份鉴别。
+- `notifications.*` 的 delivery 子集的 Host-only 隔离由 Main/Preload invoke allowlist 实现；Core Server stdin 是受信 Main transport，不提供逐请求调用方身份鉴别。
+- 工作流 RPC 只维护模板、草稿、实例、绑定与启停状态；开启实例不会创建模型 Run、消费图上的消息或执行逻辑门，见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 - Main 的 6 秒 shutdown watchdog 与 Multi-Agent Dispatcher 最坏约 10 秒的内部收口预算尚未对齐；超时路径必须按强制终止与启动恢复处理，不能宣称所有 Run 都已优雅结束。
 
 ## 13. 变更检查表

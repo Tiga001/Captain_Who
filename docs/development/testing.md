@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-09-26
 ---
 
 # 测试策略与矩阵
@@ -132,13 +132,58 @@ cargo test --locked --workspace
 4. Core Server transport tests；
 5. 必要时 Preload/Renderer allowlist 与 UI scenario。
 
-当前 `packages/protocol/fixtures` 包含 Agent、Automation、Notification、Collaboration、MCP、Skill 与持久 Agent Run projection 等版本化 JSON
+当前 `packages/protocol/fixtures` 包含 Agent、Automation、Notification、Collaboration、MCP、Skill、Workflow 与持久 Agent Run projection 等版本化 JSON
 fixture。fixture 是代表性 wire contract，不替代所有 DTO 的双端生成；新增字段必须遵守
 required/nullable/default 和 unknown-field 策略。
 
 协议方法名应由 `packages/protocol` 与 `crates/protocol-rs/src/methods.rs` 维护。Main 尚有部分重复字符串，因此相关 test 必须断言精确方法名，直到所有权完全收敛。
 
 ## 7. 专项 gate
+
+### 账号、许可与模型可执行性
+
+账号错误分类、验证码成功后才开始冷却、会话恢复与进程内许可要使用 fake driver/clock 测试；不得为本地回归发送真实
+邮件、修改线上许可或收集用户凭据。模型设置的 `execution` 投影同时约束 Renderer、Automation、模板、spawn 和
+工作流，测试应断言这些消费者对同一配置/凭据失败给出一致判断，并保留不可用模型在设置页的修复入口。
+
+```bash
+pnpm exec vitest run --project unit src/main/core/accountAuth.test.ts src/main/core/accountAuthDriver.test.ts src/main/core/accountAuthIpc.test.ts src/main/core/accountLicense.test.ts src/main/core/coreServer.modelSettings.test.ts
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/AccountLogin.browser.test.tsx src/renderer/src/app/__tests__/ModelSettingsProvider.browser.test.tsx src/renderer/src/app/__tests__/ModelConfigPicker.browser.test.tsx
+cargo test --locked -p mycopilot-core model_projection
+```
+
+真实账号登录、OTP 送达与操作系统安全存储需单独验收，mock 通过不能证明云端当前配置。详见
+[账号登录](../subsystems/account-login.md)与[本机 Token/许可](../subsystems/local-token-usage-and-license.md)。
+
+### 受管输入与工作区
+
+覆盖导入分块/完整性/取消、草稿和队列跨重启引用、纯附件/目录消息、Guidance 重用与重绑定、历史卡片及 fork；
+文件夹引用还需测试只读边界、路径逃逸、symlink/目录 identity 替换和 legacy metadata。`workspace.instructions`
+必须同时验证请求与上下文预览，且覆盖多根顺序、预算、override 优先和目录替换，不只断言 UI 能显示路径。
+
+```bash
+pnpm exec vitest run --project unit src/main/core/attachmentDialogBridge.test.ts src/renderer/src/features/chat/__tests__/chatAttachmentImports.test.ts src/renderer/src/features/chat/__tests__/workspaceMentions.test.ts
+pnpm exec vitest run --project browser src/renderer/src/features/chat/__tests__/AttachmentImports.browser.test.tsx src/renderer/src/features/chat/__tests__/ManagedMessageAttachments.browser.test.tsx src/renderer/src/features/chat/__tests__/GuidanceQueueAttachments.browser.test.tsx
+cargo test --locked -p mycopilot-core attachment_imports
+cargo test --locked -p mycopilot-core folder_input
+cargo test --locked -p mycopilot-core-server workspace_instructions --bin core-server
+```
+
+### 工作流配置
+
+工作流测试分图契约/校验、SQLite CAS 与生命周期、Main transport、Renderer 编辑和实例管理；配置测试不得把保存、
+启用或监控投影当成图执行通过。现有工作区中新增的实例启用/归档保护还需覆盖 root/child Conversation、绑定冲突、
+模板变更导致停用与 `needsReview`，详见[工作流编排](../subsystems/workflow-authoring.md)。
+
+```bash
+pnpm exec vitest run --project unit packages/protocol/src/workflows.test.ts src/main/core/coreServer.workflows.test.ts
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/WorkflowSettings.browser.test.tsx src/renderer/src/app/__tests__/WorkflowsPage.browser.test.tsx src/renderer/src/app/__tests__/useWorkflowWorkspace.browser.test.tsx
+cargo test --locked -p mycopilot-core workflow
+```
+
+schema 变更要独立核对启动升级和开发 reset：前者支持的旧版本不自动成为后者支持的配置来源。使用临时数据库检查
+exact catalog、失败后源库保留、当前库配置恢复及明确拒绝的旧源；当前 reset 旧源目标 gate 限制见
+[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。
 
 ### FileChange、Notification 与 Browser data
 

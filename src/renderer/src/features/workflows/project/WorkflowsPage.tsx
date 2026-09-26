@@ -1,85 +1,99 @@
 import type { WorkflowInstance, WorkflowRecord, WorkflowResponse } from '@mycopilot/protocol'
-import {
-  ArrowLeft,
-  Check,
-  ChevronRight,
-  GitBranch,
-  Plus,
-  RefreshCw,
-  Search,
-  Trash2,
-  Unlink,
-  X
-} from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, List, Network, Settings2, RefreshCw, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import type { AppProject } from '../../../config/projectConfig'
-import { AgentAvatar } from '../../agentCollaboration/AgentAvatar'
 import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
-import { getChatPermissionPresentation } from '../../chat/chatPermissionPresentation'
-import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
+import type { ConversationAttentionById } from '../../chat/useConversationAttention'
+import { SettingsSelect } from '../../settings/components/SettingsSelect'
 import { requestWorkflows } from '../workflowClient'
 import { workflowErrorDetail } from '../workflowErrors'
-import { workflowNodeModelLabel } from '../workflowModelPresentation'
-import { workflowText } from '../workflowText'
 import { WorkflowBindingCanvas } from './WorkflowBindingCanvas'
-import {
-  projectWorkflowText,
-  WORKFLOW_COLORS,
-  WORKFLOW_CONVERSATION_DRAG_TYPE
-} from './projectWorkflowText'
+import { WorkflowColorPicker } from './WorkflowColorPicker'
+import { WorkflowMonitorPage } from './WorkflowMonitorPage'
+import { useWorkflowActivity } from './useWorkflowActivity'
+import { projectWorkflowText, pickUnusedWorkflowColor } from './projectWorkflowText'
 import '../workflows.css'
 import './projectWorkflows.css'
 
 export interface WorkflowsPageProps {
   conversations: readonly ChatConversation[]
+  conversationAttention?: ConversationAttentionById
   conversationDrafts?: Readonly<Record<string, ChatComposerDraft>>
   projects: readonly AppProject[]
-  onNewTemplate: () => void
+  onManageTemplates: () => void
   onClose?: () => void
   onCommitted: (response: WorkflowResponse) => void | Promise<void>
   onBeforeCommit?: (conversationIds: readonly string[]) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
   onBusyChange?: (busy: boolean) => void
+  initialMonitorId?: string | null
+  onMonitorChange?: (instanceId: string | null) => void
+  onOpenConversation?: (conversationId: string) => void
 }
 
 interface BindingDraft {
   id: string
   name: string
   color: string
-  record: WorkflowRecord
+  record: WorkflowRecord | null
   instance: WorkflowInstance | null
   bindings: Record<string, string | null>
   baseline: string
 }
 
-const draftKey = (draft: Pick<BindingDraft, 'name' | 'color' | 'bindings'>) =>
+const draftKey = (draft: Pick<BindingDraft, 'name' | 'color' | 'bindings' | 'record'>) =>
   JSON.stringify([
+    draft.record?.definition.id ?? null,
     draft.name,
     draft.color,
     Object.entries(draft.bindings).sort(([a], [b]) => a.localeCompare(b))
   ])
 
+// Keep existing cards in place when the host orders a changed instance by updatedAt.
+function keepInstanceOrder(current: WorkflowInstance[], incoming: WorkflowInstance[]) {
+  const nextById = new Map(incoming.map((instance) => [instance.id, instance]))
+  const currentIds = new Set(current.map((instance) => instance.id))
+  return [
+    ...incoming.filter((instance) => !currentIds.has(instance.id)),
+    ...current.flatMap((instance) => {
+      const next = nextById.get(instance.id)
+      return next ? [next] : []
+    })
+  ]
+}
+
 export function WorkflowsPage({
   conversations,
+  conversationAttention,
   conversationDrafts,
-  projects,
-  onNewTemplate,
+  onManageTemplates,
   onClose,
   onCommitted,
   onBeforeCommit,
   onDirtyChange,
-  onBusyChange
+  onBusyChange,
+  initialMonitorId,
+  onMonitorChange,
+  onOpenConversation
 }: WorkflowsPageProps) {
   const { language } = useFrontendConfig()
   const { models } = useModelSettings()
   const t = useMemo(() => projectWorkflowText(language), [language])
-  const text = workflowText(language)
   const [records, setRecords] = useState<WorkflowRecord[]>([])
   const [instances, setInstances] = useState<WorkflowInstance[]>([])
+  const [monitorId, setMonitorId] = useState<string | null>(initialMonitorId ?? null)
+  useEffect(() => {
+    setMonitorId(initialMonitorId ?? null)
+  }, [initialMonitorId])
+  const openMonitor = (id: string | null) => {
+    setMonitorId(id)
+    onMonitorChange?.(id)
+  }
+  const runningInstanceIds = useWorkflowActivity(monitorId ? [] : instances, conversations)
   const [loading, setLoading] = useState(true)
   const [hasSnapshot, setHasSnapshot] = useState(false)
   const [error, setErrorMessage] = useState('')
@@ -90,23 +104,26 @@ export function WorkflowsPage({
   }, [])
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
-  const [choosingTemplate, setChoosingTemplate] = useState(false)
+  // Transient switch locks use aria-disabled plus handler guards to preserve appearance and focus.
+  const [togglingId, setTogglingId] = useState<string | null>(null)
+  const togglingIdRef = useRef<string | null>(null)
   const [draft, setDraft] = useState<BindingDraft | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const [search, setSearch] = useState('')
   const [pendingDelete, setPendingDelete] = useState<WorkflowInstance | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [pendingTemplate, setPendingTemplate] = useState<WorkflowRecord | null>(null)
   const [versionNotice, setVersionNotice] = useState('')
+  const [bindingNotice, setBindingNotice] = useState('')
   const [pendingSync, setPendingSync] = useState<WorkflowResponse | null>(null)
   const requestGeneration = useRef(0)
-  const dirty = !!draft && (!draft.instance || draftKey(draft) !== draft.baseline)
+  const dirty = !!draft && draftKey(draft) !== draft.baseline
 
   useEffect(() => {
     onDirtyChange?.(dirty)
   }, [dirty, onDirtyChange])
   useEffect(() => {
-    onBusyChange?.(busy)
-  }, [busy, onBusyChange])
+    onBusyChange?.(busy || togglingId !== null)
+  }, [busy, togglingId, onBusyChange])
   useEffect(
     () => () => {
       onDirtyChange?.(false)
@@ -126,7 +143,7 @@ export function WorkflowsPage({
       ])
       if (generation !== requestGeneration.current) return
       setRecords(templates.records)
-      setInstances(workflows.instances ?? [])
+      setInstances((current) => keepInstanceOrder(current, workflows.instances ?? []))
       setHasSnapshot(true)
     } catch (cause) {
       if (generation === requestGeneration.current)
@@ -150,7 +167,7 @@ export function WorkflowsPage({
 
   useEffect(() => {
     const changed = () => {
-      if (busyRef.current || pendingSync) return
+      if (busyRef.current || togglingIdRef.current || pendingSync) return
       if (draft) {
         setVersionNotice(
           t(
@@ -164,7 +181,8 @@ export function WorkflowsPage({
     return () => window.removeEventListener('captain:workflows-changed', changed)
   }, [draft, pendingSync, reload, t])
 
-  const agents = draft?.record.definition.nodes.filter((node) => node.kind === 'agent') ?? []
+  const agents = draft?.record?.definition.nodes.filter((node) => node.kind === 'agent') ?? []
+  const readyRecords = records.filter((record) => record.enabled && record.issues.length === 0)
   const selectedNode = agents.find((node) => node.id === selectedNodeId)
   const savedBindings = useMemo(
     () =>
@@ -173,37 +191,51 @@ export function WorkflowsPage({
       ),
     [draft?.instance]
   )
-  const keepsSelectedConversationSettings =
-    !!selectedNode &&
-    !!draft?.bindings[selectedNode.id] &&
-    draft.bindings[selectedNode.id] === savedBindings[selectedNode.id]
-  const PermissionIcon = selectedNode
-    ? getChatPermissionPresentation(selectedNode.permissionMode).icon
-    : null
   const activeConversations = useMemo(
     () => conversations.filter((item) => !item.archivedAt && !item.pendingArchivedAt),
     [conversations]
   )
-  const bindingsCount = agents.filter((node) => draft?.bindings[node.id]).length
   const readOnly = !!draft?.instance?.running
+  const unavailableColors = instances
+    .filter((instance) => instance.enabled && instance.id !== draft?.id)
+    .map((instance) => instance.color)
+  const colorOccupied =
+    !!draft && unavailableColors.some((color) => color.toLowerCase() === draft.color.toLowerCase())
+  const noColorsMessage = t(
+    '可选颜色已全部被占用，请先停用或调整其他工作流。',
+    'All available colors are in use. Disable or adjust another workflow first.'
+  )
+  const colorOccupiedMessage = t(
+    '这个颜色已被其他工作流使用，请选择其他颜色。',
+    'This color is used by another workflow. Choose a different color.'
+  )
 
-  const beginBinding = (record: WorkflowRecord, instance: WorkflowInstance | null = null) => {
-    if (pendingSync || busyRef.current) return
+  const beginBinding = (
+    record: WorkflowRecord | null,
+    instance: WorkflowInstance | null = null
+  ) => {
+    if (pendingSync || busyRef.current || (instance && togglingIdRef.current === instance.id))
+      return
     const existing = new Map(
       instance?.bindings.map((binding) => [binding.nodeId, binding.conversationId])
     )
     const bindings = Object.fromEntries(
-      record.definition.nodes
+      (record?.definition.nodes ?? [])
         .filter((node) => node.kind === 'agent')
         .map((node) => [node.id, existing.get(node.id) ?? null])
     )
     const color =
       instance?.color ??
-      WORKFLOW_COLORS.find((item) => !instances.some((workflow) => workflow.color === item)) ??
-      WORKFLOW_COLORS[instances.length % WORKFLOW_COLORS.length]
+      pickUnusedWorkflowColor(
+        instances.filter((workflow) => workflow.enabled).map((workflow) => workflow.color)
+      )
+    if (!color) {
+      setError(noColorsMessage)
+      return
+    }
     const next = {
       id: instance?.id ?? crypto.randomUUID(),
-      name: instance?.name ?? record.definition.name,
+      name: instance?.name ?? record?.definition.name ?? '',
       color,
       record,
       instance,
@@ -212,15 +244,41 @@ export function WorkflowsPage({
     }
     next.baseline = draftKey(next)
     setDraft(next)
-    setSelectedNodeId(record.definition.nodes.find((node) => node.kind === 'agent')?.id ?? null)
-    setSearch('')
+    setSelectedNodeId(null)
     setError('')
     setVersionNotice('')
-    setChoosingTemplate(false)
+  }
+
+  const selectTemplate = (record: WorkflowRecord) => {
+    if (!draft || draft.instance || busyRef.current) return
+    const next = {
+      ...draft,
+      record,
+      name: record.definition.name,
+      bindings: Object.fromEntries(
+        record.definition.nodes
+          .filter((node) => node.kind === 'agent')
+          .map((node) => [node.id, null])
+      )
+    }
+    next.baseline = draftKey(next)
+    setDraft(next)
+    setSelectedNodeId(null)
+    setError('')
+    setVersionNotice('')
+  }
+
+  const requestTemplate = (templateId: string) => {
+    const record = readyRecords.find((item) => item.definition.id === templateId)
+    if (!record || draft?.record?.definition.id === templateId) return
+    if (dirty) {
+      setPendingTemplate(record)
+      setConfirmDiscard(true)
+    } else selectTemplate(record)
   }
 
   const refreshVersion = async () => {
-    if (!draft || busyRef.current) return
+    if (!draft || busyRef.current || togglingIdRef.current) return
     busyRef.current = true
     setBusy(true)
     try {
@@ -229,13 +287,18 @@ export function WorkflowsPage({
         requestWorkflows({ operation: 'listInstances' })
       ])
       const record = templates.records.find(
-        (item) => item.definition.id === draft.record.definition.id
+        (item) => item.definition.id === draft.record?.definition.id
       )
       const instance = draft.instance
         ? workflows.instances?.find((item) => item.id === draft.id)
         : null
       setRecords(templates.records)
-      setInstances(workflows.instances ?? [])
+      setInstances((current) => keepInstanceOrder(current, workflows.instances ?? []))
+      if (!draft.record) {
+        setError('')
+        setVersionNotice('')
+        return
+      }
       if (!record || (draft.instance && !instance)) {
         setError(
           t(
@@ -284,11 +347,20 @@ export function WorkflowsPage({
         instance.id !== draft?.id &&
         instance.bindings.some((binding) => binding.conversationId === conversationId)
     )
-    if (other) return `${t('已加入', 'Assigned to')} ${other.name}`
+    if (other)
+      return t(
+        `这个对话已经加入其他工作流“${other.name}”，不能重复分配。`,
+        `This conversation already belongs to another workflow, “${other.name}”, and cannot be assigned again.`
+      )
     const sibling = agents.find(
       (node) => node.id !== nodeId && draft?.bindings[node.id] === conversationId
     )
-    return sibling ? `${t('已绑定', 'Bound to')} ${sibling.name}` : null
+    return sibling
+      ? t(
+          `这个对话已分配给当前工作流的“${sibling.name}”，不能重复分配。`,
+          `This conversation is already assigned to “${sibling.name}” in this workflow and cannot be assigned again.`
+        )
+      : null
   }
 
   const bind = (nodeId: string, conversationId: string | null) => {
@@ -304,7 +376,8 @@ export function WorkflowsPage({
     }
     const occupied = conversationId ? occupancy(conversationId, nodeId) : null
     if (occupied) {
-      setError(occupied)
+      setError('')
+      setBindingNotice(occupied)
       return
     }
     setError('')
@@ -313,13 +386,19 @@ export function WorkflowsPage({
   }
 
   const acceptCommit = async (response: WorkflowResponse) => {
-    setInstances(response.instances ?? [])
+    requestGeneration.current += 1
+    setLoading(false)
+    setInstances((current) => keepInstanceOrder(current, response.instances ?? []))
     setRecords(response.records)
     setDraft(null)
     setSelectedNodeId(null)
     setPendingDelete(null)
     setError('')
     onDirtyChange?.(false)
+    await synchronizeCommit(response)
+  }
+
+  const synchronizeCommit = async (response: WorkflowResponse) => {
     try {
       await onCommitted(response)
       setPendingSync(null)
@@ -358,7 +437,19 @@ export function WorkflowsPage({
   }
 
   const commit = async () => {
-    if (!draft || busyRef.current || readOnly || !draft.name.trim()) return
+    if (
+      !draft?.record ||
+      busyRef.current ||
+      togglingIdRef.current ||
+      pendingSync ||
+      readOnly ||
+      !draft.name.trim()
+    )
+      return
+    if (colorOccupied) {
+      setError(colorOccupiedMessage)
+      return
+    }
     busyRef.current = true
     setBusy(true)
     setError('')
@@ -379,6 +470,32 @@ export function WorkflowsPage({
       })
       await acceptCommit(response)
     } catch (cause) {
+      if (workflowErrorDetail(cause).includes('workflow_conversation_already_bound')) {
+        setError('')
+        setBindingNotice(
+          t(
+            '这个对话已经加入其他工作流，不能重复分配。',
+            'This conversation already belongs to another workflow and cannot be assigned again.'
+          )
+        )
+        try {
+          const current = await requestWorkflows({ operation: 'listInstances' })
+          setInstances(current.instances ?? [])
+        } catch {
+          /* Preserve the staged configuration when the catalog cannot refresh. */
+        }
+        return
+      }
+      if (workflowErrorDetail(cause).includes('workflow_color_in_use')) {
+        setError(colorOccupiedMessage)
+        try {
+          const current = await requestWorkflows({ operation: 'listInstances' })
+          setInstances(current.instances ?? [])
+        } catch {
+          /* Keep the staged configuration available for retry. */
+        }
+        return
+      }
       setError(
         t(
           '保存失败。模板、对话占用或工作流状态可能已改变，请保留当前配置并重新检查。',
@@ -393,7 +510,7 @@ export function WorkflowsPage({
   }
 
   const remove = async () => {
-    if (!pendingDelete || busyRef.current) return
+    if (!pendingDelete || busyRef.current || togglingIdRef.current) return
     busyRef.current = true
     setBusy(true)
     try {
@@ -418,97 +535,151 @@ export function WorkflowsPage({
     }
   }
 
-  const modelName = (conversation: ChatConversation) => {
-    const modelId = conversationDrafts?.[conversation.id]?.modelId ?? conversation.modelId
-    const model = models.find((candidate) => candidate.id === modelId)
-    return model ? formatModelConfigLabel(model) : t('未选择模型', 'No model selected')
+  const setInstanceEnabled = async (instance: WorkflowInstance) => {
+    if (busyRef.current || togglingIdRef.current || pendingSync) return
+    // A background read started before this mutation must not overwrite its response.
+    requestGeneration.current += 1
+    setLoading(false)
+    togglingIdRef.current = instance.id
+    setTogglingId(instance.id)
+    setError('')
+    try {
+      const response = await requestWorkflows({
+        operation: 'setInstanceEnabled',
+        id: instance.id,
+        enabled: !instance.enabled,
+        expectedRevision: instance.revision
+      })
+      setInstances((current) => keepInstanceOrder(current, response.instances ?? []))
+      setRecords(response.records)
+      await synchronizeCommit(response)
+    } catch (cause) {
+      setError(
+        workflowErrorDetail(cause).includes('workflow_color_in_use')
+          ? colorOccupiedMessage
+          : t(
+              '切换失败，请刷新后检查工作流配置。',
+              'Could not change workflow state. Refresh and check its configuration.'
+            ),
+        cause
+      )
+    } finally {
+      togglingIdRef.current = null
+      setTogglingId(null)
+    }
   }
-  const projectName = (conversation: ChatConversation) =>
-    projects.find((project) => project.id === conversation.projectId)?.name ??
-    t('未分配项目', 'No project')
-  const candidates = activeConversations.filter((conversation) =>
-    `${conversation.title} ${projectName(conversation)}`
-      .toLowerCase()
-      .includes(search.toLowerCase())
-  )
+
   const back = () => {
     if (busyRef.current) return
     if (draft) {
       if (dirty) {
+        setPendingTemplate(null)
         setConfirmDiscard(true)
         return
       }
       setDraft(null)
       setSelectedNodeId(null)
       setError('')
-    } else if (choosingTemplate) setChoosingTemplate(false)
-    else onClose?.()
+    } else onClose?.()
   }
 
-  return (
-    <section className="project-workflows" aria-label={t('工作流管理', 'Workflow management')}>
-      <header className="project-workflows__header">
-        <div className="project-workflows__identity">
-          {(draft || choosingTemplate || onClose) && (
-            <Tooltip content={t('返回', 'Back')}>
+  if (monitorId) {
+    const instance = instances.find((item) => item.id === monitorId)
+    const record = records.find((item) => item.definition.id === instance?.templateId)
+    if (instance && record) {
+      return (
+        <WorkflowMonitorPage
+          key={instance.id}
+          instance={instance}
+          graph={record.definition}
+          conversations={conversations}
+          conversationAttention={conversationAttention}
+          conversationDrafts={conversationDrafts}
+          models={models}
+          onBack={() => openMonitor(null)}
+          onOpenConversation={(id) => onOpenConversation?.(id)}
+        />
+      )
+    }
+    return (
+      <section className="project-workflows" aria-label={t('工作流流程图', 'Workflow diagram')}>
+        <header className="project-workflows__header">
+          <div className="project-workflows__identity">
+            <Tooltip content={t('返回工作流', 'Back to workflows')}>
               <button
                 type="button"
                 className="workflow-icon-button"
-                aria-label={t('返回', 'Back')}
-                disabled={busy}
-                onClick={back}
+                aria-label={t('返回工作流', 'Back to workflows')}
+                onClick={() => openMonitor(null)}
               >
-                <ArrowLeft />
+                <ArrowLeft aria-hidden="true" />
               </button>
             </Tooltip>
-          )}
-          <GitBranch aria-hidden="true" />
-          <h1>
-            {draft
-              ? draft.instance
-                ? t('管理工作流', 'Manage workflow')
-                : t('绑定对话', 'Bind conversations')
-              : choosingTemplate
-                ? t('选择工作流模板', 'Choose a workflow template')
-                : t('工作流', 'Workflows')}
-          </h1>
-          {draft && (
-            <>
-              <ChevronRight aria-hidden="true" />
-              <span className="project-workflows__template-name">
-                {draft.record.definition.name}
-              </span>
-            </>
+            <h1>{t('工作流流程图', 'Workflow diagram')}</h1>
+          </div>
+        </header>
+        <div className="project-workflows__empty" role={error ? 'alert' : 'status'}>
+          <p>
+            {loading
+              ? t('正在加载工作流…', 'Loading workflows…')
+              : error || t('工作流或模板已不可用', 'This workflow or its template is unavailable')}
+          </p>
+          {!loading && (
+            <button className="workflow-button" type="button" onClick={() => void reload()}>
+              <RefreshCw aria-hidden="true" />
+              {t('重试', 'Retry')}
+            </button>
           )}
         </div>
-        {!draft && (
+      </section>
+    )
+  }
+
+  return (
+    <section
+      className={`project-workflows${draft ? ' project-workflows--editing' : ''}`}
+      aria-label={t('工作流管理', 'Workflow management')}
+    >
+      {!draft && (
+        <header className="project-workflows__header">
+          <div className="project-workflows__identity">
+            {onClose && (
+              <Tooltip content={t('返回', 'Back')}>
+                <button
+                  type="button"
+                  className="workflow-icon-button"
+                  aria-label={t('返回', 'Back')}
+                  disabled={busy}
+                  onClick={back}
+                >
+                  <ArrowLeft aria-hidden="true" />
+                </button>
+              </Tooltip>
+            )}
+            <h1>{t('工作流', 'Workflows')}</h1>
+          </div>
           <div className="project-workflows__actions">
             <button
               type="button"
               className="workflow-button"
               disabled={busy || !!pendingSync}
-              onClick={onNewTemplate}
+              onClick={onManageTemplates}
             >
-              <Plus />
-              {t('新建模板', 'New template')}
+              <List aria-hidden="true" />
+              {t('管理工作流模板', 'Manage workflow templates')}
             </button>
-            {!choosingTemplate && (
-              <button
-                type="button"
-                className="workflow-button workflow-button--primary"
-                disabled={loading || !hasSnapshot || busy || !!pendingSync}
-                onClick={() => {
-                  setChoosingTemplate(true)
-                  setError('')
-                }}
-              >
-                <GitBranch />
-                {t('激活工作流', 'Activate workflow')}
-              </button>
-            )}
+            <button
+              type="button"
+              className="workflow-button workflow-button--primary"
+              disabled={loading || !hasSnapshot || busy || !!pendingSync}
+              onClick={() => beginBinding(null)}
+            >
+              <Network aria-hidden="true" />
+              {t('激活新工作流', 'Activate new workflow')}
+            </button>
           </div>
-        )}
-      </header>
+        </header>
+      )}
       {error && (
         <div className="project-workflows__notice is-error" role="alert">
           <div className="project-workflows__error-copy">
@@ -534,7 +705,7 @@ export function WorkflowsPage({
             <button
               className="workflow-button"
               type="button"
-              disabled={busy}
+              disabled={busy || !!togglingId}
               onClick={() => void refreshVersion()}
             >
               <RefreshCw />
@@ -560,25 +731,54 @@ export function WorkflowsPage({
             className="workflow-icon-button"
             type="button"
             aria-label={t('刷新版本', 'Refresh version')}
-            disabled={busy}
+            disabled={busy || !!togglingId}
             onClick={() => void refreshVersion()}
           >
             <RefreshCw />
           </button>
         </div>
       )}
-      {loading ? (
+      {loading && !hasSnapshot ? (
         <div className="project-workflows__empty" role="status">
           {t('正在加载工作流…', 'Loading workflows…')}
         </div>
       ) : !hasSnapshot ? (
         <div className="project-workflows__empty">
-          <GitBranch />
+          <Network />
           <p>{t('暂时无法读取工作流', 'Workflows could not be loaded')}</p>
         </div>
       ) : draft ? (
         <>
-          <div className="project-workflows__binding-toolbar">
+          <div
+            className="project-workflows__binding-toolbar"
+            role="toolbar"
+            aria-label={t('工作流配置', 'Workflow configuration')}
+          >
+            <div className="project-workflows__template-field">
+              <span>{t('工作流模板', 'Workflow template')}</span>
+              <SettingsSelect
+                ariaLabel={t('工作流模板', 'Workflow template')}
+                className="project-workflows__template-select"
+                value={draft.record?.definition.id ?? ''}
+                disabled={busy || !!draft.instance}
+                options={
+                  draft.instance && draft.record
+                    ? [{ value: draft.record.definition.id, label: draft.record.definition.name }]
+                    : [
+                        {
+                          value: '',
+                          label: t('请选择工作流模板', 'Choose a workflow template'),
+                          disabled: true
+                        },
+                        ...readyRecords.map((record) => ({
+                          value: record.definition.id,
+                          label: record.definition.name
+                        }))
+                      ]
+                }
+                onChange={requestTemplate}
+              />
+            </div>
             <label>
               <span>{t('名称', 'Name')}</span>
               <input
@@ -588,27 +788,49 @@ export function WorkflowsPage({
                 onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               />
             </label>
-            <fieldset className="project-workflows__colors" disabled={busy || readOnly}>
-              <legend>{t('颜色', 'Color')}</legend>
-              {WORKFLOW_COLORS.map((color, index) => (
-                <button
-                  key={color}
-                  type="button"
-                  aria-label={`${t('标记颜色', 'Marker color')} ${index + 1}`}
-                  aria-pressed={draft.color === color}
-                  style={{ background: color }}
-                  onClick={() => setDraft({ ...draft, color })}
-                >
-                  {draft.color === color && <Check />}
-                </button>
-              ))}
-            </fieldset>
-            <span className="project-workflows__binding-help">
-              {t(
-                '从左侧拖入对话，或点击节点选择',
-                'Drag conversations from the sidebar, or select a node'
+            <div className="project-workflows__binding-actions">
+              <WorkflowColorPicker
+                color={draft.color}
+                unavailableColors={unavailableColors}
+                disabled={busy || readOnly}
+                onChange={(color) => setDraft({ ...draft, color })}
+              />
+              {selectedNode && draft.bindings[selectedNode.id] && (
+                <Tooltip content={t('解除对话分配', 'Remove conversation assignment')}>
+                  <button
+                    type="button"
+                    className="workflow-icon-button"
+                    aria-label={t('解除对话分配', 'Remove conversation assignment')}
+                    disabled={busy || readOnly}
+                    onClick={() => bind(selectedNode.id, null)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </button>
+                </Tooltip>
               )}
-            </span>
+            </div>
+            <div className="project-workflows__commit-actions">
+              <button type="button" className="workflow-button" disabled={busy} onClick={back}>
+                {t('取消', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className="workflow-button workflow-button--primary"
+                disabled={
+                  busy ||
+                  !!togglingId ||
+                  !!pendingSync ||
+                  readOnly ||
+                  colorOccupied ||
+                  !draft.record ||
+                  !draft.name.trim() ||
+                  (draft.record?.issues.length ?? 0) > 0
+                }
+                onClick={() => void commit()}
+              >
+                {t('激活', 'Activate')}
+              </button>
+            </div>
           </div>
           {draft.instance?.needsReview && (
             <div className="project-workflows__notice">
@@ -627,226 +849,96 @@ export function WorkflowsPage({
             </div>
           )}
           <div className="project-workflows__binding-content">
-            <WorkflowBindingCanvas
-              graph={draft.record.definition}
-              conversations={conversations}
-              conversationDrafts={conversationDrafts}
-              models={models}
-              bindings={draft.bindings}
-              savedBindings={savedBindings}
-              selectedNodeId={selectedNodeId}
-              disabled={busy || readOnly}
-              onSelect={(id) => {
-                setSelectedNodeId(id)
-                setSearch('')
-              }}
-              onBind={bind}
-            />
-            {selectedNode && (
-              <aside
-                className="project-workflows__chooser"
-                aria-label={t('选择对话', 'Choose a conversation')}
+            {draft.record ? (
+              <WorkflowBindingCanvas
+                key={draft.record.definition.id}
+                graph={draft.record.definition}
+                color={draft.color}
+                conversations={conversations}
+                conversationDrafts={conversationDrafts}
+                models={models}
+                bindings={draft.bindings}
+                savedBindings={savedBindings}
+                selectedNodeId={selectedNodeId}
+                disabled={busy || readOnly}
+                onSelect={(id) => setSelectedNodeId((current) => (current === id ? null : id))}
+                onBind={bind}
+              />
+            ) : (
+              <div
+                className="workflow-canvas-shell workflow-binding-canvas-shell project-workflows__blank-canvas"
+                aria-label={t('空白工作流画布', 'Empty workflow canvas')}
               >
-                <div className="project-workflows__chooser-heading">
-                  <AgentAvatar agentId={selectedNode.id} />
-                  <h2>{selectedNode.name}</h2>
-                  <Tooltip content={t('收起', 'Collapse')}>
-                    <button
-                      type="button"
-                      className="workflow-icon-button"
-                      aria-label={t('收起', 'Collapse')}
-                      onClick={() => setSelectedNodeId(null)}
-                    >
-                      <X />
+                <div className="project-workflows__empty">
+                  <Network aria-hidden="true" />
+                  <p>
+                    {readyRecords.length
+                      ? t('在上方选择工作流模板', 'Choose a workflow template above')
+                      : t('还没有可用的工作流模板', 'No workflow templates are ready yet')}
+                  </p>
+                  {!readyRecords.length && (
+                    <button type="button" className="workflow-button" onClick={onManageTemplates}>
+                      <List aria-hidden="true" />
+                      {t('管理工作流模板', 'Manage workflow templates')}
                     </button>
-                  </Tooltip>
-                </div>
-                {selectedNode.task && (
-                  <p className="project-workflows__node-task">{selectedNode.task}</p>
-                )}
-                {PermissionIcon && (
-                  <div className="project-workflows__permission">
-                    <PermissionIcon />
-                    <span>
-                      {t('节点预设：', 'Node preset: ')}
-                      {selectedNode.permissionMode === 'full'
-                        ? t('完全权限', 'Full permissions')
-                        : selectedNode.permissionMode === 'custom'
-                          ? t('自定义权限', 'Custom permissions')
-                          : t('默认权限', 'Default permissions')}
-                    </span>
-                  </div>
-                )}
-                <p className="project-workflows__permission-note">
-                  {keepsSelectedConversationSettings
-                    ? t(
-                        '当前绑定保持不变，将保留对话现有的模型和权限。',
-                        'This binding is unchanged. The conversation keeps its current model and permissions.'
-                      )
-                    : t(
-                        '确认后使用节点预设的模型和权限；正在运行的轮次保持原设置，下轮生效。之后可在对话里独立调整。',
-                        'Confirmation applies the node model and permissions once. Active turns keep their settings; changes apply on the next turn. You can adjust conversation settings independently afterward.'
-                      )}
-                </p>
-                <button
-                  className={`project-workflows__conversation project-workflows__conversation--new${!draft.bindings[selectedNode.id] ? ' is-selected' : ''}`}
-                  type="button"
-                  disabled={busy || readOnly}
-                  onClick={() => bind(selectedNode.id, null)}
-                  aria-pressed={!draft.bindings[selectedNode.id]}
-                >
-                  <Plus />
-                  <span>
-                    <strong>{t('自动新建对话', 'Create a new conversation')}</strong>
-                    <small>{workflowNodeModelLabel(selectedNode, models, text)}</small>
-                  </span>
-                  {!draft.bindings[selectedNode.id] && <Check />}
-                </button>
-                {!!draft.bindings[selectedNode.id] && (
-                  <button
-                    type="button"
-                    className="project-workflows__unbind"
-                    disabled={busy || readOnly}
-                    onClick={() => bind(selectedNode.id, null)}
-                  >
-                    <Unlink />
-                    {t('解除绑定，改为新建', 'Unbind and create a new conversation')}
-                  </button>
-                )}
-                <label className="project-workflows__search">
-                  <Search />
-                  <input
-                    aria-label={t('搜索对话', 'Search conversations')}
-                    placeholder={t('搜索对话或项目', 'Search conversations or projects')}
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </label>
-                <div className="project-workflows__conversation-list">
-                  {candidates.map((conversation) => {
-                    const assigned = occupancy(conversation.id, selectedNode.id)
-                    const selected = draft.bindings[selectedNode.id] === conversation.id
-                    return (
-                      <button
-                        key={conversation.id}
-                        type="button"
-                        className={`project-workflows__conversation${selected ? ' is-selected' : ''}`}
-                        aria-pressed={selected}
-                        disabled={busy || readOnly || !!assigned}
-                        draggable={!assigned && !busy && !readOnly}
-                        onDragStart={(event) => {
-                          event.dataTransfer.setData(
-                            WORKFLOW_CONVERSATION_DRAG_TYPE,
-                            conversation.id
-                          )
-                          event.dataTransfer.effectAllowed = 'link'
-                        }}
-                        onClick={() => bind(selectedNode.id, conversation.id)}
-                      >
-                        <span>
-                          <strong>{conversation.title}</strong>
-                          <small>
-                            {projectName(conversation)} · {modelName(conversation)}
-                          </small>
-                          {assigned && <small>{assigned}</small>}
-                        </span>
-                        {selected && <Check />}
-                      </button>
-                    )
-                  })}
-                  {!candidates.length && (
-                    <p className="project-workflows__hint">
-                      {t(
-                        '没有找到对话，可在确认时自动新建。',
-                        'No conversations found. You can create one when confirming.'
-                      )}
-                    </p>
                   )}
                 </div>
-              </aside>
+              </div>
             )}
           </div>
-          <footer className="project-workflows__footer">
-            <span>
-              {t(
-                `已绑定 ${bindingsCount} 个 · 将新建 ${agents.length - bindingsCount} 个对话`,
-                `${bindingsCount} bound · ${agents.length - bindingsCount} conversations to create`
-              )}
-            </span>
-            <div>
-              <button type="button" className="workflow-button" disabled={busy} onClick={back}>
-                {t('取消', 'Cancel')}
-              </button>
-              <button
-                type="button"
-                className="workflow-button workflow-button--primary"
-                disabled={busy || readOnly || !draft.name.trim() || draft.record.issues.length > 0}
-                onClick={() => void commit()}
-              >
-                {busy
-                  ? t('正在保存…', 'Saving…')
-                  : draft.instance
-                    ? t('确认配置', 'Confirm configuration')
-                    : t('确认激活', 'Confirm activation')}
-              </button>
-            </div>
-          </footer>
         </>
-      ) : choosingTemplate ? (
-        <div className="project-workflows__library">
-          <p className="project-workflows__hint">
-            {t(
-              '选择已启用的模板，为每个智能体安排对话。',
-              'Choose an enabled template and assign conversations to its agents.'
-            )}
-          </p>
-          {records.map((record) => (
-            <button
-              key={record.definition.id}
-              type="button"
-              className="project-workflows__template"
-              disabled={!record.enabled || record.issues.length > 0}
-              onClick={() => beginBinding(record)}
-            >
-              <GitBranch />
-              <span>
-                <strong>{record.definition.name}</strong>
-                <small>
-                  {record.definition.description || t('工作流模板', 'Workflow template')}
-                </small>
-                {(!record.enabled || record.issues.length > 0) && (
-                  <small>
-                    {record.issues.length
-                      ? t('需要先完成模板配置', 'Complete the template first')
-                      : t('模板尚未启用', 'Template is disabled')}
-                  </small>
-                )}
-              </span>
-              <ChevronRight />
-            </button>
-          ))}
-          {!records.length && (
-            <div className="project-workflows__empty">
-              <GitBranch />
-              <p>{t('还没有工作流模板', 'No workflow templates yet')}</p>
-              <button
-                type="button"
-                className="workflow-button"
-                disabled={busy || !!pendingSync}
-                onClick={onNewTemplate}
-              >
-                <Plus />
-                {t('新建模板', 'New template')}
-              </button>
-            </div>
-          )}
-        </div>
       ) : (
         <div className="project-workflows__library">
           {instances.map((instance) => {
             const record = records.find((item) => item.definition.id === instance.templateId)
+            const complete =
+              !!record &&
+              record.definition.nodes
+                .filter((node) => node.kind === 'agent')
+                .every((node) =>
+                  instance.bindings.some(
+                    (binding) =>
+                      binding.nodeId === node.id &&
+                      activeConversations.some(
+                        (conversation) => conversation.id === binding.conversationId
+                      )
+                  )
+                )
+            const conflicts = instances.some(
+              (other) =>
+                other.id !== instance.id &&
+                other.enabled &&
+                other.color.toLowerCase() === instance.color.toLowerCase()
+            )
+            const enableBlocked =
+              !instance.enabled &&
+              (!record ||
+                record.issues.length > 0 ||
+                instance.needsReview ||
+                instance.templateRevision !== record.revision ||
+                !complete ||
+                conflicts)
+            const switchTitle = instance.enabled
+              ? t('停用工作流', 'Disable workflow')
+              : conflicts
+                ? colorOccupiedMessage
+                : enableBlocked
+                  ? t(
+                      '请先检查模板并补全对话绑定',
+                      'Review the template and complete conversation assignments first'
+                    )
+                  : t('启用工作流', 'Enable workflow')
             return (
-              <article className="project-workflows__instance" key={instance.id}>
+              <article
+                className={`project-workflows__instance${instance.enabled && runningInstanceIds.has(instance.id) ? ' is-running' : ''}`}
+                key={instance.id}
+                style={{ '--workflow-color': instance.color } as CSSProperties}
+              >
+                <svg className="project-workflows__activity" aria-hidden="true" focusable="false">
+                  <rect className="project-workflows__activity-track" pathLength="100" />
+                  <rect className="project-workflows__activity-trail" pathLength="100" />
+                  <rect className="project-workflows__activity-head" pathLength="100" />
+                </svg>
                 <span
                   className="project-workflows__color-dot"
                   style={{ background: instance.color }}
@@ -854,7 +946,8 @@ export function WorkflowsPage({
                 <button
                   type="button"
                   className="project-workflows__instance-main"
-                  disabled={!record || !!pendingSync}
+                  aria-disabled={togglingId === instance.id || undefined}
+                  disabled={busy || !record || !!pendingSync}
                   onClick={() => record && beginBinding(record, instance)}
                 >
                   <strong>{instance.name}</strong>
@@ -866,35 +959,63 @@ export function WorkflowsPage({
                     )}
                   </small>
                 </button>
-                <span
-                  className={`project-workflows__status${instance.needsReview ? ' needs-review' : ''}`}
-                >
-                  {instance.running
-                    ? t('运行中', 'Running')
-                    : instance.needsReview
-                      ? t('需要重新确认', 'Needs review')
-                      : t('已配置', 'Configured')}
-                </span>
+                {(instance.running || instance.needsReview) && (
+                  <span
+                    className={`project-workflows__status${instance.needsReview ? ' needs-review' : ''}`}
+                  >
+                    {instance.running ? t('运行中', 'Running') : t('需要重新确认', 'Needs review')}
+                  </span>
+                )}
+                <Tooltip content={switchTitle}>
+                  <button
+                    type="button"
+                    role="switch"
+                    className="project-workflows__switch"
+                    aria-label={`${instance.enabled ? t('停用工作流', 'Disable workflow') : t('启用工作流', 'Enable workflow')} ${instance.name}`}
+                    aria-checked={instance.enabled}
+                    aria-busy={togglingId === instance.id || undefined}
+                    aria-disabled={!!togglingId || undefined}
+                    disabled={busy || !!pendingSync || enableBlocked}
+                    onClick={() => void setInstanceEnabled(instance)}
+                  >
+                    <span aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip content={t('查看流程图', 'View workflow diagram')}>
+                  <button
+                    type="button"
+                    className="workflow-icon-button project-workflows__diagram"
+                    aria-label={`${t('查看流程图', 'View workflow diagram')} ${instance.name}`}
+                    disabled={!record}
+                    onClick={() => openMonitor(instance.id)}
+                  >
+                    <Network aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip content={t('配置', 'Configure')}>
+                  <button
+                    type="button"
+                    className="workflow-icon-button project-workflows__configure"
+                    aria-label={`${t('配置', 'Configure')} ${instance.name}`}
+                    aria-disabled={togglingId === instance.id || undefined}
+                    disabled={busy || !record || !!pendingSync}
+                    onClick={() => record && beginBinding(record, instance)}
+                  >
+                    <Settings2 aria-hidden="true" />
+                  </button>
+                </Tooltip>
                 <Tooltip content={t('移除工作流', 'Remove workflow')}>
                   <button
                     type="button"
                     className="workflow-icon-button"
                     aria-label={`${t('移除工作流', 'Remove workflow')} ${instance.name}`}
+                    aria-disabled={!!togglingId || undefined}
                     disabled={busy || instance.running || !!pendingSync}
-                    onClick={() => setPendingDelete(instance)}
+                    onClick={() => {
+                      if (!togglingIdRef.current) setPendingDelete(instance)
+                    }}
                   >
                     <Trash2 />
-                  </button>
-                </Tooltip>
-                <Tooltip content={t('管理工作流', 'Manage workflow')}>
-                  <button
-                    type="button"
-                    className="workflow-icon-button"
-                    aria-label={`${t('管理工作流', 'Manage workflow')} ${instance.name}`}
-                    disabled={!record || !!pendingSync}
-                    onClick={() => record && beginBinding(record, instance)}
-                  >
-                    <ChevronRight />
                   </button>
                 </Tooltip>
               </article>
@@ -902,7 +1023,7 @@ export function WorkflowsPage({
           })}
           {!instances.length && (
             <div className="project-workflows__empty">
-              <GitBranch />
+              <Network />
               <h2>{t('让对话一起协作', 'Bring conversations together')}</h2>
               <p>
                 {t(
@@ -914,14 +1035,26 @@ export function WorkflowsPage({
                 type="button"
                 className="workflow-button workflow-button--primary"
                 disabled={busy || !!pendingSync}
-                onClick={() => setChoosingTemplate(true)}
+                onClick={() => beginBinding(null)}
               >
-                <Plus />
-                {t('激活工作流', 'Activate workflow')}
+                <Settings2 aria-hidden="true" />
+                {t('激活新工作流', 'Activate new workflow')}
               </button>
             </div>
           )}
         </div>
+      )}
+      {bindingNotice && (
+        <ConfirmationDialog
+          title={t('无法分配对话', 'Cannot assign conversation')}
+          description={bindingNotice}
+          cancelLabel={t('关闭', 'Close')}
+          confirmLabel={t('知道了', 'Got it')}
+          confirmVariant="primary"
+          showCancelButton={false}
+          onCancel={() => setBindingNotice('')}
+          onConfirm={() => setBindingNotice('')}
+        />
       )}
       {pendingDelete && (
         <ConfirmationDialog
@@ -947,10 +1080,15 @@ export function WorkflowsPage({
           )}
           cancelLabel={t('继续编辑', 'Keep editing')}
           confirmLabel={t('放弃修改', 'Discard changes')}
-          onCancel={() => setConfirmDiscard(false)}
+          onCancel={() => {
+            setConfirmDiscard(false)
+            setPendingTemplate(null)
+          }}
           onConfirm={() => {
             setConfirmDiscard(false)
-            setDraft(null)
+            if (pendingTemplate) selectTemplate(pendingTemplate)
+            else setDraft(null)
+            setPendingTemplate(null)
             setSelectedNodeId(null)
             setError('')
             setVersionNotice('')

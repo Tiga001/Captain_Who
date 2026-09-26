@@ -324,6 +324,32 @@ fn delete_chat_message_records_in_transaction(
     Ok(attachments)
 }
 
+fn invalidate_workflows_before_trigger_disabled_deletion(
+    connection: &rusqlite::Connection,
+    conversation_ids: &[String],
+) -> Result<(), String> {
+    if conversation_ids.is_empty() {
+        return Ok(());
+    }
+    // Agent-tree teardown temporarily disables SQLite triggers. Reproduce the workflow
+    // invalidation before cascading away its bindings, in the same deletion transaction.
+    let placeholders = std::iter::repeat_n("?", conversation_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut values = vec![rusqlite::types::Value::Integer(now_ms())];
+    values.extend(
+        conversation_ids
+            .iter()
+            .cloned()
+            .map(rusqlite::types::Value::Text),
+    );
+    connection.execute(
+        &format!("UPDATE workflow_instances SET enabled=0,needs_review=1,revision=revision+1,updated_at=MAX(updated_at+1,?),last_request_json='{{}}' WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id IN ({placeholders}))"),
+        rusqlite::params_from_iter(values),
+    ).map_err(storage_error)?;
+    Ok(())
+}
+
 fn delete_agent_tree_records(
     connection: &rusqlite::Connection,
     scope: &AgentTreeDeletionScope,

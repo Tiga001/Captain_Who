@@ -126,20 +126,11 @@ beforeEach(async () => {
           definition: structuredClone(request.definition),
           revision: request.expectedRevision + 1,
           updatedAt: 1,
-          enabled: validationIssues.length === 0 && (old?.enabled ?? false),
+          enabled: validationIssues.length === 0,
           issues: structuredClone(validationIssues)
         },
         ...records.filter((record) => record.definition.id !== request.definition.id)
       ]
-    }
-    if (request.operation === 'setEnabled') {
-      const record = records.find((record) => record.definition.id === request.id)
-      if (!record || record.revision !== request.expectedRevision)
-        throw Object.assign(new Error('Revision conflict'), { code: -32009 })
-      if (record.issues.length)
-        throw Object.assign(new Error('Workflow needs validation'), { code: -32602 })
-      record.enabled = request.enabled
-      record.revision += 1
     }
     if (request.operation === 'delete')
       records = records.filter((record) => record.definition.id !== request.id)
@@ -636,11 +627,11 @@ describe('native workflow editor', () => {
     }
   )
 
-  it('only lets validated workflows toggle and persists the switch across reopening', async () => {
+  it('lists valid templates and incomplete drafts without any template activation switches', async () => {
     const definition = parseWorkflowDefinition(fixture)
     definition.name = '版本发布验收'
     records = [
-      { definition, revision: 1, updatedAt: 1, enabled: false, issues: [] },
+      { definition, revision: 1, updatedAt: 1, enabled: true, issues: [] },
       {
         definition: { ...structuredClone(definition), id: 'draft', name: '未完成流程' },
         revision: 1,
@@ -650,108 +641,36 @@ describe('native workflow editor', () => {
       }
     ]
     const view = await renderWorkflow()
-    const valid = page.getByRole('switch', { name: /版本发布验收/ })
-    const invalid = page.getByRole('switch', { name: /未完成流程/ })
-    await expect.element(valid).toBeEnabled()
-    await expect.element(valid).toHaveAttribute('aria-checked', 'false')
-    await expect.element(invalid).toBeDisabled()
-    await expect.element(invalid).toHaveAttribute('aria-checked', 'false')
+    await expect
+      .element(page.getByRole('button', { name: '编辑工作流模板 版本发布验收', exact: true }))
+      .toBeVisible()
+    await expect
+      .element(page.getByRole('button', { name: '编辑工作流模板 未完成流程', exact: true }))
+      .toBeVisible()
+    await expect.element(page.getByText('草稿', { exact: true })).toBeVisible()
+    expect(page.getByRole('switch').query()).toBeNull()
     expect(document.body.textContent).not.toContain('图结构已校验')
-    await valid.click()
-    await expect.element(valid).toHaveAttribute('aria-checked', 'true')
-    expect(service.request).toHaveBeenLastCalledWith({
-      operation: 'setEnabled',
-      id: definition.id,
-      enabled: true,
-      expectedRevision: 1
-    })
+    expect(service.request.mock.calls.map(([request]) => request.operation)).toEqual(['list'])
     await page.screenshot({
-      path: '../../../../../.cache/workflow-authoring/workflow-switch-light.png'
+      path: '../../../../../.cache/workflow-authoring/workflow-templates-availability-light.png'
     })
     await view.unmount()
     for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, classicDarkTheme)))
       document.documentElement.style.setProperty(key, value)
     await renderWorkflow()
-    const reopened = page.getByRole('switch', { name: /版本发布验收/ })
-    await expect.element(reopened).toHaveAttribute('aria-checked', 'true')
+    await expect
+      .element(page.getByRole('button', { name: '编辑工作流模板 版本发布验收', exact: true }))
+      .toBeVisible()
+    expect(page.getByRole('switch').query()).toBeNull()
+    expect(records[0].enabled).toBe(true)
+    expect(records[1].enabled).toBe(false)
+    expect(records.map((record) => record.revision)).toEqual([1, 1])
     await page.screenshot({
-      path: '../../../../../.cache/workflow-authoring/workflow-switch-dark.png'
-    })
-    await reopened.click()
-    await expect.element(reopened).toHaveAttribute('aria-checked', 'false')
-    expect(service.request).toHaveBeenLastCalledWith({
-      operation: 'setEnabled',
-      id: definition.id,
-      enabled: false,
-      expectedRevision: 2
+      path: '../../../../../.cache/workflow-authoring/workflow-templates-availability-dark.png'
     })
   })
 
-  it('keeps the new switch unavailable until an older running host is restarted', async () => {
-    records = [
-      {
-        definition: parseWorkflowDefinition(fixture),
-        revision: 1,
-        updatedAt: 1,
-        issues: []
-      } as unknown as WorkflowRecord
-    ]
-    await renderWorkflow()
-    const toggle = page.getByRole('switch')
-    await expect.element(toggle).toBeDisabled()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
-    await expect.element(toggle).toHaveAttribute('title', '重启应用后可使用启用开关')
-    ;(toggle.element() as HTMLButtonElement).click()
-    expect(service.request.mock.calls.map(([request]) => request.operation)).toEqual(['list'])
-  })
-
-  it('keeps a failed toggle unchanged and prevents concurrent toggle requests', async () => {
-    const definition = parseWorkflowDefinition(fixture)
-    records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
-    await renderWorkflow()
-    const toggle = page.getByRole('switch')
-    await expect.element(toggle).toBeEnabled()
-    let rejectToggle!: (reason: Error) => void
-    service.request.mockImplementationOnce(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectToggle = reject
-        })
-    )
-    await toggle.click()
-    await expect.element(toggle).toBeDisabled()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
-    const calls = service.request.mock.calls.length
-    ;(toggle.element() as HTMLButtonElement).click()
-    expect(service.request.mock.calls).toHaveLength(calls)
-    rejectToggle(new Error('Storage unavailable'))
-    await expect.element(page.getByRole('alert')).toBeVisible()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
-    await expect.element(toggle).toBeEnabled()
-    await toggle.click()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
-    expect(records[0].revision).toBe(2)
-  })
-
-  it('refreshes a stale toggle revision instead of overwriting another change', async () => {
-    const definition = parseWorkflowDefinition(fixture)
-    records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
-    await renderWorkflow()
-    const toggle = page.getByRole('switch')
-    await expect.element(toggle).toBeEnabled()
-    records[0].revision = 2
-    records[0].enabled = true
-    await toggle.click()
-    await expect.element(page.getByRole('alert')).toHaveTextContent('请刷新列表后重试')
-    expect(records[0].revision).toBe(2)
-    await page.getByRole('button', { name: '重试', exact: true }).click()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
-    await toggle.click()
-    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
-    expect(records[0].revision).toBe(3)
-  })
-
-  it('turns an enabled workflow off when saved as a draft and leaves a corrected graph off', async () => {
+  it('makes an invalid saved draft unavailable and automatically restores availability when corrected', async () => {
     const definition = parseWorkflowDefinition(fixture)
     records = [{ definition, revision: 1, updatedAt: 1, enabled: true, issues: [] }]
     await renderWorkflow()
@@ -764,16 +683,17 @@ describe('native workflow editor', () => {
     await expect.poll(() => records[0].enabled).toBe(false)
     await page.getByRole('button', { name: '知道了', exact: true }).click()
     await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
-    await expect.element(page.getByRole('switch')).toBeDisabled()
-    await expect.element(page.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
+    expect(page.getByRole('switch').query()).toBeNull()
+    await expect.element(page.getByText('草稿', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '编辑工作流模板', exact: true }).click()
     validationIssues = []
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('版本发布验收')
     await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(3)
     await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
-    await expect.element(page.getByRole('switch')).toBeEnabled()
-    await expect.element(page.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
+    expect(page.getByRole('switch').query()).toBeNull()
+    expect(records[0].enabled).toBe(true)
+    expect(page.getByText('草稿', { exact: true }).query()).toBeNull()
     expect(document.body.textContent).not.toContain('图结构已校验')
   })
 

@@ -2,12 +2,14 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 工作区指令（AGENTS.md）
 
 工作区指令把项目文件夹根部的 `AGENTS.md` 约定自动带给模型。它不新增任何工具或权限，只是 Conversation World State 的一个模型可见 section：`workspace.instructions`。
+
+这里的“项目文件夹”是 Run admission 冻结的 primary/auxiliary roots。Composer 单独选择的 Folder Reference、附件或 `@` 提及不扩展发现范围；目录中的文件可按相应读取权限访问，但不会仅因被附加就自动成为项目指令。两类目录入口的区别见[会话输入](conversation-inputs.md#文件夹引用)。
 
 ## 发现规则
 

@@ -1,0 +1,236 @@
+.workflow-monitor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-main-panel);
+}
+.workflow-monitor__header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  box-sizing: border-box;
+  padding: calc(var(--titlebar-height, 32px) + 2px) 20px 12px;
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+  -webkit-app-region: drag;
+}
+.workflow-monitor__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.workflow-monitor__back:hover {
+  background: var(--mc-color-state-hover);
+}
+.workflow-monitor__back:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+}
+.workflow-monitor__color {
+  flex-shrink: 0;
+  width: 4px;
+  height: 23px;
+  border-radius: 3px;
+  background: var(--workflow-instance-color);
+}
+.workflow-monitor__header h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--mc-font-size-lg);
+  font-weight: var(--mc-font-weight-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-monitor__node.is-running .workflow-monitor__node-status {
+  background: var(--workflow-instance-color);
+}
+.workflow-monitor__shell {
+  min-width: 0;
+}
+.workflow-monitor__canvas {
+  --workflow-node-surface: #fff;
+  --workflow-node-text: #262626;
+  --workflow-node-muted: #667085;
+  --workflow-node-border: #cbd5e1;
+  --workflow-node-accent: #0068c9;
+  overscroll-behavior: contain;
+}
+.workflow-monitor__canvas .workflow-node:not(.workflow-node--gate) {
+  color: var(--workflow-node-text);
+  background: var(--workflow-node-surface);
+  border-color: var(--workflow-node-border);
+  border-radius: 9px;
+}
+.workflow-monitor__canvas .workflow-node__copy > span {
+  color: var(--workflow-node-muted);
+}
+.workflow-monitor__canvas .workflow-gate-shape path {
+  fill: var(--workflow-node-surface);
+  stroke: var(--workflow-node-border);
+}
+.workflow-monitor__canvas .workflow-node--root {
+  border-style: solid;
+}
+.workflow-monitor__canvas button.workflow-monitor__node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  text-align: left;
+  border-width: 1.5px;
+  font: inherit;
+  cursor: pointer;
+}
+.workflow-monitor__canvas .workflow-monitor__node.is-bound {
+  border-color: color-mix(in srgb, var(--workflow-instance-color) 65%, var(--workflow-node-border));
+}
+.workflow-monitor__canvas .workflow-monitor__node:hover:not(:disabled),
+.workflow-monitor__canvas .workflow-monitor__node:focus-visible {
+  border-color: var(--workflow-instance-color);
+  outline: 2px solid color-mix(in srgb, var(--workflow-instance-color) 35%, transparent);
+  outline-offset: 2px;
+}
+.workflow-monitor__canvas .workflow-monitor__node:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.workflow-monitor__node .workflow-node__copy {
+  padding-right: 22px;
+}
+.workflow-monitor__node .workflow-node__copy > span {
+  padding-right: 57px;
+}
+.workflow-monitor__node-indicators {
+  position: absolute;
+  right: 10px;
+  top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 7px;
+}
+.workflow-monitor__node-status {
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  opacity: 0.6;
+  background: var(--workflow-node-muted);
+}
+.workflow-monitor__node-unread {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--workflow-node-accent);
+}
+.workflow-monitor__node-attention {
+  position: absolute;
+  right: 9px;
+  bottom: 10px;
+  max-width: 70px;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: var(--mc-radius-pill);
+  color: var(--workflow-node-accent);
+  background: color-mix(in srgb, var(--workflow-node-accent) 10%, white);
+  font-size: 10px;
+  font-weight: var(--mc-font-weight-medium);
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-monitor__node[data-waiting='approval'] .workflow-monitor__node-attention {
+  color: #168348;
+  background: #eaf8ef;
+}
+.workflow-monitor__node.is-running .workflow-monitor__node-status {
+  opacity: 1;
+}
+.workflow-monitor__node::after {
+  position: absolute;
+  inset: -3px;
+  border: 2px solid var(--workflow-instance-color);
+  border-radius: 11px;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--workflow-instance-color) 30%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  content: '';
+}
+.workflow-monitor__node.is-running::after {
+  animation: workflow-monitor-breathe 2.2s ease-in-out infinite;
+}
+.workflow-monitor__node-orbit {
+  position: absolute;
+  inset: -3px;
+  width: calc(100% + 6px);
+  height: calc(100% + 6px);
+  overflow: visible;
+  visibility: hidden;
+  color: var(--workflow-instance-color);
+  pointer-events: none;
+}
+.workflow-monitor__node-orbit rect {
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  rx: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2px;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.workflow-monitor__node-orbit-trail {
+  stroke-dasharray: 22 78;
+  opacity: 0.3;
+}
+.workflow-monitor__node-orbit-head {
+  stroke-dasharray: 8 92;
+  filter: drop-shadow(0 0 2px currentColor);
+}
+.workflow-monitor__node.is-running .workflow-monitor__node-orbit {
+  visibility: visible;
+}
+.workflow-monitor__node.is-running .workflow-monitor__node-orbit rect {
+  animation: workflow-monitor-orbit 3.2s linear infinite;
+}
+@keyframes workflow-monitor-orbit {
+  to {
+    stroke-dashoffset: 100;
+  }
+}
+@keyframes workflow-monitor-breathe {
+  0%,
+  100% {
+    opacity: 0.22;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workflow-monitor__node.is-running .workflow-monitor__node-orbit {
+    visibility: hidden;
+  }
+  .workflow-monitor__node.is-running .workflow-monitor__node-orbit rect {
+    animation: none;
+  }
+  .workflow-monitor__node.is-running::after {
+    animation: none;
+    opacity: 0.65;
+  }
+}

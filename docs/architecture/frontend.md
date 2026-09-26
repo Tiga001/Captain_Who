@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 前端架构
@@ -13,7 +13,7 @@ last_verified: 2026-09-16
 
 Renderer 负责：
 
-- 展示会话、Agent Run、Automation Run、审批、设置和右侧栏 Tool。
+- 展示会话、Agent Run、Automation Run、Workflow 模板与实例、审批、设置和右侧栏 Tool。
 - 管理仅影响展示和交互的临时状态。
 - 将 Electron Main service 或 Rust Core 的权威快照投影为 UI，并拒绝身份不匹配或过期的异步结果。
 - 通过窄化的 Host API 发起持久化、原生能力或后端操作。
@@ -72,12 +72,12 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 `app/AppShell.tsx` 是应用级 orchestration layer，而不是可复用 feature。它当前组合：
 
 - 会话元数据、按需详情加载、活动会话、滚动位置和会话底部跟随。
-- Composer 草稿、附件、模型与 Skill 选择。
+- Composer 草稿、托管附件导入、文件夹引用、工作区 `@` 引用、模型与 Skill 选择。
 - Agent Run 绑定、事件缓冲、流式文本刷新、停止与权威终态对账。
 - 待审批动作、命令会话恢复、steer/排队消息、编辑重写和 Provider transition。
 - Multi-Agent collaboration store、审批和 observer surface。
 - 通用通知 settings/event/resync、原生点击导航和 Main locale mirror；不在前端实现第二份投递 outbox。
-- 左侧栏、中央会话页、Automation 的 Scheduled 主视图、右侧栏 workspace/capability 和全屏设置页。
+- 左侧栏、中央会话页、Automation 的 Scheduled 主视图、全局 Workflow 管理/只读流程图、右侧栏 workspace/capability 和全屏设置页。
 
 会话滚动的当前契约：`useConversationBottomFollow` 把距底部 20 px 以内视为贴底并持续跟随；流式增量与容器/消息块高度变化（含异步 Markdown 图片等无 DOM 变更的块级增长）都保持最新内容在底部。只有读者主动上移才暂停跟随，底部侧增长与程序化滚动的竞态不会误停。离开底部时，interactive surface 在输入框上方显示浮动“回到底部”控件：普通状态为向下箭头，流式生成期间替换为打字省略号；点击平滑回到底部并恢复跟随（`prefers-reduced-motion` 时立即跳转），不中断生成。observer surface 不显示该控件。
 
@@ -92,6 +92,8 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 - 右侧栏：模块注册表驱动的多页面平台，详见 [右侧栏平台](../subsystems/right-sidebar.md)。
 
 Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独立 `primaryView`，覆盖中央会话页和右侧栏，而不是注册成右侧栏页面；左侧栏仍保留，用于切回 Conversation。`AppShell` 只持有视图切换、外部导航请求和本次应用会话的 drawer 宽度偏好，Automation task、Automation Run 和 attention 的业务状态仍来自 Core Server。
+
+Workflow 同样使用独立主视图：左侧「工作流」管理跨项目的实例，设置中的 `workflows` 页面管理模板；实例绑定画布和只读流程图不属于 Agent Center，也不按项目创建副本。实例开启状态、模板版本和绑定由 Rust Core 持久化；前端的活动边框与节点提示只投影现有对话/子 Agent 状态。当前尚无工作流消息路由、逻辑门执行或专门的 Run，详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 
 Projects 的新建和编辑统一经过项目表单；目录选择使用 Main 的原生 picker，Main 在提交时校验文件夹存在性、重复和嵌套关系。项目含一个主文件夹和若干辅助文件夹，标题栏项目卡按存储顺序展示，并可逐个在 Finder 打开；从卡片进入编辑后的“移除本地项目”请求仍进入既有移除确认流程。首次安装的模型目录为空，`selectedModelId=''`，用户必须在 Configuration 中配置模型；UI 不得以历史内置模型列表作为后端默认值。
 
@@ -116,6 +118,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 | 模型、搜索与图片生成凭据                         | Rust Core 选择的凭据存储                                                 | 只接收状态并暂存用户当前输入；成功/取消后清空；从不回读明文或引用  |
 | 活动 Run、pending action、command session        | Rust Core 事件和存储记录                                                 | 绑定权威 id、缓冲早到事件、reload 时重新 hydrate/reconcile         |
 | Automation task、Automation Run、attention       | Core Server/Rust Core 管理的 SQLite Automation task/Run/event            | 按 `revision`、事件 `sequence` 和请求身份合并；通知只触发刷新      |
+| Workflow 模板、暂存草稿、实例和对话绑定          | Core Server/Rust Core 的 Workflow repository                             | CAS、保存幂等和实例使用确认；本地画布草稿不改变对话或触发执行      |
 | 通知事实、批次、设置和投递 disposition           | Core Server/Rust Core；原生显示由 Electron Main                          | settings 使用 CAS；event/resync 只触发刷新；点击只执行 typed 导航  |
 | Browser 逻辑导航、历史、偏好和下载               | Main surface/session + Rust Core-owned history/preferences/download rows | 只投影 safe DTO；按 `surfaceInstanceId/stateRevision` 拒绝迟到状态 |
 | 右侧栏页面、选中项、滚动/局部预览状态            | Renderer 内存                                                            | 按 module 策略保活或卸载；应用重启后重建                           |
@@ -144,6 +147,14 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 
 后端上下文算法见 [上下文管理](./context-management.md)；Tool 结果投影规则见 [Tool 结果消费者矩阵](../subsystems/tool-result-consumer-matrix.md) 和 [Tool 结果限制](../subsystems/tool-result-limits.md)。
 
+## Composer 输入与协作展示
+
+文件附件在 Host 完成托管导入后以稳定引用进入草稿和提交，Renderer 不把大文件字节重复放入发送、引导或排队请求。导入状态独立于已完成附件；切换草稿 scope、取消导入和迟到 picker 结果必须隔离。普通消息和运行中引导允许仅包含附件或文件夹引用，历史和队列复用同类卡片与图片预览。完整契约见[会话输入与附件](../subsystems/conversation-inputs.md)。
+
+`+` 菜单和空 `@` 菜单共用添加入口，首页包含文件、图片、文件夹及 Skill 列表；带查询的 `@` 通过 Main 搜索当前项目的全部配置目录，显示安全的逻辑路径。选中的工作区引用保存为 `@workspace/<alias>/<path>` Markdown，既不复制文件内容，也不授予新的目录权限。菜单相对整个 Composer 上方定位，附件、引用、排队区改变高度时仍保持该锚点。搜索、项目切换和原生 picker 均检查请求身份。
+
+协作时间线使用后端持久化的实际 requester/recipient ownership，不能把结构父子关系直接当成展示归属。自动 Result 唤醒的终态不生成重复完成行；子 Agent 报告保留在父邮箱而不改写父消息历史。observer 在持久历史之外叠加精确 Run 的流式快照，并使用 generation/sequence 防止重复、缺失前缀及跨 Agent 串流。Agent Center 树上的通信光波是另一份有界、无正文的短时投影，不作为已读、终态或路由执行依据，详见[右侧栏平台](../subsystems/right-sidebar.md)。
+
 ## Automation（UI：Scheduled）
 
 `features/automations/` 是 Scheduled 页面及其 Renderer client、cache、realtime 和表单状态的领域边界；
@@ -169,11 +180,11 @@ ScheduledPage
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v49，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。数据库版本以[存储与数据生命周期](./storage-and-data-lifecycle.md)为准，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
-设置页的页面 id 和导航清单以 `features/settings/SettingsPage.tsx` 为准。当前精确 id 为 `general`、`profile`、`appearance`、`configuration`、`personalization`、`usageBilling`、`skills`、`browser`、`agentTemplates`、`mcp`、`environment` 和 `archivedConversations`。
+设置页的页面 id 和导航清单以 [SettingsPage.tsx](../../src/renderer/src/features/settings/SettingsPage.tsx) 及[设置注册表](../../src/renderer/src/features/settings/settingsRegistry.ts)为准。Workflow 模板使用独立 `workflows` 页面，与 `agentTemplates` 子 Agent 模板页面分开；新增页面须同步搜索目录、深链入口与未保存草稿保护。
 
 设置不是单一存储域：外观中的语言/主题在 localStorage，其他 UI preferences 多数通过 Storage API，MCP/Skill/图片生成、Browser 和通知使用各自的权威服务。Browser 独立页组合 automation capability、app-owned link 目标、下载设置/历史、浏览历史与清除数据；MCP 页只维护 MCP Server 列表。General 页的普通任务通知 preset 使用 Rust Core revision/CAS；Never 只关闭四个普通任务开关，不连带关闭 Automation 通知。页面组件应调用所属领域 hook/client，不应建立第二份通用设置对象。
 
@@ -194,7 +205,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v49 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2、Workflow definition schema v1 与 SQLite schema 必须分开命名和演进。
 11. FileChange diff 卡片、Browser 下载中心和原生通知点击只消费安全投影；UI 中可见的路径、卡片或按钮不授予文件/Browser/通知权限。
 12. 凭据查询只允许返回状态；credential reference 和已有 secret 都不得进入 Renderer DTO、store、错误或测试 snapshot。
 
@@ -223,6 +234,9 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - Scheduled 布局：`src/renderer/src/features/automations/automationLayout.ts`、`useAutomationLayout.ts`
 - 设置导航：`src/renderer/src/features/settings/SettingsPage.tsx`
 - Agent Template library：`src/renderer/src/features/settings/pages/AgentTemplatesSettingsPage.tsx`
+- Workflow 模板/实例与只读流程图：[features/workflows/](../../src/renderer/src/features/workflows/)、[useWorkflowWorkspace.ts](../../src/renderer/src/app/useWorkflowWorkspace.ts)
+- Workflow 活动与待处理提示：[useWorkflowActivity.ts](../../src/renderer/src/features/workflows/project/useWorkflowActivity.ts)、[useWorkflowMonitor.ts](../../src/renderer/src/features/workflows/project/useWorkflowMonitor.ts)、[useConversationAttention.ts](../../src/renderer/src/features/chat/useConversationAttention.ts)
+- Composer 导入和逻辑引用：[useAttachmentImports.ts](../../src/renderer/src/features/chat/useAttachmentImports.ts)、[workspaceMentions.ts](../../src/renderer/src/features/chat/workspaceMentions.ts)
 - 静态依赖规则：`eslint.config.mjs`
 
 ## 测试与验证
@@ -259,6 +273,8 @@ pnpm test:automation-core-e2e
 - [ ] FileChange 活动/历史分页绑定精确 identity，超预算时安全降级；observer 没有获得 mutation 能力。
 - [ ] Browser surface state、下载和历史事件检查 instance/revision；通知设置使用 CAS，点击只消费 typed destination。
 - [ ] Agent Template 定义与 project assignment 的部分失败会刷新 canonical 列表，不把本地勾选当成已提交事实。
+- [ ] Workflow 实例启停、颜色占用、归档保护和模板使用确认以 Host 结果为准；列表校准与只读监视不覆盖暂存绑定或清除未读。
+- [ ] Composer 导入/搜索/提交按 scope 和草稿版本处理迟到结果；仅附件/目录/工作区引用输入与排队引导有覆盖。
 
 ## 当前限制
 
@@ -271,3 +287,4 @@ pnpm test:automation-core-e2e
 - 保存 Automation 编辑会采用当前电脑 timezone；UI 当前不提供独立 timezone 选择器。
 - Automation 的真实 Core Server E2E 是独立命令，默认 `pnpm check` 不会运行。
 - 当前没有通用通知 inbox 或 badge；Renderer 只提供设置、event/resync 和原生点击导航。
+- Workflow 已具备定义、实例绑定与只读活动监视；图中的输入/输出规则尚未驱动消息路由或模型执行。

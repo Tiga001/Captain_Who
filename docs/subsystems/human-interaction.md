@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 人机交互 Tool：阻塞与非阻塞问答
@@ -122,11 +122,14 @@ Renderer 使用 Host API 的完整快照作为权威状态，`requestChanged` �
 
 - 一批问题在聊天时间线中显示一个入口，而不是为每题创建入口；异步批次可以最小化后从该入口恢复。
 - 展示优先级固定为审批 > 阻塞问题 > 非阻塞问题。被抢占的未提交草稿和页码保留在当前 Renderer 内存。
+- 不在对应对话页面时，左侧栏为仍有 `open` 提问的对话显示「等待交互」，优先级低于「等待批准」。侧栏和工作流流程图共享提问状态；非阻塞问题在模型结束或面板最小化后仍保留提示，提交、忽略或取消后移除。状态从 Host 分页快照及请求变化恢复，未加载聊天历史的对话也可显示，不把浏览流程图当作已读或回答。
 - 提交后，问题和答案按题序显示为一个用户外观的问答气泡；忽略的异步批次不显示正式回答气泡。
 - 当前通用原生通知只覆盖任务终态和待审批等事实；人机提问本身不会额外创建系统原生通知。用户应在 Conversation 的面板或时间线入口处理问题。
 - 未提交的选项、文字和页码只保存在 Renderer 内存，关闭窗口或重载页面会丢失；已接纳的问题、已提交答案及 Delivery 回执会持久化并可在同版本重启后重新读取。
 
 前端状态与 UI 真源为[src/renderer/src/features/humanInteraction/](../../src/renderer/src/features/humanInteraction/)，跨进程通道为[src/main/ipc/humanInteractionIpc.ts](../../src/main/ipc/humanInteractionIpc.ts)和[src/preload/HumanInteractionIpcBridge.ts](../../src/preload/HumanInteractionIpcBridge.ts)。通用通知的当前事实类型见[通用通知](notifications.md)。
+
+侧栏与工作流监视使用 [`useConversationAttention`](../../src/renderer/src/features/chat/useConversationAttention.ts) 统一加载 Host 分页请求快照，不要求先加载 Conversation 消息；[`useConversationAttention.browser.test.tsx`](../../src/renderer/src/app/__tests__/useConversationAttention.browser.test.tsx) 覆盖待回答投影。工作流画布只消费相同 attention 状态，不自动提交、忽略问题或启动工作流执行。
 
 ## 数据、隐私与安全边界
 

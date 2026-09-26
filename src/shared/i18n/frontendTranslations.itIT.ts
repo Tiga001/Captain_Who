@@ -140,6 +140,7 @@ export const itITTranslations = {
   'sidebar.unreadConversation': 'Nuova risposta',
   'sidebar.processingConversation': 'Elaborazione',
   'sidebar.waitingApproval': 'In attesa di approvazione',
+  'sidebar.waitingAnswer': 'In attesa di interazione',
   'sidebar.archiveAllChats': 'Archivia tutte le chat',
   'sidebar.organizeSidebar': 'Organizza la barra laterale',
   'sidebar.sortBy': 'Ordina per',
@@ -159,6 +160,8 @@ export const itITTranslations = {
   'conversation.renameConversation': 'Rinomina la chat',
   'conversation.archiveConversation': 'Archivia la chat',
   'conversation.archiveFailed': 'Impossibile archiviare la chat. Per favore riprova.',
+  'conversation.archiveWorkflowActive':
+    'Disattiva il flusso di lavoro prima di archiviare la chat.',
   'conversation.markUnread': 'Segna come non letto',
   'conversation.renameTitle': 'Rinomina la chat',
   'conversation.renameDescription': 'Sii breve e facile da riconoscere',

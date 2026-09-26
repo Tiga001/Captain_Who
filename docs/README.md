@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-26
 ---
 
 # Captain Who 开发文档
@@ -41,37 +41,32 @@ fixture 和测试为准。
 
 ## 子系统
 
-[工作流定义与画布编辑](subsystems/workflow-authoring.md) 说明工作流第一阶段的节点、连线规则、草稿校验与持久化边界。
-
-[账号登录与云端资料](subsystems/account-login.md) 说明启动蒙版、会话存储、退出登录不影响任务的边界，以及真实账号验收步骤。
-
-[本机 Token 活动与账号许可](subsystems/local-token-usage-and-license.md) 说明纯本机统计、24 小时许可缓存、开发库显式重置及云端先行部署的边界。
-
-[macOS Arm64 桌面自动更新](subsystems/desktop-updates.md) 说明受限 IPC、手动下载、安全退出安装与 COS 发布验收边界。
-
-[手动上下文压缩与快捷命令](subsystems/manual-context-compaction.md) 说明七项 Slash 命令、独立用量、取消恢复、压缩边界分支与 latest fork。
-
-[工作区指令（AGENTS.md）](subsystems/workspace-instructions.md) 说明每个冻结文件夹根部的 AGENTS.md 如何聚合为模型可见的 `workspace.instructions` section、32 KiB 上限与截断标记，以及修改和删除在采样边界的 replace/remove 语义。
-
-| 文档                                                              | 内容                                                     |
-| ----------------------------------------------------------------- | -------------------------------------------------------- |
-| [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |
-| [向用户提问](subsystems/human-interaction.md)                     | 阻塞/非阻塞 Tool、设置、状态、投递、恢复与跨进程边界     |
-| [FileChange](subsystems/file-change.md)                           | `apply_patch`、Observation、审批、提交、审计和历史 Diff  |
-| [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与通知事实          |
-| [通用通知](subsystems/notifications.md)                           | 普通任务与 Automation 的事实、批次、原生投递和点击导航   |
-| [Tool Result 消费矩阵](subsystems/tool-result-consumer-matrix.md) | Model、Event、Trace、Archive 等投影消费者                |
-| [Tool Result 上限](subsystems/tool-result-limits.md)              | 截断、分页、归档和恢复契约                               |
-| [MCP](subsystems/mcp.md)                                          | 用户配置的 stdio MCP Server 与内部 HostBridge Capability |
-| [Skills](subsystems/skills.md)                                    | bundled、installed、workspace Skill 生命周期             |
-| [浏览器与自动化](subsystems/browser-automation.md)                | surface、Managed Playwright、设置、历史、下载和风险门禁  |
-| [命令与会话](subsystems/command-sessions.md)                      | 命令策略、进程组、handoff、wait 和恢复                   |
-| [Office 与 Artifact](subsystems/office-and-artifacts.md)          | Word、表格、演示文稿、PDF、受管运行时与 Artifact         |
-| [右侧栏平台](subsystems/right-sidebar.md)                         | 模块注册、实例、工作区绑定和页面生命周期                 |
-| [终端](subsystems/terminal.md)                                    | node-pty utility process、背压和清理                     |
-| [工作区文件](subsystems/workspace-files.md)                       | 路径约束、预览模式和资源预算                             |
-| [Git Review](subsystems/git-review.md)                            | diff scope、snapshot、FileChange 历史 Diff 与变更操作    |
-| [图片生成](subsystems/image-generation.md)                        | Profile、凭据、任务日志和 Artifact 发布                  |
+| 文档                                                                 | 内容                                                     |
+| -------------------------------------------------------------------- | -------------------------------------------------------- |
+| [工作流定义与实例](subsystems/workflow-authoring.md)                 | 模板画布、校验、实例绑定、启停与只读监视；执行调度未接线 |
+| [对话输入与附件](subsystems/conversation-inputs.md)                  | 分块导入、文件夹引用、工作区提及、草稿、队列与引导       |
+| [账号登录与云端资料](subsystems/account-login.md)                    | 登录门禁、会话存储、退出登录与运行中任务的边界           |
+| [本机 Token 与账号许可](subsystems/local-token-usage-and-license.md) | 本机统计、许可缓存、Host 准入租约与恢复约束              |
+| [桌面自动更新](subsystems/desktop-updates.md)                        | macOS Arm64 更新 IPC、下载、退出安装与验收边界           |
+| [手动上下文压缩](subsystems/manual-context-compaction.md)            | Slash 命令、独立用量、取消恢复、压缩边界与 Fork          |
+| [工作区指令](subsystems/workspace-instructions.md)                   | 冻结工作区根部 AGENTS.md、预算和采样边界更新             |
+| [工具、权限与审批](subsystems/tools-permissions-and-approvals.md)    | 工具注册、权限、审批、取消和恢复                         |
+| [向用户提问](subsystems/human-interaction.md)                        | 阻塞/非阻塞 Tool、设置、状态、投递、恢复与跨进程边界     |
+| [FileChange](subsystems/file-change.md)                              | `apply_patch`、Observation、审批、提交、审计和历史 Diff  |
+| [Scheduled Automation](subsystems/scheduled-automations.md)          | 定时任务、调度、Run、恢复、attention 与通知事实          |
+| [通用通知](subsystems/notifications.md)                              | 普通任务与 Automation 的事实、批次、原生投递和点击导航   |
+| [Tool Result 消费矩阵](subsystems/tool-result-consumer-matrix.md)    | Model、Event、Trace、Archive 等投影消费者                |
+| [Tool Result 上限](subsystems/tool-result-limits.md)                 | 截断、分页、归档和恢复契约                               |
+| [MCP](subsystems/mcp.md)                                             | 用户配置的 stdio MCP Server 与内部 HostBridge Capability |
+| [Skills](subsystems/skills.md)                                       | bundled、installed、workspace Skill 生命周期             |
+| [浏览器与自动化](subsystems/browser-automation.md)                   | surface、Managed Playwright、设置、历史、下载和风险门禁  |
+| [命令与会话](subsystems/command-sessions.md)                         | 命令策略、进程组、handoff、wait 和恢复                   |
+| [Office 与 Artifact](subsystems/office-and-artifacts.md)             | Word、表格、演示文稿、PDF、受管运行时与 Artifact         |
+| [右侧栏平台](subsystems/right-sidebar.md)                            | 模块注册、实例、工作区绑定和页面生命周期                 |
+| [终端](subsystems/terminal.md)                                       | node-pty utility process、背压和清理                     |
+| [工作区文件](subsystems/workspace-files.md)                          | 路径约束、预览模式和资源预算                             |
+| [Git Review](subsystems/git-review.md)                               | diff scope、snapshot、FileChange 历史 Diff 与变更操作    |
+| [图片生成](subsystems/image-generation.md)                           | Profile、凭据、任务日志和 Artifact 发布                  |
 
 ## 开发、发布与运维
 
@@ -98,6 +93,10 @@ fixture 和测试为准。
 - [人机交互分轮交付历史](archive/human-interaction-rollout-history.md)：已完成的五轮实施路线与后续修订背景。
 
 ## 文档状态
+
+本次开发基线为 2026-09-26 的代码工作树，包含工作流实例启停、归档保护和只读流程监视的未提交改动；
+这是开发实现快照，不表示这些能力已经随安装包发布。各页面只在核验其内容后更新 `last_verified`。
+工作流模板/实例管理与现有 Multi-Agent、Scheduled Automation 是不同子系统，工作流消息路由和逻辑门执行尚未实现。
 
 - `current`：描述当前代码，可以作为开发和评审依据。
 - `draft`：尚未成为工程约束，不得据此宣称功能已实现。

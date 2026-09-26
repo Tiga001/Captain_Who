@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-09-26
 ---
 
 # Multi-Agent 发布门禁
@@ -59,7 +59,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v56”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v57”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -117,14 +117,24 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.settings.get`�
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v56**（全局工作流实例与独立编辑草稿），空库须原子创建完整 v56；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留工作流并增加默认关闭的启用开关；exact v53 → v54 保留历史增加工作流定义表；exact v52 → v53 保留全部历史且不回填旧活动；exact v51 → v52 保留协作历史并更新 Mailbox 正文约束。exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56。不转换或清除旧协作历史，v50 已有旧日志时必须返回 reset-required。当前库须通过 exact SQLite catalog fingerprint 和外键校验。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v57**（实例启停与对话归档保护），空库须原子创建完整 v57；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留工作流并增加默认关闭的模板 enabled 历史字段；exact v53 → v54 保留历史增加工作流定义表；exact v52 → v53 保留全部历史且不回填旧活动；exact v51 → v52 保留协作历史并更新 Mailbox 正文约束。exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57。不转换或清除旧协作历史，v50 已有旧日志时必须返回 reset-required。当前库须通过 exact SQLite catalog fingerprint 和外键校验。以下输入必须 fail closed 且不修改源库：
 
 - v49 及更早的开发库，或仍有旧协作事件的 v50 库；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v56；仅从受支持的 exact catalog 恢复 allowlisted 配置与 credential reference。该显式 reset 清空聊天、运行、本机 Token 统计、Run/Wake 冻结策略和项目；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。启动时不会自动执行 reset，也不转换旧聊天、运行或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v57；仅从受支持的 exact catalog 恢复 allowlisted 配置与 credential reference。该显式 reset 清空聊天、运行、本机 Token 统计、Run/Wake 冻结策略和项目；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。启动时不会自动执行 reset，也不转换旧聊天、运行或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
+
+涉及 v57 工作流生命周期时，还需保留工作流专项回归证据，不能用本门禁的协作运行时测试代替：
+
+- 模板可用性仅由当前 `issues` 是否为空派生，历史 enabled 字段不控制可用性，界面没有模板开关。
+- 实例 enabled 持久化、默认开启；新建和编辑确认均开启，`setInstanceEnabled` 使用 revision 校验，失败不改变实例。
+- 仅开启实例独占颜色且比较忽略大小写；关闭释放颜色，重新开启或确认配置时重新检查占用。
+- 开启实例中的对话禁止归档；批量归档先检查全批目标，每次存储写入仍由触发器保护，不宣称跨请求原子性。关闭后归档或删除绑定对话使实例保持关闭并标记 `needsReview`。
+- 正式发布模板变更将关联实例关闭并要求复核；读取时校验失效仅使模板不可选，重新开启实例仍须模板有效。关闭不取消活跃 Run，也不删除绑定或对话。
+
+此处只验证模板、实例、颜色及归档管理；工作流消息路由、逻辑门执行与调度尚未实现。专项测试入口见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 
 ## 7. 发布所需的组合证据
 

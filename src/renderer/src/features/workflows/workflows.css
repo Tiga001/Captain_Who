@@ -270,10 +270,6 @@
   border-radius: var(--mc-radius-card);
   background: var(--mc-color-surface-card);
 }
-.workflow-record__enabled {
-  flex-shrink: 0;
-  margin-left: 8px;
-}
 .workflow-record__title {
   display: flex;
   align-items: center;

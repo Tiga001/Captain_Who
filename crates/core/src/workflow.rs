@@ -291,11 +291,6 @@ pub enum Request {
         id: String,
         expected_revision: u64,
     },
-    SetEnabled {
-        id: String,
-        enabled: bool,
-        expected_revision: u64,
-    },
 }
 impl<'de> Deserialize<'de> for Request {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -306,6 +301,7 @@ impl<'de> Deserialize<'de> for Request {
                 "listInstances"
                     | "saveInstance"
                     | "deleteInstance"
+                    | "setInstanceEnabled"
                     | "saveDraft"
                     | "deleteDraft"
                     | "duplicate"
@@ -333,12 +329,6 @@ impl<'de> Deserialize<'de> for Request {
             },
             Delete {
                 id: String,
-                #[serde(rename = "expectedRevision")]
-                expected_revision: u64,
-            },
-            SetEnabled {
-                id: String,
-                enabled: bool,
                 #[serde(rename = "expectedRevision")]
                 expected_revision: u64,
             },
@@ -372,15 +362,6 @@ impl<'de> Deserialize<'de> for Request {
                     expected_revision,
                 } => Self::Delete {
                     id,
-                    expected_revision,
-                },
-                WireRequest::SetEnabled {
-                    id,
-                    enabled,
-                    expected_revision,
-                } => Self::SetEnabled {
-                    id,
-                    enabled,
                     expected_revision,
                 },
             },
@@ -1191,24 +1172,24 @@ mod tests {
     }
 
     #[test]
-    fn availability_wire_contract_is_strict_and_old_records_default_disabled() {
+    fn instance_activation_wire_contract_is_strict() {
         assert!(matches!(
             serde_json::from_value::<Request>(json!({
-                "operation": "setEnabled", "id": "workflow-review", "enabled": true,
+                "operation": "setInstanceEnabled", "id": "workflow-review", "enabled": true,
                 "expectedRevision": 1
             }))
             .unwrap(),
-            Request::SetEnabled {
+            Request::Manage(crate::workflow_management::Request::SetInstanceEnabled {
                 enabled: true,
                 expected_revision: 1,
                 ..
-            }
+            })
         ));
         for invalid in [
-            json!({"operation":"setEnabled","id":"workflow-review","expectedRevision":1}),
-            json!({"operation":"setEnabled","id":"workflow-review","enabled":null,"expectedRevision":1}),
-            json!({"operation":"setEnabled","id":"workflow-review","enabled":1,"expectedRevision":1}),
-            json!({"operation":"setEnabled","id":"workflow-review","enabled":true,"expectedRevision":1,"extra":true}),
+            json!({"operation":"setInstanceEnabled","id":"workflow-review","expectedRevision":1}),
+            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":null,"expectedRevision":1}),
+            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":1,"expectedRevision":1}),
+            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":true,"expectedRevision":1,"extra":true}),
         ] {
             assert!(serde_json::from_value::<Request>(invalid).is_err());
         }

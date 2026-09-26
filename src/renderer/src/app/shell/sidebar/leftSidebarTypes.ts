@@ -1,6 +1,7 @@
 import type { AppProject } from '../../../config/projectConfig'
 import type { ProjectEditDialogResult } from '../../../config/ProjectSettingsProvider'
 import type { ChatConversation } from '../../../features/chat/chatTypes'
+import type { ConversationAttentionById } from '../../../features/chat/useConversationAttention'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 
 export type SidebarSectionScope = 'projects' | 'conversations'
@@ -16,6 +17,7 @@ export interface SidebarConversation {
   id: string
   isPending?: boolean
   isWaitingForApproval?: boolean
+  isWaitingForAnswer?: boolean
   messages?: ChatConversation['messages']
   workflow?: { id: string; name: string; color: string }
   modelId?: string | null
@@ -42,6 +44,7 @@ export interface ProjectPointerDragState {
 export interface LeftSidebarProps {
   activeConversationId: string | null
   conversations: ChatConversation[]
+  conversationAttention?: ConversationAttentionById
   onArchiveAllProjectConversations: () => void
   onArchiveAllRootConversations: () => void
   onArchiveConversation: (conversationId: string) => void

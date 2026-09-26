@@ -30,6 +30,7 @@ const instance: WorkflowInstance = {
   revision: 1,
   updatedAt: 1,
   needsReview: false,
+  enabled: true,
   running: false,
   bindings: [
     { nodeId: 'agent-a', conversationId: 'existing' },
@@ -198,7 +199,12 @@ function Harness() {
       </button>
       {syncError && <span>sync failed</span>}
       <output data-testid="state">
-        {JSON.stringify({ conversations, drafts, memberships: workflow.memberships })}
+        {JSON.stringify({
+          conversations,
+          drafts,
+          memberships: workflow.memberships,
+          allMemberships: workflow.allMemberships
+        })}
       </output>
     </>
   )
@@ -249,6 +255,7 @@ describe('workflow workspace synchronization', () => {
     ).toBe('project-a')
     await screen.getByRole('button', { name: 'remove workflow' }).click()
     await expect.poll(() => read().memberships).toEqual({})
+    expect(read().allMemberships).toEqual({})
     expect(read().conversations).toHaveLength(3)
     expect(mocks.metas).toHaveBeenCalledOnce()
   })
@@ -294,6 +301,33 @@ describe('workflow workspace synchronization', () => {
       read().drafts.existing.queuedMessages.map((item: { modelId: string }) => item.modelId)
     ).toEqual(['queued-model', 'node-model'])
     expect(mocks.persist.mock.calls.filter(([id]) => id === 'existing')).toHaveLength(1)
+  })
+
+  it('shows membership only while enabled and never reapplies binding preferences on a toggle', async () => {
+    mocks.request.mockResolvedValue({ records: [], issues: [], instances: [instance] })
+    const screen = await render(<Harness />)
+    const read = () => JSON.parse(screen.getByTestId('state').element().textContent!)
+    await expect.poll(() => read().memberships.existing?.id).toBe(instance.id)
+    expect(read().allMemberships.existing).toEqual(read().memberships.existing)
+    mocks.request.mockResolvedValue({
+      records: [],
+      issues: [],
+      instances: [{ ...instance, enabled: false }]
+    })
+    window.dispatchEvent(new Event('captain:workflows-changed'))
+    await expect.poll(() => read().memberships).toEqual({})
+    expect(read().allMemberships.existing).toEqual({
+      id: instance.id,
+      name: instance.name,
+      color: instance.color
+    })
+    mocks.request.mockResolvedValue({ records: [], issues: [], instances: [instance] })
+    window.dispatchEvent(new Event('captain:workflows-changed'))
+    await expect.poll(() => read().memberships.existing?.id).toBe(instance.id)
+    expect(mocks.persist).not.toHaveBeenCalled()
+    expect(mocks.metas).not.toHaveBeenCalled()
+    expect(read().drafts.existing.modelId).toBe('existing-model')
+    expect(read().drafts.existing.permissionMode).toBe('default')
   })
 
   it('reloads persisted membership after template or binding changes', async () => {

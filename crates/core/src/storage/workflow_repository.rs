@@ -101,19 +101,6 @@ pub fn request(
                 return Err(revision_conflict());
             }
         }
-        Request::SetEnabled {
-            id,
-            enabled,
-            expected_revision,
-        } => {
-            set_enabled(
-                &transaction,
-                &id,
-                enabled,
-                expected_revision,
-                available_models,
-            )?;
-        }
         Request::Manage(request) => {
             response.affected_conversation_ids =
                 management::request(&transaction, request, available_models)?;
@@ -142,7 +129,7 @@ fn list(
     }
     let mut statement = connection
         .prepare(
-            "SELECT workflow_id, definition_json, revision, updated_at, enabled FROM workflow_definitions
+            "SELECT workflow_id, definition_json, revision, updated_at FROM workflow_definitions
          ORDER BY updated_at DESC, workflow_id ASC",
         )
         .map_err(storage_error)?;
@@ -153,14 +140,13 @@ fn list(
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
-                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(storage_error)?;
     let mut records = vec![];
     let mut invalid_records = vec![];
     for row in rows {
-        let (id, json, revision, updated_at, enabled) = row.map_err(storage_error)?;
+        let (id, json, revision, updated_at) = row.map_err(storage_error)?;
         if !(1..=MAX_SAFE_REVISION).contains(&revision) || updated_at < 0 {
             return Err(Error::Storage(
                 "Invalid persisted workflow record metadata".into(),
@@ -169,7 +155,7 @@ fn list(
         match parse_persisted_definition(&json, &id, available_models) {
             Ok((definition, issues)) => records.push(Record {
                 definition,
-                enabled: enabled && issues.is_empty(),
+                enabled: issues.is_empty(),
                 revision: revision as u64,
                 updated_at,
                 issues,
@@ -275,64 +261,6 @@ fn save(
              VALUES (?1, ?2, ?3, ?4)", params![definition.id, json, next, timestamp],
         ).map_err(storage_error)?;
     }
-    Ok(())
-}
-
-fn set_enabled(
-    connection: &Connection,
-    id: &str,
-    enabled: bool,
-    expected_revision: u64,
-    available_models: &HashSet<String>,
-) -> Result<(), Error> {
-    validate_id(id)?;
-    let expected = revision_to_sql(expected_revision)?;
-    if expected == 0 {
-        return Err(Error::Invalid(
-            "Changing workflow availability requires its current revision".into(),
-        ));
-    }
-    let current: Option<(String, i64, i64)> = connection
-        .query_row(
-            "SELECT definition_json, revision, updated_at FROM workflow_definitions WHERE workflow_id = ?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(storage_error)?;
-    let Some((json, revision, updated_at)) = current else {
-        return Err(revision_conflict());
-    };
-    if revision != expected {
-        return Err(revision_conflict());
-    }
-    let definition: Definition = serde_json::from_str(&json).map_err(storage_error)?;
-    if definition.id != id || updated_at < 0 {
-        return Err(Error::Storage("Invalid persisted workflow record".into()));
-    }
-    let issues = definition
-        .validate(available_models)
-        .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
-    if !issues.is_empty() {
-        return Err(Error::Invalid(
-            "Save a valid workflow before changing its availability".into(),
-        ));
-    }
-    let next = next_revision(expected)?;
-    let timestamp = now_ms().max(updated_at.saturating_add(1));
-    let changed = connection
-        .execute(
-            "UPDATE workflow_definitions SET enabled = ?1, revision = ?2, updated_at = ?3
-             WHERE workflow_id = ?4 AND revision = ?5",
-            params![enabled, next, timestamp, id, expected],
-        )
-        .map_err(storage_error)?;
-    if changed != 1 {
-        return Err(revision_conflict());
-    }
-    // Availability changes do not alter graph content; keep an existing draft based
-    // on this exact published revision publishable after reopening the editor.
-    connection.execute("UPDATE workflow_editing_drafts SET base_revision=?1 WHERE template_id=?2 AND base_revision=?3",params![next,id,expected]).map_err(storage_error)?;
     Ok(())
 }
 

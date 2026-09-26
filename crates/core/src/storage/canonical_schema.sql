@@ -6853,3 +6853,32 @@ BEGIN
         last_request_json = '{}', updated_at = MAX(updated_at + 1, NEW.updated_at)
     WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = NEW.id);
 END;
+
+
+-- Workflow instance activation and protected conversation archiving, schema v57.
+ALTER TABLE workflow_instances ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1));
+UPDATE workflow_instances SET enabled=0 WHERE needs_review=1;
+DROP TRIGGER workflow_bound_conversation_before_delete;
+DROP TRIGGER workflow_bound_conversation_archive_changed;
+CREATE TRIGGER workflow_bound_conversation_before_delete
+BEFORE DELETE ON conversations
+BEGIN
+    UPDATE workflow_instances SET enabled=0, needs_review = 1, revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, OLD.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = OLD.id);
+END;
+CREATE TRIGGER workflow_bound_conversation_archive_changed
+AFTER UPDATE OF archived_at ON conversations
+WHEN NEW.archived_at IS NOT OLD.archived_at
+BEGIN
+    UPDATE workflow_instances SET enabled=0, needs_review = 1, revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, NEW.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = NEW.id);
+END;
+CREATE TRIGGER workflow_active_conversation_archive_guard
+BEFORE UPDATE OF archived_at ON conversations
+WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL
+     AND EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN workflow_instances w ON w.instance_id=b.instance_id WHERE b.conversation_id=OLD.id AND w.enabled=1)
+BEGIN
+    SELECT RAISE(ABORT, 'workflow_active_archive_blocked');
+END;

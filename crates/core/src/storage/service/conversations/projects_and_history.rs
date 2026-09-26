@@ -70,6 +70,10 @@ impl StorageService {
                 )
                 .map_err(storage_error)?;
                 ensure_deletion_scope_has_no_active_execution(transaction, &conversation_ids)?;
+                invalidate_workflows_before_trigger_disabled_deletion(
+                    transaction,
+                    &conversation_ids,
+                )?;
                 automation_repository::invalidate_automations_before_trigger_disabled_project_delete(
                     transaction,
                     project_id,

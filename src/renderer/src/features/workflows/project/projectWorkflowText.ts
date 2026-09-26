@@ -15,3 +15,8 @@ export const WORKFLOW_COLORS = [
   '#8879D8',
   '#D67E55'
 ] as const
+
+export function pickUnusedWorkflowColor(colors: readonly string[]): string | null {
+  const used = new Set(colors.map((color) => color.trim().toLowerCase()))
+  return WORKFLOW_COLORS.find((color) => !used.has(color.toLowerCase())) ?? null
+}

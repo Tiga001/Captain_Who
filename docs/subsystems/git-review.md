@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # Git Review 子系统
@@ -27,9 +27,14 @@ Git Review 在右侧栏中提供仓库变更摘要、按文件差异、完整内
 
 - `unstaged`：工作区相对索引的变化，允许暂存与恢复。
 - `staged`：索引相对 `HEAD` 的变化，只允许取消暂存；必须先取消暂存，才能从 `unstaged` 范围恢复。
+- `uncommitted`：工作区相对 `HEAD` 的整体未提交变化，只读。
+- `commit`：所选完整 commit SHA 相对第一父提交的变化，初始提交相对空树，只读。
+- `branch`：所选 base ref 与 `HEAD` 的 merge-base 到当前工作区的变化，包含未提交内容，只读。
 - `lastTurn`：最近一次 Agent Turn 前后记录的工作区变化，只读，并要求 `conversationId`。
 
-文件状态包括 `modified`、`added`、`deleted`、`renamed`、`copied`、`untracked` 和 `conflicted`。公开的 `path` 使用斜杠分隔，并始终相对当前选中 project root；即使 project 是更大 Git worktree 的子目录，也不能把仓库根前缀泄漏到 UI。`previousPath` 只在旧路径同样位于该 project 内时出现。摘要返回 `repositoryId`、`snapshotId`、统计信息、文件列表及 `truncated` 标记。后续 diff、完整内容和变更请求都必须携带同一身份信息；Renderer 不应自行拼接 Git 路径或推断重命名关系。
+上述范围由 `GitReviewTarget` 判别联合表达；`getReviewRepositoryContext` 与 `listReviewCommits` 提供分支和提交选择快照，不授予创建分支或提交能力。多目录项目的 `source` 可为指定 folder id；仅 `lastTurn` 允许 `source: { kind: 'all' }` 聚合该轮各源。普通范围、分支目录和提交目录始终选择单源；未知源不回退主目录。
+
+文件状态包括 `modified`、`added`、`deleted`、`renamed`、`copied`、`untracked` 和 `conflicted`。公开的 `path` 使用斜杠分隔，并相对所选源根；即使源是更大 Git worktree 的子目录，也不能把仓库根前缀泄漏到 UI。`previousPath` 只在旧路径同样位于源内时出现。摘要返回 `repositoryId`、`snapshotId`、统计信息、文件列表及 `truncated` 标记；多源条目另带 source folder/alias 与用于打开文件的 workspace path，历史摘要带 assistant-message identity。后续 diff、完整内容和变更请求只提交 snapshot/file identity，由后端还原精确仓库、范围与路径；Renderer 不应自行拼接 Git 路径或推断重命名关系。
 
 ### 响应降级
 
@@ -40,7 +45,7 @@ Git Review 在右侧栏中提供仓库变更摘要、按文件差异、完整内
 ### 加载摘要与差异
 
 1. `useGitRepositoryCapability` 根据当前项目和工作区建立能力上下文；没有有效工作区时不发起请求。
-2. `useGitReview` 请求所选范围的摘要，并以项目、范围、会话和返回的快照身份作为缓存边界。
+2. `useGitReview` 请求所选范围的摘要，并以项目、来源/目录 revision、target（含会话、commit 或 base ref）和返回的快照身份作为缓存边界。
 3. Renderer 最多并发加载 4 个 diff，请求队列最多 64 个；缓存最多 64 个文件或约 2400 万字符。
 4. 用户请求完整文件对照时，使用独立队列：最多并发 4 个、排队 16 个，缓存最多 24 个文件或约 1200 万字符。
 5. Rust Core 只接受属于当前快照的文件身份，并在限制内运行 Git、解析结果。
@@ -75,7 +80,9 @@ Rust Core 快照在内存中保存，默认有效期 5 分钟；普通 Review �
 
 ### `lastTurn`
 
-Agent Run 会持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通过当前会话取最近一条可用记录，并比较这两个边界；它不等同于当前工作区，也不允许变更操作。没有会话、没有记录或记录已失效时，UI 必须显示明确空态或不可用状态。
+Agent Run 会按该轮冻结的多目录工作区持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通过当前会话取最近一条可用记录，并比较这两个边界；它不等同于当前工作区，也不允许变更操作。多源聚合按来源显示文件，同名文件不能合并；跳转 Files 时携带 source folder 和该轮 assistant-message id，按历史来源解析，不能回退到现在的项目目录。没有会话、没有记录或记录已失效时，UI 必须显示明确空态或不可用状态。
+
+聊天回复末尾的 Turn diff 摘要同样从持久的首个 before/final after 状态派生，通过 `getTurnDiffSummaries` 按 conversation/project 与 assistant-message ids 批量读取；不得把各次 `apply_patch` 的统计相加充当整轮结果，也不另存一份摘要 authority。
 
 ### 展示与偏好
 
@@ -85,7 +92,7 @@ Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser �
 
 ## 状态与安全不变量
 
-1. `repositoryId + snapshotId + scope + conversationId` 共同限定一次 Review；任何一项变化都必须隔离旧请求与缓存。
+1. project/source、target 和后端 repository/snapshot identity 共同限定一次 Review；任何一项变化都必须隔离旧请求与缓存。
 2. Rust Core 是路径、仓库边界、快照有效性和 Git 参数的最终裁决者；Renderer 校验只用于体验优化。
 3. 不得在 Main 或 Renderer 中新增直接的 `git` 子进程调用。
 4. `snapshotExpired` 必须触发重新取摘要；不得重放带旧快照的变更操作。
@@ -93,7 +100,7 @@ Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser �
 6. 二进制、超限、冲突和不支持状态必须保留为结构化状态。
 7. 恢复操作必须经过用户确认，且只能作用于快照中的单个受控文件身份。
 8. 异步结果写入 UI 前必须验证当前项目、会话、范围和快照身份。
-9. 所有公开 Git path 均相对 selected project root；仓库根前缀和 project 外 `previousPath` 不进入协议。
+9. 所有公开 Git path 均相对 selected source root；仓库根前缀和源外 `previousPath` 不进入协议；跨源重命名不得通过隐藏旧路径绕过 mutation 边界。
 10. Git Review 与 FileChange 可共享 renderer，但 authority、分页和 mutation 永远分离。
 
 ## 代码真源
@@ -101,6 +108,7 @@ Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser �
 - 协议与状态：`packages/protocol/src/git.ts`
 - Rust Core 聚合入口与限制：`crates/core/src/git_review.rs`
 - 快照：`crates/core/src/git_review/snapshot.rs`
+- target 解析与比较基准：[metadata.rs](../../crates/core/src/git_review/metadata.rs)
 - 变更安全：`crates/core/src/git_review/mutation.rs`
 - Core Server RPC：`crates/core-server/src/transport/git_rpc.rs`
 - Main IPC：`src/main/ipc/gitIpc.ts`
@@ -136,6 +144,7 @@ Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser �
 - [ ] 危险操作有确认、结构化结果及操作后的权威刷新。
 - [ ] 更新相关单元测试、集成测试和本文的限制说明。
 - [ ] FileChange 复用只发生在纯展示层，没有混用 Git snapshot/cache/mutation identity。
+- [ ] 多源 all 仅用于 lastTurn；历史文件跳转保留冻结来源，普通源切换隔离 branch/commit 目录和 diff 缓存。
 
 ## 当前限制
 

@@ -2,21 +2,21 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # 工作区文件与预览
 
-Files 模块提供项目目录树和只读预览。它是 Electron Main 通过 Host API 管理的工作区浏览能力，不是 Agent `read_file`、统一 `FileChange`、附件解析或 Office 文档渲染能力。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)。
+Files 模块提供项目多目录树和只读预览，Main 的同一工作区服务还为 Composer `@` 引用提供有界搜索。它是 Electron Main 通过 Host API 管理的工作区浏览能力，不是 Agent `read_file`、统一 `FileChange`、附件解析或 Office 文档渲染能力。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)，引用提交见[会话输入与附件](./conversation-inputs.md)。
 
 ## 职责边界
 
 | 层                           | 当前职责                                                                                     |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
 | Renderer                     | 文件树、筛选、选中项、Markdown source/preview、文本高亮、图片/PDF 显示、copy/reveal 操作入口 |
-| Preload/Host API             | 暴露 list/readPreview/copyPath/revealInFolder 四个窄方法                                     |
-| Main `WorkspaceFilesService` | 用 project id 解析权威根目录；规范化相对路径；阻止逃逸/symlink；有界读取并分类预览           |
-| Rust Core Storage            | 保存 project id 与配置路径，供 Main 解析项目根                                               |
+| Preload/Host API             | 暴露 listDirectory/searchMentions/readPreview/copyPath/revealInFolder 窄方法                 |
+| Main `WorkspaceFilesService` | 用 project/folder id 解析权威根；规范化相对路径；阻止逃逸/symlink；有界搜索、读取和分类预览  |
+| Rust Core Storage            | 保存项目多目录配置与每轮冻结工作区；历史读取复验原目录实体                                   |
 
 Renderer 不能提交绝对路径，不能从预览结果推导任意文件系统权限。Files 模块只读；复制和 reveal 由 Main 对已验证路径执行。
 
@@ -24,7 +24,7 @@ Agent 的 create/update/delete 与 direct `apply_patch` 现在统一投影为 `F
 
 ## 目录列举
 
-请求包含 `projectId`、可选相对 `directoryPath` 和 `includeHidden`。Main 通过 Core Server 解析项目路径，并对根与候选执行 `realpath`/containment 检查。
+请求包含 `projectId`、可选 `folderId`、相对 `directoryPath` 和 `includeHidden`。未指定 folder id 时选主文件夹，指定后必须精确命中配置项，不能回退到其他根。Main 通过 Core Server 解析项目路径，并对根与候选执行 `realpath`/containment 检查。
 
 目录列举规则：
 
@@ -40,11 +40,21 @@ Agent 的 create/update/delete 与 direct `apply_patch` 现在统一投影为 `F
 
 ## 文件树会话
 
-同一 project 的多个 Files 页面共享 `WorkspaceFileTreeSession`，从而复用已展开目录和树模型；只有当前 foreground Files page 是 active consumer。
+同一 project、folder id 与目录路径 revision 的多个 Files 页面共享 `WorkspaceFileTreeSession`，从而复用已展开目录和树模型；只有当前 foreground Files page 是 active consumer。多目录项目在树顶部提供源选择，各源独立保留搜索和展开状态。切换树不改变已有预览的 folder id；源路径改绑或移除会销毁对应缓存，alias/role 改变不使同一实体目录的树缓存失效。
 
 会话按需加载 root 和已展开目录。每次 refresh 增加 generation、清空 request id/目录状态和模型；迟到请求只有 generation、directory 和 request id 全部匹配才可写入。筛选使用 tree 的 `hide-non-matches` 模式，默认目录折叠、虚拟滚动和 sticky folders。
 
-Files 页面自身使用 `unmount-when-inactive`，但 project-scoped tree session 由 `WorkspaceFileTreeSessions` 资源层管理。预览不会在后台继续读取；再次激活时按 page state 重新加载。
+Files 页面自身使用 `unmount-when-inactive`，但 project/folder-scoped tree session 由 `WorkspaceFileTreeSessions` 资源层管理。预览不会在后台继续读取；再次激活时按 page state 重新加载。
+
+## Composer 工作区引用搜索
+
+`searchMentions` 只接收 project id、query 和可选 limit，跨配置的主/辅助目录搜索文件与目录名/相对路径。结果仅含 folder id、alias、kind、相对 path、displayName 和 displayPath，不含原生绝对路径或文件正文。Main 忽略 symlink 及 `.git`、`.cache`、`node_modules`、`build`、`dist`、`out`、`target` 目录，查询最多 256 字符，默认返回 40 项、最多 100 项；访问最多 50,000 个条目、保留最多 20,000 个候选后排序，`truncated` 明示不完整结果。空查询直接返回空集合，无法读取的目录跳过。
+
+Renderer 当前合并延迟搜索并请求 24 项，旧查询结果不能覆盖新查询或新项目。选择项成为 Composer 的逻辑 `@workspace/<alias>/<path>` 引用；点击引用可进入相应 Files 源或目录，提交时仍由普通工作区工具解析和授权。搜索结果不是文件快照、目录授权或附件导入，路径变化后实际使用仍需重新验证。
+
+## 当前与历史文件身份
+
+预览、copy 和 reveal 均接受可选 `assistantMessageId`。缺少该字段时使用当前项目目录配置；带该字段时由 Rust Core 读取该轮冻结的工作区，再按 folder id（省略时取该轮主根）解析 `@workspace/<alias>/<path>` 并复验目录实体。缺少历史快照、未知源或原根身份变化均失败，不降级读取当前同名路径。历史页面只固定工作区来源，实际预览仍读取该来源当前磁盘文件，并非恢复旧版文件内容。
 
 ## 预览分类与限制
 
@@ -77,15 +87,15 @@ Word、Excel 和 PowerPoint 在 Files preview 中明确显示“不支持预览�
 
 ## 页面与原生操作
 
-每个文件页使用 `workspace-file:<relative-path>` 作为 resourceKey。同一 workspace session 已存在的文件页会被复用。空 Files 页可承载第一个 transient 预览；打开其他文件会替换当前 transient 页，再次打开同一文件（包括再次点击树中已选中的文件）则把该页稳定为 `tabState: stable`。稳定页不会被下一次预览替换，后续文件会创建新的 transient 页。标签以斜体区分 transient 状态；如果目标已有稳定页，平台激活该页并清理可替换的 transient 来源页；如果目标本身是 transient，也会在激活时升级为 stable。
+每个文件页的 resourceKey 包含源 folder id、可选历史 assistant-message id 和源内相对路径。同一 workspace session 与来源身份已存在的文件页会被复用。空 Files 页可承载第一个 transient 预览；打开其他文件会替换当前 transient 页，再次打开同一文件（包括再次点击树中已选中的文件）则把该页稳定为 `tabState: stable`。稳定页不会被下一次预览替换，后续文件会创建新的 transient 页。标签以斜体区分 transient 状态；如果目标已有稳定页，平台激活该页并清理可替换的 transient 来源页；如果目标本身是 transient，也会在激活时升级为 stable。
 
 只有显式的 `tabState: transient` 可被替换。缺失 `tabState` 的旧页面状态按 stable 处理，不能把 optional 字段误解释为 transient 默认值。
 
 每个 workspace 最多 20 个关联文件页，超限按平台规则淘汰；替换 transient 页不新增页面。
 
-page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-lines。项目删除或 workspace 不可用时页面关闭，避免旧 project id 继续发请求。
+page state 保存相对路径、folder id、可选历史 assistant-message id、`tabState`、Markdown view、PDF page 和 wrap-lines。项目删除或 workspace 不可用时页面关闭，避免旧 project id 继续发请求。
 
-复制路径与 Finder/Explorer reveal 不把绝对路径先交给 Renderer：Renderer 发送 project id + 相对路径，Main 再解析 exact real path，分别调用 Electron clipboard 或 `shell.showItemInFolder()`。Symlink 不允许执行这两项操作。
+复制路径与 Finder/Explorer reveal 不把绝对路径先交给 Renderer：Renderer 发送 project/folder id、可选历史 assistant-message id 与相对路径，Main 再解析 exact real path，分别调用 Electron clipboard 或 `shell.showItemInFolder()`。Symlink 不允许执行这两项操作。
 
 ## 状态与安全不变量
 
@@ -94,7 +104,7 @@ page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-l
 3. Symlink 可展示但不可递归、预览、copy real path 或 reveal。
 4. `.git` 不进入文件树；Files 不提供写、删除或重命名操作。
 5. 文件读取以实际 bytes 进行上限检查，Renderer 还要执行行数/解码预算。
-6. 异步目录和预览响应必须绑定 project、path、generation/request id。
+6. 异步目录和预览响应必须绑定 project、folder、可选历史 assistant-message、path、generation/request id。
 7. Markdown 链接不能让主 Renderer 导航到外部或未知协议。
 8. FileChange、Git Review 和 Files 可以复用语法/diff 展示组件，但 transaction、snapshot 和 project-relative path identity 不可互换。
 
@@ -135,6 +145,8 @@ page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-l
 - [ ] copy/reveal 仍由 Main 解析路径，Renderer 不接收绝对路径。
 - [ ] 与 Agent 附件、Office 或 Git Review 的能力区别在用户文案中清晰。
 - [ ] FileChange 发生后通过权威 refresh 观察文件，不把聊天 diff 或审批状态写入 Files cache。
+- [ ] 多源树切换、目录改绑、历史来源失效和同名文件页均使用精确源身份；不存在回退到当前主目录的路径。
+- [ ] `@` 搜索有查询/遍历/结果预算，略过 symlink 与生成目录，结果只提供逻辑路径且不绕过实际读取授权。
 
 ## 当前限制
 
@@ -144,3 +156,4 @@ page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-l
 - 文本预览最多 1 MiB 且最多渲染 5,000 行；图片 12 MiB；PDF 32 MiB。
 - 单目录最多 20,000 项；单 workspace 最多 20 个关联文件页。
 - 页面和预览选项不跨应用重启持久化。
+- `@` 搜索是按请求有界扫描，不是完整文件索引；忽略目录、不可读目录和预算截断可能使结果不完整。

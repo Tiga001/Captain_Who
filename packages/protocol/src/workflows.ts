@@ -93,7 +93,7 @@ export interface WorkflowIssue {
 }
 export interface WorkflowRecord {
   definition: WorkflowDefinition
-  /** Effective availability after validation; this does not describe a running workflow. */
+  /** Derived template readiness: true exactly when validation has no issues. */
   enabled: boolean
   revision: number
   updatedAt: number
@@ -110,7 +110,7 @@ export type WorkflowRequest =
       expectedDraftRevision?: number
     }
   | { operation: 'delete'; id: string; expectedRevision: number }
-  | { operation: 'setEnabled'; id: string; enabled: boolean; expectedRevision: number }
+  | { operation: 'setInstanceEnabled'; id: string; enabled: boolean; expectedRevision: number }
   | { operation: 'listInstances' }
   | {
       operation: 'saveInstance'
@@ -145,7 +145,8 @@ export interface WorkflowInstance {
   revision: number
   updatedAt: number
   needsReview: boolean
-  /** Reserved authoritative runtime state; no client operation starts execution. */
+  enabled: boolean
+  /** Activity in an enabled instance; no client operation starts graph execution. */
   running: boolean
 }
 export interface WorkflowTemplateUsage {
@@ -420,7 +421,7 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
     const item = object(value, ['operation', 'id', 'expectedRevision'])
     return { operation: op, id: text(item.id), expectedRevision: integer(item.expectedRevision, 1) }
   }
-  if (op === 'setEnabled') {
+  if (op === 'setInstanceEnabled') {
     const item = object(value, ['operation', 'id', 'enabled', 'expectedRevision'])
     return {
       operation: op,
@@ -528,7 +529,7 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
         ['definition', 'enabled', 'revision', 'updatedAt', 'issues'],
         ['enabled']
       )
-      // Early v1 records predate the availability switch; omission is safe, while
+      // Missing readiness is treated as unavailable until the host is updated;
       // explicit malformed values and contradictory effective states are rejected.
       const enabled = Object.hasOwn(item, 'enabled') ? boolean(item.enabled) : false
       const recordIssues = issues(item.issues)
@@ -662,6 +663,7 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
     'revision',
     'updatedAt',
     'needsReview',
+    'enabled',
     'running'
   ])
   return {
@@ -673,6 +675,7 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
     revision: integer(item.revision, 1),
     updatedAt: integer(item.updatedAt),
     needsReview: boolean(item.needsReview),
+    enabled: boolean(item.enabled),
     running: boolean(item.running),
     bindings: array(
       item.bindings,

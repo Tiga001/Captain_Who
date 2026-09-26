@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useRef,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction
@@ -50,6 +51,7 @@ type ContextWindowSnapshots = ReturnType<
 interface UseAppShellRuntimeOptions {
   activeConversationId: string | null
   activeConversationIdRef: MutableRefObject<string | null>
+  visibleConversationId?: string | null
   activeDraftId: string
   activeRunBindingsRef: MutableRefObject<Map<string, ActiveRunBinding>>
   automationConversationMetaRefreshEpochRef: MutableRefObject<number>
@@ -119,6 +121,7 @@ interface UseAppShellRuntimeOptions {
 export function useAppShellRuntime({
   activeConversationId,
   activeConversationIdRef,
+  visibleConversationId,
   activeDraftId,
   activeRunBindingsRef,
   automationConversationMetaRefreshEpochRef,
@@ -174,6 +177,14 @@ export function useAppShellRuntime({
   uiPreferences,
   uiPreferencesStartupAttempt
 }: UseAppShellRuntimeOptions) {
+  const visibleConversationIdRef = useRef(
+    visibleConversationId === undefined ? activeConversationId : visibleConversationId
+  )
+  useLayoutEffect(() => {
+    visibleConversationIdRef.current =
+      visibleConversationId === undefined ? activeConversationId : visibleConversationId
+  }, [activeConversationId, visibleConversationId])
+
   // Agent tool events arrive faster than React state commits. Keep the ref and state in one
   // update path so an older render snapshot cannot overwrite newer tool-call results.
   const setConversationsWithRef = useCallback((value: SetStateAction<ChatConversation[]>) => {
@@ -613,6 +624,7 @@ export function useAppShellRuntime({
     conversationState: {
       activeConversationId,
       activeConversationIdRef,
+      visibleConversationIdRef,
       conversations,
       conversationsRef,
       setActiveConversationId,

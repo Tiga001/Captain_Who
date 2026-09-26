@@ -1,4 +1,6 @@
 .workflow-graph-editor {
+  /* Keep native titlebar drag regions behind Settings from swallowing editor input. */
+  -webkit-app-region: no-drag;
   container-type: inline-size;
   display: flex;
   flex-direction: column;

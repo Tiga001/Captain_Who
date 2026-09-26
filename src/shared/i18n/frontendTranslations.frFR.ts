@@ -140,6 +140,7 @@ export const frFRTranslations = {
   'sidebar.unreadConversation': 'Nouvelle réponse',
   'sidebar.processingConversation': 'Traitement',
   'sidebar.waitingApproval': "En attente d'approbation",
+  'sidebar.waitingAnswer': 'En attente d’interaction',
   'sidebar.archiveAllChats': 'Archiver toutes les discussions',
   'sidebar.organizeSidebar': 'Organiser la barre latérale',
   'sidebar.sortBy': 'Trier par',
@@ -159,6 +160,8 @@ export const frFRTranslations = {
   'conversation.renameConversation': 'Renommer la discussion',
   'conversation.archiveConversation': 'Archiver le chat',
   'conversation.archiveFailed': "Impossible d'archiver le chat. Veuillez réessayer.",
+  'conversation.archiveWorkflowActive':
+    'Désactivez le workflow avant d’archiver cette conversation.',
   'conversation.markUnread': 'Marquer comme non lu',
   'conversation.renameTitle': 'Renommer la discussion',
   'conversation.renameDescription': 'Soyez bref et facile à reconnaître',

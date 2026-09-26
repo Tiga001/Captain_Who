@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-13
+last_verified: 2026-09-26
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,9 +24,9 @@ last_verified: 2026-09-13
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v56**（SQLite `PRAGMA user_version = 56`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v57**（SQLite `PRAGMA user_version = 57`）：
 
-- `STORAGE_SCHEMA_VERSION = 56`；
+- `STORAGE_SCHEMA_VERSION = 57`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - v48 新增 `conversation_history_index_entries`，以普通索引把搜索记录身份映射到 FTS rowid，避免分支复制历史时反复全表扫描；
@@ -34,7 +34,7 @@ last_verified: 2026-09-13
 - v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表，统计起始时间在创建 schema 时固定，不回填此前的观测；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 当前 v56 库须通过 exact fingerprint 和外键校验。exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有工作流并增加默认关闭的 enabled 字段；exact v53 → v54 增加工作流定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
+- 当前 v57 库须通过 exact fingerprint 和外键校验。exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有工作流并增加默认关闭的模板 enabled 历史字段（当前可用性已改为校验结果派生）；exact v53 → v54 增加工作流定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55、v56、v57，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 未知版、非空未版本化或结构被篡改的数据库也返回 `development_storage_schema_reset_required`，不修改源库或自动重置。
 
@@ -42,7 +42,7 @@ last_verified: 2026-09-13
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v56，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。支持版本与恢复字段以 `crates/core-server/src/bin/storage-reset-dev.rs` 为准。启动时不会自动执行该工具。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v57，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。当前可确认的配置保留来源为 exact 当前 v57：旧配置来源判定仍受 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49` 限制，与当前 v57 不匹配，因此不能承诺已登记旧版本可恢复。启动升级到当前 schema 与旧备份 reset 是不同路径，详见[恢复手册](../operations/recovery-runbook.md)。真源为 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs)；启动时不会自动执行该工具。
 
 ## 本机 Token 统计
 
@@ -71,6 +71,8 @@ last_verified: 2026-09-13
 新附件使用 `AgentInputAttachment.encoding = managed`，`data` 保存不透明导入 ID。Electron 原生选择器分块读取已由用户选择的文件；Renderer File/Clipboard 按 512 KiB 分块提交。`storage.beginAttachmentImport / appendAttachmentImport / finishAttachmentImport / cancelAttachmentImport` 在受管目录创建文件及原子持久化清单，校验连续偏移、真实长度与 SHA-256。普通附件不再使用原有 8 MiB 的业务上限。Core Server 导入接口使用后台任务池；正文不穿过整条聊天 JSON 请求。
 
 导入目录为附件目录同级的 `attachment-imports/v1`，不会被普通附件 orphan 扫描误删。草稿、排队消息、编辑重发和失败恢复统一传递 managed 短引用，不提供旧 utf8/base64 原附件的恢复或转换分支。保存消息、引导和编辑重发时，复用现有附件表和事务补偿，64 KiB 流式复制并重新验证摘要。取消仅立即删除未完成导入；完成引用可能已被草稿或恢复记录持有，按引用扫描和保留期清理。无 SQLite DDL 或 schema 版本变更。
+
+启动清理只删除超过 7 天且未被 Composer 草稿/队列、pending action 或人机交互 suspension 引用的导入；持久 JSON 无法解析时停止清理。重用已存附件先形成稳定的 managed 引用，新消息/引导接纳时重新绑定 attachment identity，不覆盖原消息所属行。排队项的模型、权限与输入快照，及已接纳 guidance 的 durable 状态，分别按原 owner 保存与幂等恢复；完整输入契约见[会话输入](../subsystems/conversation-inputs.md)。
 
 Renderer 只在内存中缓存有界缩略图，点击再请求较大派生预览；不会把预览正文写回草稿。模型图片最长边 2048、单图不超过 8 MiB，缩略图最长边 256、data URL 不超过 192 KiB；解码限制为 40M 像素、256 MiB decoder allocation。原文件保留，工具的权限、内容身份与取消校验独立执行。普通文件的命令挂载使用流式 hash/复制，移除原有单文件 64 MiB、总计 128 MiB 限制；数量与授权约束继续生效。
 
@@ -113,7 +115,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v56 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v57 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -139,7 +141,7 @@ Automation notification outbox、投递 RPC 或第二套 claim/acknowledge autho
 
 ## 向用户提问表组
 
-独立设置、问题批次、不可变回应、回答投递和同步挂起记录分别持久化。创建提问在数据库事务内复核根身份、运行绑定与实时设置；提交或忽略通过 revision/CAS 和 submission identity 结算一次。正式提交与 pending delivery 原子写入，忽略没有 delivery。第 1 轮只持久化这些事实，暂停恢复和真实投递在后续轮次接入。详见[向用户提问](../subsystems/human-interaction.md)。
+独立设置、问题批次、不可变回应、回答投递和同步挂起记录分别持久化。创建提问在数据库事务内复核根身份、运行绑定与实时设置；提交或忽略通过 revision/CAS 和 submission identity 结算一次。正式提交与 pending delivery 原子写入，忽略没有 delivery。阻塞问题保存私有恢复材料，提交后恢复同一 Run；非阻塞答案通过 durable delivery 绑定 UserGuidance 或新 HumanRoot Turn，在实际消费后标记 applied。启动按持久请求、投递和 suspension 对账，不能从 UI 状态重放。详见[向用户提问](../subsystems/human-interaction.md)。
 
 ## 事务原则
 
@@ -159,7 +161,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v56、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v57、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -195,7 +197,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v56 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v57 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -203,8 +205,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v56 的 version 与 fingerprint 必须一致。
-2. 自动结构升级接受 exact v51–v55；exact v50 还要求协作事件日志为空。既有历史不转换、不删除，升级事务失败时完整回滚，更旧版本或未知 catalog 必须 fail closed。
+1. `canonical_schema.sql`、canonical schema v57 的 version 与 fingerprint 必须一致。
+2. 自动结构升级接受 exact v51–v56；exact v50 还要求协作事件日志为空。既有历史不转换、不删除，每一步迁移事务失败时完整回滚；整个逐级链不属于一个总事务，更旧版本或未知 catalog 必须 fail closed。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
 5. FTS、Renderer JSON 和缓存均不是权威数据。
@@ -247,8 +249,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v56，同时更新本文当前快照。
-- [ ] 验证 exact v55 升级保留全部历史、失败回滚且重复打开不重建；更早版本按上述逐级升级条件检查，拒绝时不修改源库。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v57，同时更新本文当前快照。
+- [ ] 验证 exact v56 升级保留全部历史、失败回滚且重复打开不重建；更早版本按上述逐级升级条件检查，拒绝时不修改源库。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。
 - [ ] 外部工作在事务外执行，提交时重新校验 revision/CAS。
@@ -262,7 +264,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 当前限制
 
-- 开发期没有自动数据库升级或降级；所有旧库（包括 exact v46）必须显式走受管 reset 流程。
+- 只支持上述精确 catalog 的逐级向前升级，不提供降级或任意旧库转换；更早版本被拒绝时也不能假设 reset 能保留其配置，须按当前恢复手册核对可恢复来源。
 - 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
 - Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。
@@ -281,4 +283,14 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 Files 当前读取按 project + folder id 定位；历史读取再携带 assistant-message id，使用原 Run 解析目录。Git Review 单源快照冻结项目成员、目录实体和 Git 身份；读取及 mutation 均复验快照，目录移除、改绑或仓库变化使旧操作失效。LastTurn 可按所有 Git 源聚合，但仍只读取同一次 Run 的冻结文件记录；来源无法匹配时明确显示不可用信息，不能按新别名重新解释历史。Terminal 源选择使用创建时捕获的目录实体，验证后向原 PTY 发送 cd。以上页面选择属于 Renderer 内存状态，不新增数据库 schema。
 
-工作流定义自 schema v54 起保存在 `workflow_definitions`；精确 v53 数据库以事务增加定义表与索引，既有会话、Agent 和历史保持不变。v55 为该表增加 enabled 字段，精确 v54 数据库以事务升级，已有工作流默认关闭。v56 增加 `workflow_instances`、`workflow_instance_bindings` 和 `workflow_editing_drafts`。实例不属于单个项目，可绑定跨项目对话；数据库唯一约束保证每个对话只能属于一个实例和一个节点。绑定确认在同一事务中新建缺失对话、一次性设置输入框的模型与权限并保存绑定；已有对话的当前模型元数据、活跃 Run 和队列快照保持不变，下一次发送沿普通模型切换路径生效。普通生成中的对话可被绑定；模型切换或手动上下文压缩期间沿相同 admission 锁拒绝配置变更；删除或归档已绑定对话将实例标为需要重新确认。独立草稿不会改变正式模板；活跃会话 Trace 或实例运行状态阻止覆盖模板。详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+Composer Folder Reference 不属于上述项目绑定。v50 的 `agent_run_guidances.folder_references_json` 与消息/草稿对应字段保留其 name、绝对 `rootPath`、目录 identity 和可用性；模型和展示投影有意包含 name/path，但不包含 Host 目录身份。历史加载与 fork 保留离线引用，不重绑定已被替换的目录；按需读时再验证身份。兼容读取旧 nested identity 的 snake_case 字段并写出 camelCase，不是放宽 authority。选中目录只增加读取来源，不增加写权限或自动发现其 AGENTS.md，见[会话输入](../subsystems/conversation-inputs.md#文件夹引用)。
+
+## 工作流模板与实例生命周期
+
+工作流定义自 schema v54 起保存在 `workflow_definitions`；精确 v53 数据库以事务增加定义表与索引，既有会话、Agent 和历史保持不变。v55 曾为模板增加默认关闭的 enabled 字段；当前该历史字段不控制可用性，模板 `enabled` 由实时校验 `issues` 是否为空派生，不再提供模板启用开关。v56 增加 `workflow_instances`、`workflow_instance_bindings` 和 `workflow_editing_drafts`；v57 为实例增加默认值为 true 的 `enabled` 及归档保护。
+
+实例启停通过 `setInstanceEnabled` 和 expectedRevision 做 CAS；新建或编辑确认均将实例设为开启。仅开启实例独占颜色，比较忽略十六进制字母大小写；确认配置和重新开启都在事务中复核。关闭实例保留绑定、对话及所选颜色，隐藏侧栏标记并释放颜色，不取消当前 Run。关闭不解除全局唯一绑定，实例仍不属于单个项目，可以保留跨项目对话。
+
+绑定确认在同一事务中新建缺失对话、一次性设置输入框的模型与权限并保存绑定；已有对话的当前模型元数据、活跃 Run 和队列快照保持不变，下一次发送沿普通模型切换路径生效。普通生成中的对话可被绑定；模型切换或手动上下文压缩期间沿相同 admission 锁拒绝配置变更。
+
+开启实例中的对话由数据库触发器禁止归档；关闭实例后才允许归档。归档或删除绑定对话、正式发布模板更新会关闭相关实例并标记 needsReview；重新开启须通过当前模板、绑定完整性、对话未归档及颜色占用检查。读取时的模板校验失效只使模板不可选，不自动关闭现有实例。前端批量归档先预检全部目标，数据库逐请求校验，不新增跨请求的原子批量 RPC。独立编辑草稿不改变正式模板；开启实例的活跃会话 Trace 或实例运行状态阻止覆盖正式模板。工作流执行与消息路由仍未实现，启停不创建、投递或取消模型任务。详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 通用通知
@@ -110,7 +110,7 @@ Main 的通知语言来自 Renderer 在启动早期同步的窄化 locale mirror
 
 ## 协议与安全不变量
 
-1. Notification schema v1、Automation schema v1/permission v2 与 SQLite canonical schema v49 是不同版本线。
+1. Notification schema v1、Automation schema v1/permission v2 与 SQLite canonical schema 是不同版本线；数据库版本见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
 2. 业务事务写事实；event/resync、原生 toast 和 Renderer 文案均不能反向生成事实。
 3. claim token、lease、validation 和 disposition 只存在于 Main ↔ Core Server Host-only 边界。
 4. 原生文案只使用安全、有限、本地化的 subject；完整业务内容留在所属页面。

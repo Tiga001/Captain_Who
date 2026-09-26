@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 手动上下文压缩与快捷命令
@@ -32,11 +32,13 @@ last_verified: 2026-09-16
 
 摘要生成复用跨厂商无工具压缩器；从持久日志选择最新完整安全前缀，检查游标前进、工具组闭合和受保护内容。没有新安全内容或没有值得压缩的历史时返回 noop，不发模型请求。空闲压缩可以包含最近完成的一轮，原始聊天时间线和 Exact Archive 不因此删减。
 
+压缩摘要始终使用显式有限输出预算（上限 30,000，再按任务上限和可用上下文空间收紧），不随普通聊天请求省略 HTTP 输出上限而变为无限预算。详见[上下文预留](../architecture/context-management.md#请求输出上限与上下文预留)。
+
 生成在事务外执行。收到的实际用量先独立持久化，然后在提交事务中复核旧 head、历史和模型配置，原子应用摘要、receipt 与操作终态。取消先请求 token 停止；提交成功后取消以 completed 事实为准。失败、提交前取消或过期状态都不替换旧上下文。启动恢复将残留 running 操作置为 interrupted，不自动重放付费请求。
 
 ## 用量、存储和分支
 
-当前 SQLite canonical v49 包含操作表和独立用量表。exact v47 依次通过搜索索引与纯附件引导迁移保留历史；其余旧版、未知版本和校验不通过的库返回 reset-required。`/fork` 和成功分割线的分支入口复用现有持久数据，不引入额外 schema 升级。详见[存储生命周期](../architecture/storage-and-data-lifecycle.md)。
+操作表和独立用量表属于当前 SQLite canonical schema；当前版本、允许的 exact 升级路径及 reset 限制统一见[存储生命周期](../architecture/storage-and-data-lifecycle.md#schema-发布策略)。`/fork` 和成功分割线的分支入口复用已有持久数据，不另建模型 Run 或重复计费。
 
 用量以 operation 为 owner，冻结请求模型价格，不覆盖上一条助手回复、不增加聊天消息数。失败或取消后已知的实际用量仍计入；未知 token 数量保持未知。清理用量保留幂等凭证，删除聊天前汇入日汇总。请求已在远端处理但本地尚未收到响应时崩溃，无法从本地准确补出厂商账单。
 

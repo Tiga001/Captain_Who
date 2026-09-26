@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 故障排查
@@ -48,16 +48,17 @@ pnpm verify:artifact-runtime
 
 ## `development_storage_schema_reset_required`
 
-当前开发策略只接受规范 schema 及 catalog fingerprint，不对旧库原地迁移。完全退出 Captain Who 后执行：
+当前开发策略接受规范 schema 及 exact catalog fingerprint；只对代码明确允许的 v50–v56 原地升级，其中 v50
+要求协作事件日志为空。不要把 reset-required 理解为可以直接重建任何旧库。完全退出 Captain Who 后先执行预检：
 
 ```bash
 pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。正式工具从 exact current v49 及 exact v35–v48 保留 allowlisted 配置与
-credential reference；无法安全识别且含配置的旧库拒绝重置。人机交互设置及 revision 在 v36–v49 reset 中保留，问题与回应历史不保留。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
-事实、浏览/下载记录、Agent 模板与分配、FileChange 事务和会话运行状态不会恢复。应用或 Core Server 仍持锁时
+第一条是非破坏性预检，第二条才会备份并重建。当前工具只支持 exact current v57 的配置保留，历史来源恢复分支
+仍被目标版本 gate 拒绝；详情见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。预检拒绝时保留原库，使用隔离数据根继续开发，不能追加确认参数绕过。人机交互设置、通知设置、Browser 下载设置和链接偏好属于配置保留项，问题、通知
+事实、浏览/下载记录、Agent 模板与分配、工作流模板/实例/草稿、FileChange 事务、本机 Token 统计和会话运行状态不会恢复。应用或 Core Server 仍持锁时
 命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
 [存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
 
@@ -68,6 +69,9 @@ App startup gate 会等待项目、模型和 Electron Host 状态。先定位具
 
 ## Scheduled Automation 未运行或显示 blocked
 
+模型选择器中缺少已配置模型时，先检查 Host 返回的 `execution` 及 `reason`。`enabled=true` 不能替代连接、
+Profile/runtime identity 和凭据可用性检查；在设置中修复并保存后重新读取，不手工补进前端列表。
+
 先确认应用与 Core Server 在计划时间附近持续运行；当前没有操作系统后台调度服务，应用退出期间不会启动 Turn。然后从 Scheduled 页面或 Automation Host API 核对 authoritative task/run：
 
 - 只有 `active` 且 health 为 `ok` 的任务才有 `nextRunAt`；`paused`、`blocked` 或已有非终态 Run 时不会再入队。
@@ -77,15 +81,23 @@ App startup gate 会等待项目、模型和 Electron Host 状态。先定位具
 
 `blocked` 会清空 `nextRunAt` 并要求修复配置：
 
-| code                                            | 修复方向                                                |
-| ----------------------------------------------- | ------------------------------------------------------- |
-| `target_missing/target_archived/target_invalid` | 重新选择可写的根 Conversation，或改为新 Conversation    |
-| `project_missing/project_path_missing`          | 重新绑定存在且路径可用的 Project                        |
-| `model_missing/model_disabled`                  | 选择存在且启用的 Model                                  |
-| `permission_disabled`                           | 重新启用该权限模式，或编辑任务改用当前允许的模式        |
-| `schedule_invalid/configuration_invalid`        | 重新编辑 schedule/配置并保存，让 Core Server 重新规范化 |
+| code                                             | 修复方向                                                |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| `target_missing/target_archived/target_invalid`  | 重新选择可写的根 Conversation，或改为新 Conversation    |
+| `project_missing/project_path_missing`           | 重新绑定存在且路径可用的 Project                        |
+| `model_missing/model_disabled/model_unavailable` | 选择 Host 判定可执行的 Model，修复连接、Profile 或凭据  |
+| `permission_disabled`                            | 重新启用该权限模式，或编辑任务改用当前允许的模式        |
+| `schedule_invalid/configuration_invalid`         | 重新编辑 schedule/配置并保存，让 Core Server 重新规范化 |
 
 保存修复时若出现 revision conflict，应先刷新最新 task 再重新应用编辑；不要手工改 SQLite 的 health、revision、Run status 或 lease。完整状态机见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
+
+## 登录、许可或附件/工作流恢复失败
+
+- 首次会话校验期间显示启动背景是正常阶段；区分账号资料、Host 水合和许可验证。许可失败只阻止新的用户回合，不能通过清理本机聊天修复。冷启动需重新联网验证许可，磁盘历史许可文件不会放行；账号会话和许可的边界见[账号许可](../subsystems/local-token-usage-and-license.md)。
+- 密码登录提示通用服务错误时，核对 CloudBase 密码 provider 是否启用，不把它当作密码错误。验证码发送失败可立即重试；成功接受后才有 60 秒本地冷却。排障仅记录安全 SDK code/request ID，不采集密码、验证码或 token。
+- 附件卡处于导入中时先等待导入终态；草稿/队列保存的是 durable import 引用，重启后仍应复用原身份。若报 missing/integrity 错误，保留草稿并重新选择源文件，不把缺失引用当作空附件提交。目录引用是只读授权，原目录替换或丢失时必须重新选择。
+- 只有附件或目录引用的消息和 Guidance 是有效输入，空文本不能单独成为拒绝原因。历史消息、队列与 Guidance 附件展示应按权威输入恢复，详见[会话输入](../subsystems/conversation-inputs.md)。
+- 工作流保存成功不表示节点已执行。实例需复核、模板不可用、绑定会话归档/删除或 revision conflict 时先刷新权威配置；启用实例关联会话无法归档时先暂停实例。不要通过删除绑定表修复；详见[工作流编排](../subsystems/workflow-authoring.md)。
 
 ## 系统通知未出现、语言不对或重复
 

@@ -68,6 +68,7 @@ export function useAgentRunLifecycle({
   const {
     activeConversationId,
     activeConversationIdRef,
+    visibleConversationIdRef = activeConversationIdRef,
     conversations,
     conversationsRef,
     setActiveConversationId,
@@ -956,7 +957,7 @@ export function useAgentRunLifecycle({
           const nextConversations = conversationsRef.current.map((conversation) => {
             if (
               conversation.id !== conversationId ||
-              activeConversationIdRef.current === conversationId ||
+              visibleConversationIdRef.current === conversationId ||
               (conversation.archivedAt !== null && conversation.archivedAt !== undefined) ||
               conversation.pendingArchivedAt !== undefined
             ) {
@@ -995,7 +996,7 @@ export function useAgentRunLifecycle({
       }
     },
     [
-      activeConversationIdRef,
+      visibleConversationIdRef,
       autoSubmitQueuedMessage,
       enqueueConversationMetaSave,
       bufferMessageDelta,

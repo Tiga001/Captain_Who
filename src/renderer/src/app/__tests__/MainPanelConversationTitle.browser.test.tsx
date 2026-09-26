@@ -343,6 +343,50 @@ describe('MainPanelToolbar project card', () => {
     ]
   }
 
+  it('opens the workflow from its colored icon before the project folder', async () => {
+    const onOpen = vi.fn()
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar
+          {...toolbarProps}
+          t={translate}
+          conversationActions={conversationActions()}
+          projectCard={{
+            conversationCount: 2,
+            onEditProject: vi.fn(),
+            onRevealFolder: vi.fn(),
+            project: playground
+          }}
+          workflow={{ name: 'Review workflow', color: '#e472a0', onOpen }}
+          title="Review changes"
+        />
+      </div>
+    )
+
+    const workflow = screen.getByRole('button', { name: 'Review workflow' })
+    const folder = screen.getByRole('button', { name: 'Open project details' })
+    const workflowBox = workflow.element().getBoundingClientRect()
+    expect(workflowBox.right).toBeLessThanOrEqual(folder.element().getBoundingClientRect().left)
+    expect(workflowBox.height).toBe(folder.element().getBoundingClientRect().height)
+    expect(getComputedStyle(workflow.element()).color).toBe('rgb(228, 114, 160)')
+    await userEvent.hover(workflow)
+    await expect.element(screen.getByRole('tooltip', { name: 'Review workflow' })).toBeVisible()
+    await workflow.click()
+    expect(onOpen).toHaveBeenCalledOnce()
+
+    await screen.rerender(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar
+          {...toolbarProps}
+          conversationActions={conversationActions()}
+          title="Unbound conversation"
+        />
+      </div>
+    )
+    await expect.element(workflow).not.toBeInTheDocument()
+    expect(screen.container.querySelector('.main-panel__workflow')).toBeNull()
+  })
+
   it('opens project details from the title and reveals or edits from the card', async () => {
     const onEditProject = vi.fn()
     const onRevealFolder = vi.fn()

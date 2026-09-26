@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-26
 ---
 
 # 本机 Token 活动与账号许可
@@ -15,7 +15,7 @@ Token 活动属于本机，不属于账号，不跨设备同步。账号退出�
 
 Rust Core 在模型请求 observation 持久化事务中按唯一请求 ID 幂等提取实际用量，覆盖常规模型请求与手动/自动压缩。按完成时间的 Asia/Shanghai 日期记录，不按整个 run 的累计 Done 快照相加。输入缓存使用现有规范化输入，思考输出不重复加；缺少完整实际用量的请求只计入“未报告用量”，不从文本或估算 Token 补数。
 
-schema v47 引入本机统计表，当前空库直接创建 v49；exact v47 先升级到 v48（补建搜索索引），再升级到 v49（允许纯附件引导），保留统计起始时间、去重账本和累计用量。2026-09-14 经用户确认，开发期移除 v46 → v47 自动升级；v46 及更早版本均返回 `development_storage_schema_reset_required`，不修改原库，需由开发者另行确认后执行显式重建。统计开始时间之前的旧 observation 不回填。查询 RPC 为 `agent.getLocalTokenUsage`，仅走本地 Core Server/IPC，日期范围最多 3660 天，计数以十进制字符串跨 IPC 传输以避免精度损失。
+schema v47 引入本机统计表，当前空库使用 [canonical schema](../../crates/core/src/storage/canonical_schema.sql)；受支持的 exact v50–v56 启动升级保留统计起始时间、去重账本和累计用量，其中 v50 另要求协作事件日志为空。v49 及更早版本不再自动升级；版本或 fingerprint 不受支持时返回 `development_storage_schema_reset_required`，不能沿用历史版本的迁移承诺。当前显式 reset 会丢弃本机统计，支持来源与保护边界见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。统计开始时间之前的旧 observation 不回填。查询 RPC 为 `agent.getLocalTokenUsage`，仅走本地 Core Server/IPC，日期范围最多 3660 天，计数以十进制字符串跨 IPC 传输以避免精度损失。
 
 个人资料展示今日/累计/单日最高、所选年份合计及年度热力图，不展示下方日/周/累计趋势和说明段落。年份通过左右按钮切换，最小 2026，最大当前上海年份。刷新仅重新读取本机统计，保留已显示数据、热力图节点及页面滚动位置，不触发资料或许可刷新；切年读取成功后再同时更新年份与数据，失败仍保留原图。本机计数不是计费或防篡改证据；服务商未返回、进程崩溃前未落盘的用量无法从客户端凭空恢复。
 

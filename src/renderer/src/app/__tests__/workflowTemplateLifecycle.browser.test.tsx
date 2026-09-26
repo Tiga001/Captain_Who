@@ -68,7 +68,7 @@ beforeEach(async () => {
           definition: structuredClone(request.definition),
           revision: request.expectedRevision + 1,
           updatedAt: 1,
-          enabled: old?.enabled ?? false,
+          enabled: true,
           issues: []
         },
         ...records.filter((record) => record.definition.id !== request.definition.id)
@@ -104,11 +104,6 @@ beforeEach(async () => {
       drafts = drafts.filter((item) => item.definition.id !== request.id)
       invalidDrafts = invalidDrafts.filter((item) => item.id !== request.id)
     }
-    if (request.operation === 'setEnabled') {
-      const record = records.find((item) => item.definition.id === request.id)!
-      record.enabled = request.enabled
-      record.revision += 1
-    }
     if (request.operation === 'duplicate') {
       const original = records.find((item) => item.definition.id === request.id)!
       records.push({
@@ -119,7 +114,7 @@ beforeEach(async () => {
           name: request.name
         },
         revision: 1,
-        enabled: false
+        enabled: original.issues.length === 0
       })
     }
     return structuredClone({ records, drafts, usages, invalidRecords, invalidDrafts, issues: [] })
@@ -174,6 +169,7 @@ describe('workflow template lifecycle', () => {
     await editAndSave('新的有效模板')
     await expect.poll(() => records.length).toBe(2)
     expect(page.getByRole('alert').query()).toBeNull()
+    expect(records[0].enabled).toBe(true)
     await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     await expect.element(unavailable).toBeVisible()
     await unavailable.getByRole('button', { name: '删除工作流模板 1234', exact: true }).click()
@@ -247,7 +243,7 @@ describe('workflow template lifecycle', () => {
     expect(page.getByRole('alert').query()).toBeNull()
   })
 
-  it('refreshes unavailable records after a successful enabled toggle', async () => {
+  it('refreshes unavailable records after a successful template copy', async () => {
     invalidRecords = [
       {
         id: 'invalid-template',
@@ -261,7 +257,7 @@ describe('workflow template lifecycle', () => {
     const unavailable = page.getByRole('article', { name: '模板不可用 无效模板', exact: true })
     await expect.element(unavailable).toHaveTextContent('数据无效')
     invalidRecords = []
-    await page.getByRole('switch', { name: '启用工作流 发布验收', exact: true }).click()
+    await page.getByRole('button', { name: '复制模板 发布验收', exact: true }).click()
     await expect.element(unavailable).not.toBeInTheDocument()
   })
 
@@ -319,7 +315,7 @@ describe('workflow template lifecycle', () => {
     expect(records[0]).toEqual(original)
     expect(records[1].definition.name).toBe('发布验收 (副本)')
     expect(records[1].definition.id).not.toBe(original.definition.id)
-    expect(records[1].enabled).toBe(false)
+    expect(records[1].enabled).toBe(true)
     expect(drafts[0].definition.name).toBe('未发布修改')
     expect(usages[0].templateId).toBe(original.definition.id)
   })

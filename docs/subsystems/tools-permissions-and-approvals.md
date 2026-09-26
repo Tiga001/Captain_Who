@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-26
 ---
 
 # Tool 体系、权限与审批
@@ -65,20 +65,26 @@ Git 差异通过 `run_command` 执行普通 Git 命令，沿用命令权限与�
 
 Core Server 为真实 Run、恢复和上下文预览提供 Storage-backed 搜索策略；设置 CAS 与执行 admission 共享设置锁，只读取搜索凭据，不把 Tavily 密钥放入 `AgentChatInput` 或恢复信封。无 Host 的 Rust Core 独立调用保留显式冻结配置适配器，该适配器不具备运行中更新能力，不能替代真实 Host 接线。
 
-2026-09-06 验证：Rust Core 的 `web_search`（14 项）、`web_fetch`（10 项）、`prompts::tests`（18 项）、`builtin_capability`（29 项）及 `builtin_capabilities`（12 项）全部通过；Core Server 的 `web_search`（4 项）、`human_input`（34 项）、`pending_actions`（71 项）、`persisted_resume_input`（7 项）及 `builtin_capability`（35 项）全部通过，各 filter 存在重叠，不作为独立用例总数相加。真实 Harness/Host 测试使用 loopback Provider、临时 SQLite 和内存测试凭据，覆盖运行中开关、迟到搜索/抓取、审批及同步提问暂停、凭据缺失、重启和重新授权；没有调用真实搜索服务或启动真实浏览器。相关三包 all-targets Clippy、文档和测试布局检查通过。本轮没有修改 Renderer/Preload 协议，不新增数据库版本或要求重置开发数据。
+动态开关回归位于 Rust Core 的 `web_search`、`web_fetch`、`builtin_capability` 测试和 Core Server 的 `web_search`、`human_input`、`pending_actions`、`persisted_resume_input` 测试，覆盖运行中关闭、迟到执行、审批/问答暂停、凭据缺失、重启和重新授权。真实 Harness/Host 回归使用 loopback Provider、临时 SQLite 和测试凭据，不代表已经验证真实搜索服务或浏览器。
+
+### 搜索工具内部重试
+
+`web_search` 与 `web_fetch` 在一次 Tool 调用内共用 [`web_retry.rs`](../../crates/core/src/tools/web_retry.rs)：连接、超时、408/429/5xx、无法读取/解析的响应可在原调用预算内最多尝试 3 次；其他 4xx（包括 404）和取消直接结算。重试采用有界指数退避及 jitter，支持秒数形式的 `Retry-After`；要求等待超过 10 秒或剩余预算不足 5 秒时停止重试。等待响应取消令牌，模型只接收整个尝试序列的最终结果，不把中间错误当作多次 ToolResult。
+
+这只适用于上述只读搜索工具的暂态 Provider 故障，不改变权限复核、Tool Result/Archive 上限，也不构成命令、图像生成或 MCP 未知副作用的重放许可。开发构建可从专用 tracing target 查看计划、等待、放弃、耗尽与恢复事件；诊断不替代最终 Tool 结算。
 
 ## 权限模型
 
 `AgentPermissions` 是后端权威值：
 
-| 维度              | 当前值                              | 说明                                                              |
-| ----------------- | ----------------------------------- | ----------------------------------------------------------------- |
-| read              | `workspace_only` / `all`            | 工作区、附件与受管引用；`all` 才允许受支持的外部绝对路径/系统别名 |
-| write             | `denied` / `workspace_only` / `all` | 控制所有 file-write 域 Tool；可见性不代表写权限                   |
-| command           | `require_approval` / `auto_approve` | 用户正常审批偏好                                                  |
-| command safety    | `guarded` / `full_access`           | 独立的风险上限；always-denied 操作不因 full access 放行           |
-| patch             | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验        |
-| builtin execution | `require_approval` / `auto_approve` | 应用可证明来源的内置 Skill/Capability 是否弹窗；不扩大其他权限    |
+| 维度              | 当前值                              | 说明                                                                              |
+| ----------------- | ----------------------------------- | --------------------------------------------------------------------------------- |
+| read              | `workspace_only` / `all`            | 冻结工作区、已选文件夹读取授权、附件与受管引用；其余外部绝对路径/系统别名须 `all` |
+| write             | `denied` / `workspace_only` / `all` | 控制所有 file-write 域 Tool；可见性不代表写权限                                   |
+| command           | `require_approval` / `auto_approve` | 用户正常审批偏好                                                                  |
+| command safety    | `guarded` / `full_access`           | 独立的风险上限；always-denied 操作不因 full access 放行                           |
+| patch             | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验                        |
+| builtin execution | `require_approval` / `auto_approve` | 应用可证明来源的内置 Skill/Capability 是否弹窗；不扩大其他权限                    |
 
 模板、项目、父 Agent 和动态 policy 之间使用逐维 `meet`，只能收紧不能扩权。Tool 用 `AgentToolPermissionPolicy::Default` 或 `FileChange(ReadWrite|WriteOnly)` 声明权限域；禁止在 Runtime 中维护第二份按 Tool 名判断的易漂移 allowlist。
 
@@ -114,7 +120,9 @@ Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更�
 - `artifact://sha256/...` 或 `image-artifact://sha256/...`；
 - 只有 read/write=`all` 时允许的受支持系统别名和外部绝对路径。
 
-解析过程执行规范化、父目录与 symlink/reparse 检查、conversation grant 校验、文件 identity/revision 校验，并为命令/Office 创建私有只读输入 mount。当前一次文件输入最多 16 项，单项 64 MiB、合计 128 MiB；视觉输入单项上限为 8 MiB。URI 是稳定引用，不是裸本地路径，不能被字符串替换绕过授权。
+解析过程执行规范化、父目录与 symlink/reparse 检查、conversation grant 校验、文件 identity/revision 校验，并为命令/Office 创建私有只读输入 mount。当前一次文件输入最多 16 项；普通文件 mount 已使用流式摘要/复制，不再使用统一的单项 64 MiB、合计 128 MiB 旧上限。视觉输入单项上限仍为 8 MiB，各来源和解析器另有自己的限额。URI 是稳定引用，不是裸本地路径，不能被字符串替换绕过授权。
+
+项目由一个主根与辅助根集合组成，Run admission 冻结绑定；普通相对路径选择主根，`@workspace/<alias>/...` 明确选择根。Composer Folder Reference 则是独立的按需读取授权，模型可见所选 name/绝对路径，Host 保留目录实体并在读取时复验。它不扩大写权限、不自动成为命令执行许可，也不把目录加入项目工作区。目录变动、历史路径与分叉处理见[存储生命周期](../architecture/storage-and-data-lifecycle.md#多文件夹执行与浏览边界)和[会话输入](conversation-inputs.md)。
 
 模型通过专用结构化文本修改 Tool 写文件时只使用 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。create/begin-create 不接收公开 Observation；Host 私下冻结 Missing/parent 状态并以 no-clobber 提交，成功后才签发第一个公开 ID。update/delete 与 begin-update 绑定准确 `read_file` Observation；成功 apply 或 Staged update commit 后，Runtime 重新验证写后目标并把同一个 ID 续约到新状态，供同一 Run 的后续模型响应使用。同一 Provider Tool Call 批次重复使用该 ID 会在副作用前拒绝。签发或续约失败只要求重新读取，不会把已经提交的结果误报为失败。两种模式始终绑定目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。命令与 Office/Builder 的文件副作用不进入这套 Observation/audit 契约，分别按自身边界授权和记录。完整 schema、状态、限额、持久表和历史 Diff 见 [FileChange 子系统](./file-change.md)。
 

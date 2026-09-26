@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # FileChange 子系统
@@ -57,10 +57,12 @@ Staged 持久状态包括 `drafting`、`ready`、`waiting_approval`、`applying`
 
 路径先经过 `FileChangePathPolicy`：
 
-- 有 workspace 时，相对路径解析到规范 workspace；`write=all` 才能使用允许的外部绝对路径或系统别名。
+- 有 workspace 时，普通相对路径解析到本 Run 冻结的主文件夹，`@workspace/<alias>/...` 明确选择对应辅助根；`workspace_only` 写权限覆盖冻结根集合。外部绝对路径或系统别名仍须 `write=all`，批准后不会根据项目最新配置重解释旧路径。
 - 拒绝 `..`、`.git/.hg/.svn`、symlink/reparse 父链或叶子、非普通文件，以及 Unix 上的 hard link。
 - 拒绝 `pdf/doc/docx/ppt/pptx/xls/xlsx`；Office/PDF 不能伪装成文本 FileChange。
 - proposal 冻结 canonical parent、稳定目录 identity、叶子 identity/revision；effect boundary 再复核，最终以 no-follow/no-clobber 或 compare-and-publish 原子提交。
+
+Composer 选中的 Folder Reference 为其原目录增加读取授权，模型可看到绝对路径，但该选择不会把外部目录加入 FileChange 的 workspace 写集合。即使 `read_file` 能成功读取，`apply_patch` 仍按当前全局 write ceiling、冻结根及审批契约检查；完整输入边界见[会话输入](conversation-inputs.md#文件夹引用)。
 
 `read_file.fileChangeTarget` 是 update/delete 的来源证明。Observation 绑定 Run、Conversation、Tool Call、canonical target、父目录 identity 和叶子状态：
 
@@ -83,7 +85,7 @@ Run grant 的安全边界：
 
 1. 用户选择范围时先写 `pending` intent，它没有执行权。
 2. 只有授予它的 FileChange 以匹配的 applied result digest 结算后，intent 才变为 `active`；每个 Run 最多一个 active grant。
-3. grant 冻结 Run/Conversation/Project、原 write ceiling、permission/toolset/provider revision、`apply-patch-file-change-v1` contract revision、授予 action/receipt，以及精确 workspace root 或 external parent 与稳定目录 identity。
+3. grant 冻结 Run/Conversation/Project、原 write ceiling、permission/toolset/provider revision、`apply-patch-file-change-v1` contract revision、授予 action/receipt，以及 workspace 绑定或精确 external parent 与稳定目录 identity。多根 workspace 内可复用同一 Run grant，但目标根和原授予根都必须仍匹配本 Run 冻结的目录实体；新增项目根不会扩张已授予范围。
 4. 后续 proposal 和真正 effect boundary 都重新加载并验证 durable grant。缺失、损坏、作用域变化或 revision 不符时结果为 definitely-not-executed，并重新请求批准。
 5. checkpoint 中的 grant ref 只是索引，不单独构成 authority。Run 终态、取消、恢复身份不匹配或 grant owner 丢失时必须 revoke。
 
@@ -149,21 +151,13 @@ summary、settlements、固定操作长文或已终态事务。没有未完成�
 不产生用户气泡、第二个 ToolResult 或额外模型请求；可随普通历史压缩。它替代原来长期受保护的
 “继续事务”指令，不把已完成事务重新描述为待完成。文件执行、审批、停止清理及恢复语义保持原样。
 
-### 上下文优化回归（2026-09-06）
+### 上下文优化回归
 
-本轮新增的覆盖使用临时数据库和本地受控 HTTP Provider，不调用商业模型：
-
-- `cargo test --locked -p mycopilot-core --lib file_transaction`：7 项通过，覆盖精确当前状态、终态省略、未知状态围栏、Run 清理、单次纠正以及普通可见性事实的 Trace/checkpoint 投影。
-- `cargo test -p mycopilot-core storage::file_change_repository::tests::runtime_states -- --nocapture`：3 项通过，覆盖所有状态及顺序、owner/source 保留，以及 SQL authorizer 禁止读取正文/Observation/binding 时仍可查询运行元数据。
-- `cargo test --locked -p mycopilot-core-server --bin core-server file_transaction_context`：3 项真实 Host/Harness 测试通过，覆盖 Direct、begin/append/edit/commit/abort、普通工具历史、同批次执行围栏、纯文字纠正退场和审批暂停后的可见性事实单次恢复。
-
-全仓 `cargo test --locked --workspace`：3,637 项通过、0 失败、14 项按现有登记忽略。最后的容量计量调整后再次执行上述 7 项 Rust Core 与 3 项 Host 定向回归，全部通过。`cargo clippy --locked --workspace --all-targets -- -D warnings`、Rust 格式、变更文档格式、开发/用户文档检查、测试归属检查和 `git diff --check` 均通过。没有执行浏览器测试，本轮未改动前端。
-
-本轮没有改变 canonical schema v41、checkpoint v15 或恢复信封 v12，不要求新的开发数据重置；也没有修改 Renderer 或公共 RPC 契约。
+定向回归使用临时数据库和本地受控 Provider：Runtime 的 `file_transaction` 测试覆盖终态省略、未知状态围栏、单次纠正及 Trace/checkpoint；[repository 的 runtime_states 测试](../../crates/core/src/storage/file_change_repository.rs) 验证轻量元数据查询不读取正文/Observation/binding；Core Server 的 `file_transaction_context` 测试覆盖 Direct/Staged、同批次围栏、审批暂停与普通可见性事实恢复。当前数据库/恢复版本见[存储生命周期](../architecture/storage-and-data-lifecycle.md)，历史验收版本不构成新的 reset 要求。
 
 ## 7. 持久化、历史 Diff 与分叉
 
-canonical schema v49 中的 FileChange 数据分为：
+当前 [canonical schema](../architecture/storage-and-data-lifecycle.md#schema-发布策略) 中的 FileChange 数据分为：
 
 - `agent_file_changes`、`agent_file_change_chunks`、`agent_file_change_operations`：仅保存 Staged create/update 草稿、mutation receipt 与可见历史；Direct 不在这里伪造草稿。
 - `agent_file_change_run_grants`：Run-scoped runtime authority，不是聊天历史。

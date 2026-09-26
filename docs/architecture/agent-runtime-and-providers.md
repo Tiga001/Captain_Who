@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # Agent Runtime 与模型 Provider
@@ -51,6 +51,12 @@ Rust Core 与 Core Server 的边界是有意的：Runtime 可以提出动作并�
 此表用于读者定位，不应成为新的注册真源。新增或删除 Provider 必须以 `provider_registration.rs` 和 provider contract test 为准，并同步本文。
 
 Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 replay、上下文投影、Usage 口径、partial Trace、Tool Call 来源、终态批次、Checkpoint 私有参数以及 continuation 要求。Runtime 应查询 `ProviderTurnRuntimePolicy`，不得按 profile 名称散落条件分支。
+
+### 模型可用性与输出预算
+
+Host 的 [`ModelProjection`](../../crates/core/src/storage/service/model_projection.rs) 是所有模型选择器、协作目录、模板和 Automation 目标共同的可执行性判定。它从同一配置 revision 生成脱敏模型元数据与 typed `execution` 状态，同时检查 enabled、连接/Profile/revision/运行时身份及有效凭据；一个模型失败不使其他模型消失。目录构建复用按配置 revision 缓存的投影，同次构建中共享凭据引用只检查一次。应用外修改凭据可能暂不刷新目录，但 spawn 与实际执行仍重新解析精确模型并拒绝不可用连接，缓存不授予执行权。
+
+普通聊天不再统一设置 30,000 输出 token 上限。[`runtime/output_budget.rs`](../../crates/core/src/runtime/output_budget.rs) 分开解析可选 HTTP 上限与上下文容量预留，真实请求、预览、自动压缩触发和配置指纹使用同一结果。通用 OpenAI-compatible 与受支持的 DeepSeek/Moonshot 请求默认省略输出上限；通用 Anthropic Messages 保留必填的 30,000 兼容值。预留与厂商 allowance 不等价；明确冻结的旧任务预算原值恢复，压缩摘要继续使用独立有限预算。具体规则见[输出上限与上下文预留](./context-management.md#请求输出上限与上下文预留)。
 
 ## 一次 Run 的主流程
 
@@ -103,7 +109,7 @@ Turn admission 创建的 pending assistant message 正文为空；系统不再�
 
 此次只把目录和当前指南移到 Conversation full 前，并把本次输入连同关联 diff、附件移到预激活 Skill 与初始 Run 状态前。作用域、权限判定和持久化规则不变；原消息正文、role、lifetime、retention、Tool 参数、调用与结果绑定、Provider continuation 也不因布局而改变。Run 中新激活的 Skill、审批或提问恢复后的 full World State、状态 diff、同步答案 ToolResult 与异步答案 User 消息保持因果位置；不能按类型提前到初始说明。同步答案虽可显示为用户气泡，模型仍只通过原工具调用的唯一结果接收。
 
-Run 结束时，本次输入、预激活 Skill、初始 Run 状态及 live 时间线（完整布局第 8–11 项）仍不会整块历史化。后续 Run 只按原有日志规则重建用户消息、已结算输出、Tool 交换与状态记录；初始 Run 说明和状态块不会因发送位置改变而成为会话历史。
+Run 结束后，本次输入、已结算输出、Tool 交换及状态记录从权威日志重建；附件已提取内容、不可变图片引用、预激活 Skill 正文和初始 Run World State 通过 `ContextMaterial` 在原因果位置重放。不重新读取旧 Skill 或提取旧附件，不从历史观察恢复旧权限；RequestOnly 能力指南不进入持久历史。详见[可重放的 Run 材料](./conversation-trace-and-archive.md#可重放的-run-材料)。
 
 工具实现注册、模型工具暴露和使用指南是三层不同事实：实现可以保持已注册以支持同 Run 后续开启，`EffectiveToolSet` 决定本次 Schema，扩展贡献当前使用指南。`tools` 顺序仍为稳定工具按名称排序，再拼接动态工具按名称排序；稳定工具指导留在稳定 system，可选能力指南使用独立的 `CapabilityInstructions` 布局标记。`tools` 是消息之外的字段，其 JSON 属性位置不表示模型 token 顺序。
 
@@ -151,7 +157,7 @@ FileChange 的恢复状态横跨两类私有存储：checkpoint 保存 pending/q
 
 `request_order` 只是私有检查点中的布局元数据，不是 journal sequence、权限身份或可执行授权。压缩重建从权威日志恢复已经闭合的消息，通过此元数据维持它们与尚存 Run overlay 的因果相对顺序；恢复时不重新排列已发生的工具队列、回答与状态变化。当前能力指南仍在下一次自然采样时重新生成，不从 checkpoint 恢复旧的开启状态或 RequestOnly 文本。
 
-模型请求只解析所选 connection 所需的 secret，并在 SQLite transaction/mutex 之外访问 Credential Store。Run、子 Agent Wake、Automation snapshot 和恢复输入必须冻结并复核 `provider_connection_revision`；凭据替换或清除会改变连接 revision，旧 Run 不得静默使用新密钥。catalog/usage/模板等只需元数据的路径不得批量解密凭据，也不能因一个不相关 reference 不可用而阻断全部模型。
+模型请求只解析所选 connection 所需的 secret，并在 SQLite transaction/mutex 之外访问 Credential Store。Run、子 Agent Wake、Automation snapshot 和恢复输入必须冻结并复核 `provider_connection_revision`；凭据替换或清除会改变连接 revision，旧 Run 不得静默使用新密钥。普通元数据/usage 路径不读取 secret；需要判定可执行性的目录与模板路径复用上述 ModelProjection，检查结果只投影 availability，不向调用方暴露凭据。
 
 审批 ticket 与 sealed/process execution material 的生命周期分开：MCP Server、Browser risk、内置敏感 Tool 和 Skill 安装即使临时 payload 已过期，ticket 也不会因此自动结算；它仍等待用户决定或所属 Run 的取消/终态流程收口。晚批准时若 Host 已无法取得精确材料，continuation 必须接收 definitely-not-dispatched 的 failed Tool Result 并继续模型闭环，不能重新生成调用、自动 retry 或声称用户决定已过期。
 

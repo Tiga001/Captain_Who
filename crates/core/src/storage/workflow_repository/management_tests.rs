@@ -22,7 +22,7 @@ fn setup() -> Connection {
     .unwrap();
     call(
         &mut c,
-        json!({"operation":"setEnabled","id":"template","enabled":true,"expectedRevision":1}),
+        json!({"operation":"save","definition":definition(),"expectedRevision":1}),
     )
     .unwrap();
     c
@@ -41,6 +41,162 @@ fn existing(c: &Connection, id: &str, project: &str) {
 fn count(c: &Connection, table: &str) -> i64 {
     c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
+}
+
+fn toggle(c: &mut Connection, id: &str, enabled: bool, revision: u64) -> Result<Response, Error> {
+    call(
+        c,
+        json!({"operation":"setInstanceEnabled","id":id,"enabled":enabled,"expectedRevision":revision}),
+    )
+}
+
+#[test]
+fn workflow_disable_preserves_busy_turns_and_confirmed_reconfiguration_reactivates() {
+    let mut c = setup();
+    let first = call(&mut c, create("instance", None)).unwrap();
+    assert!(first.instances[0].enabled);
+    let chat = first.instances[0].bindings[0].conversation_id.clone();
+    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('busy',?1,'assistant','Working',1,0)",[&chat]).unwrap();
+    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('busy',?1,'run',1,'in_progress',0,1,1)",[&chat]).unwrap();
+    assert!(call(&mut c, json!({"operation":"list"})).unwrap().instances[0].running);
+    let off = toggle(&mut c, "instance", false, 1).unwrap();
+    assert!(!off.instances[0].enabled);
+    assert!(!off.instances[0].running);
+    assert_eq!(off.instances[0].bindings, first.instances[0].bindings);
+    assert_eq!(
+        toggle(&mut c, "instance", false, 1).unwrap().instances[0].revision,
+        2
+    );
+    let state: String = c
+        .query_row(
+            "SELECT terminal_status FROM conversation_turn_traces WHERE run_id='run'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "in_progress");
+    let mut configure = create("instance", Some(&chat));
+    configure["expectedRevision"] = json!(2);
+    let configured = call(&mut c, configure).unwrap();
+    assert!(configured.instances[0].enabled && configured.instances[0].running);
+    assert!(configured.affected_conversation_ids.is_empty());
+}
+
+#[test]
+fn workflow_only_enabled_instances_reserve_colors_and_enabling_rechecks_occupancy() {
+    let mut c = setup();
+    let first = call(&mut c, create("first", None)).unwrap();
+    toggle(&mut c, "first", false, 1).unwrap();
+    call(&mut c, create("second", None)).unwrap();
+    assert!(
+        matches!(toggle(&mut c,"first",true,2),Err(Error::Conflict(message)) if message=="workflow_color_in_use")
+    );
+    let mut configure = create(
+        "first",
+        Some(&first.instances[0].bindings[0].conversation_id),
+    );
+    configure["expectedRevision"] = json!(2);
+    assert!(
+        matches!(call(&mut c, configure.clone()),Err(Error::Conflict(message)) if message=="workflow_color_in_use")
+    );
+    toggle(&mut c, "second", false, 1).unwrap();
+    let confirmed = call(&mut c, configure).unwrap();
+    assert!(
+        confirmed
+            .instances
+            .iter()
+            .find(|instance| instance.id == "first")
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
+fn workflow_template_updates_disable_instances_until_binding_confirmation() {
+    let mut c = setup();
+    let first = call(&mut c, create("instance", None)).unwrap();
+    let published=call(&mut c,json!({"operation":"save","definition":definition(),"expectedRevision":2,"expectedUsageRevision":first.usages[0].usage_revision})).unwrap();
+    assert!(!published.instances[0].enabled && published.instances[0].needs_review);
+    assert!(
+        matches!(toggle(&mut c,"instance",true,2),Err(Error::Invalid(message)) if message=="workflow_instance_needs_review")
+    );
+    let mut configure = create(
+        "instance",
+        Some(&first.instances[0].bindings[0].conversation_id),
+    );
+    configure["expectedRevision"] = json!(2);
+    configure["expectedTemplateRevision"] = json!(3);
+    let reviewed = call(&mut c, configure).unwrap();
+    assert!(reviewed.instances[0].enabled && !reviewed.instances[0].needs_review);
+    toggle(&mut c, "instance", false, 3).unwrap();
+    c.execute(
+        "DELETE FROM workflow_instance_bindings WHERE instance_id='instance'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        matches!(toggle(&mut c,"instance",true,4),Err(Error::Invalid(message)) if message=="workflow_bindings_incomplete")
+    );
+}
+
+#[test]
+fn workflow_archive_guard_covers_metadata_full_save_and_atomic_multirow_updates() {
+    let mut c = setup();
+    existing(&c, "a-unbound", "P");
+    existing(&c, "z-bound", "P");
+    call(&mut c, create("instance", Some("z-bound"))).unwrap();
+    let mut full = crate::storage::chat_repository::get_conversation(&c, "z-bound")
+        .unwrap()
+        .unwrap();
+    full.archived_at = Some(10);
+    full.title = "Should not persist".into();
+    assert!(
+        crate::storage::chat_repository::save_conversation(&mut c, full)
+            .unwrap_err()
+            .to_string()
+            .contains("workflow_active_archive_blocked")
+    );
+    let mut meta = crate::storage::chat_repository::list_conversation_metas(&c)
+        .unwrap()
+        .into_iter()
+        .find(|chat| chat.id == "z-bound")
+        .unwrap();
+    meta.archived_at = Some(10);
+    meta.updated_at = 10;
+    assert!(
+        crate::storage::chat_repository::save_conversation_meta(&c, &meta)
+            .unwrap_err()
+            .to_string()
+            .contains("workflow_active_archive_blocked")
+    );
+    assert!(c
+        .execute("UPDATE conversations SET archived_at=10", [])
+        .unwrap_err()
+        .to_string()
+        .contains("workflow_active_archive_blocked"));
+    assert_eq!(
+        c.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE archived_at IS NOT NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        crate::storage::chat_repository::get_conversation(&c, "z-bound")
+            .unwrap()
+            .unwrap()
+            .title,
+        "z-bound"
+    );
+    toggle(&mut c, "instance", false, 1).unwrap();
+    c.execute("UPDATE conversations SET archived_at=10", [])
+        .unwrap();
+    let after = call(&mut c, json!({"operation":"list"})).unwrap();
+    assert!(!after.instances[0].enabled && after.instances[0].needs_review);
+    assert_eq!(count(&c, "conversations"), 2);
+    assert_eq!(after.instances[0].bindings.len(), 1);
 }
 
 #[test]
@@ -131,13 +287,135 @@ fn workflow_instance_confirmation_is_idempotent_and_removal_keeps_conversations(
 }
 
 #[test]
+fn workflow_colors_are_exclusive_case_insensitively_before_any_conversation_changes() {
+    let mut c = setup();
+    let first_request = create("first", None);
+    let first = call(&mut c, first_request.clone()).unwrap();
+    assert!(!first.instances[0].running);
+    existing(&c, "existing", "P");
+    c.execute("INSERT INTO composer_drafts(scope_id,message,permission_mode,permission_mode_version,model_id,project_id,attachments_json,skills_json,queued_messages_json,updated_at) VALUES ('existing','Unsent text','custom',2,'user-model','P','[]','[]','[]',9)",[]).unwrap();
+    let draft_before: String = c.query_row("SELECT json_array(message,permission_mode,model_id,updated_at) FROM composer_drafts WHERE scope_id='existing'",[],|r|r.get(0)).unwrap();
+    for conversation in [None, Some("existing")] {
+        for color in ["#4A82E8", "#4a82e8"] {
+            let mut duplicate = create("second", conversation);
+            duplicate["color"] = json!(color);
+            assert!(
+                matches!(call(&mut c, duplicate),Err(Error::Conflict(message)) if message=="workflow_color_in_use")
+            );
+            assert_eq!(count(&c, "workflow_instances"), 1);
+            assert_eq!(count(&c, "workflow_instance_bindings"), 1);
+            assert_eq!(count(&c, "conversations"), 2);
+            assert_eq!(count(&c, "composer_drafts"), 2);
+            let draft_after: String = c.query_row("SELECT json_array(message,permission_mode,model_id,updated_at) FROM composer_drafts WHERE scope_id='existing'",[],|r|r.get(0)).unwrap();
+            assert_eq!(draft_after, draft_before);
+        }
+    }
+    // A successful confirmation remains safely replayable without creating another chat.
+    let replayed = call(&mut c, first_request).unwrap();
+    assert_eq!(
+        replayed.affected_conversation_ids,
+        first.affected_conversation_ids
+    );
+    assert_eq!(count(&c, "conversations"), 2);
+}
+
+#[test]
+fn workflow_can_keep_its_color_move_to_a_free_color_and_release_it_on_removal() {
+    let mut c = setup();
+    let created = call(&mut c, create("first", None)).unwrap();
+    let conversation_id = &created.instances[0].bindings[0].conversation_id;
+    let mut update = create("first", Some(conversation_id));
+    update["expectedRevision"] = json!(1);
+    update["color"] = json!("#4a82e8");
+    let retained = call(&mut c, update.clone()).unwrap();
+    assert_eq!(retained.instances[0].color, "#4a82e8");
+    assert!(retained.affected_conversation_ids.is_empty());
+    update["expectedRevision"] = json!(2);
+    update["color"] = json!("#AA0000");
+    let changed = call(&mut c, update.clone()).unwrap();
+    assert_eq!(changed.instances[0].color, "#AA0000");
+    assert!(changed.affected_conversation_ids.is_empty());
+    let second = call(&mut c, create("second", None)).unwrap();
+    assert_eq!(second.instances.len(), 2);
+    // An existing instance also cannot take a color claimed after its editor was opened.
+    update["expectedRevision"] = json!(3);
+    update["color"] = json!("#4a82e8");
+    assert!(
+        matches!(call(&mut c, update.clone()),Err(Error::Conflict(message)) if message=="workflow_color_in_use")
+    );
+    call(
+        &mut c,
+        json!({"operation":"deleteInstance","id":"second","expectedRevision":1}),
+    )
+    .unwrap();
+    let released = call(&mut c, update).unwrap();
+    assert_eq!(released.instances.len(), 1);
+    assert_eq!(released.instances[0].color, "#4a82e8");
+    assert_eq!(released.instances[0].revision, 4);
+    assert_eq!(count(&c, "conversations"), 2);
+}
+
+#[test]
+fn workflow_concurrent_confirmations_cannot_claim_the_same_color_from_stale_lists() {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("workflow-colors.sqlite");
+    let mut first = Connection::open(&path).unwrap();
+    run_migrations(&first).unwrap();
+    call(
+        &mut first,
+        json!({"operation":"save","definition":definition(),"expectedRevision":0}),
+    )
+    .unwrap();
+    call(
+        &mut first,
+        json!({"operation":"save","definition":definition(),"expectedRevision":1}),
+    )
+    .unwrap();
+    let mut second = Connection::open(&path).unwrap();
+    for connection in [&mut first, &mut second] {
+        connection.busy_timeout(Duration::from_secs(5)).unwrap();
+        assert!(call(connection, json!({"operation":"listInstances"}))
+            .unwrap()
+            .instances
+            .is_empty());
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let results = std::thread::scope(|scope| {
+        let left_barrier = Arc::clone(&barrier);
+        let left = scope.spawn(move || {
+            left_barrier.wait();
+            call(&mut first, create("first", None))
+        });
+        let right = scope.spawn(move || {
+            barrier.wait();
+            let mut request = create("second", None);
+            request["color"] = json!("#4a82e8");
+            call(&mut second, request)
+        });
+        [left.join().unwrap(), right.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result|matches!(result,Err(Error::Conflict(message)) if message=="workflow_color_in_use")).count(),1);
+    let verified = Connection::open(path).unwrap();
+    assert_eq!(count(&verified, "workflow_instances"), 1);
+    assert_eq!(count(&verified, "workflow_instance_bindings"), 1);
+    assert_eq!(count(&verified, "conversations"), 1);
+    assert_eq!(count(&verified, "composer_drafts"), 1);
+}
+
+#[test]
 fn workflow_bindings_are_exclusive_and_fail_atomically() {
     let mut c = setup();
     existing(&c, "existing", "P");
     call(&mut c, create("first", Some("existing"))).unwrap();
+    let mut second = create("second", Some("existing"));
+    second["color"] = json!("#00AA00");
     assert!(matches!(
-        call(&mut c, create("second", Some("existing"))),
-        Err(Error::Conflict(_))
+        call(&mut c, second),
+        Err(Error::Conflict(message)) if message == "workflow_conversation_already_bound"
     ));
     assert_eq!(count(&c, "workflow_instances"), 1);
     let mut graph = definition();
@@ -151,6 +429,7 @@ fn workflow_bindings_are_exclusive_and_fail_atomically() {
     let usages = call(&mut c, json!({"operation":"list"})).unwrap().usages;
     call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":usages[0].usage_revision})).unwrap();
     let mut invalid = create("new", None);
+    invalid["color"] = json!("#AA0000");
     invalid["expectedTemplateRevision"] = json!(3);
     invalid["bindings"] =
         json!([{"nodeId":"a","conversationId":null},{"nodeId":"b","conversationId":"missing"}]);
@@ -254,14 +533,20 @@ fn workflow_conversation_archive_and_restore_require_binding_review() {
     let mut c = setup();
     let created = call(&mut c, create("instance", None)).unwrap();
     let id = &created.instances[0].bindings[0].conversation_id;
+    assert!(c
+        .execute("UPDATE conversations SET archived_at=2 WHERE id=?1", [id])
+        .unwrap_err()
+        .to_string()
+        .contains("workflow_active_archive_blocked"));
+    call(&mut c,json!({"operation":"setInstanceEnabled","id":"instance","enabled":false,"expectedRevision":1})).unwrap();
     c.execute("UPDATE conversations SET archived_at=2 WHERE id=?1", [id])
         .unwrap();
     let archived = call(&mut c, json!({"operation":"listInstances"})).unwrap();
     assert!(archived.instances[0].needs_review);
-    assert_eq!(archived.instances[0].revision, 2);
+    assert_eq!(archived.instances[0].revision, 3);
     assert_eq!(archived.instances[0].bindings.len(), 1);
     let mut update = create("instance", Some(id));
-    update["expectedRevision"] = json!(2);
+    update["expectedRevision"] = json!(3);
     assert!(
         matches!(call(&mut c,update),Err(Error::Invalid(message)) if message=="workflow_conversation_archived")
     );
@@ -272,7 +557,7 @@ fn workflow_conversation_archive_and_restore_require_binding_review() {
     .unwrap();
     let restored = call(&mut c, json!({"operation":"listInstances"})).unwrap();
     assert!(restored.instances[0].needs_review);
-    assert_eq!(restored.instances[0].revision, 3);
+    assert_eq!(restored.instances[0].revision, 4);
 }
 
 #[test]
@@ -295,47 +580,6 @@ fn workflow_publish_does_not_delete_a_newer_editing_draft() {
     let published=call(&mut c,json!({"operation":"save","definition":newer,"expectedRevision":2,"expectedDraftRevision":2})).unwrap();
     assert_eq!(published.records[0].definition.name, "Newer draft");
     assert!(published.drafts.is_empty());
-}
-
-#[test]
-fn workflow_availability_changes_advance_draft_base_without_rewriting_edits() {
-    let mut c = setup();
-    let mut graph = definition();
-    graph["name"] = json!("Editing");
-    call(&mut c,json!({"operation":"saveDraft","definition":graph,"expectedRevision":2,"expectedDraftRevision":0})).unwrap();
-    let toggled = call(
-        &mut c,
-        json!({"operation":"setEnabled","id":"template","enabled":false,"expectedRevision":2}),
-    )
-    .unwrap();
-    assert_eq!(toggled.drafts[0].base_revision, 3);
-    assert_eq!(toggled.drafts[0].revision, 1);
-    assert_eq!(toggled.drafts[0].definition.name, "Editing");
-    let published=call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":3,"expectedDraftRevision":1})).unwrap();
-    assert_eq!(published.records[0].definition.name, "Editing");
-}
-
-#[test]
-fn workflow_disabled_templates_block_new_instances_but_allow_existing_binding_updates() {
-    let mut c = setup();
-    let created = call(&mut c, create("existing", None)).unwrap();
-    call(
-        &mut c,
-        json!({"operation":"setEnabled","id":"template","enabled":false,"expectedRevision":2}),
-    )
-    .unwrap();
-    let mut new = create("new", None);
-    new["expectedTemplateRevision"] = json!(3);
-    assert!(call(&mut c, new).is_err());
-    let mut update = create(
-        "existing",
-        Some(&created.instances[0].bindings[0].conversation_id),
-    );
-    update["expectedRevision"] = json!(1);
-    update["expectedTemplateRevision"] = json!(3);
-    let updated = call(&mut c, update).unwrap();
-    assert_eq!(updated.instances.len(), 1);
-    assert!(updated.affected_conversation_ids.is_empty());
 }
 
 #[test]

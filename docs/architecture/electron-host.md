@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # Electron Host 与进程架构
@@ -42,6 +42,8 @@ Electron Main
 ```
 
 Core Server 在开发环境由 `cargo run -p mycopilot-core-server --bin core-server --quiet` 启动；打包环境从 `process.resourcesPath` 启动平台对应的 `core-server` 可执行文件。JSON-RPC 使用一行一个 JSON 消息的 stdin/stdout 管道，stderr 仅作为 Rust Core 诊断输出。
+
+Main 同时处理子进程 `error`、`exit` 与 stdin `error`：子进程先关闭管道产生的 `EPIPE` 归入该代进程失败，并拒绝全部待完成请求，不能变成未捕获异常使 Host 退出。旧 child 的迟到错误不能清空已重启的新 child；启动 ping 失败由既有 startup recovery 显示，管道错误不伪造请求成功。
 
 终端服务按需启动：第一个终端会话触发 `utilityProcess.fork()`。所有终端会话共享同一个 utility process，但 Main 使用 utility generation、Renderer WebContents 和 session id 共同约束所有权。
 
@@ -106,7 +108,7 @@ SQLite notification facts / batches
 
 通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `NotificationOpenRequest` 交给最近一个已通过 `openRequestedReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 以 FIFO 暂存最多 32 个请求，溢出时丢弃最早请求。单项点击打开 application、精确 Conversation/message/approval 或 Automation/run；Main 只把用户实际看到且仍有效的 event ids 标为 seen。请求不包含原生 Notification 对象、绝对路径或任意导航 URL。
 
-Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema v49 是三条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema 是独立版本线。数据库版本见[存储与数据生命周期](./storage-and-data-lifecycle.md)，Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
 
 ## macOS 系统集成：Dock 菜单与菜单栏托盘
 
@@ -151,12 +153,12 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 2. 只有主 frame、精确匹配已登记入口的 Renderer WebContents 可以调用 Host API IPC。
 3. Preload 只能暴露 `HostApi`；不得暴露通用 IPC、Node 或 Electron 对象。
 4. 主窗口页面和浏览器 guest 是不同信任域。guest 不得获得应用 preload、Node 集成或主窗口 origin。
-5. 原生路径、WebContents、Session、Target、CDP 会话、系统凭据和托管 Artifact 路径只存在于受信进程。
+5. WebContents、Session、Target、CDP 会话、系统凭据和托管 Artifact 私有路径只存在于受信进程；用户选择的项目/输入文件夹路径与本地 Browser 导航 URL 按各领域 DTO 展示，不得据此推导其他原生能力。
 6. 所有异步资源都必须有明确 owner、generation/instance 标识和退出清理路径。
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge、release、suppress、list 或 summary 原生通知；这些方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Notification/Automation event、resync 和本机定时器只能触发重新读取 notification batch 或业务快照，不能被当作通知已显示或业务 Run 已终结的证据。
-10. Notification schema v1、Automation schema v1/permission mode v2 与 SQLite schema v49 不得由 Main 合并为单一版本。
+10. Notification schema v1、Automation schema v1/permission mode v2、Workflow definition schema v1 与 SQLite schema 不得由 Main 合并为单一版本。
 11. Dock 菜单与菜单栏托盘只展示用户可见的根 Conversation 摘要；点击导航经 Main 的一次性 pending id 与受信渲染进程单次领取传递，原生菜单回调不得直接写入业务状态。
 
 ## 代码真源
@@ -164,6 +166,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 - Main 组合与生命周期：`src/main/index.ts`
 - 窗口 close-to-hide：`src/main/mainWindowLifecycle.ts`
 - Core Server 进程与 JSON-RPC：`src/main/core/jsonRpcClient.ts`
+- Host 输入导入：[AttachmentDialogBridge.ts](../../src/main/attachments/AttachmentDialogBridge.ts)，协议与生命周期见[会话输入与附件](../subsystems/conversation-inputs.md)
 - Core Server 类型化门面：`src/main/core/coreServer.ts`
 - Preload 入口：`src/preload/index.ts`
 - Dock 最近聊天、菜单栏托盘与 Dock 导航桥：`src/main/dockRecentConversations.ts`、`src/main/menuBarRunningConversations.ts`、`src/preload/AppIpcBridge.ts`
@@ -186,7 +189,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 重点测试包括：
 
 - `src/main/mainWindowLifecycle.test.ts`
-- `src/main/core/jsonRpcClient.environment.test.ts`
+- [jsonRpcClient.environment.test.ts](../../src/main/core/jsonRpcClient.environment.test.ts)：子进程环境与 stdin `EPIPE` 后待完成请求清理。
 - `src/main/terminal/TerminalBridge.test.ts`
 - `src/main/core/managedWebviewSecurity.test.ts`
 - `src/main/core/systemNotificationCoordinator.test.ts`
@@ -228,7 +231,7 @@ pnpm test:automation-core-e2e
 - 应用当前只维护一个主窗口；信任登记和部分服务组合以此为前提。
 - Core Server JSON-RPC 使用进程管道和逐行 JSON，不是可远程访问的服务。
 - 终端会话依赖本机 shell 与 `node-pty`，不提供跨应用重启恢复。
-- 浏览器只允许受管分区中的 HTTP/HTTPS 页面；网页权限请求统一拒绝。
+- 浏览器允许受管分区中的 HTTP/HTTPS 和本地 `file:` 文档；网页权限请求统一拒绝。本地文件导航的当前授权边界见[浏览器与自动化](../subsystems/browser-automation.md)。
 - Renderer 启动阶段是固定清单，没有通用插件式阶段注册机制。
 - 通用原生通知依赖 Electron/操作系统支持；不支持时只保留所属业务状态，不会显示系统通知。
 - “系统已显示、Core Server ACK 未提交”的崩溃窗口可能导致一次重复通知，当前没有 OS 级 exactly-once receipt。

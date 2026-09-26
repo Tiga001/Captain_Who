@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-26
 ---
 
 # Office 自动化与受管 Artifact
@@ -98,6 +98,11 @@ Artifact ID 是 `sha256:<digest>`，物理对象位于私有 `objects/` 下。SQ
 URI 不是全局公开地址。`file_input`、`read_image` 或其他消费者在每次解析时校验：URI scheme 与 kind 相符、当前 conversation 有 direct grant，或其受信 `root_agent_id/root_conversation_id` 与生产者属于同一 Agent task tree；记录路径安全、文件非 symlink、size/hash/格式仍匹配。task-tree authority 只由 `agent_nodes` 解析，模型/Renderer 不能自报 root identity。普通独立 Conversation 没有 tree scope；Generic Managed Artifact 不因“同 project”获得额外共享，只能依赖 direct grant 或受信 task-tree scope，附件则继续保留既有 project sharing。物理 absolute path 不离开 Rust Core StorageService/Core Server 边界。
 
 附件使用同一 task-tree root 规则：根 Agent 与子 Agent 可读取树内已授权附件/Artifact，即使生产子 Agent 已完成或归档；grant 仍保存在原生产 conversation 上，不复制成每个子 Agent 的新 grant。既有 project attachment 共享规则继续适用。Browser Artifact 仍是短期 Run scope，不自动继承该 tree sharing；durable Browser Download 由自己的 conversation/project/tree 与文件 identity 检查授权。
+
+Composer 大附件现在先经过 durable Host import，草稿、队列、Guidance 和提交请求携带引用，接纳后再绑定为
+Conversation 附件；import 不是 Generic Managed Artifact grant。文件夹引用则是只读目录授权，不属于附件字节或
+Artifact store，模型可以看到所选根路径。导入、复用、纯附件消息、目录引用与恢复细节统一见
+[会话输入](conversation-inputs.md)；本节的“私有路径不外泄”指受管对象存储路径，不排除用户显式选择的目录路径。
 
 `resource_locator` 对登记的 virtual scheme 分派到对应 resolver。未知或格式错误的 virtual prefix 必须 fail closed，不能退回为普通 workspace path；否则模型可借一个拼错的 URI 绕过其真实 store 的 grant 检查。
 

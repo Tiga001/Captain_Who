@@ -40,6 +40,7 @@ import type {
   RightSidebarWorkspaceReferenceNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
+import { useConversationAttention } from '../features/chat/useConversationAttention'
 import {
   isAssistantMessageGenerating,
   isAssistantReplySettled
@@ -224,6 +225,7 @@ export function AppShell() {
     getRandomNewConversationPromptIndex()
   )
   const [primaryView, setPrimaryView] = useState<PrimaryView>('conversation')
+  const [workflowMonitorId, setWorkflowMonitorId] = useState<string | null>(null)
   const workflowDirtyRef = useRef(false)
   const workflowBusyRef = useRef(false)
   const [pendingWorkflowExit, setPendingWorkflowExit] = useState<{ proceed: () => void } | null>(
@@ -422,6 +424,7 @@ export function AppShell() {
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
+  const conversationAttention = useConversationAttention(conversations)
   const titleProject = useMemo(() => {
     const projectId = activeConversation?.projectId
     if (!projectId) return null
@@ -617,6 +620,7 @@ export function AppShell() {
     updateUiPreferences
   } = useAppShellRuntime({
     activeConversationId,
+    visibleConversationId: getVisibleActiveConversationId(primaryView, activeConversationId),
     activeConversationIdRef,
     activeDraftId,
     activeRunBindingsRef,
@@ -752,6 +756,9 @@ export function AppShell() {
     setConversations: setConversationsWithRef,
     applyDraftPreferences: applyWorkflowDraftPreferences
   })
+  const activeConversationWorkflow = activeConversation
+    ? workflowWorkspace.allMemberships[activeConversation.id]
+    : undefined
 
   const { hasPendingSynchronization, retrySynchronization } = workflowWorkspace
   const requestScheduledExit = useCallback(
@@ -844,6 +851,7 @@ export function AppShell() {
     rememberConversationScrollPosition,
     selectConversation
   } = useConversationNavigation({
+    workflowMemberships: workflowWorkspace.memberships,
     activeConversationIdRef,
     conversationScrollPositionsRef,
     conversationsRef,
@@ -852,6 +860,7 @@ export function AppShell() {
     messages: {
       activeCommandSession: t('chat.continueInNewTaskActiveCommand'),
       archiveFailed: t('conversation.archiveFailed'),
+      archiveWorkflowActive: t('conversation.archiveWorkflowActive'),
       continueInNewTaskFailed: t('chat.continueInNewTaskFailed'),
       continueInNewTaskBusy: t('chat.continueInNewTaskBusy'),
       originArchived: t('chat.continuationOriginArchived'),
@@ -881,21 +890,40 @@ export function AppShell() {
   }, [requestScheduledExit])
 
   const openWorkflows = useCallback(() => {
-    if (primaryView === 'workflows') return
+    if (primaryView === 'workflows' && workflowMonitorId === null) return
     requestScheduledExit(() => {
       conversationOpenRequestKeyRef.current += 1
       setScheduledOpenRequest(null)
+      setWorkflowMonitorId(null)
       setPrimaryView('workflows')
     })
-  }, [primaryView, requestScheduledExit])
+  }, [primaryView, requestScheduledExit, workflowMonitorId])
 
-  const openWorkflowTemplate = useCallback(() => {
+  const openWorkflowMonitor = useCallback(
+    (instanceId: string) => {
+      requestScheduledExit(() => {
+        conversationOpenRequestKeyRef.current += 1
+        setScheduledOpenRequest(null)
+        setWorkflowMonitorId(instanceId)
+        setPrimaryView('workflows')
+      })
+    },
+    [requestScheduledExit]
+  )
+
+  const handleWorkflowMonitorChange = useCallback((instanceId: string | null) => {
+    // Returning to the list or changing diagrams supersedes any node's pending chat load.
+    conversationOpenRequestKeyRef.current += 1
+    setWorkflowMonitorId(instanceId)
+  }, [])
+
+  const manageWorkflowTemplates = useCallback(() => {
     requestScheduledExit(() => {
       setPrimaryView('conversation')
       openSettings('workflows', undefined, {
         page: 'workflows',
-        id: 'workflow-create',
-        view: 'create',
+        id: 'workflows-list',
+        view: 'workflows',
         revision: Date.now()
       })
     })
@@ -980,6 +1008,8 @@ export function AppShell() {
         return
       }
 
+      // A newer native task intent supersedes a pending chat load, even while exit is confirmed.
+      conversationOpenRequestKeyRef.current += 1
       requestScheduledExit(() => {
         scheduledOpenRequestKeyRef.current += 1
         conversationOpenRequestKeyRef.current += 1
@@ -1438,6 +1468,7 @@ export function AppShell() {
           <LeftSidebar
             activeConversationId={getVisibleActiveConversationId(primaryView, activeConversationId)}
             conversations={conversations}
+            conversationAttention={conversationAttention}
             projects={projects}
             uiPreferences={uiPreferences}
             onArchiveAllProjectConversations={() => {
@@ -1539,6 +1570,14 @@ export function AppShell() {
           rightOpen={rightOpen}
           t={t}
           title={activeConversation?.title}
+          workflow={
+            activeConversationWorkflow
+              ? {
+                  ...activeConversationWorkflow,
+                  onOpen: () => openWorkflowMonitor(activeConversationWorkflow.id)
+                }
+              : undefined
+          }
           projectCard={
             titleProject
               ? {
@@ -1791,9 +1830,13 @@ export function AppShell() {
           <div className="workflow-page-layer" data-testid="workflow-page-layer">
             <WorkflowsPage
               conversations={conversations}
+              conversationAttention={conversationAttention}
               conversationDrafts={drafts}
+              initialMonitorId={workflowMonitorId}
+              onMonitorChange={handleWorkflowMonitorChange}
+              onOpenConversation={requestOpenConversationFromScheduled}
               projects={projects}
-              onNewTemplate={openWorkflowTemplate}
+              onManageTemplates={manageWorkflowTemplates}
               onBeforeCommit={workflowWorkspace.beforeCommit}
               onCommitted={workflowWorkspace.committed}
               onDirtyChange={handleWorkflowDirtyChange}

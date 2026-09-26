@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # Scheduled Automation 子系统
@@ -53,6 +53,11 @@ Automation 支持两种 destination：
 现有 Conversation 不能指向子 Agent Conversation 或非活跃 Agent 节点。创建、更新、`runNow` 和实际
 admission 都会重新核对目标；项目/模型/Conversation 被删除、归档、禁用或路径失效时，任务进入
 `blocked`，`nextRunAt` 被清空并产生 attention，而不是静默改绑。
+
+目标模型使用同一个 Host 模型可执行性投影，不能仅以 `enabled=true` 判为可用。创建、更新和新回合准入均校验
+有效连接、Profile/runtime identity 与凭据；模型缺失、禁用和其他不可用情形映射到现有目标错误/blocked reason，
+而非悄悄切换模型。查看 [`service.rs`](../../crates/core-server/src/application/automation/service.rs) 与
+[`model_projection.rs`](../../crates/core/src/storage/service/model_projection.rs)。
 
 ### 调度
 
@@ -187,7 +192,7 @@ ready 时以 FIFO 暂存最多 32 个请求，并在 `openRequestedReady` 后恢
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v49**；Automation DTO 与 Automation 表记录的 `schemaVersion` 各为 **v1**，permission mode v2，shared Notification contract 为 v1；这些版本域不能混用。Automation 专属三组数据为：
+SQLite canonical schema 当前为 **v57**，真源为 [`migrations.rs`](../../crates/core/src/storage/migrations.rs)；Automation DTO 与 Automation 表记录的 `schemaVersion` 各为 **v1**，permission mode v2，shared Notification contract 为 v1；这些版本域不能混用。Automation 专属三组数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；
 - `automation_runs`：不可变配置 snapshot、admission lease、Agent/Conversation 绑定、终态和结果投影；
@@ -293,7 +298,7 @@ Core Server，验证 Host API 的 CRUD、CAS、`runNow`、历史和 attention；
 - [ ] 新 Run 路径是否共享 Agent gate、Trace、Approval、取消、Usage 和恢复？
 - [ ] 新事件是否只用于 invalidation，并覆盖 gap/resync/ready-handshake？
 - [ ] 新 Automation 通知是否先写 producer ledger 并原子投影 shared event，再按 batch claim、validate、show、acknowledge/release？
-- [ ] legacy `automation.notifications.*` 与 canonical `notifications.*` 是否没有被误当成两套 native delivery authority？
+- [ ] Automation 通知是否只使用共享 notification event/batch 与 `notifications.*` 投递 authority，而未重新引入专用 outbox 或重复投递入口？
 - [ ] 父资源删除、任务删除和关停是否不会留下悬空 Run 或失效通知？
 - [ ] 是否运行 Rust、协议、Main/Preload、Renderer 和独立真实 Core Server E2E？
 - [ ] 是否同步更新[测试策略](../development/testing.md)、[恢复 Runbook](../operations/recovery-runbook.md)

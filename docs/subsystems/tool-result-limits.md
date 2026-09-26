@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-24
+last_verified: 2026-09-26
 ---
 
 # Tool Result 上限、分页与恢复
@@ -53,7 +53,7 @@ Tool / Provider / OS process
 | `attachments_list*`          | 请求页最多 500                                                                                               | 预算感知页 + 10K                         | opaque cursor                                            |
 | `workspace_map`              | depth 8、tree 1,000、walk 20,000                                                                             | summary/treeText/coverage                | 缩小 `focusPath` 重查                                    |
 | 文档文本读取                 | 文件 25 MiB；OOXML 单 entry 16 MiB、总 XML 64 MiB                                                            | canonical text + 10K                     | `historyOpen`                                            |
-| 文件输入 mount               | 最多 16 项；单项 64 MiB、合计 128 MiB；视觉输入单项 8 MiB                                                    | 不直接等于 Tool Result                   | 缩小输入或分批调用                                       |
+| 文件输入 mount               | 最多 16 项；普通文件流式校验/复制，无统一单项 64 MiB 或合计 128 MiB 旧上限；视觉输入单项 8 MiB               | 不直接等于 Tool Result                   | 来源/解析器仍有独立边界，按结构化错误处理                |
 | `web_search`                 | 请求/模型最多 8 条；Provider 另有限制                                                                        | 搜索产品页 + 10K                         | Provider cursor 或 `web_fetch`                           |
 | `web_fetch`                  | Provider/传输安全限；Exact Capture 64 MiB                                                                    | M 统一 10K；E/C 可有兼容字符限           | `historyOpen`                                            |
 | `apply_patch` Direct         | complete content 32 KiB；1–128 edits；edit 后目标 240,000 UTF-8 bytes                                        | receipt/successor + 10K                  | 超 Direct 边界改用 Staged；冲突后重新 `read_file`        |
@@ -75,6 +75,8 @@ Tool / Provider / OS process
 | 协作 Tool                    | 保留 Mailbox 总积压背压与单批条数限制；正文无固定业务字数上限                                                | 完整消息；使用整轮上下文预算             | 超整轮容量明确失败并保留原文；不进 Exact Archive         |
 
 表中数字是当前核验快照。修改任何一项时必须以常量和测试为准，并同步本文；不要从文档生成安全配置。
+
+Composer 原始附件的导入、模型视觉输入与 Tool Result 是不同阶段：managed import 以最多 512 KiB 的分块持久化原件，不再用旧的普通附件 8 MiB 上限；Runtime 图片上下文仍有单图/合计预算，普通文档读取也仍有解析限。移除输入 mount 的统一大小限不会放宽 64 MiB Exact Capture、10K 普通工具结果 Gate 或 Browser 下载来源限制。完整输入链路见[会话输入](conversation-inputs.md)。
 
 ## Model Result Gate
 

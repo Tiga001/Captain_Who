@@ -1,0 +1,123 @@
+.workflow-binding-canvas-shell {
+  min-width: 260px;
+  background-image: radial-gradient(var(--mc-color-border-subtle) 0.8px, transparent 0.8px);
+  background-size: 20px 20px;
+}
+.workflow-binding-canvas {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  cursor: grab;
+}
+.workflow-binding-canvas__extent {
+  position: relative;
+}
+.workflow-binding-canvas__stage {
+  background: none;
+}
+.workflow-binding-canvas .workflow-node {
+  cursor: default;
+}
+.workflow-binding-canvas .workflow-edge {
+  pointer-events: none;
+}
+.workflow-binding-node-anchor {
+  position: absolute;
+}
+.workflow-binding-node-tooltip-anchor {
+  width: 100%;
+  height: 100%;
+}
+.workflow-binding-canvas button.workflow-binding-node {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--mc-color-text-primary) 70%, var(--mc-color-surface-card));
+  border: 2px solid transparent;
+}
+.workflow-binding-canvas .workflow-binding-node:not(.is-bound) .workflow-node__avatar {
+  filter: grayscale(0.75);
+  opacity: 0.7;
+}
+.workflow-binding-canvas .workflow-binding-node.is-bound {
+  background: var(--mc-color-text-primary);
+  border-color: var(--workflow-instance-color);
+}
+.workflow-binding-canvas .workflow-binding-node.is-selected,
+.workflow-binding-canvas .workflow-binding-node:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+.workflow-binding-canvas .workflow-binding-node.is-drop-target {
+  outline: 3px solid var(--mc-color-focus-ring);
+  outline-offset: 4px;
+}
+.workflow-binding-node-tooltip {
+  min-width: 185px;
+  max-width: 220px;
+  padding: 3px 1px;
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-regular);
+  line-height: 1.5;
+}
+.workflow-binding-node-tooltip > strong {
+  display: block;
+  margin-bottom: 9px;
+  overflow-wrap: anywhere;
+  font-weight: var(--mc-font-weight-strong);
+}
+.workflow-binding-node-tooltip dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+.workflow-binding-node-tooltip dl > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+}
+.workflow-binding-node-tooltip dt {
+  color: var(--mc-color-text-muted);
+}
+.workflow-binding-node-tooltip dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.workflow-binding-node-tooltip__permission {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+.workflow-binding-node-tooltip__permission[data-permission='default'] {
+  color: var(--mc-color-icon-subtle);
+}
+.workflow-binding-node-tooltip__permission[data-permission='full'] {
+  color: var(--mc-color-icon-danger);
+}
+.workflow-binding-node-tooltip__permission[data-permission='custom'] {
+  color: var(--mc-color-text-accent);
+}
+.workflow-binding-node-tooltip__permission svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.workflow-binding-node-tooltip dl > .workflow-binding-node-tooltip__task {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+}
+.workflow-binding-node-tooltip__task dd {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  max-height: 145px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  text-align: left;
+}

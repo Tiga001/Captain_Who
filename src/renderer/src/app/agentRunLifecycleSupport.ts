@@ -247,6 +247,7 @@ export interface UseAgentRunLifecycleOptions {
   conversationState: {
     activeConversationId: string | null
     activeConversationIdRef: MutableRefObject<string | null>
+    visibleConversationIdRef?: MutableRefObject<string | null>
     conversations: ChatConversation[]
     conversationsRef: MutableRefObject<ChatConversation[]>
     setActiveConversationId: Dispatch<SetStateAction<string | null>>

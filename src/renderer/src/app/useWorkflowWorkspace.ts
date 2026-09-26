@@ -135,18 +135,29 @@ export function useWorkflowWorkspace({
     },
     [retrySynchronization]
   )
-  const memberships = useMemo(() => {
-    const result: Record<string, { id: string; name: string; color: string }> = {}
+  const { memberships, allMemberships } = useMemo(() => {
+    type Membership = { id: string; name: string; color: string }
+    const memberships: Record<string, Membership> = {}
+    const allMemberships: Record<string, Membership> = {}
     for (const instance of instances) {
       for (const binding of instance.bindings) {
-        result[binding.conversationId] = {
+        const membership = {
           id: instance.id,
           name: instance.name,
           color: instance.color
         }
+        allMemberships[binding.conversationId] = membership
+        if (instance.enabled) memberships[binding.conversationId] = membership
       }
     }
-    return result
+    return { memberships, allMemberships }
   }, [instances])
-  return { beforeCommit, committed, memberships, hasPendingSynchronization, retrySynchronization }
+  return {
+    beforeCommit,
+    committed,
+    memberships,
+    allMemberships,
+    hasPendingSynchronization,
+    retrySynchronization
+  }
 }

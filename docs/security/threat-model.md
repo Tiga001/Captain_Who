@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-26
 ---
 
 # 威胁模型
@@ -67,6 +67,25 @@ FileChange/audit 快照按需读取。Run grant 又绑定 Run、Conversation/Pro
 但必须由 Command policy 识别、审批和审计，不能被描述为受 FileChange Observation/audit 契约保护；旧 writer
 alias 或手工修改 SQLite 也不能作为绕过正式副作用边界的入口。
 
+### 会话输入、工作区指令与工作流配置
+
+大附件先通过 Main 导入为受管字节，输入/草稿/队列仅传递 opaque import 身份；使用前再次校验完整性和所属授权。
+文件夹引用只授予目录读取，不递归上传目录，也不扩大写入或命令权限。用户所选文件夹名称与绝对路径会提供给模型，
+而 durable root identity 留在 Host；“所有本机绝对路径永不进入模型”不是当前契约。Run 的项目目录 membership
+与 identity 独立冻结，目录被替换时 fail closed。详见[会话输入](../subsystems/conversation-inputs.md)。
+
+`workspace.instructions` 来自冻结根目录中的 `AGENTS.override.md`/`AGENTS.md`，每次请求与预览共用有界读取器，
+重新验证目录身份并拒绝 leaf symlink。指令内容仍是不可信项目数据，不授予 Tool 权限，也不等同于 Skill 激活。
+工作流图、模板可用性、实例启用和编辑草稿由 Rust Core 持久校验；可用模型、CAS 与绑定关系必须在 Host 重验。
+配置保存/启用不能作为已执行节点、外部副作用成功或用户批准的证据。
+
+### 账号与新回合许可
+
+Main 持有加密登录会话与进程内许可，Renderer 和 Core Server 不取得账号 token。冷启动/切换账号必须重新在线验证
+许可；Core Server 的新根回合与 Automation admission 还验证 Main 同步的有界 execution lease。既有 Run、审批和
+子任务不会因退出或许可变化被取消。该 lease 信任 Main，不是服务端签名 DRM；掌控本机程序的管理员仍在边界之外。
+账号之间共享现有本机数据库，不构成账号级本地数据隔离。详见[本机 Token 与许可](../subsystems/local-token-usage-and-license.md)。
+
 ### Scheduled Automation 与无人值守权限
 
 Scheduled Automation task 是对未来 Turn 的持续授权，不是普通提醒。只有应用与 Core Server 运行时才会执行，但用户不一定在屏幕前。创建或更新 task 时，Core Server 解析权限模式并把精确权限 projection 冻结到配置；每个 Run 又保存配置 snapshot。admission 时当前设置只作为 revocation ceiling：Full/Custom 模式已被关闭就 fail closed 并将 task 标为 `permission_disabled`，不会回退到 Default，也不会自动扩大权限。
@@ -93,8 +112,22 @@ Approval authority 仍是原 Agent pending action。通知、attention、task pr
 crash、下载、上传、文件读取和 Agent 自动化由 Electron Main broker。Renderer 与模型只接收 path-free download
 identity/projection；本机目标路径仅保留在 Host/Core Server 边界，显式 reveal/copy-path 也由 Main 执行而不通过 IPC
 返回路径。
-“每次询问保存位置”只适用于手动下载，Agent 下载不会触发原生 save dialog。自动化能力先按任务激活，敏感
-目标再绑定精确 origin/风险授权。网络策略降低 SSRF、DNS rebinding 和本地目标风险，但不应宣称等同网络沙箱。
+“每次询问保存位置”只适用于手动下载，Agent 下载不会触发原生 save dialog。自动化能力先按任务激活，HTTP(S)
+敏感目标再绑定精确 origin/风险授权。网络策略降低 SSRF、DNS rebinding 和本地网络目标风险，但不应宣称等同网络沙箱。
+
+本地 `file://` 导航是独立边界：地址栏和 Agent `browser_navigate` 均可打开本地文档，PDF 使用 Chromium 内置查看器。
+当前 [`BrowserNetworkPolicy`](../../src/main/browser/BrowserNetworkPolicy.ts) 对 `file:` 直接返回 allow 和空
+`riskKinds`，静态 Host boundary 也放行；[`BrowserNetworkGuard`](../../src/main/browser/BrowserNetworkGuard.ts)
+对本地文件流在 registered guest 校验前放行，以覆盖 PDF loader 的独立 WebContents。
+[`ManagedPlaywrightMcpHost`](../../src/main/mcp/ManagedPlaywrightMcpHost.ts) 为官方连接设置
+`allowUnrestrictedFileAccess: true`。这条导航路径不检查 Agent workspace、FileChange scope、Folder Reference grant
+或原生 picker 授权；受管上传输入的 FileBroker 授权不能被当成本地导航的保护证据。能力激活和其他敏感工具规则仍
+各自适用，但 `file:` 目的地本身没有额外 BrowserRisk 审批。
+
+本地文件 URL 会进入 Browser history 与页面/CDP 投影，因而可能包含本机绝对路径；download 的 path-free 契约
+不能推广到 Browser 的所有 URL。其访问范围受实际文件、操作系统和 Chromium 约束，当前不能宣称本地浏览被隔离
+在项目工作区内。真源另见 [`BrowserHistoryService`](../../src/main/browser/BrowserHistoryService.ts) 与
+[`ElectronGuestCdpTransport`](../../src/main/browser/ElectronGuestCdpTransport.ts)。
 
 ### 外部 MCP
 
@@ -142,9 +175,11 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed。唯一支持的 exact v47 → v48 → v49 升级依次补建派生搜索索引并放宽纯附件引导约束，事务失败完整回滚并保留源库；其余旧版要求显式开发重置。正式开发 reset 只从 exact current v49 及 exact v35–v48 提取
-明确 allowlist；旧 schema 不保留永久兼容读取路径，绑定 exact v33 fingerprint 的私有备份恢复是受控例外。notification facts、Browser history/download records、
-Agent templates 和 FileChange 运行/审计状态不会迁移。
+fail closed。当前 schema v57 只接受明确的 exact v50–v56 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属或
+回填历史。启动迁移与显式 reset 是不同边界：reset 当前可从 exact v57 提取 allowlist，旧源恢复仍受固定目标版本 gate
+拒绝。不得用手工改 `user_version`、删表或默默丢弃配置绕过。reset 不保留 notification facts、Browser history/download
+records、Agent templates、工作流模板/实例/草稿、本机 Token 统计和 FileChange 运行/审计状态。详见
+[恢复 Runbook](../operations/recovery-runbook.md)。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管
 清理策略处理，不根据 Renderer 猜测直接删除。
@@ -154,9 +189,10 @@ Agent templates 和 FileChange 运行/审计状态不会迁移。
 - 文件/命令权限是应用策略，不是通用 OS 容器；
 - 外部 MCP 的路径校验到实际 spawn 之间仍存在平台相关 race；
 - Windows 用户配置的 stdio MCP Server 尚不能宣称完整进程树隔离；
-- macOS 已有 app/managed native target 与 DMG signing，但仓库没有独立 DMG verifier，notarization、stapling 和自动更新发布链路尚未配置；
+- macOS 已有 app/managed native target 与 DMG signing；打包验证、notarization 与更新链路的实际覆盖须独立核对[构建与发布](../development/build-and-release.md)，不能从源码测试通过推断系统验收结果；
 - packaged privacy scan 当前只在 macOS afterPack 执行，非 macOS 不能继承该证据；
 - 浏览器和运行时组件仍需要目标平台、打包态和供应链持续验证；
+- Browser 本地 `file://` 导航不受 workspace/picker 读取授权约束，且 URL 可保留本机路径；网络风险门禁不构成本地文件隔离；
 - Full/Custom Automation 的冻结权限可在无人值守时产生副作用；Custom 细项变更不会自动收窄旧 task，暂停也不取消 active Run；
 - 普通任务/Automation 原生通知可能被前台/disabled/平台策略抑制、延迟或在 show/ACK 崩溃窗口重复，且通知内容受操作系统锁屏展示策略影响；
 - FileChange 只覆盖单目标普通 UTF-8 文本且最多 4 MiB；命令与专用 Builder/Office 输出仍有独立副作用边界；
@@ -175,6 +211,7 @@ Agent templates 和 FileChange 运行/审计状态不会迁移。
 - 敏感值是否可能进入日志、Trace、事件、错误、Archive 或快照；
 - FileChange 是否绑定 Observation、Run grant、目录 identity、audit/receipt，限制 symlink/hard link/根目录逃逸，并对 unknown outcome 禁止盲重放；
 - Browser download 是否只向 Renderer/模型暴露 path-free identity，并保持手动/Agent save-dialog 边界；
+- Browser `file://` 导航、PDF loader 和历史 URL 是否明确区别于 download/upload 授权，未将网络门禁或 FileBroker 冒充本地导航的 workspace 限制；
 - packaged 组件是否通过 frozen receipt/Mach-O allowlist、最小 entitlement、privacy scan 与最终产物验签；
 - 测试是否包含拒绝、篡改、越界、重复和恢复路径；
 - 文档是否明确测试未覆盖的平台和残余风险。

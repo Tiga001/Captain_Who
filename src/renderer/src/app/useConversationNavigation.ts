@@ -21,7 +21,8 @@ const ARCHIVE_CONVERSATION_MAX_ATTEMPTS = 3
 class ConversationArchiveError extends Error {
   constructor(
     message: string,
-    readonly safeToRollback: boolean
+    readonly safeToRollback: boolean,
+    readonly workflowBlocked = false
   ) {
     super(message)
   }
@@ -30,6 +31,7 @@ class ConversationArchiveError extends Error {
 interface ConversationNavigationMessages {
   activeCommandSession: string
   archiveFailed: string
+  archiveWorkflowActive: string
   continueInNewTaskFailed: string
   continueInNewTaskBusy: string
   originArchived: string
@@ -43,6 +45,7 @@ interface UseConversationNavigationOptions {
   conversationsRef: MutableRef<ChatConversation[]>
   drafts: Record<string, ChatComposerDraft>
   hydrateConversation: (conversationId: string) => Promise<ChatConversation | null>
+  workflowMemberships: Readonly<Record<string, unknown>>
   messages: ConversationNavigationMessages
   onActiveConversationArchived: (conversation: ChatConversation) => void
   persistDraftNow: (scopeId: string, draft: ChatComposerDraft) => Promise<void>
@@ -63,6 +66,7 @@ export function useConversationNavigation({
   conversationsRef,
   drafts,
   hydrateConversation,
+  workflowMemberships,
   messages,
   onActiveConversationArchived,
   persistDraftNow,
@@ -309,6 +313,11 @@ export function useConversationNavigation({
           )
       )
       if (originalsById.size === 0) return
+      // Block the entire selection before writing archive intents or changing navigation.
+      if ([...originalsById.keys()].some((id) => workflowMemberships[id])) {
+        showToast(messages.archiveWorkflowActive)
+        return
+      }
       for (const conversationId of originalsById.keys()) {
         archiveRequestsInFlightRef.current.add(conversationId)
       }
@@ -377,6 +386,13 @@ export function useConversationNavigation({
           try {
             await saveConversationMeta(candidate)
           } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message.includes('workflow_active_archive_blocked')
+            ) {
+              // SQLite rejected this write atomically; do not retry a deliberate workflow guard.
+              throw new ConversationArchiveError(error.message, true, true)
+            }
             // A rejected IPC response does not prove the SQLite commit failed. Read back the
             // exact row before deciding whether this attempt needs a retry.
             lastError = error
@@ -418,6 +434,7 @@ export function useConversationNavigation({
       const archivedById = new Map<string, ChatConversation>()
       const failedIds = new Set<string>()
       let failed = false
+      let workflowBlocked = false
       for (const [index, outcome] of outcomes.entries()) {
         const candidate = candidates[index]
         if (!candidate) continue
@@ -425,6 +442,8 @@ export function useConversationNavigation({
           archivedById.set(candidate.id, outcome.value)
         } else {
           failed = true
+          workflowBlocked ||=
+            outcome.reason instanceof ConversationArchiveError && outcome.reason.workflowBlocked
           if (outcome.reason instanceof ConversationArchiveError && outcome.reason.safeToRollback) {
             failedIds.add(candidate.id)
           }
@@ -483,7 +502,8 @@ export function useConversationNavigation({
           })
         )
       }
-      if (failed) showToast(messages.archiveFailed)
+      if (failed)
+        showToast(workflowBlocked ? messages.archiveWorkflowActive : messages.archiveFailed)
       for (const conversationId of originalsById.keys()) {
         archiveRequestsInFlightRef.current.delete(conversationId)
       }
@@ -492,6 +512,8 @@ export function useConversationNavigation({
       activeConversationIdRef,
       conversationsRef,
       messages.archiveFailed,
+      messages.archiveWorkflowActive,
+      workflowMemberships,
       onActiveConversationArchived,
       setConversationsWithRef,
       showToast,

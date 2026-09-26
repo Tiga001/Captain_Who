@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-09
+last_verified: 2026-09-26
 ---
 
 # 上下文管理
@@ -40,7 +40,7 @@ messages + Trace/model-context journal + active compaction head
  compaction planner -> summary generation -> atomic commit
 ```
 
-`agent_run_json`、Renderer 事件和 timeline 只用于展示，不得反向重建模型历史。终态 parent message 中冻结的 `collaborationTimelineActivities` 也只是展示 snapshot；final-response stream 开始后发生的子 Agent 活动仍留在 Agent Center/event log，但不会被补入已提交回复或模型上下文。Provider payload 必须从 Provider-neutral `LlmMessage` 生成；这适用于 OpenAI-compatible、Anthropic-compatible 和 DeepSeek，而不是只适用于某两个 Provider。
+`agent_run_json`、Renderer 事件和 timeline 只用于展示，不得反向重建模型历史。`collaborationFinalResponseBoundary` 记录最终正文开始时的位置，Run 结算时冻结回复内的 `collaborationTimelineActivities`；结算后活动显示在实际 owner 会话的消息之间，不改写旧回复，也不凭 UI 活动创建模型输入。模型协作信息仍来自持久 Mailbox/receipt。Provider payload 必须从 Provider-neutral `LlmMessage` 生成；这适用于所有已注册 Provider。
 
 ## 逻辑日志顺序
 
@@ -181,30 +181,11 @@ Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户
 
 ### 最终请求指纹与跨 Run 诊断
 
-`MYCOPILOT_REQUEST_FINGERPRINT=1` 可启用最终 HTTP 发送边界诊断：在 Provider adapter 完成 payload 后、`reqwest` 发送前，向 Core Server stderr 输出一行 `[request-fingerprint]` JSON。默认关闭，不修改请求和持久化格式，不保存正文、工具参数或凭据。日志包含 model、tools 数量及 SHA-256、顶层 system、每条消息的序号/role/content UTF-8 字节数与字符数/content 指纹、整条消息指纹及完整 payload 指纹。字符数指 Unicode scalar count，不是 token 估算。结构化内容按 compact JSON 计算，数组顺序保留；整条消息指纹同时覆盖 reasoning、tool call ID 和 arguments，不能只比较可见正文。完整 payload 的指纹覆盖所有其他 Provider 字段。
+共同前缀必须按实际 Provider wire payload 比较，不能只检查消息是否包含某些文字。[Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 使用真实 Turn admission、SQLite、Runtime 和本地 Provider，比较跨 Run 的工具定义、消息、真实文件内容、成组 Tool 交换及 continuation。
 
-复现命令（临时数据库、本地可控 Provider，不调用真实模型）：
+普通发送由 Host 原子创建 user/assistant pair；Renderer 只乐观显示，不能迟到 upsert 覆盖首次持久化的创建时间、正文或 Run identity。上下文前缀使用这些稳定持久事实，既有错误历史不靠推测回写。[存储生命周期](./storage-and-data-lifecycle.md#消息创建与重试归属)维护新增/幂等重试与状态回存的共同边界。
 
-```sh
-MYCOPILOT_REQUEST_FINGERPRINT=1 cargo test -p mycopilot-core-server --bin core-server request_prefix -- --nocapture
-```
-
-[Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 使用真实 `AgentService::start_conversation_turn`、项目绑定、设置/能力快照、SQLite、Rust Core Harness、`workspace_map`/两次 `read_file` 和 native DeepSeek V4 高推理序列化，在本地 HTTP 服务收到最终 JSON 时再计算指纹。第一 Run 发出三个请求，下一 Run 输入“谢谢”；比较上一 Run 最后请求的每条旧消息，而非只检查内容包含关系。请求长度必须增加；真实文件内容、成组工具交换、reasoning 都必须存在。
-
-2026-09-07 初次诊断在真实 Host 重现的断点是 `messages[5]`（从 0 开始）中旧 user 的 `user_message_created_at` 被改写；tools 和后面的 Run material、正文、reasoning、成组工具交换都保持一致。原因是 Renderer 同时排队乐观消息保存并启动 Host，迟到的 upsert 覆盖了 Host 已冻结的时间。所报告真实聊天的消息与独立 Trace 时间也相差 29ms，与该机制吻合；旧请求未保留最终 wire，不能把落盘核对当成现场 payload 捕获。
-
-该竞争现已在两端修复：
-
-- [普通发送](../../src/renderer/src/app/useAppShellMessageSubmission.ts) 只做乐观展示，由 `startConversationTurn` 原子创建用户/助手消息；`starting` 不再发起状态保存。明确没有 Run 的失败或取消才补存失败 pair，保留输入、附件和错误，不覆盖后来输入的草稿。排队发送复用相同路径。
-- [Renderer 新增消息接口](../../crates/core/src/storage/chat_repository.rs) 的同会话重复 ID 保留已存时间、正文、角色、状态、Run 投影和位置，在同一事务返回真实记录；另一会话占用该 ID 则整批拒绝。agent/snapshot 不可变校验继续生效。
-- 扩大复测还发现：Host 已完成但启动响应丢失时，无 Run ID 的本地失败状态可经 `saveChatMessageState` 清空最终正文，导致下一轮 `provider_protocol_changed` 拦截。该路径也已修复：启动未确认的失败/取消只更新本地展示；后端对有 Trace 的助手消息只接纳绑定同一 Run ID 的状态回存，忽略未绑定或绑定其他 Run 的迟到副本。本地尚未接纳的失败消息仍可正常保存。
-- Host 接纳、运行中与终态持久化继续走专用写入路径；编辑重发使用新消息 ID。没有修改上下文排序、时间格式、Provider wire 格式或 schema。
-
-[Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 将原缺陷断言改为完整前缀不变，并覆盖：无前端保存、首次请求后迟到 upsert、终态后迟到 upsert、迟到保存后重启、Renderer 终态状态回存、迟到 live checkpoint，以及启动响应丢失后的未绑定失败状态与补存。回存经真实 storage RPC 的 DTO/授权边界，核对持久化返回值、消息时间和最终正文，再比较“读文件 → 谢谢”的 tools 与每一条旧消息。另验证上一 Run 最终助手正文和 reasoning 在后续请求中完整保留，避免只检查之前已发送的输入而漏掉最后输出。
-
-修复后实际验证：7 项真实 Host 回归全部通过，28/28 发送前与 HTTP 接收端完整指纹一致。每个场景的 23 个工具不变，请求消息数量为 `7 → 9 → 12 → 16`；下一 Run 的前 12 条消息逐条等于上一 Run 最后请求，七个 `firstCrossRunChange` 均为 `None`。存储测试 662 项通过、1 项沿用既有忽略；AppShell 浏览器测试 94 项通过；Node/Web 类型检查、workspace all-targets Clippy、格式和文档检查通过。
-
-此修复无需重置数据库，也不推测或回写旧消息的原始时间。已经被改写的历史保持当前持久化事实；本次保护阻止后续迟到插入再次改写它。最终共同前缀一致仅说明本地序列化没有制造额外断点，不等于保证 Provider 实际缓存命中率。
+回归覆盖首次请求后与终态后的迟到保存、保存后重启、终态状态回存、迟到 live checkpoint、启动响应丢失及失败 pair 补存，并核验上一轮最终正文/reasoning 在后续请求完整保留。本地序列化共同前缀一致不代表 Provider 一定命中缓存；不在当前维护文档保留历史一次性通过数量作为现状门禁。
 
 ### Todo 存储与提醒预算
 
@@ -261,6 +242,8 @@ Host 在发出请求前用事务校验归属、运行状态、停止围栏、预
 上下文帧和 checkpoint 同时保存 canonical 状态日志及其投影关联；不从模型可见文本反解 Host 状态。SQLite 增量缓存与冷重建使用同一日志。上下文预览在帧副本上计算当前设置对应的临时 full/diff 和指南，使用同一能力快照进行工具计量，不写日志、request receipt 或观察标记。
 
 后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource、Artifact 与 Browser download 必须先通过统一 locator 和各自授权解析，模型字符串本身不是文件系统权限。Host 可以从 `agent_nodes` 推导同一 Agent task tree 的 exact root scope，使父/子/兄弟复用 durable attachment/artifact/download；模型、Prompt 或 Renderer 不能自报 root identity，未知 scheme-like/`@namespace` locator 必须 fail closed。
+
+Composer Folder Reference 是独立的输入来源：模型上下文有意包含所选目录 name/绝对路径，并提示先浏览再按需读取，不递归预载整个目录。Host 目录 identity 和可用性不进入模型正文；引用不替代 `workspace.binding`，不增加写权限或 `workspace.instructions` 发现根。纯附件、纯文件夹输入及运行中引导同样由 Host 构造材料，不为非空校验伪造用户正文；managed import ID 只是持久输入引用，真正材料构造仍复核附件归属及内容。详见[会话输入](../subsystems/conversation-inputs.md)。
 
 Automation HumanRoot Turn 还会追加 `automation_execution` 来源的 retained、Run-scoped system item，包含
 Host 从持久 Run 绑定构造的任务/Run identity、计划时间、上次运行时间和 trigger kind。它不修改用户
@@ -449,56 +432,19 @@ capacity exceeded
 - `crates/core-server/src/application/agent/tests/world_state_compaction_boundary.rs`
 - `crates/core-server/src/application/agent/context_compaction.rs` 内单元测试
 
-### 2026-09-06 前轮：请求顺序与能力开关验收
+### 维护回归与版本边界
 
-- `cargo test --locked -p mycopilot-core --lib -- --quiet`：2,483 项通过，10 项按已有配置忽略。包含四类 Provider 的工具与恢复契约、真实 OpenAI/Anthropic Harness 请求、开关快照一致性、迟到调用拒绝、连续用户输入与附件、审批恢复、计量，以及压缩重建后多工具闭环。
-- `cargo test --locked -p mycopilot-core-server --bin core-server human_input -- --quiet`：34 项通过，覆盖真实 Host 的同步/异步回答、开关关闭后的既有批次、暂停恢复与投递边界。
-- `cargo clippy --locked --workspace --all-targets -- -D warnings`：通过。
-- 文档、公开文档、测试归属检查通过；新增 Rust 文件的 Rustfmt 和修改的 whitespace 检查通过。未改 Renderer、Preload 或公共 TypeScript 协议，本轮没有执行浏览器回归。
+请求布局、跨 Run 材料、压缩恢复与 Provider continuation 应联合验证，不把某个历史轮次的测试数量当作当前完成门禁。重点补充入口：
 
-新增 `frame/request_layout.rs` 测试验证整条消息的 role、内容、图片与工具身份仅发生排列变化，初始与运行中 Skill/快照不混淆，全量计量和 manifest 的 `modelRequestIndex` 使用发送顺序。`frame/compaction_layout_tests.rs` 验证连续压缩、checkpoint 往返及完整多调用 Turn 重建为逐调用日志后的因果关系；manifest 的 `index` 仍为内部 journal 位置。
+- [输出预算回归](../../crates/core/src/runtime/tests/output_budget.rs)：省略 wire 上限、内部预留与恢复指纹。
+- [统一历史回归](../../crates/core/src/runtime/tests/unified_history.rs)：真实 Runtime、SQLite 重启、原图引用、冷/热容量与跨 Run 前缀。
+- [请求前缀回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs)：Host admission、迟到 Renderer upsert、终态及持久化回执。
+- [工作区指令回归](../../crates/core-server/src/application/agent/tests/workspace_instructions.rs)：同一次发现用于预览与请求，replace/remove 及目录身份复验。
+- [分支历史回归](../../crates/core/src/storage/conversation_fork_repository/tests.rs)：精确边界、上下文来源、图片和身份重映射。
 
-首次完整回归暴露的两处旧断言已更新：预激活 Skill 的来源增加布局标签；搜索开关只改变动态工具契约，不再改变稳定工具前缀。最终完整回归结果如上。数据库仍为 canonical schema v39，本轮没有迁移或重置数据。
+当前 SQLite 版本与升级/reset 边界统一以[存储生命周期](./storage-and-data-lifecycle.md#schema-发布策略)为准。Trace 为 v6（[常量](../../crates/core/src/conversation_trace/model.rs)），Runtime checkpoint 为 v19（[常量](../../crates/core/src/protocol/checkpoint.rs)），私有恢复信封为 v14（[校验](../../crates/core-server/src/application/agent/persisted_resume_input.rs)）。这三种版本独立于数据库版本；拒绝旧 checkpoint 不意味着数据库必须删除历史，也不意味着 reset 能恢复任意旧备份配置。
 
-### 2026-09-06 跨 Run World State 升级验收
-
-本轮已完成：搜索与人机交互可用性、浏览器用户设置进入 Conversation full/diff；浏览器任务激活、Skills 和附件保留 Run 作用域；工具名称清单仅供 Host 使用。当时保留 15 层模型消息布局，工具 Schema、RequestOnly 指南及状态使用同一请求边界快照；后续已将忽略提问改为普通时序事实，当前 14 项布局以上文组装规则为准。
-
-请求日志、未观察状态保护、幂等提交、观察确认、冷重建、增量缓存、只读预览、checkpoint、压缩、分支、删除及重写均已接入。完整回归发现并修复了无存储压缩执行器丢失 canonical ledger，以及恰好压缩到 Trace N 后无法重建位于 N 之后的未观察 diff 两个问题。真实 Host 回归覆盖跨三个 Run 的关闭／开启／关闭、预览不写库、凭据不入状态，以及精确 Trace 压缩后清理缓存再正常发送。
-
-实际执行结果：
-
-- `cargo test --locked --workspace`：最终 3,606 项通过、0 项失败、14 项按已有配置忽略。包括 Rust Core 2,504 项、Core Server 主程序 857 项、开发库 reset 63 项及其余协议、客户端、集成和文档测试。初轮失败已修复并纳入最终完整复验，忽略项不计为通过。
-- `cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`pnpm typecheck`：通过。
-- `pnpm test:storage-reset-dev`：10 项通过。修改脚本的 ESLint、修改文档及脚本的 Prettier、文档检查、公开文档检查、测试归属检查和 `git diff --check`：通过。
-- 本轮没有修改 Renderer、Preload 或公共 TypeScript 问答契约，没有执行浏览器回归或真实付费模型请求；跨层请求使用可控本地 Provider。没有进行厂商缓存命中率实测。
-
-当前 canonical schema 为 **v41**，Trace 为 **v5**，私有 Run checkpoint 为 **v15**，持久恢复输入为 **v12**。旧开发聊天不迁移；受管 reset 支持从 exact v40 及已支持旧版本保留配置和凭据引用后创建 v41，详见 [恢复手册](../operations/recovery-runbook.md)。所有数据库验证使用临时库，没有重置用户实际数据。
-
-### 2026-09-06 请求前缀布局优化验收
-
-已完成两项布局调整：Conversation full 放到初始 Skill 目录、协作目录及当前能力指南之后；本次连续用户输入与关联 diff、附件整体放到预激活 Skill 和初始 Run full 之前。旧编号顺序为 `1 → 3 → 4 → 5 → 2 → 6 → 7 → 10 → 8 → 9 → 11 → 12 → 13 → 14 → 15`，上方当前组装规则已按新位置重新编号。
-
-新增共同前缀对比验证：full 与摘要同时变化时，前面的目录和指南仍逐消息相同；本次连续用户输入成为下一 Run 历史时，前缀可以延伸至这些用户输入及其关联 diff，同时不继承旧 Run 的 Skill、快照或附件投影。这些测试验证请求相同性，不代表厂商实际缓存命中率。
-
-实际执行以下 Rust 测试筛选，全部最终通过；筛选间存在重叠，不合计为独立用例总数：
-
-| 命令范围                                                                     | 结果                                                                                |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `cargo test --locked -p mycopilot-core --lib layout --no-fail-fast`          | 14 通过、1 项已有忽略；包含真实 OpenAI-compatible/Anthropic-compatible 两次连续请求 |
-| 同包 `--lib context::`                                                       | 139 通过，覆盖冷组装、共享基线、计量及压缩后布局                                    |
-| 同包 `--lib runtime::checkpoint::`                                           | 40 通过                                                                             |
-| 同包 `--lib runtime::tests::compaction_and_tool_flow::`                      | 6 通过                                                                              |
-| 同包 `--lib runtime::tests::approval_resume::`                               | 2 通过                                                                              |
-| `cargo test --locked -p mycopilot-core-server --bin core-server world_state` | 3 通过，包含真实 Host 跨 Run 状态及精确 Trace 压缩重建                              |
-| 同包同目标 `application::agent::tests::context_history::`                    | 16 通过、1 项已有忽略                                                               |
-| 同包同目标 `context_window`                                                  | 5 通过                                                                              |
-
-复验中更新了两条与旧布局相关的测试假设：输入归类变化仍使计量缓存失效，但新顺序下消息位置可能相同；Host 历史顺序断言精确匹配消息正文，避免把前置协作目录中引用的任务标题当成用户消息。工具配对、图片字节、因果顺序及状态历史的断言继续保留。
-
-Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档的 Prettier、文档/公开文档/测试归属检查和 `git diff --check` 通过。本轮未改公共 TypeScript 协议或前端，未执行浏览器和真实厂商缓存测试；schema/checkpoint/恢复输入版本保持 v40/v15/v12，没有新增存储重置要求。
-
-## 普通后端历史事件（2026-09-06）
+## 普通后端历史事件
 
 忽略非阻塞交互不再占用请求尾部的独立层。每次结算产生一个普通 `BackendState` Trace，
 模型正文为 `{type: human_interaction_status, requestId, status: ignored}`，经过现有
@@ -510,34 +456,15 @@ Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档�
 `conversationCompletionCovered` 标记说明最终回复已经被摘要覆盖，防止后置事件保留时重复终态。
 
 压缩使用普通历史规则，不特意保留或重新注入忽略状态；活动 Run 的事件与权威 journal
-重建结果通过 trace origin 去重。分支继承边界内的冻结事实，投影回执与未答权限不继承。
-完整实现与本轮验证见[人机交互](../subsystems/human-interaction.md#忽略操作的普通历史投影2026-09-06)。
+重建结果通过 trace origin 去重。分支继承边界内的冻结事实，不复制可执行投递；仍 open 的非阻塞问题由专用分支事务创建目标身份，并且只在可认证回执中重写请求 ID。
+完整实现见[人机交互](../subsystems/human-interaction.md#非阻塞路径先接纳后投递)。
 
-## 文件事务上下文精简（2026-09-06）
+## 文件事务上下文
 
 文件事务的上下文现已按寿命拆分：固定规则在稳定前缀，已完成结果归普通工具历史，尾部只含
 当前未完成事务的状态与精确游标。纯文字违规提醒只进入下一次请求；工具旁白被屏蔽的事实以普通
 `BackendState` 留在其完整工具批次之后，随历史压缩，不长期保护过期操作指令。
 详见 [FileChange 模型上下文](../subsystems/file-change.md#模型上下文的三种寿命)。
-
-## 2026-09-07 统一跨 Run 历史验收
-
-已完成旧第 7 层与本轮第 8–11 层的统一材料记录和重放，适配容量、自动/手动压缩、fork、child snapshot、历史裁剪和同版本恢复。稳定前缀、动态工具策略以及 Todo/修复/未完成文件事务尾部保持现状。本轮不新增缓存遥测系统，不引入图片摘要器。
-
-实际执行并通过：
-
-- Rust Core 全量单元测试：`cargo test --locked -p mycopilot-core --lib -- --quiet`，**2,566 通过、10 项已有忽略**。其中真实 Runtime + SQLite 重启 + 三轮请求分别验证 DeepSeek、Generic OpenAI、Generic Anthropic 的实际发送内容：不变条件下，上一轮请求 messages 是下一轮的完整前缀；tools/system 不变，工具正文与结果不重复，私有 reasoning 保持 Provider 边界。另有原图引用、审批/引导、压缩、分支和冷/热容量回归。
-- Core Server 主程序：`cargo test --locked -p mycopilot-core-server --bin core-server -- --quiet --test-threads=8`，**865 通过、3 项已有忽略**；Core Server library **33 通过**；受管 MCP stdio 真实集成测试退出码 **0**。
-- 开发期 reset：`cargo test --locked -p mycopilot-core-server --bin storage-reset-dev -- --quiet`，**66 通过**；Node reset 脚本测试 **10 通过**。包含 exact v41 reset、新库校验，以及配置和凭据引用保留。
-- TypeScript 协议 **371 通过**，Host/Preload bridge **11 通过**，问答 Renderer 浏览器回归 **24 通过**。
-- `pnpm test:human-interaction-core-e2e`：**2 通过**，使用受管 Chromium、实际 Host/Preload、实际 Core Server 及可控 Provider，覆盖同步暂停恢复与异步回答后继续。
-- Workspace all-target Clippy（`-D warnings`）、Rustfmt、TypeScript 类型检查、ESLint、修改文件的 Prettier、开发/公开文档检查、测试归属与 Rust 忽略项登记、`git diff --check` 均通过。
-
-首次回归发现并修复了历史 Run 状态误入 Conversation ledger、压缩重建容量分类缓存、合法新 Trace 边界以及若干旧序号/版本断言问题。一次同时运行多个大型套件的 Host 回归出现大输出命令等待超时；该用例单独复验和上述 8 线程全量复验均通过，没有修改命令生产逻辑。浏览器真实链路的旧按钮文案断言已与现有“下一项”界面统一，最终两项通过。忽略项不计为通过。
-
-当前 **SQLite schema v42 / Trace v6 / checkpoint v17 / 恢复信封 v13 / 压缩输入 v6**。旧开发库需要通过现有受管 reset 创建新库，不提供旧聊天迁移；所有数据库测试均使用临时库，本次未重置真实数据。配置与 API 凭据不删除，操作说明见[恢复手册](../operations/recovery-runbook.md)。
-
-本轮验证的是请求内容的相同性，没有调用真实付费 Provider 测量缓存命中率，不能据此承诺 98%。能力/工具/目录变化、压缩和仍保留的请求尾部可缩短共同前缀；图片仍按原始视觉输入计入容量。
 
 ## 变更检查表
 
@@ -558,4 +485,4 @@ Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档�
 - ContextFrame 的增量缓存只在 revision 连续时有效，复杂重写会退回全量重建。
 - Continuity Index 是有限引用集合，不是完整目录；精确内容必须通过历史工具打开。
 - 正在执行且未提交的流式模型片段不会成为可恢复的长期上下文。
-- final-response stream 开始后的协作活动不会回填已冻结的 parent message timeline；完整后续状态需从 Agent Center/event log 查询。
+- Run 结算后协作活动在 owner 会话的消息间独立展示，不回写冻结回复，也不由这些 UI 活动反向组装模型上下文。
