@@ -1031,11 +1031,11 @@ export function WorkflowsPage({
                     <span aria-hidden="true" />
                   </button>
                 </Tooltip>
-                <Tooltip content={t('查看流程图', 'View workflow diagram')}>
+                <Tooltip content={t('工作流看板', 'Workflow board')}>
                   <button
                     type="button"
                     className="workflow-icon-button project-workflows__diagram"
-                    aria-label={`${t('查看流程图', 'View workflow diagram')} ${instance.name}`}
+                    aria-label={`${t('工作流看板', 'Workflow board')} ${instance.name}`}
                     disabled={!record}
                     onClick={() => openMonitor(instance.id)}
                   >

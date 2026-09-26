@@ -311,7 +311,7 @@ describe('global workflow management', () => {
         'chat-a': { waitingApproval: false, waitingAnswer: true, unread: true }
       }
     })
-    const diagram = page.getByRole('button', { name: '查看流程图 交付看板', exact: true })
+    const diagram = page.getByRole('button', { name: '工作流看板 交付看板', exact: true })
     await expect.element(diagram).toBeVisible()
     const configure = page.getByRole('button', { name: '配置 交付看板', exact: true }).element()
     expect(
@@ -356,7 +356,7 @@ describe('global workflow management', () => {
     expect(document.querySelector('.project-workflows__library')).toBeNull()
     await view.rerender(renderPage({ initialMonitorId: null, onOpenConversation }))
     await expect
-      .element(page.getByRole('button', { name: '查看流程图 停用看板', exact: true }))
+      .element(page.getByRole('button', { name: '工作流看板 停用看板', exact: true }))
       .toBeVisible()
   })
 

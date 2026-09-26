@@ -1,5 +1,5 @@
 // Small constants, queue payload types, and panel toggle controls for AppShell.
-import { MoreHorizontal, Network } from 'lucide-react'
+import { MoreHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { TranslationKey } from '../config/frontendTranslations'
 import type { AppProject } from '../config/projectConfig'
@@ -7,10 +7,10 @@ import type { ChatMessage } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../hooks/useDismissOnOutsidePointer'
-import { Tooltip } from '../components/overlay/Tooltip'
 import { isMacOS } from '../lib/platform'
 import { MainPanelBrandMark } from './shell/MainPanelBrandMark'
 import { MainPanelProjectCard } from './shell/MainPanelProjectCard'
+import { MainPanelWorkflowMenu, type MainPanelWorkflow } from './shell/MainPanelWorkflowMenu'
 import {
   ConversationActionsMenu,
   type ConversationActionsMenuPosition
@@ -151,7 +151,7 @@ export interface MainPanelProjectCardActions {
 interface MainPanelToolbarProps extends SidebarToggleControlsProps {
   conversationActions?: MainPanelConversationActions
   projectCard?: MainPanelProjectCardActions
-  workflow?: { name: string; color: string; onOpen: () => void }
+  workflow?: MainPanelWorkflow
   title?: string
 }
 
@@ -176,6 +176,7 @@ function MainPanelConversationTitle({
   const titleAtEditStartRef = useRef(title)
   const [menuPosition, setMenuPosition] = useState<ConversationActionsMenuPosition | null>(null)
   const [projectOpen, setProjectOpen] = useState(false)
+  const [workflowOpen, setWorkflowOpen] = useState(false)
   const [draft, setDraft] = useState(title)
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
   const isMenuOpen = Boolean(menuPosition)
@@ -183,13 +184,17 @@ function MainPanelConversationTitle({
     conversationActions && editingConversationId === conversationActions.conversationId
   )
   const closeMenu = () => setMenuPosition(null)
-  const closeProjectCard = () => setProjectOpen(false)
+  const closeTitlePopovers = () => {
+    setProjectOpen(false)
+    setWorkflowOpen(false)
+  }
   useDismissOnOutsidePointer(menuRootRef, isMenuOpen, closeMenu)
 
   useEffect(() => {
     editingConversationIdRef.current = null
     setEditingConversationId(null)
     setProjectOpen(false)
+    setWorkflowOpen(false)
   }, [conversationActions?.conversationId, projectCard?.project.id])
 
   const finishEditing = (next: string | null) => {
@@ -212,7 +217,7 @@ function MainPanelConversationTitle({
   const startEditing = () => {
     if (!conversationActions) return
     closeMenu()
-    closeProjectCard()
+    closeTitlePopovers()
     titleAtEditStartRef.current = title
     setDraft(title)
     editingConversationIdRef.current = conversationActions.conversationId
@@ -222,32 +227,28 @@ function MainPanelConversationTitle({
   return (
     <div className="main-panel__title" data-editing={isEditing || undefined}>
       {workflow ? (
-        <Tooltip
-          anchorClassName="main-panel__workflow"
-          content={workflow.name}
-          preferredPlacement="bottom"
-        >
-          <button
-            className="main-panel__workflow-button"
-            type="button"
-            aria-label={workflow.name}
-            style={{ color: workflow.color }}
-            onClick={() => {
+        <MainPanelWorkflowMenu
+          onOpenChange={(nextOpen) => {
+            if (nextOpen) {
               closeMenu()
-              closeProjectCard()
-              workflow.onOpen()
-            }}
-          >
-            <Network aria-hidden="true" />
-          </button>
-        </Tooltip>
+              setProjectOpen(false)
+            }
+            setWorkflowOpen(nextOpen)
+          }}
+          open={workflowOpen}
+          t={t}
+          workflow={workflow}
+        />
       ) : null}
       {projectCard ? (
         <MainPanelProjectCard
           conversationCount={projectCard.conversationCount}
           onEditProject={projectCard.onEditProject}
           onOpenChange={(nextOpen) => {
-            if (nextOpen) closeMenu()
+            if (nextOpen) {
+              closeMenu()
+              setWorkflowOpen(false)
+            }
             setProjectOpen(nextOpen)
           }}
           onRevealFolder={projectCard.onRevealFolder}
@@ -300,7 +301,7 @@ function MainPanelConversationTitle({
                 return
               }
 
-              closeProjectCard()
+              closeTitlePopovers()
               const rect = event.currentTarget.getBoundingClientRect()
               setMenuPosition({
                 x: Math.max(

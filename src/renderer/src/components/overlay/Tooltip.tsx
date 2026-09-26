@@ -36,6 +36,8 @@ interface TooltipProps {
   delayOnFocus?: boolean
   /** Link supplemental tooltip content to the trigger. Leave false when it repeats aria-label. */
   describeTrigger?: boolean
+  /** Hides the tooltip while the trigger's own popup is open. */
+  disabled?: boolean
   preferredPlacement?: TooltipPlacement
 }
 
@@ -51,6 +53,7 @@ export function Tooltip({
   delayMs = DEFAULT_DELAY_MS,
   delayOnFocus = false,
   describeTrigger = false,
+  disabled = false,
   preferredPlacement = 'top'
 }: TooltipProps): ReactNode {
   const tooltipId = useId()
@@ -228,6 +231,7 @@ export function Tooltip({
       </span>
 
       {isOpen &&
+        !disabled &&
         createPortal(
           <div
             className="mc-tooltip"

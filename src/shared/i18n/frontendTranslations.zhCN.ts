@@ -10,6 +10,10 @@ export const zhCNTranslations = {
   'workflows.templatesLoadFailed': '子智能体模板加载失败，请重试后打开工作流。',
   'workflows.settingsTitle': '工作流模板',
   'workflows.settingsDescription': '创建和编辑工作流图、节点与连线规则。',
+  'workflows.openBoard': '查看工作流看板',
+  'workflows.upstreamNodes': '上游节点',
+  'workflows.downstreamNodes': '下游节点',
+  'workflows.noNodes': '暂无节点',
   'configuration.invalidContextCapacityTitle': '上下文窗口不足',
   'configuration.invalidContextCapacity':
     '模型「{displayName}」尚未保存：总窗口为 {contextWindowTokens} tokens，输出预留为 {reservedOutputTokens}，安全余量为 {safetyMarginTokens}，没有可用的输入空间。请按模型实际支持的上下文窗口调整后再保存；若不支持更大的窗口，请更换模型或调整厂商设置。编辑内容已保留。',

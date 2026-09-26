@@ -10,6 +10,10 @@ export const zhTWTranslations = {
   'workflows.templatesLoadFailed': '子智能體範本載入失敗，請重試後開啟工作流程。',
   'workflows.settingsTitle': '工作流程',
   'workflows.settingsDescription': '建立與編輯工作流程圖、節點與連線規則。',
+  'workflows.openBoard': '查看工作流程看板',
+  'workflows.upstreamNodes': '上游節點',
+  'workflows.downstreamNodes': '下游節點',
+  'workflows.noNodes': '暫無節點',
   'configuration.invalidContextCapacityTitle': '上下文視窗不足',
   'configuration.invalidContextCapacity':
     '模型「{displayName}」尚未儲存：總視窗為 {contextWindowTokens} tokens，輸出預留為 {reservedOutputTokens}，安全餘量為 {safetyMarginTokens}，沒有可用的輸入空間。請按模型實際支援的上下文視窗調整後再儲存；若不支援更大的視窗，請更換模型或調整廠商設定。編輯內容已保留。',

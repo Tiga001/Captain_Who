@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
-import type { WorkflowInstance, WorkflowResponse } from '@mycopilot/protocol'
+import type { WorkflowInstance, WorkflowRecord, WorkflowResponse } from '@mycopilot/protocol'
+import {
+  workflowNeighborNodes,
+  type WorkflowNeighborNode
+} from '../features/workflows/workflowNeighborNodes'
 import type { ChatComposerDraft, ChatConversation } from '../features/chat/chatTypes'
 import { loadComposerDrafts, loadConversationMetas } from '../features/storage/storageClient'
 import { requestWorkflows } from '../features/workflows/workflowClient'
@@ -25,6 +29,7 @@ export function useWorkflowWorkspace({
   applyDraftPreferences
 }: WorkflowWorkspaceOptions) {
   const [instances, setInstances] = useState<WorkflowInstance[]>([])
+  const [records, setRecords] = useState<WorkflowRecord[]>([])
   const refreshEpoch = useRef(0)
   const pendingSynchronization = useRef(new Set<string>())
   const pendingPreferences = useRef(
@@ -38,7 +43,10 @@ export function useWorkflowWorkspace({
       const epoch = ++refreshEpoch.current
       try {
         const response = await requestWorkflows({ operation: 'listInstances' })
-        if (!disposed && epoch === refreshEpoch.current) setInstances(response.instances ?? [])
+        if (!disposed && epoch === refreshEpoch.current) {
+          setInstances(response.instances ?? [])
+          setRecords(response.records ?? [])
+        }
       } catch (error) {
         console.error('Failed to refresh workflow membership', error)
       }
@@ -114,6 +122,7 @@ export function useWorkflowWorkspace({
     async (response: WorkflowResponse) => {
       ++refreshEpoch.current
       if (response.instances) setInstances(response.instances)
+      if (response.records) setRecords(response.records)
       for (const id of response.affectedConversationIds ?? []) {
         const instance = response.instances?.find((item) =>
           item.bindings.some((binding) => binding.conversationId === id)
@@ -152,11 +161,30 @@ export function useWorkflowWorkspace({
     }
     return { memberships, allMemberships }
   }, [instances])
+  /** Upstream and downstream bound agents, keyed by the conversation bound to the node. */
+  const neighborNodes = useMemo(() => {
+    const neighbors: Record<
+      string,
+      { upstream: WorkflowNeighborNode[]; downstream: WorkflowNeighborNode[] }
+    > = {}
+    for (const instance of instances) {
+      const definition = records.find(
+        (record) => record.definition.id === instance.templateId
+      )?.definition
+      for (const binding of instance.bindings) {
+        neighbors[binding.conversationId] = definition
+          ? workflowNeighborNodes(definition, instance.bindings, binding.nodeId)
+          : { upstream: [], downstream: [] }
+      }
+    }
+    return neighbors
+  }, [instances, records])
   return {
     beforeCommit,
     committed,
     memberships,
     allMemberships,
+    neighborNodes,
     hasPendingSynchronization,
     retrySynchronization
   }

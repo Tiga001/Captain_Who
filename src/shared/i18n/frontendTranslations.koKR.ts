@@ -10,6 +10,10 @@ export const koKRTranslations = {
   'workflows.templatesLoadFailed': '하위 에이전트 템플릿을 불러오지 못했습니다. 다시 시도하세요.',
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
+  'workflows.openBoard': '워크플로 보드 보기',
+  'workflows.upstreamNodes': '업스트림 노드',
+  'workflows.downstreamNodes': '다운스트림 노드',
+  'workflows.noNodes': '노드 없음',
   'configuration.invalidContextCapacityTitle': '컨텍스트 창이 너무 작습니다',
   'configuration.invalidContextCapacity':
     '“{displayName}”을 저장하지 못했습니다. 총 {contextWindowTokens} 토큰에 출력 예약 {reservedOutputTokens} 토큰과 안전 여유 {safetyMarginTokens} 토큰을 확보할 수 없어 입력 공간이 없습니다. 모델의 실제 지원 용량에 맞게 조정한 후 저장하세요. 더 큰 창을 지원하지 않으면 다른 모델을 선택하거나 제공업체 설정을 조정하세요. 편집 내용은 유지됩니다.',

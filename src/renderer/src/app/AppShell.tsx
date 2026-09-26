@@ -760,6 +760,9 @@ export function AppShell() {
   const activeConversationWorkflow = activeConversation
     ? workflowWorkspace.allMemberships[activeConversation.id]
     : undefined
+  const activeWorkflowNeighbors = activeConversation
+    ? workflowWorkspace.neighborNodes[activeConversation.id]
+    : undefined
 
   const { hasPendingSynchronization, retrySynchronization } = workflowWorkspace
   const requestScheduledExit = useCallback(
@@ -1575,7 +1578,11 @@ export function AppShell() {
             activeConversationWorkflow
               ? {
                   ...activeConversationWorkflow,
-                  onOpen: () => openWorkflowMonitor(activeConversationWorkflow.id)
+                  upstream: activeWorkflowNeighbors?.upstream ?? [],
+                  downstream: activeWorkflowNeighbors?.downstream ?? [],
+                  onOpen: () => openWorkflowMonitor(activeConversationWorkflow.id),
+                  onOpenConversation: (conversationId: string) =>
+                    requestOpenConversationFromScheduled(conversationId)
                 }
               : undefined
           }

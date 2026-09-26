@@ -11,6 +11,10 @@ export const jaJPTranslations = {
     'サブエージェントのテンプレートを読み込めませんでした。再試行してください。',
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
+  'workflows.openBoard': 'ワークフローボードを表示',
+  'workflows.upstreamNodes': '上流ノード',
+  'workflows.downstreamNodes': '下流ノード',
+  'workflows.noNodes': 'ノードなし',
   'configuration.invalidContextCapacityTitle': 'コンテキスト容量が不足しています',
   'configuration.invalidContextCapacity':
     '「{displayName}」は保存されていません。総容量 {contextWindowTokens} トークンに対し、出力予約は {reservedOutputTokens}、安全余裕は {safetyMarginTokens} で、入力用の空きがありません。モデルが実際に対応するコンテキスト容量に調整してから保存してください。より大きな容量に対応しない場合は別のモデルを選ぶか、プロバイダー設定を調整してください。編集内容は保持されています。',

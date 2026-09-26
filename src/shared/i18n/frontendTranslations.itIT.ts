@@ -11,6 +11,10 @@ export const itITTranslations = {
     'Impossibile caricare i modelli di subagenti. Riprova per aprire i flussi di lavoro.',
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
+  'workflows.openBoard': 'Visualizza bacheca del flusso',
+  'workflows.upstreamNodes': 'Nodi a monte',
+  'workflows.downstreamNodes': 'Nodi a valle',
+  'workflows.noNodes': 'Nessun nodo',
   'configuration.invalidContextCapacityTitle': 'Finestra di contesto insufficiente',
   'configuration.invalidContextCapacity':
     '“{displayName}” non è stato salvato. La finestra di {contextWindowTokens} token non contiene la riserva di output ({reservedOutputTokens}) e il margine di sicurezza ({safetyMarginTokens}), senza spazio per l’input. Imposta la finestra in base alla capacità effettiva del modello prima di salvare. Se non supporta una finestra più grande, scegli un altro modello o modifica le impostazioni del provider. Le modifiche sono conservate.',

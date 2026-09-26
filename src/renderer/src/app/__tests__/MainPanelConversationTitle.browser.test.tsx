@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { userEvent } from 'vitest/browser'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
 import { getTranslation } from '../../config/frontendTranslations'
@@ -343,8 +343,24 @@ describe('MainPanelToolbar project card', () => {
     ]
   }
 
-  it('opens the workflow from its colored icon before the project folder', async () => {
+  it('opens the workflow menu from its colored icon before the project folder', async () => {
     const onOpen = vi.fn()
+    const onOpenConversation = vi.fn()
+    const workflowProps = {
+      name: 'Review workflow',
+      color: '#e472a0',
+      upstream: [
+        { nodeId: 'planner', name: 'Planner', conversationId: 'conversation-planner' },
+        { nodeId: 'researcher', name: 'Researcher', conversationId: 'conversation-researcher' }
+      ],
+      downstream: [
+        { nodeId: 'reviewer', name: 'Reviewer', conversationId: 'conversation-reviewer' }
+      ],
+      onOpen,
+      onOpenConversation
+    }
+    await page.viewport(1000, 700)
+    onTestFinished(() => page.viewport(414, 896))
     const screen = await render(
       <div className="app-shell" style={shellStyle}>
         <MainPanelToolbar
@@ -357,7 +373,7 @@ describe('MainPanelToolbar project card', () => {
             onRevealFolder: vi.fn(),
             project: playground
           }}
-          workflow={{ name: 'Review workflow', color: '#e472a0', onOpen }}
+          workflow={workflowProps}
           title="Review changes"
         />
       </div>
@@ -371,8 +387,44 @@ describe('MainPanelToolbar project card', () => {
     expect(getComputedStyle(workflow.element()).color).toBe('rgb(228, 114, 160)')
     await userEvent.hover(workflow)
     await expect.element(screen.getByRole('tooltip', { name: 'Review workflow' })).toBeVisible()
+
     await workflow.click()
+    const menu = screen.getByRole('menu', { name: 'Review workflow' })
+    await expect.element(menu).toBeVisible()
+    await expect.element(screen.getByRole('tooltip')).not.toBeInTheDocument()
+    expect(onOpen).not.toHaveBeenCalled()
+    const items = menu
+      .getByRole('menuitem')
+      .elements()
+      .map((item) => item.textContent)
+    expect(items).toEqual(['View workflow board', 'Upstream nodes', 'Downstream nodes'])
+
+    await menu.getByRole('menuitem', { name: 'Upstream nodes' }).click()
+    const upstream = screen.getByRole('menu', { name: 'Upstream nodes' })
+    await expect
+      .poll(() =>
+        upstream
+          .getByRole('menuitem')
+          .elements()
+          .map((item) => item.textContent)
+      )
+      .toEqual(['Planner', 'Researcher'])
+    const menuBox = menu.element().getBoundingClientRect()
+    expect(upstream.element().getBoundingClientRect().left).toBeGreaterThanOrEqual(menuBox.right)
+    await page.screenshot({
+      path: '../../../../../.cache/workflow-authoring/conversation-workflow-menu-light.png'
+    })
+
+    await menu.getByRole('menuitem', { name: 'Downstream nodes' }).hover()
+    const downstream = screen.getByRole('menu', { name: 'Downstream nodes' })
+    await downstream.getByRole('menuitem', { name: 'Reviewer' }).click()
+    expect(onOpenConversation).toHaveBeenCalledWith('conversation-reviewer')
+    await expect.element(menu).not.toBeInTheDocument()
+
+    await workflow.click()
+    await screen.getByRole('menuitem', { name: 'View workflow board' }).click()
     expect(onOpen).toHaveBeenCalledOnce()
+    await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
 
     await screen.rerender(
       <div className="app-shell" style={shellStyle}>

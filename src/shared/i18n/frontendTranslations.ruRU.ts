@@ -11,6 +11,10 @@ export const ruRUTranslations = {
     'Не удалось загрузить шаблоны субагентов. Повторите попытку, чтобы открыть рабочие процессы.',
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
+  'workflows.openBoard': 'Открыть доску процесса',
+  'workflows.upstreamNodes': 'Узлы выше по потоку',
+  'workflows.downstreamNodes': 'Узлы ниже по потоку',
+  'workflows.noNodes': 'Нет узлов',
   'configuration.invalidContextCapacityTitle': 'Недостаточное окно контекста',
   'configuration.invalidContextCapacity':
     '«{displayName}» не сохранена. Окно в {contextWindowTokens} токенов не вмещает резерв вывода ({reservedOutputTokens}) и запас безопасности ({safetyMarginTokens}), не оставляя места для ввода. Перед сохранением укажите фактически поддерживаемое моделью окно. Если большее окно не поддерживается, выберите другую модель или измените настройки провайдера. Ваши правки сохранены.',
