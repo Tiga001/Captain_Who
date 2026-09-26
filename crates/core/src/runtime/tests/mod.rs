@@ -384,6 +384,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                     }
                 }
                 ConversationTurnTraceItem::AgentMailboxDelivery { content, .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { content, .. }
                 | ConversationTurnTraceItem::BackendState { content, .. } => {
                     crate::ConversationModelContextItem {
                         images: Vec::new(),
@@ -494,5 +495,6 @@ mod steering_and_repair;
 mod todo_budget;
 mod trace_and_projection;
 mod web_search;
+mod workflow;
 
 mod unified_history;

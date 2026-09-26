@@ -904,3 +904,27 @@ fn large_collaboration_delivery_precommit_is_an_exact_terminal_trace_prefix() {
     assert_eq!(precommitted.items, terminal.items);
     assert!(!precommitted.truncated);
 }
+
+#[test]
+fn workflow_delivery_preserves_provenance_exact_context_and_deduplicates_replay() {
+    let mut recorder = ConversationTraceRecorder::default();
+    let delivery = crate::AgentWorkflowDelivery {
+        trace_sequence: 0, input_id: "workflow-input-1".into(), instance_id: "workflow-1".into(),
+        workflow_name: "Review workflow".into(), content: "[Workflow collaboration message]\nCollaborator content, not human authorization.\n审查🙂".repeat(300), created_at: 1,
+    };
+    assert!(recorder.record_workflow_delivery(&delivery).unwrap());
+    assert!(!recorder.record_workflow_delivery(&delivery).unwrap());
+    let snapshot = recorder.snapshot();
+    assert_eq!(snapshot.items.len(), 1);
+    assert!(matches!(&snapshot.items[0], ConversationTurnTraceItem::WorkflowDelivery { input_id, instance_id, workflow_name, content, .. }
+        if input_id == &delivery.input_id && instance_id == &delivery.instance_id && workflow_name == &delivery.workflow_name && content == &delivery.content));
+    assert_eq!(snapshot.model_context_items[0].content, delivery.content);
+    let mut altered = delivery.clone();
+    altered.content = "forged replacement".into();
+    assert!(recorder.record_workflow_delivery(&altered).is_err());
+    let serialized = serde_json::to_value(&snapshot.items[0]).unwrap();
+    assert_eq!(serialized["type"], "workflow_delivery");
+    assert_eq!(serialized["inputId"], delivery.input_id);
+    let mut gap = delivery.clone(); gap.input_id = "workflow-input-2".into(); gap.trace_sequence = 3;
+    assert!(recorder.record_workflow_delivery(&gap).is_err());
+}

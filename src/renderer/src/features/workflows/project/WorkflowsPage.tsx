@@ -38,6 +38,7 @@ export interface WorkflowsPageProps {
 interface BindingDraft {
   id: string
   name: string
+  projectId: string | null
   color: string
   record: WorkflowRecord | null
   instance: WorkflowInstance | null
@@ -45,10 +46,13 @@ interface BindingDraft {
   baseline: string
 }
 
-const draftKey = (draft: Pick<BindingDraft, 'name' | 'color' | 'bindings' | 'record'>) =>
+const draftKey = (
+  draft: Pick<BindingDraft, 'name' | 'projectId' | 'color' | 'bindings' | 'record'>
+) =>
   JSON.stringify([
     draft.record?.definition.id ?? null,
     draft.name,
+    draft.projectId,
     draft.color,
     Object.entries(draft.bindings).sort(([a], [b]) => a.localeCompare(b))
   ])
@@ -70,6 +74,7 @@ export function WorkflowsPage({
   conversations,
   conversationAttention,
   conversationDrafts,
+  projects,
   onManageTemplates,
   onClose,
   onCommitted,
@@ -196,6 +201,7 @@ export function WorkflowsPage({
     [conversations]
   )
   const readOnly = !!draft?.instance?.running
+  const projectMissing = !!draft?.projectId && !projects.some((item) => item.id === draft.projectId)
   const unavailableColors = instances
     .filter((instance) => instance.enabled && instance.id !== draft?.id)
     .map((instance) => instance.color)
@@ -236,6 +242,7 @@ export function WorkflowsPage({
     const next = {
       id: instance?.id ?? crypto.randomUUID(),
       name: instance?.name ?? record?.definition.name ?? '',
+      projectId: instance?.projectId ?? null,
       color,
       record,
       instance,
@@ -443,6 +450,7 @@ export function WorkflowsPage({
       togglingIdRef.current ||
       pendingSync ||
       readOnly ||
+      projectMissing ||
       !draft.name.trim()
     )
       return
@@ -460,6 +468,7 @@ export function WorkflowsPage({
         id: draft.id,
         templateId: draft.record.definition.id,
         name: draft.name.trim(),
+        projectId: draft.projectId,
         color: draft.color,
         bindings: agents.map((node) => ({
           nodeId: node.id,
@@ -470,6 +479,15 @@ export function WorkflowsPage({
       })
       await acceptCommit(response)
     } catch (cause) {
+      if (workflowErrorDetail(cause).includes('workflow_project_missing')) {
+        setError(
+          t(
+            '所选项目已不存在，请重新选择所属项目。',
+            'The selected project no longer exists. Choose a different project.'
+          )
+        )
+        return
+      }
       if (workflowErrorDetail(cause).includes('workflow_conversation_already_bound')) {
         setError('')
         setBindingNotice(
@@ -755,9 +773,9 @@ export function WorkflowsPage({
             aria-label={t('工作流配置', 'Workflow configuration')}
           >
             <div className="project-workflows__template-field">
-              <span>{t('工作流模板', 'Workflow template')}</span>
+              <span>{t('模版', 'Template')}</span>
               <SettingsSelect
-                ariaLabel={t('工作流模板', 'Workflow template')}
+                ariaLabel={t('模版', 'Template')}
                 className="project-workflows__template-select"
                 value={draft.record?.definition.id ?? ''}
                 disabled={busy || !!draft.instance}
@@ -782,12 +800,43 @@ export function WorkflowsPage({
             <label>
               <span>{t('名称', 'Name')}</span>
               <input
+                aria-label={t('名称', 'Name')}
                 value={draft.name}
                 maxLength={160}
                 disabled={busy || readOnly}
                 onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               />
             </label>
+            <div className="project-workflows__project-field">
+              <Tooltip
+                content={t(
+                  '自动新建的对话将放入这个项目，拖入的已有对话保留原项目。',
+                  'New conversations are created in this project. Assigned conversations keep their current project.'
+                )}
+              >
+                <span>{t('所属项目', 'Project')}</span>
+              </Tooltip>
+              <SettingsSelect
+                ariaLabel={t('所属项目', 'Project')}
+                className="project-workflows__project-select"
+                value={draft.projectId ?? ''}
+                disabled={busy || readOnly}
+                options={[
+                  { value: '', label: t('无项目', 'No project') },
+                  ...projects.map((project) => ({ value: project.id, label: project.name })),
+                  ...(projectMissing
+                    ? [
+                        {
+                          value: draft.projectId!,
+                          label: t('项目已删除', 'Project deleted'),
+                          disabled: true
+                        }
+                      ]
+                    : [])
+                ]}
+                onChange={(projectId) => setDraft({ ...draft, projectId: projectId || null })}
+              />
+            </div>
             <div className="project-workflows__binding-actions">
               <WorkflowColorPicker
                 color={draft.color}
@@ -821,6 +870,7 @@ export function WorkflowsPage({
                   !!togglingId ||
                   !!pendingSync ||
                   readOnly ||
+                  projectMissing ||
                   colorOccupied ||
                   !draft.record ||
                   !draft.name.trim() ||

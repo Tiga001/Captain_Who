@@ -65,6 +65,9 @@ pub(super) fn current_model_context_for_trace(
             ConversationTurnTraceItem::AgentMailboxDelivery {
                 sequence, content, ..
             }
+            | ConversationTurnTraceItem::WorkflowDelivery {
+                sequence, content, ..
+            }
             | ConversationTurnTraceItem::BackendState {
                 sequence, content, ..
             } => Some(crate::ConversationModelContextItem {

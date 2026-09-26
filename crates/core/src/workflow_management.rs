@@ -22,6 +22,9 @@ pub struct Instance {
     pub template_revision: u64,
     pub name: String,
     pub color: String,
+    /// Destination only for automatically created conversations; bindings remain cross-project.
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub bindings: Vec<Binding>,
     pub revision: u64,
     pub updated_at: i64,
@@ -76,6 +79,8 @@ pub enum Request {
         template_id: String,
         name: String,
         color: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
         bindings: Vec<BindingInput>,
         expected_revision: u64,
         expected_template_revision: u64,

@@ -278,6 +278,36 @@ fn apply_steer_inputs(
     Ok(baseline)
 }
 
+fn apply_workflow_deliveries(
+    deliveries: &[crate::AgentWorkflowDelivery],
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    assistant_message_id: &str,
+) -> AgentResult<()> {
+    let mut recorded = Vec::new();
+    {
+        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        for delivery in deliveries {
+            if recorder.record_workflow_delivery(delivery).map_err(AgentError::new)? {
+                recorded.push(delivery);
+            }
+        }
+    }
+    if recorded.is_empty() { return Ok(()); }
+    publish_trace_snapshot(conversation_trace, trace_observer)?;
+    for delivery in recorded {
+        active_context.push(ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, delivery.content.clone()),
+            with_trace_origin(
+                ContextMetadata::new(ContextSource::UserGuidance, ContextScope::Run, ContextRetention::Retained),
+                Some(assistant_message_id), Some(delivery.trace_sequence),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn apply_agent_mailbox_delivery(
     delivery: &AgentSamplingBoundaryDelivery,
     active_context: &mut ContextFrame,

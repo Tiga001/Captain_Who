@@ -102,6 +102,12 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         }
     }
     insert_conversation(&transaction, &plan.target)?;
+    // Workflow provenance is independent of Agent-tree snapshot authorization and survives
+    // ordinary standalone forks as well as collaboration-root forks.
+    for (source_message_id,target_message_id) in &plan.message_id_map {
+        transaction.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) SELECT ?1,?2,input_id FROM workflow_execution_message_origins WHERE message_id=?3 AND conversation_id=?4",params![target_message_id,plan.target.id,source_message_id,plan.source_conversation_id]).map_err(database_error)?;
+    }
+
     if let Some(collaboration) = &plan.collaboration_root {
         let source = agent_graph_repository::get_agent_node_by_conversation(
             &transaction,

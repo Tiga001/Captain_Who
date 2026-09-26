@@ -62,6 +62,14 @@ impl AgentService {
             return Err("编辑重发的新旧消息 ID 必须互不冲突。".to_string().into());
         }
         self.authorize_user_conversation_write(&conversation_id)?;
+        if self
+            .storage
+            .workflow_execution_delivery_origins(&conversation_id)?
+            .iter()
+            .any(|(message_id, _)| message_id == &source_user_message_id)
+        {
+            return Err("工作流来信不能编辑为用户消息。".to_string().into());
+        }
 
         let request_bytes =
             serde_json::to_vec(&input).map_err(|error| format!("无法验证编辑重发请求：{error}"))?;
@@ -123,10 +131,29 @@ impl AgentService {
 
     pub(super) fn start_human_root_turn_with_response(
         &self,
+        input: AgentConversationTurnInput,
+        rewrite: Option<HumanConversationTurnRewrite>,
+        automation: Option<AutomationHumanRootAdmission>,
+        response: Option<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        self.start_root_turn_with_workflow(
+            input,
+            rewrite,
+            automation,
+            response,
+            None,
+            notifications,
+        )
+    }
+
+    pub(super) fn start_root_turn_with_workflow(
+        &self,
         mut input: AgentConversationTurnInput,
         rewrite: Option<HumanConversationTurnRewrite>,
         mut automation: Option<AutomationHumanRootAdmission>,
         response: Option<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>,
+        workflow: Option<mycopilot_core::workflow_execution::Input>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         let automation_execution_context = automation
@@ -163,6 +190,9 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
+            return Err("Workflow delivery is shutting down.".to_string().into());
+        }
         if let Some(rewrite) = &rewrite {
             if let Some(existing) = self
                 .storage
@@ -273,6 +303,8 @@ impl AgentService {
             .is_empty();
 
         let run_id = next_run_id();
+        self.storage
+            .workflow_execution_bind_run(&conversation_id, &run_id)?;
         let global_permit = match automation
             .as_mut()
             .and_then(|automation| automation.global_permit.take())
@@ -306,7 +338,26 @@ impl AgentService {
                 .check()
                 .map_err(ExecutionAccessDenied::agent_error)
         };
-        let prepared_outcome = if let Some(response) = response.clone() {
+        let prepared_outcome = if let Some(workflow) = workflow.clone() {
+            let claim =
+                self.storage
+                    .workflow_execution_bind_input(&workflow.id, &run_id, &user_message_id);
+            match claim {
+                Ok(true) => prepare_reserved_workflow_turn(
+                    &self.storage,
+                    &self.skills,
+                    input,
+                    &run_id,
+                    previous_conversation.clone(),
+                    expected_revision,
+                    workflow,
+                    &execution_access_check,
+                )
+                .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
+                Ok(false) => Err("workflow input is no longer pending".to_string().into()),
+                Err(error) => Err(error.into()),
+            }
+        } else if let Some(response) = response.clone() {
             prepare_reserved_human_response_turn(
                 &self.storage,
                 &self.skills,
@@ -349,6 +400,19 @@ impl AgentService {
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
             }
         };
+        let prepared_outcome = prepared_outcome.and_then(|outcome| {
+            if workflow.is_none()
+                && response.is_none()
+                && automation.is_none()
+                && matches!(&outcome, PreparedConversationTurnOutcome::Prepared(_))
+            {
+                // A newly admitted explicit user turn lifts Stop before its worker can sample.
+                // Workflow deliveries and pre-existing asynchronous answers never lift it.
+                self.storage
+                    .workflow_execution_resume_conversation(&conversation_id)?;
+            }
+            Ok(outcome)
+        });
         drop(execution_access_guard);
         let prepared = match prepared_outcome {
             Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
@@ -359,6 +423,11 @@ impl AgentService {
                 return Ok(*output);
             }
             Err(error) => {
+                if let Some(workflow) = &workflow {
+                    let _ = self
+                        .storage
+                        .workflow_execution_fail_input(&workflow.id, &error.to_string());
+                }
                 if response.is_some() {
                     let settlement = self
                         .storage

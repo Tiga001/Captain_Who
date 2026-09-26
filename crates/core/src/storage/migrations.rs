@@ -1,13 +1,17 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 57;
+pub const STORAGE_SCHEMA_VERSION: i32 = 59;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V57_SCHEMA_FINGERPRINT: &str =
     "sha256:ada068a864855b8c42afa6de36f72791212dfd90938fd547f7236e9cf26ed289";
+const V58_SCHEMA_FINGERPRINT: &str =
+    "sha256:682fa9fd22c87bccdd9d201ac97f200aee3d69718ca216ac46256854ffdbf623";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:b3e50620bff925cbc53da8c13146908b8aa3128ac406be9b28c73069b09fc3c4";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -17,6 +21,8 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v55 adds explicit workflow availability, disabled by default for every existing definition.
 /// v56 adds independent workflow instances and isolated editing drafts; graph JSON is untouched.
 /// v57 adds instance activation and prevents archiving conversations of enabled workflows.
+/// v58 adds durable workflow execution receipts and delivery provenance.
+/// v59 adds a nullable default project for future auto-created workflow conversations.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -54,6 +60,14 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 56 {
         upgrade_workflow_activation_v56(connection)?;
+    }
+
+    if read_schema_version(connection)? == 57 {
+        upgrade_workflow_execution_v57(connection)?;
+    }
+
+    if read_schema_version(connection)? == 58 {
+        upgrade_workflow_default_project_v58(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -277,7 +291,74 @@ fn workflow_activation_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
         .find("-- Workflow instance activation and protected conversation archiving, schema v57.")
         .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Durable workflow execution messages and receipts, schema v58.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn workflow_execution_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Durable workflow execution messages and receipts, schema v58.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Default project for newly created workflow conversations, schema v59.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn workflow_default_project_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Default project for newly created workflow conversations, schema v59.")
+        .unwrap();
     &CANONICAL_SCHEMA[start..]
+}
+
+fn upgrade_workflow_default_project_v58(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V58_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_default_project_schema())?;
+    transaction.pragma_update(None, "user_version", 59)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
+}
+
+fn upgrade_workflow_execution_v57(connection: &Connection) -> rusqlite::Result<()> {
+    validate_schema_fingerprint(connection, V57_SCHEMA_FINGERPRINT)?;
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let result = (|| {
+        let transaction = connection.unchecked_transaction()?;
+        // Rebuild the CHECK constraint without replaying history projection triggers.
+        let dependents = transaction.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='conversation_turn_trace_items' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")?
+            .query_map([], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        transaction.execute_batch("CREATE TEMP TABLE workflow_trace_v57_backup AS SELECT * FROM conversation_turn_trace_items; DROP TABLE conversation_turn_trace_items;")?;
+        let start = CANONICAL_SCHEMA
+            .find("CREATE TABLE conversation_turn_trace_items (")
+            .unwrap();
+        let end = CANONICAL_SCHEMA[start..].find(";\n").unwrap() + start + 1;
+        transaction.execute_batch(&CANONICAL_SCHEMA[start..end])?;
+        transaction.execute_batch("INSERT INTO conversation_turn_trace_items SELECT * FROM workflow_trace_v57_backup; DROP TABLE workflow_trace_v57_backup;")?;
+        for sql in dependents {
+            transaction.execute_batch(&sql)?;
+        }
+        transaction.execute_batch(workflow_execution_schema())?;
+        transaction.pragma_update(None, "user_version", 58)?;
+        validate_schema_fingerprint(&transaction, V58_SCHEMA_FINGERPRINT)?;
+        ensure_foreign_keys_are_valid(&transaction)?;
+        transaction.commit()
+    })();
+    connection.pragma_update(None, "foreign_keys", true)?;
+    result
+}
+
+fn canonical_schema_v57() -> String {
+    CANONICAL_SCHEMA
+        .replace(workflow_default_project_schema(), "")
+        .replace(workflow_execution_schema(), "")
+        .replace(
+            "'agent_mailbox_delivery', 'workflow_delivery',",
+            "'agent_mailbox_delivery',",
+        )
 }
 
 fn upgrade_workflow_activation_v56(connection: &Connection) -> rusqlite::Result<()> {
@@ -285,7 +366,7 @@ fn upgrade_workflow_activation_v56(connection: &Connection) -> rusqlite::Result<
     validate_schema_fingerprint(&transaction, V56_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_activation_schema())?;
     transaction.pragma_update(None, "user_version", 57)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V57_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 
@@ -310,7 +391,7 @@ fn workflow_availability_schema() -> &'static str {
 }
 
 fn canonical_schema_v54() -> String {
-    CANONICAL_SCHEMA
+    canonical_schema_v57()
         .replace(workflow_activation_schema(), "")
         .replace(workflow_instance_schema(), "")
         .replace(workflow_availability_schema(), "")
@@ -437,11 +518,80 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn v58_workflow_default_project_migration_preserves_existing_data() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                &super::CANONICAL_SCHEMA.replace(super::workflow_default_project_schema(), ""),
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 58).unwrap();
+        connection.execute("INSERT INTO projects(id,name,created_at,updated_at) VALUES ('project','Keep project',1,1)", []).unwrap();
+        connection.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at,enabled) VALUES ('template','{\"schemaVersion\":1,\"id\":\"template\"}',3,4,1)", []).unwrap();
+        connection.execute("INSERT INTO conversations(id,project_id,title,created_at,updated_at) VALUES ('chat','project','Keep chat',1,1)", []).unwrap();
+        connection.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('message','chat','user','Keep message',1,0)", []).unwrap();
+        connection.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled) VALUES ('instance','template',3,'Keep instance','#AABBCC',1,1,0,0,'{}',1)", []).unwrap();
+        connection.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES ('instance','node','chat')", []).unwrap();
+        connection.execute("INSERT INTO workflow_execution_events(instance_id,input_id,flow_ids_json,kind,created_at) VALUES ('instance',NULL,'[\"flow\"]','sent',1)", []).unwrap();
+        super::run_migrations(&connection).unwrap();
+        assert_eq!(
+            super::read_schema_version(&connection).unwrap(),
+            super::STORAGE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT project_id FROM workflow_instances WHERE instance_id='instance'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0)
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT project_id FROM conversations WHERE id='chat'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "project"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT content FROM messages WHERE id='message'", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "Keep message"
+        );
+        assert_eq!(connection.query_row("SELECT conversation_id FROM workflow_instance_bindings WHERE instance_id='instance'", [], |r| r.get::<_, String>(0)).unwrap(), "chat");
+        assert_eq!(connection.query_row("SELECT flow_ids_json FROM workflow_execution_events WHERE instance_id='instance'", [], |r| r.get::<_, String>(0)).unwrap(), "[\"flow\"]");
+        super::run_migrations(&connection).unwrap();
+    }
+    #[test]
+    fn v57_workflow_execution_migration_preserves_existing_trace_and_accepts_workflow_receipts() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&super::canonical_schema_v57())
+            .unwrap();
+        connection.pragma_update(None, "user_version", 57).unwrap();
+        connection.execute("INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('chat','Keep',1,1)",[]).unwrap();
+        connection.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('assistant','chat','assistant','Keep reply',1,0)",[]).unwrap();
+        connection.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('assistant','chat','run',1,'in_progress',0,1,1)",[]).unwrap();
+        connection.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES ('assistant',0,'backend_state','{}')",[]).unwrap();
+        super::run_migrations(&connection).unwrap();
+        let original:String=connection.query_row("SELECT item_json FROM conversation_turn_trace_items WHERE assistant_message_id='assistant' AND sequence=0",[],|r|r.get(0)).unwrap();
+        assert_eq!(original, "{}");
+        connection.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES ('assistant',1,'workflow_delivery','{}')",[]).unwrap();
+        super::run_migrations(&connection).unwrap();
+    }
+    #[test]
     fn v56_workflow_activation_migration_preserves_graphs_bindings_and_history() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                &super::CANONICAL_SCHEMA.replace(super::workflow_activation_schema(), ""),
+                &super::canonical_schema_v57().replace(super::workflow_activation_schema(), ""),
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 56).unwrap();
@@ -451,7 +601,10 @@ mod tests {
         connection.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json) VALUES ('active','template',3,'Active','#AABBCC',1,1,0,0,'{}'),('review','template',3,'Review','#001122',2,2,1,0,'{}')",[]).unwrap();
         connection.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES ('active','node','chat')",[]).unwrap();
         super::run_migrations(&connection).unwrap();
-        assert_eq!(super::read_schema_version(&connection).unwrap(), 57);
+        assert_eq!(
+            super::read_schema_version(&connection).unwrap(),
+            super::STORAGE_SCHEMA_VERSION
+        );
         let active: bool = connection
             .query_row(
                 "SELECT enabled FROM workflow_instances WHERE instance_id='active'",
@@ -506,7 +659,7 @@ mod tests {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                &super::CANONICAL_SCHEMA
+                &super::canonical_schema_v57()
                     .replace(super::workflow_activation_schema(), "")
                     .replace(super::workflow_instance_schema(), ""),
             )

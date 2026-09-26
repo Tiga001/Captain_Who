@@ -158,6 +158,16 @@ impl ConversationTurnTrace {
                             .map_err(|error| format!("conversation trace folder reference is invalid: {error}"))?;
                     }
                 }
+                ConversationTurnTraceItem::WorkflowDelivery {
+                    input_id, instance_id, workflow_name, content, created_at, ..
+                } => {
+                    if pending_call.is_some() || input_id.trim().is_empty()
+                        || instance_id.trim().is_empty() || workflow_name.trim().is_empty()
+                        || content.trim().is_empty() || *created_at < 0 {
+                        return Err("conversation workflow delivery has invalid identity or splits a tool exchange".into());
+                    }
+                    ensure_no_binary_text("workflow delivery", content)?;
+                }
                 ConversationTurnTraceItem::AgentMailboxDelivery {
                     receipt_id,
                     message_id,

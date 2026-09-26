@@ -21,6 +21,13 @@ impl AgentService {
         {
             return Ok(false);
         }
+        let _admission = self.conversation_admission.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            if let Err(error) = self.storage.workflow_execution_pause_conversation(conversation_id) {
+                self.cancel_exact_run_execution(run_id, Some(conversation_id));
+                return Err(error.into());
+            }
+        }
         // `agent.cancelRun` is the explicit user stop boundary. Capture the authoritative
         // conversation binding before cancelling the worker, because worker teardown removes the
         // ActiveRunControl. This is intentionally separate from `cancel_run_internal`: deletion,

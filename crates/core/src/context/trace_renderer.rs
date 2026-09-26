@@ -210,6 +210,9 @@ impl ConversationTraceRenderer {
                 }
                 ConversationTurnTraceItem::AgentMailboxDelivery {
                     sequence, content, ..
+                }
+                | ConversationTurnTraceItem::WorkflowDelivery {
+                    sequence, content, ..
                 } => {
                     if pending_exchange.is_some() {
                         return Err(AgentError::new(
@@ -768,6 +771,7 @@ mod tests {
                 },
                 ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { .. }
                 | ConversationTurnTraceItem::BackendState { .. }
                 | ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
@@ -1239,6 +1243,7 @@ mod tests {
                 ConversationTurnTraceItem::AssistantNarration { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { .. }
                 | ConversationTurnTraceItem::BackendState { .. }
                 | ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }

@@ -359,6 +359,7 @@ fn validate_conversation_trace_tool_call_ids(
                     | ConversationTurnTraceItem::ContextMaterial { .. }
             | ConversationTurnTraceItem::UserGuidance { .. }
             | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { .. }
             | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
             | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
             | ConversationTurnTraceItem::RuntimeError { .. } => {}

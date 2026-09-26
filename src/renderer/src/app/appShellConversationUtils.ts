@@ -27,6 +27,7 @@ export function getEditableLastTurn(conversation: ChatConversation) {
   const userMessage = messages[userIndex]
   const assistantMessage = messages[assistantIndex]
   if (userMessage?.role !== 'user' || assistantMessage?.role !== 'assistant') return null
+  if (userMessage.workflowSource) return null
   if (assistantMessage.status !== 'sent') return null
 
   const assistantRunStatus = assistantMessage.agentRun?.status

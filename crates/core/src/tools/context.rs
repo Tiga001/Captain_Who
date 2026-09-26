@@ -563,7 +563,7 @@ impl ToolExecutionContext {
         &self.text_output_budget
     }
 
-    pub(super) fn check_cancelled(&self) -> AgentResult<()> {
+    pub(crate) fn check_cancelled(&self) -> AgentResult<()> {
         self.cancellation_token.check()
     }
 
@@ -680,6 +680,12 @@ impl ToolExecutionContext {
         storage
             .resolve_active_file_change_run_grant(file_change, &context)
             .map_err(crate::storage::service::FileChangeRunGrantServiceError::into_agent_error)
+    }
+
+    pub(crate) fn assistant_message_id(&self) -> AgentResult<&str> {
+        self.assistant_message_id
+            .as_deref()
+            .ok_or_else(|| AgentError::new("当前工具执行缺少可信 assistant message id。"))
     }
 
     pub(crate) fn tool_call_id(&self) -> AgentResult<&str> {

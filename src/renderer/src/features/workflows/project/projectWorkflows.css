@@ -291,9 +291,9 @@
 .project-workflows__binding-toolbar {
   min-height: 56px;
   flex-shrink: 0;
-  padding: 8px 20px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
-  gap: 14px;
+  gap: 10px;
   -webkit-app-region: drag;
 }
 .project-workflows--editing {
@@ -309,22 +309,31 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex: 0 1 220px;
+  flex: 0 1 180px;
+  white-space: nowrap;
 }
-.project-workflows__template-field {
+.project-workflows__template-field,
+.project-workflows__project-field {
   display: flex;
   align-items: center;
-  flex: 0 1 310px;
-  gap: 10px;
+  flex: 0 1 220px;
+  gap: 8px;
   min-width: 0;
   white-space: nowrap;
 }
-.project-workflows__template-select {
+.project-workflows__project-field {
+  flex-basis: 200px;
+}
+.project-workflows__template-select,
+.project-workflows__project-select {
   min-width: 0;
   --settings-content-text-color: var(--mc-color-text-primary);
 }
-.project-workflows__template-select .settings-select__button {
+.project-workflows__template-select .settings-select__button,
+.project-workflows__project-select .settings-select__button {
   height: 34px;
+  padding-inline: 9px;
+  gap: 6px;
 }
 .project-workflows__blank-canvas {
   width: 100%;
@@ -338,8 +347,10 @@
   background: var(--mc-color-surface-input);
 }
 .project-workflows__binding-toolbar input {
-  width: 170px;
+  width: 100%;
   max-width: 100%;
+  height: 34px;
+  box-sizing: border-box;
 }
 .project-workflows__binding-actions {
   display: flex;
@@ -372,7 +383,8 @@
   .project-workflows__binding-toolbar > label > span {
     display: none;
   }
-  .project-workflows__template-field > span {
+  .project-workflows__template-field > span:not(.settings-select),
+  .project-workflows__project-field > span:not(.settings-select) {
     display: none;
   }
   .project-workflows__binding-toolbar > label {

@@ -156,6 +156,30 @@
   color: #168348;
   background: #eaf8ef;
 }
+.workflow-monitor__node[data-waiting='user'] .workflow-monitor__node-attention {
+  max-width: 110px;
+}
+.workflow-monitor__node[data-waiting='failed'] .workflow-monitor__node-attention {
+  color: #b42318;
+  background: #fff0ed;
+}
+.workflow-monitor__delivery-recovery {
+  border: 0;
+  color: #b42318;
+  background: #fff0ed;
+  cursor: pointer;
+}
+.workflow-monitor__delivery-recovery.is-separate {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+.workflow-monitor__delivery-recovery:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+}
+.workflow-monitor__transmission {
+  fill: var(--workflow-instance-color);
+  filter: drop-shadow(0 0 3px var(--workflow-instance-color));
+}
 .workflow-monitor__node.is-running .workflow-monitor__node-status {
   opacity: 1;
 }
@@ -223,6 +247,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .workflow-monitor__transmission {
+    display: none;
+  }
   .workflow-monitor__node.is-running .workflow-monitor__node-orbit {
     visibility: hidden;
   }

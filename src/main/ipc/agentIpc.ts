@@ -15,6 +15,14 @@ export function registerAgentIpc(
     throw new Error('ACCOUNT_LOGIN_REQUIRED')
   }
 ): void {
+  coreServer.onWorkflowRuntimeChanged?.((snapshot) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.workflowRuntimeChanged, snapshot)
+      }
+    }
+  })
+
   coreServer.onAgentEvent((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {

@@ -559,9 +559,26 @@ impl StorageService {
     pub fn project_agent_messages_for_model(
         &self,
         conversation_id: &str,
-        messages: &mut [crate::AgentChatMessage],
+        messages: &mut Vec<crate::AgentChatMessage>,
     ) -> Result<(), String> {
         let connection = self.state.connection()?;
+        let workflow_inputs =
+            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+                &connection,
+                conversation_id,
+            )?;
+        let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
+            .iter()
+            .map(|(message_id, _)| message_id.as_str())
+            .collect();
+        // These chat bubbles are a UI projection. Their non-human model input is the
+        // durable WorkflowDelivery trace, or the workflow inbox before first sampling.
+        messages.retain(|message| {
+            !message
+                .message_id
+                .as_deref()
+                .is_some_and(|id| workflow_message_ids.contains(id))
+        });
         for message in messages.iter_mut().filter(|message| message.role == "user") {
             let Some(message_id) = message.message_id.as_deref() else {
                 continue;
@@ -582,6 +599,18 @@ impl StorageService {
         conversation: &mut ChatConversationRecord,
     ) -> Result<(), String> {
         let connection = self.state.connection()?;
+        let workflow_inputs =
+            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+                &connection,
+                &conversation.id,
+            )?;
+        let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
+            .iter()
+            .map(|(message_id, _)| message_id.as_str())
+            .collect();
+        conversation
+            .messages
+            .retain(|message| !workflow_message_ids.contains(message.id.as_str()));
         for message in conversation
             .messages
             .iter_mut()

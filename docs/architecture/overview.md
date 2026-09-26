@@ -95,9 +95,9 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v57**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局工作流实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加工作流定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
+- 当前 canonical schema 为 **v59**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v59 增加工作流新建对话的默认项目；v58 增加工作流运行持久事实与 WorkflowDelivery Trace；v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局工作流实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加工作流定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 空库原子创建 v57；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 保留定义增加默认关闭的模板 enabled 历史字段；exact v53 保留历史增加工作流定义表；exact v52 保留历史新增活动明细且不回填旧活动；exact v51 原样保留历史重建 Mailbox 正文约束后依次升 v52、v53、v54、v55、v56、v57。exact v50 仍须协作事件日志为空，依次升级至 v51、v52、v53、v54、v55、v56、v57。不转换旧协作活动；仍有旧事件时返回 `development_storage_schema_reset_required`，由用户先清理历史或显式开发重建。v49 及更早版本、未知 catalog 或外键不匹配也拒绝升级，启动时不自动清空数据库。
+- 空库原子创建 v59；exact v58 → v59 保留历史，为工作流实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留历史，增加工作流持久消息、输入与事件、来源及 Run 身份并支持 WorkflowDelivery Trace；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 保留定义增加默认关闭的模板 enabled 历史字段；exact v53 保留历史增加工作流定义表；exact v52 保留历史新增活动明细且不回填旧活动；exact v51 原样保留历史重建 Mailbox 正文约束后依次升 v52、v53、v54、v55、v56、v57、v58、v59。exact v50 仍须协作事件日志为空，依次升级至 v51、v52、v53、v54、v55、v56、v57、v58、v59。不转换旧协作活动；仍有旧事件时返回 `development_storage_schema_reset_required`，由用户先清理历史或显式开发重建。v49 及更早版本、未知 catalog 或外键不匹配也拒绝升级，启动时不自动清空数据库。
 
 上述 reset-required 是拒绝启动的错误类别，不保证当前重置工具能恢复该旧库配置。旧源恢复仍受固定目标版本 gate 限制；处理旧历史须使用受支持的旧版应用并先备份，或保留原库、使用隔离数据根继续开发，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。
 

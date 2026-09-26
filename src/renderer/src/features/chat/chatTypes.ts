@@ -1,5 +1,6 @@
 import type {
   HumanInteractionResponseDisplay,
+  WorkflowMessageSource,
   AgentCommandArtifactObservation,
   AgentCommandOutputStream,
   AgentCommandPublishedOutput,
@@ -306,6 +307,7 @@ export interface ChatMessageAttachment {
 export interface ChatMessage {
   /** Renderer-only view projection, never saved or sent as model input. */
   humanInteractionDisplay?: HumanInteractionResponseDisplay
+  workflowSource?: WorkflowMessageSource
   id: string
   role: 'user' | 'assistant'
   content: string

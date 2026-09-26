@@ -2,6 +2,9 @@ import {
   WORKFLOW_REQUEST_METHOD,
   parseWorkflowRequest,
   parseWorkflowResponse,
+  parseWorkflowRuntimeSnapshot,
+  WORKFLOW_RUNTIME_CHANGED_METHOD,
+  type WorkflowRuntimeSnapshot,
   type WorkflowRequest,
   type WorkflowResponse
 } from '@mycopilot/protocol'
@@ -273,6 +276,19 @@ function shouldLogAgentObserverWarning(count: number): boolean {
 
 /** Agent/collaboration request facade; it does not start or stop the JSON-RPC process. */
 export class CoreServerAgentApi extends CoreServerStorageApi {
+  onWorkflowRuntimeChanged(handler: (snapshot: WorkflowRuntimeSnapshot) => void): () => void {
+    return this.rpc.onNotification(WORKFLOW_RUNTIME_CHANGED_METHOD, (params) => {
+      let snapshot: WorkflowRuntimeSnapshot
+      try {
+        snapshot = parseWorkflowRuntimeSnapshot(params)
+      } catch {
+        console.warn('Ignored invalid workflow runtime notification')
+        return
+      }
+      handler(snapshot)
+    })
+  }
+
   requestWorkflows(input: WorkflowRequest): Promise<WorkflowResponse> {
     const request = parseWorkflowRequest(input)
     return this.rpc

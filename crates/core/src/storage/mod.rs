@@ -56,6 +56,7 @@ pub mod service;
 pub mod skill_enablement_repository;
 pub mod turn_diff_repository;
 pub mod usage_repository;
+pub mod workflow_execution_repository;
 pub mod workflow_repository;
 pub mod world_state_repository;
 

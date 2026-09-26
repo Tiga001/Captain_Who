@@ -88,6 +88,7 @@ impl ToolFailureGuard {
                 | ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
                 | ConversationTurnTraceItem::RuntimeError { .. } => {}

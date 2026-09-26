@@ -1,0 +1,21 @@
+.workflow-received-content {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.workflow-received-content__message {
+  min-width: 0;
+}
+
+.workflow-received-content__message + .workflow-received-content__message {
+  padding-top: 12px;
+  border-top: 1px solid var(--mc-color-border-subtle);
+}
+
+.workflow-received-content__source {
+  margin-bottom: 5px;
+  color: var(--mc-color-text-secondary);
+  font-size: var(--mc-font-size-chat-metadata);
+  font-weight: var(--mc-font-weight-strong);
+}

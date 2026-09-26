@@ -48,6 +48,8 @@ impl AgentRuntime {
             command_runtime_profile_resolver,
             command_session_executor,
             steer_input,
+            workflow_runtime,
+            workflow_inbox,
             collaboration_inbox,
             agent_collaboration,
             agent_collaboration_policy,
@@ -225,6 +227,7 @@ impl AgentRuntime {
                 agent_collaboration: agent_collaboration.clone(),
                 agent_collaboration_policy,
                 automation_report_sink,
+                workflow_runtime,
                 human_interaction_policy,
                 human_interaction_execution_ready: human_interaction_runtime.is_some(),
                 human_interaction_async_execution_ready: human_interaction_runtime
@@ -326,6 +329,22 @@ impl AgentRuntime {
         // payloads remain available for hydration but identical bytes must not steal a new ID.
         let current_image_range = current_image_start..current_image_end;
         let mut memory_conversation_world_state = MemoryConversationWorldState::new(&input)?;
+        let workflow_only_bootstrap = interactive_root && workflow_inbox.is_some() && input.messages.is_empty()
+            && input.world_state_records.is_empty() && input.context_compaction_summary.is_none()
+            && restored_checkpoint.is_none();
+        if workflow_only_bootstrap {
+            // A workflow may wake a brand-new conversation without fabricating a human message.
+            // This ephemeral full state only seeds assembly; the normal Host request boundary
+            // below still persists canonical state and the real, authenticated workflow input.
+            input.world_state_records = memory_conversation_world_state.prepare(
+                &crate::WorldStateRequestBoundary {
+                    run_id: run_id.clone(),
+                    assistant_message_id: trace_assistant_message_id.clone().ok_or_else(|| AgentError::new("Workflow delivery requires an assistant message identity."))?,
+                    request_index: 1, after_trace_sequence: None,
+                }, runtime_extensions.conversation_world_state_sections()?,
+            )?;
+        }
+
         let PreparedLlmRequest {
             template: llm_request,
             context: mut active_context,
@@ -623,6 +642,27 @@ impl AgentRuntime {
                                 trace_observer.as_ref(),
                                 assistant_message_id,
                             )?;
+                        }
+                    }
+                    if interactive_root {
+                        if let (Some(inbox), Some(conversation_id), Some(assistant_message_id)) = (
+                            workflow_inbox.as_ref(), trace_conversation_id.as_deref(), trace_assistant_message_id.as_deref(),
+                        ) {
+                            let expected_next_trace_sequence = conversation_trace.lock()
+                                .unwrap_or_else(|e| e.into_inner()).next_sequence();
+                            let boundary = AgentSamplingBoundaryRequest {
+                                conversation_id: conversation_id.to_string(), run_id: run_id.clone(),
+                                assistant_message_id: assistant_message_id.to_string(),
+                                model_batch_index: u64::try_from(next_model_request_index.saturating_add(1)).unwrap_or(u64::MAX),
+                                expected_next_trace_sequence,
+                            };
+                            let deliveries = inbox.bind_for_model_batch(boundary.clone())
+                                .or_else(|_| inbox.bind_for_model_batch(boundary))?;
+                            if workflow_only_bootstrap && next_model_request_index == 0 && deliveries.is_empty() {
+                                return Err(AgentError::new("Workflow startup input is no longer available; no model request was sent."));
+                            }
+                            apply_workflow_deliveries(&deliveries, &mut active_context,
+                                &conversation_trace, trace_observer.as_ref(), assistant_message_id)?;
                         }
                     }
                     if interactive_root {

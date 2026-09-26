@@ -29,6 +29,14 @@ vi.mock('../../features/workflows/project/useWorkflowMonitor', () => ({
     waitingApprovalConversationIds: new Set<string>()
   })
 }))
+vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
+  useWorkflowExecution: () => ({
+    snapshot: null,
+    transmissions: [],
+    completeUserInput: vi.fn(),
+    discardFailedInput: vi.fn()
+  })
+}))
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'zh-CN', resolvedColorScheme: 'dark' })
 }))
@@ -178,7 +186,8 @@ beforeEach(async () => {
               conversationId: binding.conversationId ?? `created-${binding.nodeId}`
             }))
           ),
-          color: input.color
+          color: input.color,
+          projectId: input.projectId ?? null
         }
         instances = [...instances.filter((item) => item.id !== input.id), created]
       }
@@ -251,7 +260,7 @@ async function begin() {
 }
 
 async function chooseTemplate(name: string) {
-  await page.getByRole('button', { name: /^工作流模板:/ }).click()
+  await page.getByRole('button', { name: /^模版:/ }).click()
   await page.getByRole('option', { name, exact: true }).click()
 }
 
@@ -378,7 +387,7 @@ describe('global workflow management', () => {
     expect(
       page.getByRole('button', { name: '绑定对话 · 需求分析', exact: true }).query()
     ).toBeNull()
-    await page.getByRole('button', { name: /^工作流模板:/ }).click()
+    await page.getByRole('button', { name: /^模版:/ }).click()
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/global-workflow-template-menu-dark.png'
     })
@@ -390,7 +399,7 @@ describe('global workflow management', () => {
       .toHaveValue('产品交付流程')
     await expect.element(page.getByRole('button', { name: '激活', exact: true })).toBeEnabled()
     const select = page
-      .getByRole('button', { name: /^工作流模板:/ })
+      .getByRole('button', { name: /^模版:/ })
       .element()
       .getBoundingClientRect()
     const name = page
@@ -435,7 +444,7 @@ describe('global workflow management', () => {
     ]
     window.dispatchEvent(new Event('captain:workflows-changed'))
     await page.getByRole('button', { name: '配置 已配置工作流', exact: true }).click()
-    await expect.element(page.getByRole('button', { name: /^工作流模板:/ })).toBeDisabled()
+    await expect.element(page.getByRole('button', { name: /^模版:/ })).toBeDisabled()
   })
 
   it('switches workflow availability without reinitializing conversations, including disabling a running workflow', async () => {
@@ -706,7 +715,7 @@ describe('global workflow management', () => {
     await mount()
     await page.getByRole('button', { name: '配置 已停用工作流', exact: true }).click()
     await expect
-      .element(page.getByRole('button', { name: '工作流模板: 产品交付流程', exact: true }))
+      .element(page.getByRole('button', { name: '模版: 产品交付流程', exact: true }))
       .toBeDisabled()
     await page.getByRole('button', { name: '激活', exact: true }).click()
     await expect.poll(() => onCommitted.mock.calls.length).toBe(1)
@@ -1057,13 +1066,88 @@ describe('global workflow management', () => {
         { nodeId: 'delivery', conversationId: null }
       ]
     })
-    expect(saves[0][0]).not.toHaveProperty('projectId')
+    expect(saves[0][0]).toHaveProperty('projectId', null)
     expect(onBeforeCommit.mock.invocationCallOrder[0]).toBeLessThan(
       service.request.mock.invocationCallOrder.at(-1)!
     )
     await expect
       .element(page.getByRole('button', { name: '配置 产品交付流程', exact: true }))
       .toBeVisible()
+  })
+
+  it('selects a default project for new conversations while accepting bindings from another project', async () => {
+    await mount()
+    await begin()
+    await page.getByRole('button', { name: '所属项目: 无项目', exact: true }).click()
+    await page.getByRole('option', { name: '产品项目', exact: true }).click()
+    await dropConversation('需求分析', 'chat-b')
+    await expectBoundCount(1)
+    await page.getByRole('button', { name: '激活', exact: true }).click()
+    await expect.poll(() => onCommitted.mock.calls.length).toBe(1)
+    const save = service.request.mock.calls.find(
+      ([input]) => input.operation === 'saveInstance'
+    )?.[0]
+    expect(save).toMatchObject({
+      projectId: 'project-a',
+      bindings: [
+        { nodeId: 'analysis', conversationId: 'chat-b' },
+        { nodeId: 'delivery', conversationId: null }
+      ]
+    })
+    expect(conversations.find((item) => item.id === 'chat-b')?.projectId).toBe('project-b')
+    await page.getByRole('button', { name: '配置 产品交付流程', exact: true }).click()
+    await expect
+      .element(page.getByRole('button', { name: '所属项目: 产品项目', exact: true }))
+      .toBeVisible()
+    await page.getByRole('button', { name: '所属项目: 产品项目', exact: true }).click()
+    await page.getByRole('option', { name: '无项目', exact: true }).click()
+    await page.getByRole('button', { name: '激活', exact: true }).click()
+    await expect.poll(() => onCommitted.mock.calls.length).toBe(2)
+    const saves = service.request.mock.calls.filter(([input]) => input.operation === 'saveInstance')
+    expect(saves[1][0]).toHaveProperty('projectId', null)
+  })
+
+  it('keeps template, name, project and actions on a compact toolbar and blocks deleted project choices', async () => {
+    await page.viewport(840, 700)
+    const view = await mount()
+    await begin()
+    await page.getByRole('button', { name: '所属项目: 无项目', exact: true }).click()
+    await page.getByRole('option', { name: '产品项目', exact: true }).click()
+    await dropConversation('需求分析', 'chat-b')
+    const controls = [
+      page.getByRole('button', { name: /^模版:/ }),
+      page.getByRole('textbox', { name: '名称', exact: true }),
+      page.getByRole('button', { name: /^所属项目:/ }),
+      page.getByRole('button', { name: '工作流颜色', exact: true }),
+      page.getByRole('button', { name: '解除对话分配', exact: true }),
+      page.getByRole('button', { name: '取消', exact: true }),
+      page.getByRole('button', { name: '激活', exact: true })
+    ].map((control) => control.element().getBoundingClientRect())
+    for (const [index, rect] of controls.entries()) {
+      expect(
+        Math.abs(rect.top + rect.height / 2 - controls[0].top - controls[0].height / 2)
+      ).toBeLessThan(2)
+      expect(rect.left).toBeGreaterThanOrEqual(0)
+      expect(rect.right).toBeLessThanOrEqual(840)
+      if (index > 0) expect(rect.left).toBeGreaterThan(controls[index - 1].right)
+    }
+    await page.screenshot({
+      path: '../../../../../.cache/workflow-authoring/workflow-project-toolbar-dark.png'
+    })
+    await page.viewport(640, 700)
+    await expect.element(page.getByRole('button', { name: /^模版:/ })).toBeVisible()
+    await expect.element(page.getByRole('button', { name: /^所属项目:/ })).toBeVisible()
+    expect(document.querySelector('.project-workflows')!.scrollWidth).toBeLessThanOrEqual(640)
+    await view.rerender(
+      renderPage({ projects: projects.filter((project) => project.id !== 'project-a') })
+    )
+    await expect
+      .element(page.getByRole('button', { name: '所属项目: 项目已删除', exact: true }))
+      .toBeVisible()
+    await expect.element(page.getByRole('button', { name: '激活', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: '所属项目: 项目已删除', exact: true }).click()
+    await page.getByRole('option', { name: '无项目', exact: true }).click()
+    await expect.element(page.getByRole('button', { name: '激活', exact: true })).toBeEnabled()
   })
 
   it('prevents a conversation being assigned to a second workflow or a second node, including drop actions', async () => {

@@ -31,6 +31,7 @@ import { McpToolActivity } from './McpToolActivity'
 import { BuiltinCapabilityToolActivity } from './BuiltinCapabilityToolActivity'
 import { ActivateCapabilityToolActivity } from './ActivateCapabilityToolActivity'
 import { SendMessageToolActivity } from './SendMessageToolActivity'
+import { WorkflowSendToolActivity } from './WorkflowSendToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -123,6 +124,17 @@ export function AgentToolActivity({
         result={result}
         settledStatus={settledStatus}
         toolName={call.tool}
+      />
+    )
+  }
+
+  if (call.tool === 'workflow_send') {
+    return (
+      <WorkflowSendToolActivity
+        call={call}
+        cancelled={cancelled && !result}
+        result={result}
+        settledStatus={settledStatus}
       />
     )
   }

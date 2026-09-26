@@ -422,6 +422,7 @@ export interface StorageImageFileRecord {
 export interface StorageChatMessageRecord {
   /** Host-derived immutable display proof. It is never accepted by a message write API. */
   readonly humanInteractionResponse?: HumanInteractionResponseDisplay | null
+  readonly workflowInput?: import('./workflowRuntime').WorkflowMessageSource | null
   id: string
   role: 'user' | 'assistant' | (string & {})
   content: string
@@ -436,7 +437,7 @@ export interface StorageChatMessageRecord {
 
 export type StorageChatMessageWriteRecord = Omit<
   StorageChatMessageRecord,
-  'humanInteractionResponse'
+  'humanInteractionResponse' | 'workflowInput'
 >
 
 export interface StorageChatMessageStateRecord {

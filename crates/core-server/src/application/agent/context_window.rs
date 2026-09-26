@@ -466,6 +466,9 @@ impl AgentService {
                         .as_ref()
                         .map(|checkpoint| checkpoint.run_id.as_str())
                 });
+            host_services = host_services.with_workflow_runtime(
+                self.workflow_preview_host(conversation_id, effective_run_id),
+            );
             active_assistant_message_id = active_identity
                 .as_ref()
                 .filter(|(active_run, _)| effective_run_id == Some(active_run.as_str()))

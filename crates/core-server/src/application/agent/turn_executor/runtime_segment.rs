@@ -482,6 +482,17 @@ impl AgentService {
                 ),
             ));
         }
+        host_services = self.attach_workflow_runtime(
+            host_services,
+            &agent_input,
+            super::workflow_execution::WorkflowTurnOwner {
+                run_id: &run_id,
+                conversation_id: &conversation_id,
+                assistant_message_id: &assistant_message_id,
+                token: &cancellation_token,
+            },
+            notifications.clone(),
+        );
         if let Some(sink) = automation_report_sink {
             host_services = host_services.with_automation_report_sink(sink);
         }

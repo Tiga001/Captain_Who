@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
 pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
-    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled FROM workflow_instances ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
+    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled, project_id FROM workflow_instances ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
     let rows = statement
         .query_map([], |r| {
             Ok(Instance {
@@ -22,6 +22,7 @@ pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
                 needs_review: r.get(7)?,
                 running: r.get(8)?,
                 enabled: r.get(9)?,
+                project_id: r.get(10)?,
                 bindings: vec![],
             })
         })
@@ -166,6 +167,12 @@ pub(super) fn publish(
         .into_iter()
         .filter(|instance| instance.template_id == definition.id)
     {
+        crate::storage::workflow_execution_repository::invalidate_instance(
+            c,
+            &instance.id,
+            "Workflow template was updated",
+        )
+        .map_err(Error::Storage)?;
         for binding in instance.bindings {
             if !agent_ids.contains(binding.node_id.as_str()) {
                 c.execute(
@@ -350,6 +357,12 @@ pub(super) fn request(
             if running.is_none() {
                 return Err(revision_conflict());
             }
+            crate::storage::workflow_execution_repository::invalidate_instance(
+                c,
+                &id,
+                "Workflow instance was deleted",
+            )
+            .map_err(Error::Storage)?;
             c.execute("DELETE FROM workflow_instances WHERE instance_id=?1", [id])
                 .map_err(storage_error)?;
             Ok(vec![])
@@ -359,6 +372,7 @@ pub(super) fn request(
             template_id,
             name,
             color,
+            project_id,
             bindings,
             expected_revision,
             expected_template_revision,
@@ -414,6 +428,21 @@ pub(super) fn request(
                 return Err(Error::Invalid(
                     "An instance cannot change its template".into(),
                 ));
+            }
+            // A destination project only controls auto-created chats, never existing bindings.
+            // Validate before creating any conversation; the transaction also serializes deletion.
+            if let Some(project_id) = &project_id {
+                validate_id(project_id)?;
+                let exists: bool = c
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                        [project_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(storage_error)?;
+                if !exists {
+                    return Err(Error::Invalid("workflow_project_missing".into()));
+                }
             }
             // The enclosing immediate transaction serializes competing confirmations. Check
             // every persisted instance before creating conversations or changing composer state.
@@ -520,7 +549,7 @@ pub(super) fn request(
                     conversation_id
                 } else {
                     let conversation_id = uuid::Uuid::new_v4().to_string();
-                    c.execute("INSERT INTO conversations(id,project_id,model_id,title,created_at,updated_at) VALUES (?1,NULL,?2,?3,?4,?4)",params![conversation_id,config.model_config_id,node.name,now]).map_err(storage_error)?;
+                    c.execute("INSERT INTO conversations(id,project_id,model_id,title,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)",params![conversation_id,project_id,config.model_config_id,node.name,now]).map_err(storage_error)?;
                     conversation_id
                 };
                 if previous.get(&node.id) != Some(&conversation_id) {
@@ -544,7 +573,20 @@ pub(super) fn request(
                     conversation_id,
                 });
             }
-            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,enabled=excluded.enabled,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled]).map_err(storage_error)?;
+            if current.is_some()
+                && (resolved.len() != previous.len()
+                    || resolved.iter().any(|binding| {
+                        previous.get(&binding.node_id) != Some(&binding.conversation_id)
+                    }))
+            {
+                crate::storage::workflow_execution_repository::invalidate_instance(
+                    c,
+                    &id,
+                    "Workflow conversation bindings were changed",
+                )
+                .map_err(Error::Storage)?;
+            }
+            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,project_id) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,enabled=excluded.enabled,project_id=excluded.project_id,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled,project_id]).map_err(storage_error)?;
             c.execute(
                 "DELETE FROM workflow_instance_bindings WHERE instance_id=?1",
                 [&id],

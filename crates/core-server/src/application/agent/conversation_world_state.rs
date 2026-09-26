@@ -63,6 +63,7 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
             "web.search",
             "human.interaction",
             "agent.collaboration",
+            "workflow.execution",
             "builtin.capabilities.policy",
         ]
         .into_iter()

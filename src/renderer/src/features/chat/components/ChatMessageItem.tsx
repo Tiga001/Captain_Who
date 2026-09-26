@@ -23,6 +23,11 @@ import { ChatMessageActions } from './ChatMessageActions'
 import { EditableUserMessage } from './EditableUserMessage'
 import { MessageAttachments } from './MessageAttachments'
 import { AgentRunView } from './AgentRunView'
+import {
+  WorkflowReceivedContent,
+  workflowReceivedBodies,
+  workflowReceivedCopyText
+} from './WorkflowReceivedContent'
 
 interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
@@ -122,8 +127,25 @@ function MessageInputOrigin({
   message: ChatMessage
   parentAgentId?: string | null
 }) {
-  const { t } = useFrontendConfig()
-  if (message.role !== 'user' || !message.inputOrigin) return null
+  const { t, language } = useFrontendConfig()
+  if (message.role !== 'user') return null
+  if (message.workflowSource) {
+    const source = message.workflowSource
+    return (
+      <div
+        className="chat-message__input-origin"
+        data-input-origin="workflow"
+        title={source.sources
+          .map((item) => `${item.nodeName} · ${item.conversationTitle}`)
+          .join('\n')}
+      >
+        <span>{language.startsWith('zh') ? '来自工作流' : 'From workflow'}</span>
+        <strong>{source.workflowName}</strong>
+        <span>· {source.sources.map((item) => item.nodeName).join('、')}</span>
+      </div>
+    )
+  }
+  if (!message.inputOrigin) return null
   const origin = message.inputOrigin
   if (origin.kind === 'human') return null
 
@@ -180,6 +202,10 @@ export const ChatMessageItem = memo(function ChatMessageItem({
 }: ChatMessageItemProps) {
   const { t } = useFrontendConfig()
   const [isEditing, setIsEditing] = useState(false)
+  const [expandedWorkflowMessageId, setExpandedWorkflowMessageId] = useState<string | null>(null)
+  const workflowBodies = workflowReceivedBodies(message)
+  const isWorkflowExpanded = expandedWorkflowMessageId === message.id
+  const isWorkflowCollapsed = Boolean(workflowBodies && !isWorkflowExpanded)
   const isAssistantActionsVisible = shouldShowAssistantActions(message)
   const userVisibleContent = getUserVisibleContent(message)
   const humanAnswer = message.role === 'user' ? message.humanInteractionDisplay : null
@@ -188,14 +214,17 @@ export const ChatMessageItem = memo(function ChatMessageItem({
       ? getAssistantFinalContent(message)
       : humanAnswer
         ? humanInteractionDisplayText(humanAnswer)
-        : userVisibleContent
+        : isWorkflowCollapsed && workflowBodies
+          ? workflowReceivedCopyText(workflowBodies)
+          : userVisibleContent
   const actionTimestamp =
     message.role === 'assistant'
       ? (message.agentRun?.completedAt ?? message.createdAt)
       : message.createdAt
   const actionUsage = message.role === 'assistant' ? message.agentRun?.usage : undefined
   const showActions = message.role === 'user' || isAssistantActionsVisible
-  const canEdit = message.role === 'user' && !humanAnswer && Boolean(onEditSubmit)
+  const canEdit =
+    message.role === 'user' && !humanAnswer && !message.workflowSource && Boolean(onEditSubmit)
   const pinCopyAction =
     message.role === 'assistant' && isLastAssistantMessage && isAssistantActionsVisible
   const showBody = message.role === 'assistant' || Boolean(userVisibleContent.trim())
@@ -261,27 +290,35 @@ export const ChatMessageItem = memo(function ChatMessageItem({
         </div>
       ) : showBody ? (
         <div className="chat-message__body">
-          <MessageContent
-            collaborationTimelineActivities={collaborationTimelineActivities}
-            collaborationTreeAgentIds={collaborationTreeAgentIds}
-            conversationId={conversationId}
-            humanInteraction={humanInteraction}
-            message={message}
-            mode={mode}
-            onApprove={onApprove}
-            onCancel={onCancel}
-            onReject={onReject}
-            onReviewLastTurn={onReviewLastTurn}
-            onTimelineCollapsedChange={onTimelineCollapsedChange}
-            onUiStateChange={onUiStateChange}
-            onOpenCollaborationAgent={onOpenCollaborationAgent}
-            onOpenWorkspaceReference={onOpenWorkspaceReference}
-            observerRootConversationId={observerRootConversationId}
-            projectId={projectId}
-            showTokenUsageDetails={showTokenUsageDetails}
-            timelineCollapsedOverride={timelineCollapsedOverride}
-            turnDiffSummary={turnDiffSummary}
-          />
+          {isWorkflowCollapsed && workflowBodies ? (
+            <WorkflowReceivedContent
+              bodies={workflowBodies}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
+              projectId={projectId}
+            />
+          ) : (
+            <MessageContent
+              collaborationTimelineActivities={collaborationTimelineActivities}
+              collaborationTreeAgentIds={collaborationTreeAgentIds}
+              conversationId={conversationId}
+              humanInteraction={humanInteraction}
+              message={message}
+              mode={mode}
+              onApprove={onApprove}
+              onCancel={onCancel}
+              onReject={onReject}
+              onReviewLastTurn={onReviewLastTurn}
+              onTimelineCollapsedChange={onTimelineCollapsedChange}
+              onUiStateChange={onUiStateChange}
+              onOpenCollaborationAgent={onOpenCollaborationAgent}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
+              observerRootConversationId={observerRootConversationId}
+              projectId={projectId}
+              showTokenUsageDetails={showTokenUsageDetails}
+              timelineCollapsedOverride={timelineCollapsedOverride}
+              turnDiffSummary={turnDiffSummary}
+            />
+          )}
         </div>
       ) : null}
       {showActions && !isEditing && (
@@ -289,6 +326,12 @@ export const ChatMessageItem = memo(function ChatMessageItem({
           canEdit={canEdit}
           content={actionContent}
           favorited={isFavorited}
+          workflowContextExpanded={isWorkflowExpanded}
+          onWorkflowContextToggle={
+            workflowBodies
+              ? () => setExpandedWorkflowMessageId(isWorkflowExpanded ? null : message.id)
+              : undefined
+          }
           onEdit={() => setIsEditing(true)}
           onFavoriteChange={message.role === 'user' && onUiStateChange ? updateFavorite : undefined}
           onContinueInNewTask={

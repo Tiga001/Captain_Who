@@ -484,6 +484,25 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .start_collaboration_dispatcher(outbound_tx.clone())
         .map_err(io::Error::other)?;
     agent_service.schedule_human_input_deliveries(outbound_tx.clone());
+    let workflow_service = agent_service.clone();
+    let workflow_notifications = outbound_tx.clone();
+    let workflow_dispatcher = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let service = workflow_service.clone();
+            let notifications = workflow_notifications.clone();
+            if tokio::task::spawn_blocking(move || {
+                service.schedule_workflow_deliveries(notifications)
+            })
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+    });
     let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
         mpsc::channel::<ImageArtifactOutbound>(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
@@ -575,6 +594,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
 
     // Stop future Automation claims before any shared Agent or MCP shutdown begins. Already
     // admitted HumanRoot turns continue through the normal AgentService shutdown path below.
+    workflow_dispatcher.abort();
+    let _ = workflow_dispatcher.await;
     automation_scheduler.stop_admissions().await;
 
     // `core.shutdown` settles the managed runtime inside the request loop while reverse bridge

@@ -21,7 +21,30 @@ pub(crate) fn handle_request(
     }
 
     match request.method.as_str() {
-        "agent.workflows.request" => handle_workflow_request(storage, Some(agent_service), request),
+        "agent.workflows.request" => {
+            if request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("operation"))
+                .and_then(Value::as_str)
+                .is_some_and(|operation| {
+                    matches!(
+                        operation,
+                        "runtimeSnapshot" | "completeUserInput" | "discardFailedInput"
+                    )
+                })
+            {
+                workflow_rpc::handle_workflow_runtime_request(
+                    agent_service,
+                    notification_tx,
+                    request,
+                )
+            } else {
+                let response = handle_workflow_request(storage, Some(agent_service), request);
+                agent_service.schedule_workflow_deliveries(notification_tx);
+                response
+            }
+        }
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),
         mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD => {
             let input = match parse_params::<mycopilot_protocol_rs::SetExecutionAccessInput>(
@@ -466,9 +489,20 @@ pub(crate) fn handle_request(
                     .map(|_| json!(null)),
             )
         }
-        STORAGE_LOAD_CONVERSATIONS_METHOD => {
-            storage_response(request.id, storage.load_conversation_views())
-        }
+        STORAGE_LOAD_CONVERSATIONS_METHOD => storage_response(
+            request.id,
+            storage.load_conversation_views().and_then(|conversations| {
+                conversations
+                    .into_iter()
+                    .map(|conversation| {
+                        workflow_rpc::workflow_conversation_projection(
+                            storage,
+                            serde_json::to_value(conversation).map_err(|e| e.to_string())?,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            }),
+        ),
         STORAGE_LOAD_CONVERSATION_METAS_METHOD => {
             storage_response(request.id, storage.load_conversation_metas())
         }
@@ -480,7 +514,14 @@ pub(crate) fn handle_request(
             match agent_service.authorize_user_conversation_write(&input.conversation_id) {
                 Ok(()) => storage_response(
                     request.id,
-                    storage.load_conversation_view(&input.conversation_id),
+                    storage
+                        .load_conversation_view(&input.conversation_id)
+                        .and_then(|conversation| {
+                            workflow_rpc::workflow_conversation_projection(
+                                storage,
+                                serde_json::to_value(conversation).map_err(|e| e.to_string())?,
+                            )
+                        }),
                 ),
                 Err(error) => agent_service_error_response(request.id, error),
             }

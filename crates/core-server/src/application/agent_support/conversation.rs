@@ -75,6 +75,7 @@ pub(crate) struct HumanConversationTurnRewrite {
 
 enum ConversationTurnInputSource {
     Human,
+    Workflow(Box<mycopilot_core::workflow_execution::Input>),
     HumanResponse(Box<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>),
     ExistingAgentProjection {
         collaboration_identity: Box<AgentCollaborationIdentity>,
@@ -154,6 +155,42 @@ pub(crate) fn prepare_reserved_human_response_turn(
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
             Err("human response cannot replay a rewrite".to_string().into())
+        }
+    }
+}
+
+/// A trusted workflow delivery shares root admission and permissions, but never creates a
+/// HumanText model input. Its content enters the model via the workflow sampling inbox.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_reserved_workflow_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    workflow: mycopilot_core::workflow_execution::Input,
+    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    match prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::Workflow(Box::new(workflow)),
+        TurnReservationMode::CommitDurableLease,
+        existing,
+        expected_revision,
+        None,
+        None,
+        None,
+        Some(check_execution_access),
+    )? {
+        PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
+        PreparedConversationTurnOutcome::Replayed(_) => {
+            Err("workflow delivery cannot replay a rewrite"
+                .to_string()
+                .into())
         }
     }
 }
@@ -306,6 +343,17 @@ fn prepare_conversation_turn_from_source(
             .to_string()
             .into());
     }
+    if let ConversationTurnInputSource::Workflow(workflow) = &source {
+        if workflow.conversation_id.as_deref() != input.conversation_id.as_deref()
+            || workflow.content != input.content
+            || input.user_message_id.as_deref()
+                != Some(format!("workflow-message-{}", workflow.id).as_str())
+        {
+            return Err("Workflow input does not match its trusted admission."
+                .to_string()
+                .into());
+        }
+    }
     let content = input.content.trim().to_string();
     if content.is_empty() && input.attachments.is_empty() && input.folder_references.is_empty() {
         return Err("消息必须包含正文、附件或文件夹。".to_string().into());
@@ -434,7 +482,9 @@ fn prepare_conversation_turn_from_source(
     if rewrite.is_none()
         && matches!(
             &source,
-            ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+            ConversationTurnInputSource::Human
+                | ConversationTurnInputSource::HumanResponse(_)
+                | ConversationTurnInputSource::Workflow(_)
         )
     {
         storage.rebind_input_attachment_ids(
@@ -544,6 +594,14 @@ fn prepare_conversation_turn_from_source(
     let mut history_excluded_message_ids = storage
         .list_trace_bound_agent_projection_message_ids(&conversation_id)
         .map_err(|error| error.to_string())?;
+    // Workflow bubbles are UI projections. Their authoritative model input is WorkflowDelivery
+    // in the Turn trace; including the raw role=user projection would duplicate/elevate it.
+    history_excluded_message_ids.extend(
+        storage
+            .workflow_execution_inputs_for_conversation(&conversation_id)?
+            .into_iter()
+            .filter_map(|input| input.delivery_id),
+    );
     history_excluded_message_ids.push(user_message_id.clone());
     history_excluded_message_ids.push(assistant_message_id.clone());
     if let Some(rewrite) = &rewrite {
@@ -563,7 +621,9 @@ fn prepare_conversation_turn_from_source(
     )?;
 
     let user_message = match &source {
-        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
+        ConversationTurnInputSource::Human
+        | ConversationTurnInputSource::HumanResponse(_)
+        | ConversationTurnInputSource::Workflow(_) => {
             let folder_references_json =
                 mycopilot_core::serialize_folder_references_for_storage(&input.folder_references)
                     .map_err(|error| format!("序列化文件夹引用失败：{error}"))?;
@@ -659,7 +719,9 @@ fn prepare_conversation_turn_from_source(
 
     if matches!(
         &source,
-        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+        ConversationTurnInputSource::Human
+            | ConversationTurnInputSource::HumanResponse(_)
+            | ConversationTurnInputSource::Workflow(_)
     ) {
         upsert_message(&mut conversation.messages, user_message.clone());
     }
@@ -699,14 +761,16 @@ fn prepare_conversation_turn_from_source(
                 .in_progress_trace(run_id, &conversation_id, &assistant_message_id);
             let trusted_wake = match &source {
                 ConversationTurnInputSource::Human
-                | ConversationTurnInputSource::HumanResponse(_) => None,
+                | ConversationTurnInputSource::HumanResponse(_)
+                | ConversationTurnInputSource::Workflow(_) => None,
                 ConversationTurnInputSource::ExistingAgentProjection { wake_admission, .. } => {
                     Some(wake_admission.as_ref())
                 }
             };
             let permission_source = match &source {
                 ConversationTurnInputSource::Human
-                | ConversationTurnInputSource::HumanResponse(_) => {
+                | ConversationTurnInputSource::HumanResponse(_)
+                | ConversationTurnInputSource::Workflow(_) => {
                     mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
                         input.permissions,
                     )
@@ -866,7 +930,9 @@ fn prepare_conversation_turn_from_source(
     }
     if matches!(
         &source,
-        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+        ConversationTurnInputSource::Human
+            | ConversationTurnInputSource::HumanResponse(_)
+            | ConversationTurnInputSource::Workflow(_)
     ) && rewrite.is_none()
     {
         storage.save_input_attachments(
@@ -895,9 +961,9 @@ fn prepare_conversation_turn_from_source(
         attachment_library: Some(attachment_library),
         permissions: input.permissions,
         collaboration_identity: match &source {
-            ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
-                None
-            }
+            ConversationTurnInputSource::Human
+            | ConversationTurnInputSource::HumanResponse(_)
+            | ConversationTurnInputSource::Workflow(_) => None,
             ConversationTurnInputSource::ExistingAgentProjection {
                 collaboration_identity,
                 ..
@@ -909,15 +975,17 @@ fn prepare_conversation_turn_from_source(
     let world_state_records = load_conversation_world_state(storage, &conversation_id)?;
 
     let mut agent_messages = history_messages;
-    agent_messages.push(AgentChatMessage {
-        conversation_completion_covered: false,
-        message_id: Some(user_message_id.clone()),
-        role: "user".to_string(),
-        content,
-        created_at: Some(user_message.created_at),
-        conversation_turn_trace: None,
-        conversation_model_context_items: Vec::new(),
-    });
+    if !matches!(&source, ConversationTurnInputSource::Workflow(_)) {
+        agent_messages.push(AgentChatMessage {
+            conversation_completion_covered: false,
+            message_id: Some(user_message_id.clone()),
+            role: "user".to_string(),
+            content,
+            created_at: Some(user_message.created_at),
+            conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
+        });
+    }
     storage.project_agent_messages_for_model(&conversation_id, &mut agent_messages)?;
     let provider_usage_semantics =
         mycopilot_core::resolve_provider_runtime_capabilities(&provider_protocol_key)
@@ -1024,6 +1092,16 @@ pub(crate) fn conversation_history_messages_with_model_context(
     compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
 ) -> Result<Vec<AgentChatMessage>, String> {
+    let workflow_projection_ids = traces
+        .iter()
+        .flat_map(|trace| &trace.items)
+        .filter_map(|item| match item {
+            mycopilot_core::ConversationTurnTraceItem::WorkflowDelivery { input_id, .. } => {
+                Some(format!("workflow-message-{input_id}"))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
     let traces = traces
         .iter()
         .map(|trace| (trace.assistant_message_id.as_str(), trace))
@@ -1166,9 +1244,10 @@ pub(crate) fn conversation_history_messages_with_model_context(
             }
         })
         .filter(|message| {
-            !excluded_message_ids
-                .iter()
-                .any(|excluded_id| message.0.id == *excluded_id)
+            !workflow_projection_ids.contains(&message.0.id)
+                && !excluded_message_ids
+                    .iter()
+                    .any(|excluded_id| message.0.id == *excluded_id)
         })
         .filter(|(message, trace, _)| {
             if message.status.as_deref() != Some("pending") {

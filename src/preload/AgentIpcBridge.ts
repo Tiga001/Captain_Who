@@ -2,6 +2,7 @@ import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS, type AgentHostApi } from '@mycopilot/host-api'
 import {
   parseAgentCollaborationSettings,
+  parseWorkflowRuntimeSnapshot,
   parseAgentPromptPreferencesChanged
 } from '@mycopilot/protocol'
 import type {
@@ -58,6 +59,19 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
     listCollaborationEvents: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationListEvents, input),
     requestWorkflows: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.workflows, input),
+    onWorkflowRuntimeChanged: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        let snapshot: ReturnType<typeof parseWorkflowRuntimeSnapshot>
+        try {
+          snapshot = parseWorkflowRuntimeSnapshot(payload)
+        } catch {
+          return
+        }
+        handler(snapshot)
+      }
+      ipcRenderer.on(HOST_CHANNELS.agent.workflowRuntimeChanged, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.workflowRuntimeChanged, listener)
+    },
     listAgentTemplates: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateList, input),
     createAgentTemplate: (input) =>

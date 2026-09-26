@@ -3158,7 +3158,7 @@ CREATE TABLE conversation_turn_trace_items (
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
             item_kind TEXT NOT NULL CHECK (item_kind IN (
                 'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
-                'command_session_lifecycle', 'agent_mailbox_delivery',
+                'command_session_lifecycle', 'agent_mailbox_delivery', 'workflow_delivery',
                 'context_compaction_lifecycle', 'runtime_error', 'backend_state', 'context_material'
             )),
             item_json TEXT NOT NULL CHECK (json_valid(item_json)),
@@ -6882,3 +6882,76 @@ WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL
 BEGIN
     SELECT RAISE(ABORT, 'workflow_active_archive_blocked');
 END;
+
+-- Durable workflow execution messages and receipts, schema v58.
+CREATE TABLE workflow_execution_sends (
+    send_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    source_conversation_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at INTEGER NOT NULL,
+    UNIQUE(source_run_id, tool_call_id)
+);
+CREATE TABLE workflow_execution_messages (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL UNIQUE,
+    instance_id TEXT NOT NULL,
+    execution_version TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    flow_id TEXT NOT NULL,
+    message_json TEXT NOT NULL CHECK (json_valid(message_json)),
+    input_id TEXT,
+    invalidated INTEGER NOT NULL DEFAULT 0 CHECK (invalidated IN (0,1)),
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_execution_message_queue ON workflow_execution_messages(instance_id, execution_version, node_id, flow_id, input_id, sequence);
+CREATE TABLE workflow_execution_inputs (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    input_id TEXT NOT NULL UNIQUE,
+    instance_id TEXT NOT NULL,
+    execution_version TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    conversation_id TEXT,
+    input_json TEXT NOT NULL CHECK (json_valid(input_json)),
+    status TEXT NOT NULL CHECK (status IN ('pending','claimed','applied','waiting_user','completed','paused','failed','invalidated')),
+    completion_notified INTEGER NOT NULL DEFAULT 0 CHECK (completion_notified IN (0,1)),
+    discarded INTEGER NOT NULL DEFAULT 0 CHECK (discarded IN (0,1)),
+    run_id TEXT,
+    delivery_id TEXT UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_execution_input_queue ON workflow_execution_inputs(status, conversation_id, sequence);
+CREATE INDEX workflow_execution_input_instance ON workflow_execution_inputs(instance_id, sequence);
+CREATE INDEX workflow_execution_input_run ON workflow_execution_inputs(run_id, status);
+CREATE TABLE workflow_execution_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT NOT NULL,
+    input_id TEXT,
+    flow_ids_json TEXT NOT NULL CHECK (json_valid(flow_ids_json)),
+    kind TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_execution_event_instance ON workflow_execution_events(instance_id, sequence);
+CREATE TABLE workflow_execution_pauses (
+    conversation_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE workflow_execution_runs (
+    run_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE workflow_execution_message_origins (
+    message_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    input_id TEXT NOT NULL
+);
+CREATE INDEX workflow_execution_origin_conversation ON workflow_execution_message_origins(conversation_id, message_id);
+
+-- Default project for newly created workflow conversations, schema v59.
+ALTER TABLE workflow_instances ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;

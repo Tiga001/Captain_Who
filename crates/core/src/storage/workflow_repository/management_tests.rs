@@ -802,3 +802,91 @@ fn workflow_incompatible_template_remains_protected_while_used_by_an_instance() 
         .unwrap();
     assert_eq!(persisted, raw);
 }
+
+#[test]
+fn workflow_default_project_only_applies_to_new_conversations_and_can_be_cleared() {
+    let mut c = setup();
+    existing(&c, "elsewhere", "other");
+    c.execute("INSERT INTO projects(id,name,created_at,updated_at) VALUES ('destination','Destination',1,1),('next','Next',1,1)", []).unwrap();
+    let mut request = create("instance", None);
+    request["projectId"] = json!("destination");
+    let created = call(&mut c, request.clone()).unwrap();
+    let instance = &created.instances[0];
+    let chat = &instance.bindings[0].conversation_id;
+    assert_eq!(instance.project_id.as_deref(), Some("destination"));
+    let project = |c: &Connection, chat: &str| -> Option<String> {
+        c.query_row(
+            "SELECT project_id FROM conversations WHERE id=?1",
+            [chat],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(project(&c, chat).as_deref(), Some("destination"));
+    assert_eq!(
+        call(&mut c, request).unwrap().instances[0].bindings,
+        instance.bindings
+    );
+    assert_eq!(count(&c, "conversations"), 2);
+
+    // Changing the destination must not relocate a conversation already bound to the workflow.
+    let mut update = create("instance", Some(chat));
+    update["projectId"] = json!("next");
+    update["expectedRevision"] = json!(1);
+    let changed = call(&mut c, update).unwrap();
+    assert_eq!(changed.instances[0].project_id.as_deref(), Some("next"));
+    assert!(changed.affected_conversation_ids.is_empty());
+    assert_eq!(project(&c, chat).as_deref(), Some("destination"));
+
+    // A manually selected conversation remains in its original project.
+    let mut update = create("instance", Some("elsewhere"));
+    update["projectId"] = json!("destination");
+    update["expectedRevision"] = json!(2);
+    call(&mut c, update).unwrap();
+    assert_eq!(project(&c, "elsewhere").as_deref(), Some("other"));
+
+    // Explicitly clearing the destination creates an unassigned conversation.
+    let mut update = create("instance", None);
+    update["projectId"] = Value::Null;
+    update["expectedRevision"] = json!(3);
+    let cleared = call(&mut c, update).unwrap();
+    assert_eq!(cleared.instances[0].project_id, None);
+    assert_eq!(
+        project(&c, &cleared.instances[0].bindings[0].conversation_id),
+        None
+    );
+}
+
+#[test]
+fn workflow_missing_default_project_rejects_atomically_and_deleted_project_clears_preference() {
+    let mut c = setup();
+    let mut request = create("instance", None);
+    request["projectId"] = json!("gone");
+    assert!(
+        matches!(call(&mut c, request.clone()), Err(Error::Invalid(message)) if message == "workflow_project_missing")
+    );
+    assert_eq!(count(&c, "conversations"), 0);
+    assert_eq!(count(&c, "workflow_instances"), 0);
+    c.execute(
+        "INSERT INTO projects(id,name,created_at,updated_at) VALUES ('gone','Gone',1,1)",
+        [],
+    )
+    .unwrap();
+    existing(&c, "survivor", "other");
+    request["bindings"] = json!([{ "nodeId": "a", "conversationId": "survivor" }]);
+    let created = call(&mut c, request).unwrap();
+    crate::storage::project_repository::delete_project(&c, "gone").unwrap();
+    let listed = call(&mut c, json!({"operation":"listInstances"})).unwrap();
+    assert_eq!(listed.instances[0].project_id, None);
+    assert_eq!(listed.instances[0].bindings, created.instances[0].bindings);
+    assert!(listed.instances[0].enabled);
+    assert_eq!(
+        c.query_row(
+            "SELECT project_id FROM conversations WHERE id=?1",
+            [&created.instances[0].bindings[0].conversation_id],
+            |r| r.get::<_, Option<String>>(0)
+        )
+        .unwrap(),
+        Some("other".to_owned())
+    );
+}

@@ -13,6 +13,15 @@ const activity = vi.hoisted(() => ({
   running: new Set<string>(),
   waitingApproval: new Set<string>()
 }))
+const execution = vi.hoisted(() => ({
+  snapshot: null as import('@mycopilot/protocol').WorkflowRuntimeSnapshot | null,
+  transmissions: [] as import('@mycopilot/protocol').WorkflowRuntimeEvent[],
+  completeUserInput: vi.fn().mockResolvedValue(undefined),
+  discardFailedInput: vi.fn().mockResolvedValue(undefined)
+}))
+vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
+  useWorkflowExecution: () => execution
+}))
 vi.mock('../../features/workflows/project/useWorkflowMonitor', () => ({
   useWorkflowMonitor: () => ({
     runningConversationIds: activity.running,
@@ -198,11 +207,74 @@ beforeEach(async () => {
     document.documentElement.style.setProperty(key, value)
   activity.running = new Set()
   activity.waitingApproval = new Set()
+  execution.snapshot = null
+  execution.transmissions = []
+  execution.completeUserInput.mockClear()
+  execution.discardFailedInput.mockClear()
   onBack.mockReset()
   onOpenConversation.mockReset()
 })
 
 describe('workflow read-only monitor', () => {
+  it('requires explicit confirmation before skipping a failed input while keeping chat navigation separate', async () => {
+    const input: import('@mycopilot/protocol').WorkflowRuntimeInput = {
+      id: 'failed-input',
+      instanceId: instance.id,
+      nodeId: 'build',
+      conversationId: 'chat-build',
+      executionVersion: 'v1',
+      content: '',
+      messages: [],
+      busyPolicy: 'queue',
+      status: 'failed',
+      runId: 'run',
+      deliveryId: 'delivery',
+      createdAt: 1,
+      error: 'Delivery interrupted'
+    }
+    execution.snapshot = { instanceId: instance.id, sequence: 1, inputs: [input], events: [] }
+    const screen = await render(renderPage())
+    await screen.getByRole('button', { name: '处理投递失败' }).click()
+    expect(execution.discardFailedInput).not.toHaveBeenCalled()
+    await page.getByRole('button', { name: '跳过此来信' }).click()
+    expect(execution.discardFailedInput).toHaveBeenCalledExactlyOnceWith('failed-input')
+    expect(onOpenConversation).not.toHaveBeenCalled()
+  })
+  it('shows received user work and confirms only that pending input', async () => {
+    const input: import('@mycopilot/protocol').WorkflowRuntimeInput = {
+      id: 'user-input',
+      instanceId: instance.id,
+      nodeId: 'user',
+      conversationId: null,
+      executionVersion: 'v1',
+      content: 'Review the two results',
+      messages: [],
+      busyPolicy: 'queue',
+      status: 'waiting_user',
+      runId: null,
+      deliveryId: null,
+      createdAt: 1,
+      error: null
+    }
+    execution.snapshot = { instanceId: instance.id, sequence: 1, inputs: [input], events: [] }
+    execution.transmissions = [
+      {
+        instanceId: instance.id,
+        sequence: 1,
+        inputId: input.id,
+        flowIds: ['accept'],
+        kind: 'waiting_user',
+        createdAt: Date.now()
+      }
+    ]
+    const screen = await render(renderPage())
+    expect(screen.container.querySelectorAll('.workflow-monitor__transmission')).toHaveLength(1)
+    await screen.getByRole('button', { name: '用户验收 · 等待用户操作' }).click()
+    await expect.element(page.getByRole('dialog', { name: '等待用户操作' })).toBeVisible()
+    await page.getByRole('button', { name: '我已完成' }).click()
+    expect(execution.completeUserInput).toHaveBeenCalledExactlyOnceWith('user-input')
+    expect(onOpenConversation).not.toHaveBeenCalled()
+  })
   it('preserves the template topology and coordinates and opens only bound conversations', async () => {
     const screen = await render(renderPage())
     const { geometries } = graphFlowLayout(graph)

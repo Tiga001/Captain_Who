@@ -449,10 +449,12 @@ pub struct AgentRuntimeHostServices {
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     pub(super) command_session_executor: Option<Arc<dyn AgentCommandSessionExecutor>>,
     pub(super) steer_input: Option<AgentSteerInputQueue>,
+    pub(super) workflow_inbox: Option<Arc<dyn crate::AgentWorkflowInbox>>,
     pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
     pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
     pub(super) agent_collaboration_policy: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
+    pub(super) workflow_runtime: Option<Arc<dyn crate::WorkflowRuntimeHost>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
     pub(super) human_interaction_runtime: Option<Arc<dyn AgentHumanInteractionRuntimeHost>>,
     // Read-only capacity projection only. The driver deliberately ignores these flags and
@@ -564,6 +566,16 @@ impl AgentRuntimeHostServices {
     /// model/Renderer-provided search configuration cannot replace this authority.
     pub fn with_web_search_policy(mut self, source: Arc<dyn crate::WebSearchPolicySource>) -> Self {
         self.web_search_policy = Some(source);
+        self
+    }
+
+    pub fn with_workflow_runtime(mut self, host: Arc<dyn crate::WorkflowRuntimeHost>) -> Self {
+        self.workflow_runtime = Some(host);
+        self
+    }
+
+    pub fn with_workflow_inbox(mut self, inbox: Arc<dyn crate::AgentWorkflowInbox>) -> Self {
+        self.workflow_inbox = Some(inbox);
         self
     }
 
@@ -994,6 +1006,7 @@ pub fn prepare_context_window_tool_projection(
             agent_collaboration,
             agent_collaboration_policy,
             automation_report_sink: host_services.automation_report_sink.clone(),
+            workflow_runtime: host_services.workflow_runtime.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
             human_interaction_execution_ready: human_ready,
             human_interaction_async_execution_ready: human_async_ready,

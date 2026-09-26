@@ -560,6 +560,34 @@ impl ConversationTraceRecorder {
         Some(sequence)
     }
 
+    pub(crate) fn record_workflow_delivery(
+        &mut self,
+        delivery: &crate::AgentWorkflowDelivery,
+    ) -> Result<bool, String> {
+        if delivery.input_id.trim().is_empty() || delivery.instance_id.trim().is_empty()
+            || delivery.workflow_name.trim().is_empty() || delivery.content.trim().is_empty()
+            || delivery.created_at < 0 {
+            return Err("Workflow delivery identity is invalid".into());
+        }
+        let item = ConversationTurnTraceItem::WorkflowDelivery {
+            sequence: delivery.trace_sequence, input_id: delivery.input_id.clone(),
+            instance_id: delivery.instance_id.clone(), workflow_name: delivery.workflow_name.clone(),
+            content: delivery.content.clone(), created_at: delivery.created_at, truncated: false,
+        };
+        if let Some(existing) = self.items.iter().find(|item| matches!(item,
+            ConversationTurnTraceItem::WorkflowDelivery { input_id, .. } if input_id == &delivery.input_id)) {
+            return if existing == &item { Ok(false) } else { Err("Workflow delivery conflicts with its durable trace".into()) };
+        }
+        if self.next_sequence != delivery.trace_sequence || matches!(self.items.last(), Some(ConversationTurnTraceItem::ToolCall { .. })) {
+            return Err("Workflow delivery must follow the exact safe sampling boundary".into());
+        }
+        self.items.push(item);
+        self.record_model_message(delivery.trace_sequence, 0,
+            &LlmMessage::text(crate::llm::LlmMessageRole::User, delivery.content.clone()))?;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_agent_mailbox_delivery(
         &mut self,

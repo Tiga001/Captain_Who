@@ -125,6 +125,11 @@ impl AgentService {
                 configuration_revision,
                 tool_projection.as_ref(),
             );
+            if persisted.is_ok() {
+                service
+                    .acknowledge_workflow_trace(&snapshot, &notifications)
+                    .map_err(AgentError::new)?;
+            }
             // A rejected append is not a new authoritative snapshot. In particular a Host tool
             // may already have committed its result before Runtime's later projection fails.
             // Keeping that failed projection here would make terminal settlement retry the same

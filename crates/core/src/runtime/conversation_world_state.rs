@@ -135,6 +135,7 @@ pub(super) fn conversation_capability_section_ids() -> AgentResult<Vec<WorldStat
         "web.search",
         "agent.collaboration",
         "human.interaction",
+        "workflow.execution",
         "builtin.capabilities.policy",
     ]
     .into_iter()

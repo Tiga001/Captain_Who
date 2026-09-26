@@ -1,4 +1,7 @@
-import { parseStorageHumanInteractionResponse } from '@mycopilot/protocol'
+import {
+  parseStorageHumanInteractionResponse,
+  parseWorkflowMessageSource
+} from '@mycopilot/protocol'
 import type {
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
@@ -95,6 +98,8 @@ function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
     id: message.id,
     role: message.role === 'user' ? 'user' : 'assistant',
     humanInteractionDisplay: parseStorageHumanInteractionResponse(message),
+    workflowSource:
+      message.workflowInput == null ? undefined : parseWorkflowMessageSource(message.workflowInput),
     content: message.content,
     createdAt: message.createdAt,
     status: normalizeMessageStatus(message.status),

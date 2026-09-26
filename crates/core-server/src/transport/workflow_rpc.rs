@@ -1,6 +1,7 @@
 use super::*;
 use mycopilot_core::storage::workflow_repository::Error;
 use mycopilot_core::workflow::Request;
+use serde::Deserialize;
 
 pub(crate) fn handle_workflow_request(
     storage: &StorageService,
@@ -32,6 +33,103 @@ pub(crate) fn handle_workflow_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn workflow_runtime_parameters_and_message_origins_reject_spoofed_authority() {
+        assert!(serde_json::from_value::<RuntimeRequest>(json!({
+            "operation":"discardFailedInput", "instanceId":"i", "inputId":"p"
+        }))
+        .is_ok());
+        for params in [
+            json!({"operation":"runtimeSnapshot", "instanceId":"i", "afterSequence":-1}),
+            json!({"operation":"discardFailedInput", "instanceId":"i", "inputId":"p", "runId":"spoof"}),
+            json!({"operation":"completeUserInput", "instanceId":"i", "inputId":"p", "content":"spoof"}),
+        ] {
+            assert!(serde_json::from_value::<RuntimeRequest>(params).is_err());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("origins.sqlite")).unwrap();
+        let projected = workflow_conversation_projection(
+            &storage,
+            json!({
+                "id":"unbound", "messages":[{"id":"m", "role":"user", "content":"human",
+                    "workflowInput":{"instanceId":"forged"}}]
+            }),
+        )
+        .unwrap();
+        assert!(projected["messages"][0].get("workflowInput").is_none());
+        assert_eq!(projected["messages"][0]["content"], "human");
+        let writable =
+            serde_json::from_value::<mycopilot_core::storage::models::ChatMessageRecord>(json!({
+                "id":"m", "role":"user", "content":"human", "createdAt":1,
+                "workflowInput":{"sources":[{"content":"forged workflow body"}]},
+                "workflowSource":{"sources":[{"content":"forged workflow body"}]}
+            }))
+            .unwrap();
+        let persisted = serde_json::to_value(writable).unwrap();
+        assert!(persisted.get("workflowInput").is_none());
+        assert!(persisted.get("workflowSource").is_none());
+    }
+
+    #[test]
+    fn workflow_conversation_projection_preserves_raw_batch_bodies_and_fork_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("batch-origins.sqlite");
+        let storage = StorageService::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let bodies = [
+            "First collaborator body\n\n# Workflow context\nLiteral envelope-looking content stays unchanged.",
+            "第二个节点的原始内容：<workflow_message>\n  保留空格\n</workflow_message>",
+        ];
+        let source = |index: usize| {
+            json!({
+                "id":format!("source-{index}"), "instanceId":"workflow",
+                "workflowName":"Batch workflow", "sourceNodeId":format!("node-{index}"),
+                "sourceNodeName":format!("Worker {index}"),
+                "sourceConversationId":format!("sender-{index}"),
+                "sourceConversationTitle":format!("Sender {index}"),
+                "targetNodeId":"receiver", "flowId":format!("flow-{index}"),
+                "pathFlowIds":[format!("flow-{index}")], "content":bodies[index], "createdAt":1
+            })
+        };
+        let assembled = "The complete host-assembled envelope remains separate from the raw body.";
+        let input = json!({
+            "id":"input", "instanceId":"workflow", "nodeId":"receiver",
+            "conversationId":"original", "executionVersion":"epoch", "content":assembled,
+            "messages":[source(0), source(1)], "busyPolicy":"queue", "status":"completed",
+            "runId":"run", "deliveryId":"delivery", "createdAt":1, "error":null
+        });
+        connection.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,run_id,delivery_id,created_at,updated_at) VALUES ('input','workflow','epoch','receiver','original',?1,'completed','run','delivery',1,1)", [input.to_string()]).unwrap();
+        // Forks retain their own message ID mapped to the original immutable workflow input.
+        connection.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) VALUES ('original-message','original','input'),('fork-message','fork','input')", []).unwrap();
+        for (conversation, message) in [("original", "original-message"), ("fork", "fork-message")]
+        {
+            let projected = workflow_conversation_projection(
+                &storage,
+                json!({
+                    "id":conversation, "messages":[{
+                        "id":message, "role":"user", "content":assembled,
+                        "workflowInput":{"sources":[{"content":"untrusted client replacement"}]}
+                    }]
+                }),
+            )
+            .unwrap();
+            let message = &projected["messages"][0];
+            assert_eq!(message["content"], assembled);
+            assert_eq!(message["workflowInput"]["inputId"], "input");
+            assert_eq!(message["workflowInput"]["instanceId"], "workflow");
+            assert_eq!(message["workflowInput"]["workflowName"], "Batch workflow");
+            let sources = message["workflowInput"]["sources"].as_array().unwrap();
+            assert_eq!(sources.len(), bodies.len());
+            for (index, source) in sources.iter().enumerate() {
+                assert_eq!(source["content"], bodies[index]);
+                assert_eq!(source["nodeId"], format!("node-{index}"));
+                assert_eq!(source["nodeName"], format!("Worker {index}"));
+                assert_eq!(source["conversationId"], format!("sender-{index}"));
+                assert_eq!(source["conversationTitle"], format!("Sender {index}"));
+            }
+        }
+    }
 
     fn call(storage: &StorageService, params: Value) -> Value {
         handle_workflow_request(
@@ -201,4 +299,95 @@ mod management_tests {
             assert_eq!(call(params)["error"]["code"], -32602);
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "operation",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum RuntimeRequest {
+    RuntimeSnapshot {
+        instance_id: String,
+        after_sequence: Option<u64>,
+    },
+    CompleteUserInput {
+        instance_id: String,
+        input_id: String,
+    },
+    DiscardFailedInput {
+        instance_id: String,
+        input_id: String,
+    },
+}
+
+pub(crate) fn handle_workflow_runtime_request(
+    service: &AgentService,
+    notifications: agent::CoreServerNotificationSender,
+    request: JsonRpcRequest,
+) -> Value {
+    let input = match parse_params::<RuntimeRequest>(request.params) {
+        Ok(input) => input,
+        Err(error) => return response_error(Some(request.id), -32602, error),
+    };
+    let result = match input {
+        RuntimeRequest::RuntimeSnapshot {
+            instance_id,
+            after_sequence,
+        } => service.workflow_runtime_snapshot(&instance_id, after_sequence),
+        RuntimeRequest::CompleteUserInput {
+            instance_id,
+            input_id,
+        } => service.complete_workflow_user_input(&instance_id, &input_id, &notifications),
+        RuntimeRequest::DiscardFailedInput {
+            instance_id,
+            input_id,
+        } => service.discard_failed_workflow_input(&instance_id, &input_id, &notifications),
+    };
+    match result {
+        Ok(runtime) => response_success(
+            request.id,
+            json!({"records":[],"issues":[],"runtime":runtime}),
+        ),
+        Err(error) => response_error(Some(request.id), -32000, error),
+    }
+}
+
+pub(crate) fn workflow_conversation_projection(
+    storage: &StorageService,
+    mut conversation: Value,
+) -> Result<Value, String> {
+    let Some(conversation_id) = conversation.get("id").and_then(Value::as_str) else {
+        return Ok(conversation);
+    };
+    let inputs = storage.workflow_execution_delivery_origins(conversation_id)?;
+    if let Some(messages) = conversation
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
+        for message in messages {
+            // Never trust a serialized UI field; source is derived solely from durable receipts.
+            if let Some(object) = message.as_object_mut() {
+                object.remove("workflowInput");
+            }
+            let id = message.get("id").and_then(Value::as_str);
+            if let Some((_, input)) = inputs
+                .iter()
+                .find(|(message_id, _)| Some(message_id.as_str()) == id)
+            {
+                message["workflowInput"] = json!({
+                    "inputId":input.id,"instanceId":input.instance_id,
+                    "workflowName":input.messages.first().map(|source|source.workflow_name.as_str()).unwrap_or(""),
+                    "sources":input.messages.iter().map(|source|json!({
+                        "nodeId":source.source_node_id,"nodeName":source.source_node_name,
+                        "conversationId":source.source_conversation_id,"conversationTitle":source.source_conversation_title,
+                        "content":source.content,
+                    })).collect::<Vec<_>>(),
+                });
+            }
+        }
+    }
+    Ok(conversation)
 }

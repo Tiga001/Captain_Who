@@ -147,6 +147,7 @@ mod turn;
 mod turn_executor;
 mod usage;
 mod web_search_policy;
+mod workflow_execution;
 mod workflows;
 
 use action_execution::*;
@@ -622,6 +623,8 @@ pub struct AgentService {
     conversation_admission: Arc<Mutex<()>>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
+    workflow_delivery_dispatch: Arc<Mutex<()>>,
+    workflow_dispatch_stopped: Arc<AtomicBool>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
     manual_context_compaction_cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
@@ -828,6 +831,8 @@ impl AgentService {
                 execution_access::ExecutionAccessState::default(),
             )),
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
+            workflow_delivery_dispatch: Arc::new(Mutex::new(())),
+            workflow_dispatch_stopped: Arc::new(AtomicBool::new(false)),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
             manual_context_compaction_cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -1596,6 +1601,7 @@ impl AgentService {
                 format!("failed to reconcile orphaned conversation traces: {error}")
             })?;
         self.restore_durable_conversation_turn_occupancies()?;
+        self.storage.workflow_execution_recover_claims()?;
         Ok(reconciled)
     }
 

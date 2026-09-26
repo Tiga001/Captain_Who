@@ -420,6 +420,7 @@ fn insert_snapshot_messages(
                 ],
             )
             .map_err(database_error)?;
+        connection.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) SELECT ?1,?2,input_id FROM workflow_execution_message_origins WHERE message_id=?3 AND conversation_id=?4", params![message.id,history.target.id,origin.source_message_id,history.source_conversation_id]).map_err(database_error)?;
     }
     Ok(())
 }

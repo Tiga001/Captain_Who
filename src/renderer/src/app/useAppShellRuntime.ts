@@ -34,6 +34,7 @@ import { getRecoverableGuidanceSignature, isRecoverableGuidanceItem } from './re
 import { useAgentRunLifecycle } from './useAgentRunLifecycle'
 import { usePersistedShellHydration } from './usePersistedShellHydration'
 import { useHumanInteractionConversationSync } from './useHumanInteractionConversationSync'
+import { useWorkflowConversationSync } from './useWorkflowConversationSync'
 
 type StartupStage = ReturnType<
   (typeof import('../features/startup/AppStartupContext'))['useAppStartupStage']
@@ -472,6 +473,13 @@ export function useAppShellRuntime({
     activeConversationId,
     conversationsRef,
     setConversations: setConversationsWithRef
+  })
+  useWorkflowConversationSync({
+    conversationsRef,
+    setConversations: setConversationsWithRef,
+    pendingActionsHydratedRef,
+    visibleConversationIdRef,
+    enqueueConversationMetaSave
   })
 
   useEffect(() => {

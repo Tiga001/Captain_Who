@@ -631,6 +631,9 @@ export interface WorkspaceFilesHostApi {
 
 export interface AgentHostApi {
   requestWorkflows(input: WorkflowRequest): Promise<HostInvocationResult<WorkflowResponse>>
+  onWorkflowRuntimeChanged(
+    handler: (snapshot: import('@mycopilot/protocol').WorkflowRuntimeSnapshot) => void
+  ): () => void
   onPromptPreferencesChanged(handler: (event: AgentPromptPreferencesChanged) => void): () => void
   getCollaborationSettings(
     input: AgentCollaborationSettingsGetInput

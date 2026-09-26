@@ -1,7 +1,12 @@
-import type { WorkflowDefinition, WorkflowInstance } from '@mycopilot/protocol'
+import type {
+  WorkflowDefinition,
+  WorkflowInstance,
+  WorkflowRuntimeInput
+} from '@mycopilot/protocol'
 import { ArrowLeft, Maximize2, Minus, Plus } from 'lucide-react'
 import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { dismissActiveTooltip, Tooltip } from '../../../components/overlay/Tooltip'
+import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { AgentAvatar } from '../../agentCollaboration/AgentAvatar'
 import { AccountAvatar } from '../../auth/AccountAvatar'
@@ -16,6 +21,7 @@ import { workflowNodeModelLabel, type WorkflowModelDisplay } from '../workflowMo
 import { workflowText } from '../workflowText'
 import { projectWorkflowText } from './projectWorkflowText'
 import { useWorkflowMonitor } from './useWorkflowMonitor'
+import { useWorkflowExecution } from './useWorkflowExecution'
 import '../workflowCanvas.css'
 import './workflowBindingCanvas.css'
 import './workflowMonitor.css'
@@ -47,6 +53,12 @@ export function WorkflowMonitorPage({
   const t = projectWorkflowText(language)
   const profile = useAccountAuth()?.state.profile
   const userName = profile?.displayName || t('当前用户', 'Current user')
+  const { snapshot, transmissions, completeUserInput, discardFailedInput } = useWorkflowExecution(
+    instance.id
+  )
+  const [userInput, setUserInput] = useState<WorkflowRuntimeInput | null>(null)
+  const [discardInput, setDiscardInput] = useState<WorkflowRuntimeInput | null>(null)
+  const [completionError, setCompletionError] = useState<string | null>(null)
   const { runningConversationIds, waitingApprovalConversationIds } = useWorkflowMonitor(
     instance,
     conversations
@@ -71,6 +83,7 @@ export function WorkflowMonitorPage({
   const height = Math.max(260, bounds.bottom - bounds.top + 128)
   const fitZoom = Math.min(1, Math.max(0.15, Math.min(size.width / width, size.height / height)))
   const zoom = manualZoom ?? fitZoom
+  const selectedUserNode = graph.nodes.find((node) => node.id === userInput?.nodeId)
 
   useLayoutEffect(() => {
     const element = viewportRef.current
@@ -179,6 +192,18 @@ export function WorkflowMonitorPage({
                         >
                           {flow.name}
                         </text>
+                        {transmissions
+                          .filter((event) => event.flowIds.includes(flow.id))
+                          .map((event) => (
+                            <circle
+                              key={event.sequence}
+                              r="4"
+                              className="workflow-monitor__transmission"
+                              data-transmission-sequence={event.sequence}
+                            >
+                              <animateMotion path={geometry.path} dur="2s" fill="freeze" />
+                            </circle>
+                          ))}
                       </g>
                     ) : null
                   })}
@@ -237,15 +262,55 @@ export function WorkflowMonitorPage({
                   )
                 }
                 if (node.kind === 'user') {
+                  const waiting = snapshot?.inputs.find(
+                    (input) => input.nodeId === node.id && input.status === 'waiting_user'
+                  )
                   return (
-                    <div key={node.id} className="workflow-node" style={style} title={node.name}>
-                      <span className="workflow-node__avatar workflow-user-avatar">
-                        <AccountAvatar src={profile?.avatarDataUrl} />
-                      </span>
-                      <div className="workflow-node__copy">
-                        <strong>{userName}</strong>
-                        <span>{node.name || t('用户', 'User')}</span>
-                      </div>
+                    <div key={node.id} className="workflow-binding-node-anchor" style={style}>
+                      <Tooltip
+                        content={
+                          <div className="workflow-binding-node-tooltip">
+                            <strong>{node.name || userName}</strong>
+                            <p>
+                              {node.task ||
+                                t(
+                                  '完成操作后，点击“我已完成”。',
+                                  'Complete your task, then choose “I’m done”.'
+                                )}
+                            </p>
+                          </div>
+                        }
+                        delayMs={1000}
+                        delayOnFocus
+                        describeTrigger
+                        anchorClassName="workflow-binding-node-tooltip-anchor"
+                      >
+                        <button
+                          type="button"
+                          className={`workflow-node workflow-monitor__node${waiting ? ' is-bound' : ''}`}
+                          data-node-id={node.id}
+                          data-waiting={waiting ? 'user' : undefined}
+                          disabled={!waiting}
+                          onClick={() => {
+                            setCompletionError(null)
+                            setUserInput(waiting ?? null)
+                          }}
+                          aria-label={`${node.name || userName}${waiting ? ` · ${t('等待用户操作', 'Waiting for user action')}` : ''}`}
+                        >
+                          <span className="workflow-node__avatar workflow-user-avatar">
+                            <AccountAvatar src={profile?.avatarDataUrl} />
+                          </span>
+                          <span className="workflow-node__copy">
+                            <strong>{userName}</strong>
+                            <span>{node.name || t('用户', 'User')}</span>
+                          </span>
+                          {waiting && (
+                            <span className="workflow-monitor__node-attention">
+                              {t('等待用户操作', 'Waiting for user action')}
+                            </span>
+                          )}
+                        </button>
+                      </Tooltip>
                     </div>
                   )
                 }
@@ -274,11 +339,16 @@ export function WorkflowMonitorPage({
                       message.agentRun?.status === 'waiting_for_user_input'
                   )
                 const unread = attention?.unread ?? !!conversation?.unreadAt
+                const failedInput = snapshot?.inputs.find(
+                  (input) => input.nodeId === node.id && input.status === 'failed'
+                )
                 const waitingLabel = waitingApproval
                   ? t('等待批准', 'Waiting for approval')
                   : waitingAnswer
                     ? t('等待交互', 'Waiting for interaction')
-                    : null
+                    : failedInput
+                      ? t('投递失败', 'Delivery failed')
+                      : null
                 const statusLabel =
                   waitingLabel ??
                   (running
@@ -307,6 +377,18 @@ export function WorkflowMonitorPage({
                           {unread && ` · ${t('未读消息', 'Unread messages')}`}
                         </dd>
                       </div>
+                      {failedInput && (
+                        <div className="workflow-binding-node-tooltip__task">
+                          <dt>{t('工作流投递', 'Workflow delivery')}</dt>
+                          <dd>
+                            {t(
+                              '有来信未确认送达，后续投递已暂停。',
+                              'A delivery could not be confirmed. Later inputs are paused.'
+                            )}
+                            {failedInput.error && <p>{failedInput.error}</p>}
+                          </dd>
+                        </div>
+                      )}
                       <div>
                         <dt>{t('模型', 'Model')}</dt>
                         <dd>
@@ -350,7 +432,13 @@ export function WorkflowMonitorPage({
                         className={`workflow-node workflow-monitor__node${conversationId ? ' is-bound' : ''}${running ? ' is-running' : ''}`}
                         data-node-id={node.id}
                         data-waiting={
-                          waitingApproval ? 'approval' : waitingAnswer ? 'answer' : undefined
+                          waitingApproval
+                            ? 'approval'
+                            : waitingAnswer
+                              ? 'answer'
+                              : failedInput
+                                ? 'failed'
+                                : undefined
                         }
                         aria-label={`${conversationId ? t('打开对话', 'Open conversation') : t('未绑定', 'Unbound')} · ${conversation?.title || node.name}`}
                         disabled={!conversationId}
@@ -382,11 +470,24 @@ export function WorkflowMonitorPage({
                           )}
                           <span className="workflow-monitor__node-status" aria-hidden="true" />
                         </span>
-                        {waitingLabel && (
+                        {waitingLabel && (waitingApproval || waitingAnswer || !failedInput) && (
                           <span className="workflow-monitor__node-attention">{waitingLabel}</span>
                         )}
                       </button>
                     </Tooltip>
+                    {failedInput && (
+                      <button
+                        type="button"
+                        className={`workflow-monitor__node-attention workflow-monitor__delivery-recovery${waitingApproval || waitingAnswer ? ' is-separate' : ''}`}
+                        aria-label={t('处理投递失败', 'Resolve failed delivery')}
+                        onClick={() => {
+                          setCompletionError(null)
+                          setDiscardInput(failedInput)
+                        }}
+                      >
+                        {t('投递失败', 'Delivery failed')}
+                      </button>
+                    )}
                   </div>
                 )
               })}
@@ -440,6 +541,53 @@ export function WorkflowMonitorPage({
           </div>
         </div>
       </div>
+      {userInput?.instanceId === instance.id && (
+        <ConfirmationDialog
+          title={t('等待用户操作', 'Waiting for user action')}
+          description={
+            completionError ?? (selectedUserNode?.kind === 'user' ? selectedUserNode.task : '')
+          }
+          cancelLabel={t('取消', 'Cancel')}
+          confirmLabel={t('我已完成', 'I’m done')}
+          confirmVariant="primary"
+          onCancel={() => setUserInput(null)}
+          onConfirm={async () => {
+            try {
+              await completeUserInput(userInput.id)
+              setUserInput(null)
+            } catch {
+              setCompletionError(
+                t('未能保存完成状态，请重试。', 'Could not save completion. Please retry.')
+              )
+            }
+          }}
+        />
+      )}
+      {discardInput?.instanceId === instance.id && (
+        <ConfirmationDialog
+          title={t('跳过此来信', 'Skip this input')}
+          description={
+            completionError ??
+            t(
+              '这条来信的投递结果无法确认。请先检查对应对话；确认跳过后，继续处理后续来信。',
+              'This delivery could not be confirmed. Check the conversation first; skipping this input allows later messages to proceed.'
+            )
+          }
+          cancelLabel={t('取消', 'Cancel')}
+          confirmLabel={t('跳过此来信', 'Skip this input')}
+          onCancel={() => setDiscardInput(null)}
+          onConfirm={async () => {
+            try {
+              await discardFailedInput(discardInput.id)
+              setDiscardInput(null)
+            } catch {
+              setCompletionError(
+                t('未能跳过来信，请重试。', 'Could not skip this input. Please retry.')
+              )
+            }
+          }}
+        />
+      )}
     </section>
   )
 }

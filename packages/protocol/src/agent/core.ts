@@ -359,6 +359,16 @@ export type ConversationContextMaterialKind =
 
 export type ConversationTurnTraceItem =
   | {
+      type: 'workflow_delivery'
+      sequence: number
+      inputId: string
+      instanceId: string
+      workflowName: string
+      content: string
+      createdAt: number
+      truncated: boolean
+    }
+  | {
       type: 'context_material'
       sequence: number
       eventId: string

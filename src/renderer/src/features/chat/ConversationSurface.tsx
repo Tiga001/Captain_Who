@@ -225,6 +225,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
   const userMessage = messages[messages.length - 2]
   const assistantMessage = messages[messages.length - 1]
   if (userMessage?.role !== 'user') return null
+  if (userMessage.workflowSource) return null
   if (!isAssistantReplyComplete(assistantMessage)) return null
 
   return userMessage.id

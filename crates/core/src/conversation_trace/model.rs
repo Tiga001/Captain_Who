@@ -429,6 +429,10 @@ fn validate_model_item_against_trace(
                 && item.tool_calls.is_empty()
                 && !item.content.trim().is_empty()
         }
+        ConversationTurnTraceItem::WorkflowDelivery { content, .. } => {
+            item.ordinal == 0 && item.role == "user" && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty() && !item.is_error && item.content == *content
+        }
         ConversationTurnTraceItem::ContextMaterial {
             content, images, ..
         } => {
@@ -528,6 +532,16 @@ pub enum ConversationTurnTraceItem {
         attachments: Vec<ConversationTraceAttachment>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         folder_references: Vec<crate::AgentFolderReference>,
+        created_at: i64,
+        truncated: bool,
+    },
+    /// Host-authenticated cross-conversation workflow input. Not a human instruction or approval.
+    WorkflowDelivery {
+        sequence: u64,
+        input_id: String,
+        instance_id: String,
+        workflow_name: String,
+        content: String,
         created_at: i64,
         truncated: bool,
     },
@@ -661,6 +675,7 @@ impl ConversationTurnTraceItem {
             | Self::BackendState { sequence, .. }
             | Self::UserGuidance { sequence, .. }
             | Self::AgentMailboxDelivery { sequence, .. }
+            | Self::WorkflowDelivery { sequence, .. }
             | Self::ToolCall { sequence, .. }
             | Self::ToolResult { sequence, .. }
             | Self::CommandSessionLifecycle { sequence, .. }
@@ -676,6 +691,7 @@ impl ConversationTurnTraceItem {
             Self::ContextMaterial { .. } => "context_material",
             Self::UserGuidance { .. } => "user_guidance",
             Self::AgentMailboxDelivery { .. } => "agent_mailbox_delivery",
+            Self::WorkflowDelivery { .. } => "workflow_delivery",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::CommandSessionLifecycle { .. } => "command_session_lifecycle",

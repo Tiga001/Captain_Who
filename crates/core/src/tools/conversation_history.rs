@@ -1316,7 +1316,8 @@ fn build_history_turns(
                             }
                         }));
                     }
-                    ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => {
+                    ConversationTurnTraceItem::AgentMailboxDelivery { content, .. }
+                    | ConversationTurnTraceItem::WorkflowDelivery { content, .. } => {
                         guidance = guidance.saturating_add(1);
                         let preview = normalize_preview(content, 200);
                         if !preview.is_empty() {

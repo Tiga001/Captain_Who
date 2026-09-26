@@ -479,6 +479,32 @@ impl AgentService {
             }
         };
 
+        if durable_terminal && !deletion_cleanup {
+            {
+                // Admission claims its input before the initial trace transaction. Recovery must
+                // not mistake that short preparation window for an orphaned delivery.
+                let _admission = service.conversation_admission.lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if let Err(error) = service.storage.workflow_execution_recover_claims() {
+                    eprintln!("failed to settle workflow input receipts: {error}");
+                }
+            }
+            if let Err(error) = service.storage.workflow_execution_mark_run_unread(&worker_run_id) {
+                eprintln!("failed to mark completed workflow input unread: {error}");
+            }
+            if let Ok(inputs) = service
+                .storage
+                .workflow_execution_inputs_for_conversation(&worker_conversation_id)
+            {
+                let instances = inputs.into_iter()
+                    .filter(|input| input.run_id.as_deref() == Some(worker_run_id.as_str()))
+                    .map(|input| input.instance_id)
+                    .collect::<std::collections::HashSet<_>>();
+                for instance_id in instances {
+                    service.publish_workflow_runtime(&instance_id, &notifications);
+                }
+            }
+        }
         if durable_terminal || deletion_cleanup {
             service.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
             service.release_turn_concurrency_permit(&worker_run_id);

@@ -1,6 +1,17 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Check, Copy, Database, LoaderCircle, Pencil, Split, Star } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Database,
+  LoaderCircle,
+  Pencil,
+  Split,
+  Star
+} from 'lucide-react'
 import type { AgentUsage } from '@mycopilot/protocol'
+import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { copyTextToClipboard, formatMessageTime, getUsageRows } from './chatMessageItemUtils'
 
@@ -40,6 +51,8 @@ export function ChatMessageActions({
   onEdit,
   onFavoriteChange,
   onContinueInNewTask,
+  workflowContextExpanded = false,
+  onWorkflowContextToggle,
   showTokenUsageDetails,
   timestamp,
   usage
@@ -50,6 +63,8 @@ export function ChatMessageActions({
   onEdit?: () => void
   onFavoriteChange?: (favorited: boolean) => void
   onContinueInNewTask?: () => void | Promise<void>
+  workflowContextExpanded?: boolean
+  onWorkflowContextToggle?: () => void
   showTokenUsageDetails: boolean
   timestamp: number | undefined
   usage?: AgentUsage
@@ -61,6 +76,13 @@ export function ChatMessageActions({
   const timeLabel = formatMessageTime(timestamp, language, t)
   const canCopy = Boolean(content.trim())
   const Icon = copied ? Check : Copy
+  const workflowContextLabel = language.startsWith('zh')
+    ? workflowContextExpanded
+      ? '收起工作流上下文'
+      : '展开工作流上下文'
+    : workflowContextExpanded
+      ? 'Collapse workflow context'
+      : 'Expand workflow context'
 
   useEffect(() => {
     if (!copied) return undefined
@@ -108,6 +130,22 @@ export function ChatMessageActions({
             {favorited ? t('chat.unfavorite') : t('chat.favorite')}
           </span>
         </button>
+      )}
+      {onWorkflowContextToggle && (
+        <Tooltip content={workflowContextLabel}>
+          <button
+            type="button"
+            aria-label={workflowContextLabel}
+            aria-expanded={workflowContextExpanded}
+            onClick={onWorkflowContextToggle}
+          >
+            {workflowContextExpanded ? (
+              <ChevronUp aria-hidden="true" />
+            ) : (
+              <ChevronDown aria-hidden="true" />
+            )}
+          </button>
+        </Tooltip>
       )}
       {canEdit && (
         <button

@@ -263,7 +263,7 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v57**。唯一真源：
+当前 canonical storage 是 **v59**。唯一真源：
 
 ```rust
 pub const STORAGE_SCHEMA_VERSION: i32 = 57;
@@ -271,7 +271,7 @@ pub const STORAGE_SCHEMA_VERSION: i32 = 57;
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加工作流定义表，v55 曾增加默认关闭的模板 enabled 字段。当前忽略此历史字段，模板可用性由实时校验结果派生。空库原子创建 v57；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留工作流定义并增加模板 enabled 历史字段；exact v53 原样保留历史增加工作流定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56、v57；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v57。
+v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加工作流定义表，v55 曾增加默认关闭的模板 enabled 字段。当前忽略此历史字段，模板可用性由实时校验结果派生。空库原子创建 v59；exact v58 → v59 保留历史，为工作流实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留历史，增加工作流持久消息、输入与事件、来源及 Run 身份并支持 WorkflowDelivery Trace；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留工作流定义并增加模板 enabled 历史字段；exact v53 原样保留历史增加工作流定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56、v57、v58、v59；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57、v58、v59。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v59。
 
 工作流模板和实例管理与本章的 Agent tree 协作运行时独立：模板校验通过后自动可选，实例启停通过 `setInstanceEnabled` 和 revision 校验持久化。新建或编辑实例确认后开启；只有开启实例占用颜色并禁止绑定对话归档。关闭保留绑定和对话，不取消已有 Run；正式发布模板变更、绑定对话归档或删除将实例关闭并标记 `needsReview`；读取时模板校验失效只影响模板可选状态。工作流消息路由、逻辑门执行和调度仍未实现，不能将实例开启等同于启动协作任务。详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 
@@ -329,5 +329,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] 各层 Timeline 是否按实际 owner 和任务身份展示，排除未消费任务与纯 Result 轮次，并保持冻结位置及当前树隔离？
-- [ ] 是否更新 schema v57 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v59 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

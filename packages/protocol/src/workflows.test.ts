@@ -368,12 +368,17 @@ describe('global workflow instance contract', () => {
       parseWorkflowRequest({ ...save, bindings: [{ nodeId: 'agent', conversationId: null }] })
     ).toMatchObject({ bindings: [{ nodeId: 'agent', conversationId: null }] })
     for (const extra of [
-      { projectId: 'project' },
+      { projectId: 42 },
       { running: true },
       { expectedRevision: -1 },
       { bindings: [{ nodeId: 'agent' }] }
     ])
       expect(() => parseWorkflowRequest({ ...save, ...extra })).toThrow()
+  })
+  it('accepts a nullable default project without restricting bound conversation projects', () => {
+    for (const projectId of ['project', null]) {
+      expect(parseWorkflowRequest({ ...save, projectId })).toEqual({ ...save, projectId })
+    }
   })
   it('round-trips usage guards and isolated editing drafts', () => {
     for (const request of [
@@ -431,6 +436,10 @@ describe('global workflow instance contract', () => {
       affectedConversationIds: ['chat']
     }
     expect(parseWorkflowResponse(response)).toEqual(response)
+    for (const projectId of ['project', null]) {
+      const withProject = { ...response, instances: [{ ...response.instances[0], projectId }] }
+      expect(parseWorkflowResponse(withProject)).toEqual(withProject)
+    }
     for (const enabled of [undefined, null, 'true', 1]) {
       expect(() =>
         parseWorkflowResponse({ ...response, instances: [{ ...response.instances[0], enabled }] })

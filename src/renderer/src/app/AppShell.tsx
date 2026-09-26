@@ -40,6 +40,7 @@ import type {
   RightSidebarWorkspaceReferenceNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
+import { ConversationNavigationProvider } from '../features/chat/ConversationNavigationContext'
 import { useConversationAttention } from '../features/chat/useConversationAttention'
 import {
   isAssistantMessageGenerating,
@@ -1402,7 +1403,7 @@ export function AppShell() {
       updateAssistantMessage
     })
 
-  return (
+  const workspace = (
     <AppShellWorkspace
       ref={shellRef}
       className="app-shell"
@@ -1898,5 +1899,10 @@ export function AppShell() {
           document.body
         )}
     </AppShellWorkspace>
+  )
+  return (
+    <ConversationNavigationProvider onOpenConversation={requestOpenConversationFromScheduled}>
+      {workspace}
+    </ConversationNavigationProvider>
   )
 }

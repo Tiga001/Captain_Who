@@ -83,6 +83,7 @@ mod provider_transitions;
 mod settings;
 mod trace_reconciliation;
 mod turn_diffs;
+mod workflow_execution;
 mod workflows;
 mod world_state;
 

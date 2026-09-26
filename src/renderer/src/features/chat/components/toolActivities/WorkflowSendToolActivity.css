@@ -1,0 +1,90 @@
+.workflow-send-messages {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 10px 0 0 24px;
+}
+
+.workflow-send-message {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: 12px;
+  background: var(--mc-color-surface-muted);
+  color: var(--mc-color-text-primary);
+}
+
+.workflow-send-message__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+}
+
+.workflow-send-message__target {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--mc-color-text-secondary);
+}
+
+.workflow-send-message__actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.workflow-send-message__actions button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mc-color-text-secondary);
+  cursor: pointer;
+}
+
+.workflow-send-message__actions button:hover {
+  background: var(--mc-color-state-hover);
+  color: var(--mc-color-text-primary);
+}
+
+.workflow-send-message__actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.workflow-send-message__actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workflow-send-message__body {
+  padding: 12px;
+  max-height: 360px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  user-select: text;
+}
+
+.workflow-send-messages__error {
+  margin: 0;
+  color: var(--mc-color-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.workflow-send-message__actions button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}

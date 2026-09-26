@@ -495,6 +495,7 @@ fn project_guidance_timeline(
                 }
                 ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::WorkflowDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::BackendState { .. } => {}
             }

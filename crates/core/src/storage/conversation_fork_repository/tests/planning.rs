@@ -1323,3 +1323,20 @@ fn fork_rebinds_narration_to_its_cloned_tool_call_without_changing_provider_turn
         .validate_complete_model_context(&log.items)
         .unwrap();
 }
+
+#[test]
+fn workflow_message_provenance_is_copied_to_fork_without_membership() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    let source_user = source.messages.iter().find(|m|m.role == "user").unwrap();
+    connection.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) VALUES (?1,?2,'original-workflow-input')",params![source_user.id,source.id]).unwrap();
+    let plan=build_assistant_reply_fork_plan(&connection,"workflow-provenance-fork",&source.id,"assistant-a",20).unwrap();
+    let target_message_id=plan.message_id_map[&source_user.id].clone();
+    commit_fork_plan(&mut connection,&plan).unwrap();
+    let input_id:String=connection.query_row("SELECT input_id FROM workflow_execution_message_origins WHERE message_id=?1 AND conversation_id=?2",params![target_message_id,plan.target.id],|r|r.get(0)).unwrap();
+    assert_eq!(input_id,"original-workflow-input");
+    let bound:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM workflow_instance_bindings WHERE conversation_id=?1)",[&plan.target.id],|r|r.get(0)).unwrap();
+    assert!(!bound);
+}

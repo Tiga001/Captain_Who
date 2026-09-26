@@ -101,6 +101,10 @@ fn project_durable_trace_items(
                     truncated: item_truncated,
                 }
             }
+            ConversationTurnTraceItem::WorkflowDelivery { truncated, .. } => {
+                trace_truncated |= *truncated;
+                item.clone()
+            }
             ConversationTurnTraceItem::AgentMailboxDelivery {
                 sequence,
                 receipt_id,

@@ -18,6 +18,7 @@ mod human_interaction;
 mod skills;
 mod todo;
 mod web_search;
+mod workflow;
 
 use crate::context::{ContextFrame, ContextItem, ContextTextBudget};
 use crate::protocol::{
@@ -193,6 +194,7 @@ pub(super) struct RuntimeExtensionHostServices {
     pub(super) human_interaction_execution_ready: bool,
     pub(super) human_interaction_async_execution_ready: bool,
     pub(super) human_root: bool,
+    pub(super) workflow_runtime: Option<Arc<dyn crate::WorkflowRuntimeHost>>,
 }
 
 impl RuntimeExtensions {
@@ -284,6 +286,20 @@ impl RuntimeExtensions {
                 .with_execution_ready(host_services.human_interaction_execution_ready)
                 .with_async_execution_ready(host_services.human_interaction_async_execution_ready),
             ));
+        }
+        // Register the shell even after Host capability withdrawal so old snapshots restore
+        // without recovering any previous authorization.
+        if host_services.human_root
+            || snapshots
+                .iter()
+                .any(|snapshot| snapshot.extension_id == workflow::WORKFLOW_EXTENSION_ID)
+        {
+            extensions.push(Box::new(workflow::WorkflowExtension::new(
+                host_services
+                    .human_root
+                    .then_some(host_services.workflow_runtime)
+                    .flatten(),
+            )));
         }
         extensions.push(Box::new(todo));
         let mut extensions = Self::from_extensions(extensions, Some(todo_handle), snapshots)?;

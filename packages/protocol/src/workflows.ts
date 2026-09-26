@@ -1,4 +1,5 @@
 /** Workflow definitions only. No execution capability is granted by saving a graph. */
+import { parseWorkflowRuntimeSnapshot, type WorkflowRuntimeSnapshot } from './workflowRuntime'
 export interface WorkflowGroup {
   id: string
   flowIds: string[]
@@ -100,6 +101,9 @@ export interface WorkflowRecord {
   issues: WorkflowIssue[]
 }
 export type WorkflowRequest =
+  | { operation: 'runtimeSnapshot'; instanceId: string; afterSequence?: number }
+  | { operation: 'completeUserInput'; instanceId: string; inputId: string }
+  | { operation: 'discardFailedInput'; instanceId: string; inputId: string }
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
   | {
@@ -118,6 +122,7 @@ export type WorkflowRequest =
       templateId: string
       name: string
       color: string
+      projectId?: string | null
       bindings: { nodeId: string; conversationId: string | null }[]
       expectedRevision: number
       expectedTemplateRevision: number
@@ -141,6 +146,8 @@ export interface WorkflowInstance {
   templateRevision: number
   name: string
   color: string
+  /** Default destination for new conversations only; existing bindings may span projects. */
+  projectId?: string | null
   bindings: WorkflowInstanceBinding[]
   revision: number
   updatedAt: number
@@ -172,6 +179,7 @@ export interface WorkflowInvalidDraft extends WorkflowInvalidRecord {
   baseRevision: number
 }
 export interface WorkflowResponse {
+  runtime?: WorkflowRuntimeSnapshot
   records: WorkflowRecord[]
   issues: WorkflowIssue[]
   instances?: WorkflowInstance[]
@@ -384,6 +392,18 @@ function flowSequence(value: unknown): number {
 }
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
+  if (op === 'runtimeSnapshot') {
+    const item = object(value, ['operation', 'instanceId', 'afterSequence'], ['afterSequence'])
+    return {
+      operation: op,
+      instanceId: text(item.instanceId),
+      ...(item.afterSequence !== undefined ? { afterSequence: integer(item.afterSequence) } : {})
+    }
+  }
+  if (op === 'completeUserInput' || op === 'discardFailedInput') {
+    const item = object(value, ['operation', 'instanceId', 'inputId'])
+    return { operation: op, instanceId: text(item.instanceId), inputId: text(item.inputId) }
+  }
   if (op === 'list' || op === 'listInstances') {
     object(value, ['operation'])
     return { operation: op }
@@ -431,22 +451,30 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
     }
   }
   if (op === 'saveInstance') {
-    const item = object(value, [
-      'operation',
-      'id',
-      'templateId',
-      'name',
-      'color',
-      'bindings',
-      'expectedRevision',
-      'expectedTemplateRevision'
-    ])
+    const item = object(
+      value,
+      [
+        'operation',
+        'id',
+        'templateId',
+        'name',
+        'color',
+        'projectId',
+        'bindings',
+        'expectedRevision',
+        'expectedTemplateRevision'
+      ],
+      ['projectId']
+    )
     return {
       operation: op,
       id: text(item.id),
       templateId: text(item.templateId),
       name: text(item.name),
       color: text(item.color),
+      ...(item.projectId !== undefined
+        ? { projectId: item.projectId === null ? null : text(item.projectId) }
+        : {}),
       expectedRevision: integer(item.expectedRevision),
       expectedTemplateRevision: integer(item.expectedTemplateRevision, 1),
       bindings: array(
@@ -517,9 +545,18 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       'drafts',
       'invalidRecords',
       'invalidDrafts',
-      'affectedConversationIds'
+      'affectedConversationIds',
+      'runtime'
     ],
-    ['instances', 'usages', 'drafts', 'invalidRecords', 'invalidDrafts', 'affectedConversationIds']
+    [
+      'instances',
+      'usages',
+      'drafts',
+      'invalidRecords',
+      'invalidDrafts',
+      'affectedConversationIds',
+      'runtime'
+    ]
   )
   const records = array(
     data.records,
@@ -569,6 +606,7 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     throw new Error('Duplicate invalid workflow drafts')
   return {
     records,
+    ...(data.runtime !== undefined ? { runtime: parseWorkflowRuntimeSnapshot(data.runtime) } : {}),
     issues: issues(data.issues),
     ...(invalidRecords ? { invalidRecords } : {}),
     ...(invalidDrafts ? { invalidDrafts } : {}),
@@ -653,25 +691,33 @@ function parseInvalidWorkflow(
 }
 
 function parseWorkflowInstance(value: unknown): WorkflowInstance {
-  const item = object(value, [
-    'id',
-    'templateId',
-    'templateRevision',
-    'name',
-    'color',
-    'bindings',
-    'revision',
-    'updatedAt',
-    'needsReview',
-    'enabled',
-    'running'
-  ])
+  const item = object(
+    value,
+    [
+      'id',
+      'templateId',
+      'templateRevision',
+      'name',
+      'color',
+      'projectId',
+      'bindings',
+      'revision',
+      'updatedAt',
+      'needsReview',
+      'enabled',
+      'running'
+    ],
+    ['projectId']
+  )
   return {
     id: text(item.id),
     templateId: text(item.templateId),
     templateRevision: integer(item.templateRevision, 1),
     name: text(item.name),
     color: text(item.color),
+    ...(item.projectId !== undefined
+      ? { projectId: item.projectId === null ? null : text(item.projectId) }
+      : {}),
     revision: integer(item.revision, 1),
     updatedAt: integer(item.updatedAt),
     needsReview: boolean(item.needsReview),

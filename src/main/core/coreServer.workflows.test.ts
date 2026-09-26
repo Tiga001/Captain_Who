@@ -29,6 +29,26 @@ describe('workflow IPC contract boundary', () => {
     await expect(server.requestWorkflows(request)).resolves.toEqual(response)
     expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
   })
+  it('forwards runtime reads and exact user completions without loading the template catalog', async () => {
+    const server = new CoreServer()
+    const runtime = { instanceId: 'workflow', sequence: 3, inputs: [], events: [] }
+    rpcRequest.mockResolvedValue({ records: [], issues: [], runtime })
+    for (const request of [
+      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', afterSequence: 2 },
+      { operation: 'completeUserInput' as const, instanceId: 'workflow', inputId: 'input' }
+    ]) {
+      await expect(server.requestWorkflows(request)).resolves.toEqual({
+        records: [],
+        issues: [],
+        runtime
+      })
+      expect(rpcRequest).toHaveBeenLastCalledWith('agent.workflows.request', request)
+    }
+    rpcRequest.mockResolvedValue({ records: [], issues: [], runtime: { ...runtime, sequence: -1 } })
+    await expect(
+      server.requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'workflow' })
+    ).rejects.toThrow()
+  })
   it('forwards the instance switch with its revision', async () => {
     const server = new CoreServer()
     for (const enabled of [true, false]) {
