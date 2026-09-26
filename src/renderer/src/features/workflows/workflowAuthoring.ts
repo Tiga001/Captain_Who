@@ -1,5 +1,4 @@
 import type {
-  AgentTemplate,
   WorkflowDefinition,
   WorkflowEndpoint,
   WorkflowFlow,
@@ -38,17 +37,16 @@ export function createWorkflowNode(
   name: string,
   x: number,
   y: number,
-  template?: AgentTemplate,
   modelConfigId: string | null = null
 ): WorkflowAgentNode {
   return {
     id: crypto.randomUUID(),
     kind: 'agent',
-    name: template?.name.slice(0, 128) ?? name,
-    templateId: template?.templateId ?? null,
-    modelConfigId: template ? null : modelConfigId,
+    name: name.slice(0, 128),
+    permissionMode: 'default',
+    modelConfigId,
     receives: '',
-    task: (template?.instructions ?? '').slice(0, 32768),
+    task: '',
     delivers: '',
     x,
     y

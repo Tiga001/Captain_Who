@@ -533,6 +533,7 @@
   color: var(--mc-color-text-muted);
 }
 .workflow-template-picker__identity {
+  flex: 1;
   display: grid;
   gap: 3px;
   min-width: 0;

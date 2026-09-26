@@ -29,7 +29,7 @@ describe('workflow graph editing', () => {
   })
   it('allows blank nodes independently of a model or saved template', () => {
     const node = createWorkflowNode('Research', 150, 80)
-    expect(node.templateId).toBeNull()
+    expect(node.permissionMode).toBe('default')
     expect(node.name).toBe('Research')
     expect(node.task).toBe('')
   })

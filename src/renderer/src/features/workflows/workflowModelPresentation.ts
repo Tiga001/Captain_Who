@@ -1,4 +1,4 @@
-import type { AgentTemplate, WorkflowNode } from '@mycopilot/protocol'
+import type { WorkflowNode } from '@mycopilot/protocol'
 import type { ModelConfig } from '../../config/modelConfig'
 import { formatModelConfigLabel } from '../modelSelection/modelConfigPresentation'
 import type { WorkflowText } from './workflowText'
@@ -18,25 +18,12 @@ function modelLabel(
   return label ? `${label} · ${text('modelUnavailable')}` : text('modelUnavailable')
 }
 
-export function workflowTemplateModelLabel(
-  template: AgentTemplate,
-  models: readonly WorkflowModelDisplay[],
-  text: WorkflowText
-): string {
-  return modelLabel(template.modelConfigId, models, text, template.modelDisplayName)
-}
-
 export function workflowNodeModelLabel(
   node: WorkflowNode,
-  templates: readonly AgentTemplate[],
   models: readonly WorkflowModelDisplay[],
   text: WorkflowText
 ): string {
   if (node.kind !== 'agent') return text(node.kind)
-  if (node.templateId) {
-    const template = templates.find((candidate) => candidate.templateId === node.templateId)
-    return template ? workflowTemplateModelLabel(template, models, text) : text('missingTemplate')
-  }
   return modelLabel(node.modelConfigId ?? null, models, text)
 }
 

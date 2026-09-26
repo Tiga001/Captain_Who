@@ -28,7 +28,7 @@ fn graph() -> Definition {
             id: "review".into(),
             name: "Review".into(),
             config: NodeConfig::Agent(AgentConfig {
-                template_id: None,
+                permission_mode: crate::workflow::WorkflowPermissionMode::Default,
                 model_config_id: Some("model-review".into()),
                 receives: "Code change".into(),
                 task: "Review actual defects".into(),
@@ -361,21 +361,25 @@ fn service_uses_execution_projection_for_disabled_and_credential_missing_models(
 }
 
 #[test]
-fn template_model_overrides_cannot_replace_a_saved_definition() {
+fn permission_modes_round_trip_without_creating_conversations() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
-    save(&mut connection, graph(), 0).unwrap();
-    let mut invalid = graph();
-    invalid.nodes[0].agent_mut().template_id = Some("template-review".into());
-    assert!(matches!(
-        save(&mut connection, invalid, 1),
-        Err(Error::Invalid(_))
-    ));
-    let read = request(&mut connection, Request::List).unwrap();
-    assert_eq!(read.records[0].revision, 1);
-    assert!(
-        matches!(&read.records[0].definition.nodes[0].config, NodeConfig::Agent(agent) if agent.template_id.is_none())
-    );
+    for (index, mode) in [
+        crate::workflow::WorkflowPermissionMode::Default,
+        crate::workflow::WorkflowPermissionMode::Custom,
+        crate::workflow::WorkflowPermissionMode::Full,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut definition = graph();
+        definition.nodes[0].agent_mut().permission_mode = mode.clone();
+        save(&mut connection, definition, index as u64).unwrap();
+        let read = request(&mut connection, Request::List).unwrap();
+        assert!(read.records[0].issues.is_empty());
+        assert!(matches!(&read.records[0].definition.nodes[0].config,
+            NodeConfig::Agent(agent) if agent.permission_mode == mode));
+    }
 }
 
 #[test]
@@ -446,28 +450,15 @@ fn stale_save_and_delete_never_change_current_workflow() {
 }
 
 #[test]
-fn missing_template_is_a_draft_issue_recomputed_on_list() {
+fn workflow_catalog_does_not_depend_on_subagent_templates() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
-    let mut definition = graph();
-    definition.nodes[0].agent_mut().template_id = Some("template-review".into());
-    definition.nodes[0].agent_mut().model_config_id = None;
-    let response = save(&mut connection, definition, 0).unwrap();
-    assert_eq!(response.records[0].issues[0].code, "template");
-    connection.execute_batch("INSERT INTO agent_templates (
-        template_id,schema_version,machine_key,name,description,instructions,model_config_id,enabled,revision,created_at,updated_at
-        ) VALUES ('template-review',1,'review','Review','','Review','model',1,1,1,1)").unwrap();
-    assert!(request(&mut connection, Request::List).unwrap().records[0]
-        .issues
-        .is_empty());
+    save(&mut connection, graph(), 0).unwrap();
     connection
-        .execute(
-            "DELETE FROM agent_templates WHERE template_id='template-review'",
-            [],
-        )
+        .execute("DROP TABLE agent_templates", [])
         .unwrap();
     let read = request(&mut connection, Request::List).unwrap();
-    assert_eq!(read.records[0].issues[0].code, "template");
+    assert!(read.records[0].issues.is_empty());
     assert_eq!(read.records[0].revision, 1);
 }
 

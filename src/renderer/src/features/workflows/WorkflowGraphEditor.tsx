@@ -1,7 +1,6 @@
 import { AccountAvatar } from '../auth/AccountAvatar'
 import { useAccountAuth } from '../auth/AccountAuthContext'
 import {
-  Bot,
   UserRound,
   Triangle,
   ChevronDown,
@@ -15,7 +14,6 @@ import {
 } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import type {
-  AgentTemplate,
   WorkflowDefinition,
   WorkflowEndpoint,
   WorkflowAnchor,
@@ -42,23 +40,19 @@ import {
 import { WorkflowCanvas, type WorkflowSelection } from './WorkflowCanvas'
 import { AgentAvatar } from '../agentCollaboration/AgentAvatar'
 import { WorkflowGateEditor } from './WorkflowGateEditor'
-import { WorkflowTemplatePicker } from './WorkflowTemplatePicker'
+import { CHAT_PERMISSION_PRESENTATIONS } from '../chat/chatPermissionPresentation'
+import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { WorkflowOptionPicker } from './WorkflowOptionPicker'
 import { canvasOrigin, graphBounds } from './workflowCanvasGeometry'
 import type { WorkflowText } from './workflowText'
 import { useModelSettings } from '../../config/ModelSettingsProvider'
 import { ModelConfigPicker } from '../modelSelection/ModelConfigPicker'
 import { formatModelConfigLabel } from '../modelSelection/modelConfigPresentation'
-import {
-  workflowNodeModelLabel,
-  workflowNodeLabel,
-  workflowTemplateModelLabel
-} from './workflowModelPresentation'
+import { workflowNodeModelLabel, workflowNodeLabel } from './workflowModelPresentation'
 import './workflowGraphEditor.css'
 
 export interface WorkflowGraphEditorProps {
   definition: WorkflowDefinition
-  templates: readonly AgentTemplate[]
   text: WorkflowText
   onChange: (
     update: (current: WorkflowDefinition) => WorkflowDefinition,
@@ -68,10 +62,10 @@ export interface WorkflowGraphEditorProps {
 
 export function WorkflowGraphEditor({
   definition: graph,
-  templates,
   text,
   onChange
 }: WorkflowGraphEditorProps) {
+  const { t } = useFrontendConfig()
   const { models, enabledModels } = useModelSettings()
   const profile = useAccountAuth()?.state.profile
   const userName = profile?.displayName || text('currentUser')
@@ -98,16 +92,7 @@ export function WorkflowGraphEditor({
   const configuredNode = graph.nodes.find((node) => node.id === configuredNodeId)
   const incoming = configuredNode ? nodeFlows(graph, configuredNode.id, 'input') : []
   const outgoing = configuredNode ? nodeFlows(graph, configuredNode.id, 'output') : []
-  const matchingTemplates = templates.filter((template) =>
-    `${template.name} ${template.description} ${workflowTemplateModelLabel(template, models, text)}`
-      .toLocaleLowerCase()
-      .includes(query.trim().toLocaleLowerCase())
-  )
-
   const selectedAgent = selectedNode?.kind === 'agent' ? selectedNode : undefined
-  const selectedTemplate = selectedAgent?.templateId
-    ? templates.find((template) => template.templateId === selectedAgent.templateId)
-    : undefined
   const selectedModelId = selectedAgent?.modelConfigId ?? null
   const selectedModelUnavailable = Boolean(selectedModelId && !enabledModelIds.has(selectedModelId))
   const modelOptions = [
@@ -116,7 +101,7 @@ export function WorkflowGraphEditor({
           {
             id: selectedModelId,
             disabled: true,
-            label: workflowNodeModelLabel(selectedAgent!, templates, models, text)
+            label: workflowNodeModelLabel(selectedAgent!, models, text)
           }
         ]
       : []),
@@ -189,16 +174,12 @@ export function WorkflowGraphEditor({
       }),
       group ? { group } : undefined
     )
-  const addNode = (x?: number, y?: number, templateId?: string) => {
-    const userNode = templateId === 'node:user'
+  const addNode = (x?: number, y?: number, nodeType?: string) => {
+    const userNode = nodeType === 'node:user'
     const gateKind =
-      templateId === 'gate:input' ? 'inputGate' : templateId === 'gate:output' ? 'outputGate' : null
+      nodeType === 'gate:input' ? 'inputGate' : nodeType === 'gate:output' ? 'outputGate' : null
     if (graph.nodes.length >= 128) return
-    const template =
-      templateId && !gateKind
-        ? templates.find((candidate) => candidate.templateId === templateId)
-        : undefined
-    if (templateId && !gateKind && !userNode && !template) return
+    if (nodeType && !gateKind && !userNode) return
     const dimensions = workflowNodeSize(gateKind ? { kind: gateKind } : undefined)
     const area = canvasRef.current
     const origin = canvasOrigin(graphBounds(graph))
@@ -236,13 +217,7 @@ export function WorkflowGraphEditor({
       ? createWorkflowUser(userName, position.x, position.y)
       : gateKind
         ? createWorkflowGate(gateKind, position.x, position.y, graph.nodes)
-        : createWorkflowNode(
-            text('newNode'),
-            position.x,
-            position.y,
-            template,
-            template ? null : (enabledModels[0]?.id ?? null)
-          )
+        : createWorkflowNode(text('newNode'), position.x, position.y, enabledModels[0]?.id ?? null)
     onChange((current) =>
       current.nodes.length >= 128 ? current : { ...current, nodes: [...current.nodes, node] }
     )
@@ -356,7 +331,7 @@ export function WorkflowGraphEditor({
   const nodeOptions = graph.nodes.map((node) => ({
     id: node.id,
     name: workflowNodeLabel(node, text, userName),
-    detail: workflowNodeModelLabel(node, templates, models, text)
+    detail: workflowNodeModelLabel(node, models, text)
   }))
 
   const selectionActions = (
@@ -475,8 +450,8 @@ export function WorkflowGraphEditor({
                 <Search aria-hidden="true" />
                 <input
                   ref={searchRef}
-                  aria-label={text('searchTemplates')}
-                  placeholder={text('searchTemplates')}
+                  aria-label={text('searchNodes')}
+                  placeholder={text('searchNodes')}
                   value={query}
                   onChange={(event) => setQuery(event.currentTarget.value)}
                 />
@@ -540,7 +515,7 @@ export function WorkflowGraphEditor({
                     </span>
                   </button>
                 ))}
-              <div className="workflow-node-picker__heading">{text('templates')}</div>
+              <div className="workflow-node-picker__heading">{text('agents')}</div>
               <div className="workflow-node-picker__list">
                 <button
                   className="workflow-node-picker__item"
@@ -558,33 +533,6 @@ export function WorkflowGraphEditor({
                   </span>
                   <strong>{text('blank')}</strong>
                 </button>
-                {matchingTemplates.map((template) => (
-                  <button
-                    key={template.templateId}
-                    className="workflow-node-picker__item"
-                    type="button"
-                    draggable
-                    onDragStart={(event) => {
-                      event.dataTransfer.setData(WORKFLOW_DRAG_TYPE, template.templateId)
-                      event.dataTransfer.effectAllowed = 'copy'
-                    }}
-                    onDragEnd={() => setPanel(null)}
-                    onClick={() => addNode(undefined, undefined, template.templateId)}
-                  >
-                    <span className="workflow-node-picker__icon">
-                      <Bot aria-hidden="true" />
-                    </span>
-                    <span>
-                      <strong>{template.name}</strong>
-                      <small>{workflowTemplateModelLabel(template, models, text)}</small>
-                    </span>
-                  </button>
-                ))}
-                {matchingTemplates.length === 0 ? (
-                  <p className="workflow-node-picker__empty">
-                    {text(templates.length ? 'noMatchingTemplates' : 'templateEmpty')}
-                  </p>
-                ) : null}
               </div>
             </div>
           ) : null}
@@ -610,64 +558,39 @@ export function WorkflowGraphEditor({
                 }
               />
             </label>
-            <div className="workflow-selection-field workflow-template-field">
-              <span>{text('templateShort')}</span>
-              <WorkflowTemplatePicker
-                showSelectedDetail={false}
-                value={selectedAgent.templateId}
-                templates={templates}
-                models={models}
-                text={text}
-                onChange={(templateId) => {
-                  if (templateId === selectedAgent.templateId) return
-                  const template = templates.find(
-                    (candidate) => candidate.templateId === templateId
+            <div className="workflow-selection-field">
+              <span>{text('permission')}</span>
+              <WorkflowOptionPicker
+                ariaLabel={text('permission')}
+                value={selectedAgent.permissionMode}
+                options={CHAT_PERMISSION_PRESENTATIONS.map(({ id, labelKey, icon }) => ({
+                  id,
+                  name: t(labelKey),
+                  icon
+                }))}
+                onChange={(permissionMode) => {
+                  if (
+                    permissionMode === 'default' ||
+                    permissionMode === 'custom' ||
+                    permissionMode === 'full'
                   )
-                  updateNode(selectedAgent.id, {
-                    templateId: template?.templateId ?? null,
-                    modelConfigId: template
-                      ? null
-                      : selectedTemplate && enabledModelIds.has(selectedTemplate.modelConfigId)
-                        ? selectedTemplate.modelConfigId
-                        : (enabledModels[0]?.id ?? null),
-                    ...(!selectedAgent.task && template
-                      ? { task: template.instructions.slice(0, 32768) }
-                      : {})
-                  })
+                    updateNode(selectedAgent.id, { permissionMode })
                 }}
               />
             </div>
-            {selectedAgent.templateId &&
-            !templates.some((template) => template.templateId === selectedAgent.templateId) ? (
-              <p className="workflow-error" role="alert">
-                {text('missingTemplate')}
-              </p>
-            ) : null}
             <label className="workflow-selection-field workflow-node-model">
               <span>{text('model')}</span>
-              {selectedAgent.templateId ? (
-                <input
-                  readOnly
-                  value={workflowNodeModelLabel(selectedAgent, templates, models, text)}
-                  data-unavailable={
-                    !selectedTemplate ||
-                    !enabledModelIds.has(selectedTemplate.modelConfigId) ||
-                    undefined
-                  }
-                />
-              ) : (
-                <ModelConfigPicker
-                  ariaLabel={text('selectModel')}
-                  className="workflow-node-model__picker"
-                  emptyLabel={text(enabledModels.length ? 'modelNotSelected' : 'noEnabledModels')}
-                  options={modelOptions}
-                  value={selectedModelId}
-                  onChange={(modelConfigId) => updateNode(selectedAgent.id, { modelConfigId })}
-                  variant="settings"
-                  portalMenu
-                  popoverClassName="workflow-node-model-popover"
-                />
-              )}
+              <ModelConfigPicker
+                ariaLabel={text('selectModel')}
+                className="workflow-node-model__picker"
+                emptyLabel={text(enabledModels.length ? 'modelNotSelected' : 'noEnabledModels')}
+                options={modelOptions}
+                value={selectedModelId}
+                onChange={(modelConfigId) => updateNode(selectedAgent.id, { modelConfigId })}
+                variant="settings"
+                portalMenu
+                popoverClassName="workflow-node-model-popover"
+              />
             </label>
             {selectionActions}
           </div>
@@ -818,7 +741,6 @@ export function WorkflowGraphEditor({
           ) : null}
           <WorkflowCanvas
             graph={graph}
-            templates={templates}
             models={models}
             text={text}
             selection={selection}

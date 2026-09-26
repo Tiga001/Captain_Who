@@ -4,7 +4,6 @@ import { optimizeWorkflowLayout } from './workflowAnchorLayout'
 import { anchorAtPoint, anchorPoint, type FlowEnd } from './workflowAnchors'
 import { AgentAvatar } from '../agentCollaboration/AgentAvatar'
 import type {
-  AgentTemplate,
   WorkflowDefinition,
   WorkflowEndpoint,
   WorkflowAnchor,
@@ -46,7 +45,6 @@ export interface WorkflowCanvasChangeOptions {
 }
 interface Props {
   graph: WorkflowDefinition
-  templates: readonly AgentTemplate[]
   models: readonly WorkflowModelDisplay[]
   selection: WorkflowSelection
   pending: WorkflowEndpoint | null
@@ -59,7 +57,7 @@ interface Props {
   ) => void
   onSelect: (selection: WorkflowSelection) => void
   onConfigureNode: (id: string) => void
-  onAddNode: (x: number, y: number, templateId?: string) => void
+  onAddNode: (x: number, y: number, nodeType?: string) => void
   onBegin: (endpoint: WorkflowEndpoint, anchor?: WorkflowAnchor) => void
   onFinish: (endpoint: WorkflowEndpoint, anchor?: WorkflowAnchor) => void
 }
@@ -85,7 +83,6 @@ function positionCard(
 
 export function WorkflowCanvas({
   graph,
-  templates,
   models,
   selection,
   pending,
@@ -772,8 +769,8 @@ export function WorkflowCanvas({
                     )}
                     <div className="workflow-node__copy workflow-node__copy--configurable">
                       <strong>{workflowNodeLabel(node, text, userName)}</strong>
-                      <span title={workflowNodeModelLabel(node, templates, models, text)}>
-                        {workflowNodeModelLabel(node, templates, models, text)}
+                      <span title={workflowNodeModelLabel(node, models, text)}>
+                        {workflowNodeModelLabel(node, models, text)}
                       </span>
                     </div>
                   </>

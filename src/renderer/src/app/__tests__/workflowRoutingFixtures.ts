@@ -8,7 +8,7 @@ import type { WorkflowDefinition, WorkflowFlow, WorkflowAnchor } from '@mycopilo
 /** Parallel implementation, review, and two return loops with user-placed anchors. */
 export function reviewLoopGraph(): WorkflowDefinition {
   const agent = (id: string, name: string, x: number, y: number) => ({
-    ...createWorkflowNode(name, x, y, undefined, 'model'),
+    ...createWorkflowNode(name, x, y, 'model'),
     id
   })
   const gate = (id: string, kind: 'inputGate' | 'outputGate', x: number, y: number) => ({

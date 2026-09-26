@@ -1,14 +1,14 @@
 // English UI translation strings.
 export const enUSTranslations = {
-  'settings.page.workflows': 'Workflows',
-  'workflows.editorTitle': 'Edit workflow',
+  'settings.page.workflows': 'Workflow templates',
+  'workflows.editorTitle': 'Edit workflow template',
   'workflows.name': 'Name',
   'workflows.description': 'Short description',
   'workflows.background': 'Workflow background',
   'workflows.structure': 'Edit workflow structure',
   'workflows.templatesLoading': 'Loading subagent templates…',
   'workflows.templatesLoadFailed': 'Could not load subagent templates. Retry to open workflows.',
-  'workflows.settingsTitle': 'Workflows',
+  'workflows.settingsTitle': 'Workflow templates',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'configuration.invalidContextCapacityTitle': 'Context window is too small',
   'configuration.invalidContextCapacity':

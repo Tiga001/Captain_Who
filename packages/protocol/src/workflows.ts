@@ -20,7 +20,7 @@ interface WorkflowNodeBase {
 }
 export interface WorkflowAgentNode extends WorkflowNodeBase {
   kind: 'agent'
-  templateId: string | null
+  permissionMode: 'default' | 'custom' | 'full'
   modelConfigId: string | null
   receives: string
   task: string
@@ -226,7 +226,7 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
       const common = ['kind', 'id', 'name', 'x', 'y']
       const fields =
         kind === 'agent'
-          ? ['templateId', 'modelConfigId', 'receives', 'task', 'delivers']
+          ? ['permissionMode', 'modelConfigId', 'receives', 'task', 'delivers']
           : kind === 'inputGate'
             ? ['processingMode', 'busyPolicy']
             : kind === 'user'
@@ -240,14 +240,18 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
         y: number(node.y)
       }
       if (kind === 'agent') {
-        const templateId = node.templateId === null ? null : text(node.templateId)
         const modelConfigId = node.modelConfigId === null ? null : text(node.modelConfigId)
-        if (templateId !== null && modelConfigId !== null)
-          throw new Error('A template workflow node cannot override its model')
+        const permissionMode = node.permissionMode
+        if (
+          permissionMode !== 'default' &&
+          permissionMode !== 'custom' &&
+          permissionMode !== 'full'
+        )
+          throw new Error('Invalid workflow permission mode')
         return {
           ...base,
           kind,
-          templateId,
+          permissionMode,
           modelConfigId,
           receives: text(node.receives),
           task: text(node.task),

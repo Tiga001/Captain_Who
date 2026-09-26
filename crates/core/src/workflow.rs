@@ -35,10 +35,18 @@ pub enum Mode {
     Range,
     Custom,
 }
+/// Default permission choice for the conversation created from this template node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowPermissionMode {
+    Default,
+    Custom,
+    Full,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConfig {
-    pub template_id: Option<String>,
+    pub permission_mode: WorkflowPermissionMode,
     pub model_config_id: Option<String>,
     pub receives: String,
     pub task: String,
@@ -100,7 +108,7 @@ impl<'de> Deserialize<'de> for Node {
         let x = serde_json::from_value(take("x")?).map_err(serde::de::Error::custom)?;
         let y = serde_json::from_value(take("y")?).map_err(serde::de::Error::custom)?;
         if obj.get("kind").and_then(|v| v.as_str()) == Some("agent")
-            && (!obj.contains_key("templateId") || !obj.contains_key("modelConfigId"))
+            && (!obj.contains_key("permissionMode") || !obj.contains_key("modelConfigId"))
         {
             return Err(serde::de::Error::custom("Missing agent configuration"));
         }
@@ -363,11 +371,7 @@ impl Definition {
     /// are returned as issues so a user can save and reopen an unfinished draft.
     /// This checks structural reachability, not whether an eventual agent will select
     /// an exit or whether concurrent inputs can satisfy a runtime join.
-    pub fn validate(
-        &self,
-        templates: &HashSet<String>,
-        available_models: &HashSet<String>,
-    ) -> Result<Vec<Issue>, String> {
+    pub fn validate(&self, available_models: &HashSet<String>) -> Result<Vec<Issue>, String> {
         if self.schema_version != 1
             || !valid_id(&self.id)
             || self.nodes.len() > MAX_NODES
@@ -428,9 +432,6 @@ impl Definition {
             }
             match &n.config {
                 NodeConfig::Agent(agent) => {
-                    if agent.template_id.as_ref().is_some_and(|id| !valid_id(id)) {
-                        return Err("Invalid template identifier".into());
-                    }
                     if agent.model_config_id.as_ref().is_some_and(|id| {
                         id.is_empty()
                             || id.trim() != id
@@ -438,9 +439,6 @@ impl Definition {
                             || id.chars().any(char::is_control)
                     }) {
                         return Err("Invalid model configuration identifier".into());
-                    }
-                    if agent.template_id.is_some() && agent.model_config_id.is_some() {
-                        return Err("Template nodes cannot override their template model".into());
                     }
                     if [&agent.receives, &agent.task, &agent.delivers]
                         .into_iter()
@@ -525,21 +523,12 @@ impl Definition {
                     if n.name.trim().is_empty() || agent.task.trim().is_empty() {
                         issue(&mut out, "task", &n.id)
                     }
-                    if agent
-                        .template_id
-                        .as_ref()
-                        .is_some_and(|id| !templates.contains(id))
-                    {
-                        issue(&mut out, "template", &n.id)
-                    }
-                    if agent.template_id.is_none() {
-                        match &agent.model_config_id {
-                            None => issue(&mut out, "node_model", &n.id),
-                            Some(id) if !available_models.contains(id) => {
-                                issue(&mut out, "node_model_unavailable", &n.id)
-                            }
-                            Some(_) => {}
+                    match &agent.model_config_id {
+                        None => issue(&mut out, "node_model", &n.id),
+                        Some(id) if !available_models.contains(id) => {
+                            issue(&mut out, "node_model_unavailable", &n.id)
                         }
+                        Some(_) => {}
                     }
                     if incoming.len() > 1 {
                         issue(&mut out, "inputGateRequired", &n.id)
@@ -706,7 +695,7 @@ mod tests {
             x: 100.0,
             y: 200.0,
             config: NodeConfig::Agent(AgentConfig {
-                template_id: None,
+                permission_mode: WorkflowPermissionMode::Default,
                 model_config_id: Some("model-review".into()),
                 receives: "Receive the preceding result".into(),
                 task: "Review the change".into(),
@@ -757,7 +746,7 @@ mod tests {
 
     fn validate(definition: &Definition) -> Vec<Issue> {
         definition
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .unwrap()
     }
 
@@ -776,9 +765,7 @@ mod tests {
                 .flows
                 .push(flow("self", Some(&node.id), Some(&node.id)));
             assert_eq!(
-                invalid
-                    .validate(&HashSet::new(), &HashSet::new())
-                    .unwrap_err(),
+                invalid.validate(&HashSet::new()).unwrap_err(),
                 "A flow cannot connect a node to itself"
             );
         }
@@ -802,9 +789,34 @@ mod tests {
         for offset in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
             graph.flows[0].source_anchor.as_mut().unwrap().offset = offset;
             assert!(graph
-                .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+                .validate(&HashSet::from(["model-review".into()]))
                 .is_err());
         }
+    }
+
+    #[test]
+    fn conversation_permission_modes_are_strict_and_subagent_references_are_rejected() {
+        for mode in ["default", "custom", "full"] {
+            let mut value = serde_json::to_value(definition()).unwrap();
+            value["nodes"][0]["permissionMode"] = json!(mode);
+            let graph: Definition = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate(&graph).is_empty());
+            assert_eq!(serde_json::to_value(graph).unwrap(), value);
+        }
+        for mode in [json!(null), json!("unknown"), json!(true), json!(1)] {
+            let mut value = serde_json::to_value(definition()).unwrap();
+            value["nodes"][0]["permissionMode"] = mode;
+            assert!(serde_json::from_value::<Definition>(value).is_err());
+        }
+        let mut value = serde_json::to_value(definition()).unwrap();
+        value["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("permissionMode");
+        assert!(serde_json::from_value::<Definition>(value).is_err());
+        let mut value = serde_json::to_value(definition()).unwrap();
+        value["nodes"][0]["templateId"] = json!(null);
+        assert!(serde_json::from_value::<Definition>(value).is_err());
     }
 
     #[test]
@@ -812,7 +824,8 @@ mod tests {
         let original = definition();
         assert!(validate(&original).is_empty());
         let serialized = serde_json::to_value(&original).unwrap();
-        assert_eq!(serialized["nodes"][0]["templateId"], json!(null));
+        assert!(serialized["nodes"][0].get("templateId").is_none());
+        assert_eq!(serialized["nodes"][0]["permissionMode"], json!("default"));
         assert_eq!(
             serialized["nodes"][0]["modelConfigId"],
             json!("model-review")
@@ -846,17 +859,17 @@ mod tests {
         }
         let mut graph = definition();
         graph.boundary_positions.output.x = 100001.0;
-        assert!(graph.validate(&HashSet::new(), &HashSet::new()).is_err());
+        assert!(graph.validate(&HashSet::new()).is_err());
         graph.boundary_positions.output.x = 0.0;
         graph.boundary_positions.input.y = f64::INFINITY;
-        assert!(graph.validate(&HashSet::new(), &HashSet::new()).is_err());
+        assert!(graph.validate(&HashSet::new()).is_err());
     }
 
     #[test]
-    fn model_choices_use_the_authoritative_available_set_and_template_overrides_are_forbidden() {
+    fn model_choices_use_the_authoritative_available_set() {
         let mut graph = definition();
         assert!(validate(&graph).is_empty());
-        let issues = graph.validate(&HashSet::new(), &HashSet::new()).unwrap();
+        let issues = graph.validate(&HashSet::new()).unwrap();
         assert_eq!(
             issues,
             vec![Issue {
@@ -864,15 +877,6 @@ mod tests {
                 subject: "review".into()
             }]
         );
-        graph.nodes[0].agent_mut().template_id = Some("template-review".into());
-        assert!(graph
-            .validate(
-                &HashSet::from(["template-review".into()]),
-                &HashSet::from(["model-review".into()])
-            )
-            .unwrap_err()
-            .contains("override"));
-        graph.nodes[0].agent_mut().template_id = None;
         for invalid in [
             String::new(),
             " padded".into(),
@@ -880,7 +884,7 @@ mod tests {
             "x".repeat(513),
         ] {
             graph.nodes[0].agent_mut().model_config_id = Some(invalid);
-            assert!(graph.validate(&HashSet::new(), &HashSet::new()).is_err());
+            assert!(graph.validate(&HashSet::new()).is_err());
         }
     }
 
@@ -918,25 +922,16 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_authoring_and_missing_template_are_saveable_draft_issues() {
+    fn incomplete_authoring_and_missing_model_are_saveable_draft_issues() {
         let mut draft = definition();
         draft.name.clear();
         draft.nodes[0].name.clear();
         draft.nodes[0].agent_mut().task.clear();
-        draft.nodes[0].agent_mut().template_id = Some("deleted-template".into());
         draft.nodes[0].agent_mut().model_config_id = None;
         let issues = validate(&draft);
         assert!(has_issue(&issues, "name", "workflow-1"));
         assert!(has_issue(&issues, "task", "review"));
-        assert!(has_issue(&issues, "template", "review"));
-        let templates = HashSet::from(["deleted-template".to_owned()]);
-        assert!(!has_issue(
-            &draft
-                .validate(&templates, &HashSet::from(["model-review".into()]))
-                .unwrap(),
-            "template",
-            "review"
-        ));
+        assert!(has_issue(&issues, "node_model", "review"));
     }
 
     #[test]
@@ -972,25 +967,25 @@ mod tests {
             .flows
             .push(flow("broken", Some("missing"), Some("review")));
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
             .contains("missing node"));
         graph.flows.pop();
         graph.flows.push(flow("broken", None, None));
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
             .contains("connect a node"));
         graph.flows.pop();
         graph.nodes.push(node("review"));
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
             .contains("identifiers"));
         graph.nodes.pop();
         graph.flows.push(flow("exit", Some("review"), None));
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .unwrap_err()
             .contains("identifiers"));
     }
@@ -1092,24 +1087,24 @@ mod tests {
         let mut graph = definition();
         graph.schema_version = 2;
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
         graph.schema_version = 1;
         for id in ["", " leading-space", "newline\ninside"] {
             graph.id = id.into();
             assert!(graph
-                .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+                .validate(&HashSet::from(["model-review".into()]))
                 .is_err());
         }
         graph.id = "valid".into();
         graph.nodes[0].x = f64::NAN;
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
         graph.nodes[0].x = 0.0;
         graph.viewport.zoom = f64::INFINITY;
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
     }
 
@@ -1118,17 +1113,17 @@ mod tests {
         let mut graph = definition();
         graph.background = "x".repeat(MAX_TEXT_BYTES + 1);
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
         graph.background.clear();
         graph.flows[0].name = "x".repeat(MAX_NAME_BYTES + 1);
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
         graph.flows[0].name.clear();
         graph.nodes = (0..=MAX_NODES).map(|i| node(&format!("n{i}"))).collect();
         assert!(graph
-            .validate(&HashSet::new(), &HashSet::from(["model-review".into()]))
+            .validate(&HashSet::from(["model-review".into()]))
             .is_err());
     }
 

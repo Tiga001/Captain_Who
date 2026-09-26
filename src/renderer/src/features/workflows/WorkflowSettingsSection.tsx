@@ -10,7 +10,7 @@ import {
   Undo2
 } from 'lucide-react'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { AgentTemplate, WorkflowRecord } from '@mycopilot/protocol'
+import type { WorkflowRecord } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { requestWorkflows } from './workflowClient'
@@ -38,12 +38,10 @@ import {
 import './workflows.css'
 
 export function WorkflowSettingsSection({
-  templates,
   onEditorModeChange,
   onDirtyChange,
   onSavingChange
 }: {
-  templates: readonly AgentTemplate[]
   onNavigateSettingsRoot?: () => void
   onEditorModeChange?: (editing: boolean) => void
   onDirtyChange?: (dirty: boolean) => void
@@ -468,12 +466,7 @@ export function WorkflowSettingsSection({
                 data-setting-id="workflow-structure"
                 inert={busy || undefined}
               >
-                <WorkflowGraphEditor
-                  definition={draft}
-                  templates={templates}
-                  text={text}
-                  onChange={applyChange}
-                />
+                <WorkflowGraphEditor definition={draft} text={text} onChange={applyChange} />
               </div>
             </div>
           ))}

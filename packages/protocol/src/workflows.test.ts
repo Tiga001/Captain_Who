@@ -73,13 +73,13 @@ describe('workflow authoring contract', () => {
       expect(() => parseWorkflowDefinition({ ...fixture, boundaryPositions })).toThrow()
     }
   })
-  it('preserves explicit standalone model selection and template-owned model selection', () => {
+  it('preserves independent conversation models and permissions', () => {
     const configured = structuredClone(fixture)
     const definition = {
       ...configured,
       nodes: [
         { ...configured.nodes[0], modelConfigId: 'model-implementation' },
-        { ...configured.nodes[1], templateId: 'review-template', modelConfigId: null }
+        { ...configured.nodes[1], permissionMode: 'custom', modelConfigId: 'model-review' }
       ]
     }
     expect(parseWorkflowDefinition(definition)).toEqual(definition)
@@ -90,7 +90,7 @@ describe('workflow authoring contract', () => {
     })
   })
 
-  it('rejects malformed model values and template model overrides', () => {
+  it('rejects malformed models and removed subagent template references', () => {
     for (const modelConfigId of [undefined, 12, {}, ['model-a'], true]) {
       expect(() =>
         parseWorkflowDefinition({
@@ -104,13 +104,28 @@ describe('workflow authoring contract', () => {
         ...fixture,
         nodes: [{ ...fixture.nodes[0], templateId: 'review-template', modelConfigId: 'override' }]
       })
-    ).toThrow('cannot override')
+    ).toThrow()
     expect(() =>
       parseWorkflowDefinition({
         ...fixture,
         nodes: [{ ...fixture.nodes[0], modelId: 'wrong-field' }]
       })
     ).toThrow()
+  })
+
+  it('round trips every permission mode and rejects missing or unknown modes', () => {
+    for (const permissionMode of ['default', 'custom', 'full']) {
+      const definition = { ...fixture, nodes: [{ ...fixture.nodes[0], permissionMode }] }
+      expect(parseWorkflowDefinition(definition)).toEqual(definition)
+    }
+    for (const permissionMode of [undefined, null, '', 'auto', true, 1, {}]) {
+      expect(() =>
+        parseWorkflowDefinition({
+          ...fixture,
+          nodes: [{ ...fixture.nodes[0], permissionMode }]
+        })
+      ).toThrow()
+    }
   })
 
   it('preserves boundary flows, cycles, blank nodes and viewport', () => {

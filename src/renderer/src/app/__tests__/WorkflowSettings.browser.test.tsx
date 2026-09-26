@@ -8,7 +8,6 @@ import { classicDarkTheme } from '../../config/themes/classic'
 import '../../styles/global.css'
 import '../../features/settings/SettingsPage.css'
 import type {
-  AgentTemplate,
   WorkflowRecord,
   WorkflowRequest,
   WorkflowFlow,
@@ -38,29 +37,18 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     language: 'zh-CN',
-    t: (key: string) => (key === 'settings.breadcrumb.root' ? '设置' : '当前位置')
+    t: (key: string) =>
+      ({
+        'settings.breadcrumb.root': '设置',
+        'chat.defaultPermission': '默认权限',
+        'chat.customPermission': '自定义权限',
+        'chat.fullPermission': '完全权限'
+      })[key] ?? '当前位置'
   })
 }))
 vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
 const { WorkflowSettingsSection } = await import('../../features/workflows/WorkflowSettingsSection')
 
-const templates: AgentTemplate[] = [
-  {
-    schemaVersion: 1,
-    templateId: 'review-template',
-    machineKey: 'reviewer',
-    name: '审查员模板',
-    instructions: '核实实际问题并附证据。',
-    description: '代码审查',
-    modelConfigId: 'model',
-    modelDisplayName: '模型 A',
-    projectIds: [],
-    enabled: true,
-    revision: 1,
-    createdAt: 1,
-    updatedAt: 1
-  }
-]
 function WorkflowTestShell() {
   const [editing, setEditing] = useState(false)
   return (
@@ -72,7 +60,7 @@ function WorkflowTestShell() {
       </aside>
       <main className={`settings-content${editing ? ' settings-content--workflow-editor' : ''}`}>
         <div className="settings-content__inner">
-          <WorkflowSettingsSection templates={templates} onEditorModeChange={setEditing} />
+          <WorkflowSettingsSection onEditorModeChange={setEditing} />
         </div>
       </main>
     </div>
@@ -162,7 +150,7 @@ beforeEach(async () => {
 describe('native workflow editor', () => {
   it('edits gate names in the toolbar and shares deletion controls across all selections', async () => {
     await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('门节点命名')
     await openStructure()
     for (const type of ['输入逻辑门', '输入逻辑门', '输出逻辑门']) {
@@ -189,7 +177,7 @@ describe('native workflow editor', () => {
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/gate-name-toolbar.png'
     })
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(1)
     expect(records[0].definition.nodes.map((node) => node.name)).toEqual([
       '资料汇总',
@@ -229,7 +217,9 @@ describe('native workflow editor', () => {
     definition.flows[0].name = 'S2'
     records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
     let view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await page.getByRole('group', { name: '节点 implement', exact: true }).click()
     expect(document.querySelector('.workflow-graph-inspector')).toBeNull()
@@ -237,18 +227,13 @@ describe('native workflow editor', () => {
     await controls.getByRole('textbox', { name: '节点名称', exact: true }).fill('交付负责人')
     await controls.getByRole('button', { name: '选择模型', exact: true }).click()
     await page.getByRole('option', { name: '模型 B', exact: true }).click()
-    await controls.getByRole('button', { name: '子智能体模板', exact: true }).click()
-    await page.getByRole('option', { name: /审查员模板/ }).click()
+    await controls.getByRole('button', { name: '权限', exact: true }).click()
+    await page.getByRole('option', { name: '自定义权限', exact: true }).click()
     await expect
-      .element(controls.getByRole('textbox', { name: '模型', exact: true }))
-      .toHaveValue('模型 A')
-    await expect
-      .element(controls.getByRole('textbox', { name: '模型', exact: true }))
-      .toHaveAttribute('readonly')
-    await controls.getByRole('button', { name: '子智能体模板', exact: true }).click()
-    await page.getByRole('option', { name: '未使用模板', exact: true }).click()
-    await controls.getByRole('button', { name: '选择模型', exact: true }).click()
-    await page.getByRole('option', { name: '模型 B', exact: true }).click()
+      .element(controls.getByRole('button', { name: '选择模型', exact: true }))
+      .toHaveTextContent('模型 B')
+    await controls.getByRole('button', { name: '权限', exact: true }).click()
+    await page.getByRole('option', { name: '默认权限', exact: true }).click()
     expect(document.querySelector('.workflow-graph-inspector')).toBeNull()
     await controls.getByRole('button', { name: '配置', exact: true }).click()
     await expect
@@ -268,18 +253,20 @@ describe('native workflow editor', () => {
       .element(page.getByRole('textbox', { name: '连线名称', exact: true }))
       .toHaveValue('S24')
     await page.getByRole('textbox', { name: '连线名称', exact: true }).fill('需求输入')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.nextFlowSequence).toBe(25)
     expect(records[0].definition.nodes[0]).toMatchObject({
       name: '交付负责人',
       modelConfigId: 'model-b',
-      templateId: null
+      permissionMode: 'default'
     })
     expect(records[0].definition.flows.at(-1)?.name).toBe('需求输入')
     await view.unmount()
     view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await connectCards('根智能体 · 输入', 'Implementation input')
     await expect
@@ -294,7 +281,9 @@ describe('native workflow editor', () => {
     definition.flows = []
     records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
     let view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await page.getByRole('button', { name: '100%', exact: true }).click()
     const a = page.getByRole('group', { name: '节点 implement', exact: true })
@@ -320,25 +309,25 @@ describe('native workflow editor', () => {
     await page.getByRole('button', { name: '起点', exact: true }).click()
     await expect.element(page.getByRole('option', { name: /^review/ })).toBeDisabled()
     await userEvent.keyboard('{Escape}')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.flows[0].sourceAnchor).toBeUndefined()
     expect(records[0].definition.flows[0].targetAnchor).toBeUndefined()
     const before = structuredClone(records[0].definition.flows[0])
     const handle = page.getByRole('button', { name: '连线 1 起点', exact: true })
     await handle.dropTo(a, { targetPosition: { x: 2, y: 34 } })
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(3)
     const adjusted = structuredClone(records[0].definition.flows[0])
     expect(adjusted.sourceAnchor?.side).toBe('left')
     expect(adjusted.targetAnchor).toEqual(before.targetAnchor)
     expect(adjusted.source).toEqual(before.source)
     await page.getByRole('button', { name: '撤销', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(4)
     expect(records[0].definition.flows[0]).toEqual(before)
     await page.getByRole('button', { name: '重做', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(5)
     const position = {
       left: (handle.element() as HTMLElement).style.left,
@@ -346,7 +335,9 @@ describe('native workflow editor', () => {
     }
     await view.unmount()
     view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     expect(records[0].definition.flows[0]).toEqual(adjusted)
     expect((handle.element() as HTMLElement).style.left).toBe(position.left)
@@ -371,7 +362,7 @@ describe('native workflow editor', () => {
       const original = structuredClone(definition)
       records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
       let view = await renderWorkflow()
-      await page.getByRole('button', { name: '编辑工作流 分支协作与返工', exact: true }).click()
+      await page.getByRole('button', { name: '编辑工作流模板 分支协作与返工', exact: true }).click()
       await openStructure()
       const optimize = page.getByRole('button', { name: '优化布局', exact: true })
       const zoomControls = page.getByRole('group', { name: '适应画布', exact: true })
@@ -380,7 +371,7 @@ describe('native workflow editor', () => {
         zoomControls.element().getBoundingClientRect().left
       )
       await optimize.click()
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(2)
       const arranged = structuredClone(records[0].definition)
       expect(arranged.nodes).not.toEqual(original.nodes)
@@ -402,22 +393,22 @@ describe('native workflow editor', () => {
         path: `../../../../../.cache/workflow-authoring/optimized-layout-${theme}.png`
       })
       await page.getByRole('button', { name: '撤销', exact: true }).click()
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(3)
       expect(records[0].definition.nodes).toEqual(original.nodes)
       expect(records[0].definition.flows).toEqual(original.flows)
       expect(records[0].definition.boundaryPositions).toEqual(original.boundaryPositions)
       await page.getByRole('button', { name: '重做', exact: true }).click()
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(4)
       await view.unmount()
       view = await renderWorkflow()
-      await page.getByRole('button', { name: '编辑工作流 分支协作与返工', exact: true }).click()
+      await page.getByRole('button', { name: '编辑工作流模板 分支协作与返工', exact: true }).click()
       await openStructure()
       expect(records[0].definition.nodes).toEqual(arranged.nodes)
       expect(records[0].definition.flows).toEqual(arranged.flows)
       await optimize.click()
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(5)
       expect(records[0].definition.nodes).toEqual(arranged.nodes)
       expect(records[0].definition.flows).toEqual(arranged.flows)
@@ -438,13 +429,17 @@ describe('native workflow editor', () => {
       })
       records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
       await renderWorkflow()
-      await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+      await page
+        .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+        .click()
       await openStructure()
       await page.getByRole('button', { name: '添加节点', exact: true }).click()
       await expect
-        .element(page.getByRole('textbox', { name: '搜索模板', exact: true }))
+        .element(page.getByRole('textbox', { name: '搜索节点', exact: true }))
         .toHaveFocus()
-      await expect.element(page.getByRole('button', { name: /审查员模板 模型 A/ })).toBeVisible()
+      await expect
+        .element(page.getByRole('button', { name: '新建智能体', exact: true }))
+        .toBeVisible()
       await page.screenshot({
         path: `../../../../../.cache/workflow-authoring/node-palette-${theme}.png`
       })
@@ -480,7 +475,7 @@ describe('native workflow editor', () => {
         .element(page.getByRole('option', { name: '主智能体输入', exact: true }))
         .toBeDisabled()
       await userEvent.keyboard('{Escape}')
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(2)
       expect(records[0].definition.flows.at(-1)).toMatchObject({
         source: { kind: 'node', nodeId: 'review-output' },
@@ -498,7 +493,7 @@ describe('native workflow editor', () => {
         ))
           document.documentElement.style.setProperty(key, value)
       const view = await renderWorkflow()
-      await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+      await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
       await page.getByRole('textbox', { name: '名称', exact: true }).fill('多方评审与交付')
       await openStructure()
       for (const name of ['输入逻辑门', '输出逻辑门']) {
@@ -605,7 +600,7 @@ describe('native workflow editor', () => {
       await page
         .getByRole('button', { name: '连线 1 起点', exact: true })
         .dropTo(inputCard, { targetPosition: { x: 2, y: 8 } })
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records.length).toBe(1)
       expect(records[0].definition.nodes).toHaveLength(3)
       expect(records[0].definition.flows).toHaveLength(8)
@@ -621,7 +616,7 @@ describe('native workflow editor', () => {
       })
       await view.unmount()
       await renderWorkflow()
-      await page.getByRole('button', { name: '编辑工作流 多方评审与交付', exact: true }).click()
+      await page.getByRole('button', { name: '编辑工作流模板 多方评审与交付', exact: true }).click()
       await openStructure()
       await configureNode('输入门1')
       await expect
@@ -758,21 +753,23 @@ describe('native workflow editor', () => {
     const definition = parseWorkflowDefinition(fixture)
     records = [{ definition, revision: 1, updatedAt: 1, enabled: true, issues: [] }]
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     validationIssues = [{ code: 'name', subject: '' }]
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].enabled).toBe(false)
     await page.getByRole('button', { name: '知道了', exact: true }).click()
-    await page.getByRole('button', { name: '返回工作流列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     await expect.element(page.getByRole('switch')).toBeDisabled()
     await expect.element(page.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
-    await page.getByRole('button', { name: '编辑工作流', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板', exact: true }).click()
     validationIssues = []
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('版本发布验收')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(3)
-    await page.getByRole('button', { name: '返回工作流列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     await expect.element(page.getByRole('switch')).toBeEnabled()
     await expect.element(page.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
     expect(document.body.textContent).not.toContain('图结构已校验')
@@ -793,13 +790,13 @@ describe('native workflow editor', () => {
       organization: ''
     }
     let view = await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('用户参与流程')
     await openStructure()
     await page.getByRole('button', { name: '添加节点', exact: true }).click()
     const list = document.querySelector('.workflow-node-picker__list')!
     expect(list.querySelector('button')!.textContent).toBe('新建智能体')
-    expect(list.previousElementSibling!.textContent).toBe('子智能体')
+    expect(list.previousElementSibling!.textContent).toBe('智能体')
     const canvas = page.elementLocator(document.querySelector('.workflow-canvas')!)
     await page
       .getByRole('button', { name: '用户', exact: true })
@@ -820,7 +817,7 @@ describe('native workflow editor', () => {
     await userEvent.keyboard('{ArrowRight}')
     expect((user.element() as HTMLElement).style.left).not.toBe(before)
     await page.getByRole('button', { name: '优化布局', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(1)
     expect(records[0].definition.nodes).toHaveLength(1)
     expect(records[0].definition.nodes[0]).toMatchObject({
@@ -832,7 +829,7 @@ describe('native workflow editor', () => {
     await page.screenshot({ path: '../../../../../.cache/workflow-authoring/user-node.png' })
     await view.unmount()
     view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 用户参与流程', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板 用户参与流程', exact: true }).click()
     await openStructure()
     await expect.element(user).toBeVisible()
     expect(user.element().querySelector('img')!.getAttribute('src')).toBe(avatar)
@@ -854,7 +851,9 @@ describe('native workflow editor', () => {
     definition.flows = []
     records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await page.getByRole('button', { name: '添加节点', exact: true }).click()
     await page.getByRole('button', { name: '用户', exact: true }).click()
@@ -879,7 +878,7 @@ describe('native workflow editor', () => {
     await page.getByRole('button', { name: '关闭配置面板', exact: true }).click()
     await connectCards('当前用户', 'implement')
     await connectCards('当前用户', 'review')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     const saved = records[0].definition
     const user = saved.nodes.find((node) => node.kind === 'user')!
@@ -894,7 +893,7 @@ describe('native workflow editor', () => {
     ).toHaveLength(1)
     expect(input).toMatchObject({ processingMode: 'batch', busyPolicy: 'inject' })
     await page.getByRole('button', { name: '优化布局', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(3)
     const arrangedUser = records[0].definition.nodes.find((node) => node.id === user.id)!
     const arrangedGate = records[0].definition.nodes.find((node) => node.id === input.id)!
@@ -904,7 +903,7 @@ describe('native workflow editor', () => {
 
   it('creates movable roots, opens node settings by double-click, and reconnects persisted boundaries', async () => {
     const view = await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('版本发布验收')
     await openStructure()
     const inputRoot = page.getByRole('group', { name: '根智能体 · 输入', exact: true })
@@ -915,14 +914,14 @@ describe('native workflow editor', () => {
     await inputRoot.dropTo(canvas, { targetPosition: { x: 160, y: 170 } })
     await outputRoot.dropTo(canvas, { targetPosition: { x: 800, y: 420 } })
     expect(document.querySelector('.workflow-graph-inspector')).toBeNull()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(1)
     const movedRoots = structuredClone(records[0].definition.boundaryPositions)
     expect(movedRoots.input).not.toEqual({ x: 80, y: 220 })
     expect(movedRoots.output).not.toEqual({ x: 760, y: 220 })
     expect(records[0].definition.nodes).toEqual([])
     await page.getByRole('button', { name: '撤销', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.boundaryPositions).toEqual({
       input: movedRoots.input,
@@ -963,7 +962,7 @@ describe('native workflow editor', () => {
     await userEvent.keyboard('{Delete}')
     await expect.element(inputRoot).toBeVisible()
     expect(document.querySelector('.workflow-graph-inspector')).toBeNull()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(3)
     const saved = records[0].definition
     expect(saved.boundaryPositions).toEqual(movedRoots)
@@ -974,7 +973,7 @@ describe('native workflow editor', () => {
     const rootLeft = (inputRoot.element() as HTMLElement).style.left
     await view.unmount()
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 版本发布验收', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板 版本发布验收', exact: true }).click()
     await openStructure()
     await expect.element(inputRoot).toBeVisible()
     await expect.poll(() => (inputRoot.element() as HTMLElement).style.left).toBe(rootLeft)
@@ -1052,7 +1051,7 @@ describe('native workflow editor', () => {
     definition.viewport = { x: 0, y: 0, zoom: 1 }
     records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 并行开发与评审', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板 并行开发与评审', exact: true }).click()
     await openStructure()
     await page.getByRole('button', { name: '适应画布', exact: true }).click()
     for (const node of definition.nodes)
@@ -1128,7 +1127,9 @@ describe('native workflow editor', () => {
       const originalFlows = structuredClone(definition.flows)
       records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
       await renderWorkflow()
-      await page.getByRole('button', { name: '编辑工作流 独立任务交叉连线', exact: true }).click()
+      await page
+        .getByRole('button', { name: '编辑工作流模板 独立任务交叉连线', exact: true })
+        .click()
       await openStructure()
       await page.getByRole('button', { name: '适应画布', exact: true }).click()
       await page.getByRole('button', { name: '100%', exact: true }).click()
@@ -1162,7 +1163,7 @@ describe('native workflow editor', () => {
       expect(line.getAttribute('d')).toBe(path)
       expect(bridge.getBoundingClientRect().width / bridgeWidth).toBeCloseTo(1.3, 2)
       expect(getComputedStyle(bridge).strokeWidth).toBe('2px')
-      await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
       await expect.poll(() => records[0].revision).toBe(2)
       expect(records[0].definition.flows).toEqual(originalFlows)
     }
@@ -1176,14 +1177,14 @@ describe('native workflow editor', () => {
     })
     const snapshot = structuredClone(definition)
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 分支协作与返工', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板 分支协作与返工', exact: true }).click()
     await openStructure()
     await page.getByRole('button', { name: '适应画布', exact: true }).click()
     expect(document.querySelectorAll('.workflow-edge')).toHaveLength(15)
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/review-loop-routing.png'
     })
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.nodes).toEqual(snapshot.nodes)
     expect(records[0].definition.flows).toEqual(snapshot.flows)
@@ -1191,7 +1192,7 @@ describe('native workflow editor', () => {
 
   it('shares metadata and graph across tabs and persists the whole workflow with one save', async () => {
     const view = await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await expect
       .element(page.getByRole('textbox', { name: '名称', exact: true }))
       .toHaveAttribute('placeholder', '例如：产品方案评审、版本发布验收')
@@ -1228,10 +1229,10 @@ describe('native workflow editor', () => {
       .toHaveValue('实现登录功能')
     await openStructure()
     await expect.element(page.getByRole('group', { name: '节点 开发', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(1)
     expect(records[0].definition.nodes[0]).toMatchObject({
-      templateId: null,
+      permissionMode: 'default',
       modelConfigId: 'model-b',
       task: '实现验证码登录并验证。'
     })
@@ -1246,13 +1247,13 @@ describe('native workflow editor', () => {
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/native-editor-node.png'
     })
-    await page.getByRole('button', { name: '返回工作流列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     expect(document.body.textContent).not.toMatch(
-      /定义校验|工作流已保存|可复用的协作流程|当前可设计和保存工作流|个节点|条连线/
+      /定义校验|工作流已保存|可复用的协作流程|当前可设计和保存工作流模板|个节点|条连线/
     )
     await view.unmount()
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 验证码开发', exact: true }).click()
+    await page.getByRole('button', { name: '编辑工作流模板 验证码开发', exact: true }).click()
     await openStructure()
     await expect.element(page.getByRole('group', { name: '节点 开发', exact: true })).toBeVisible()
     await expect
@@ -1271,7 +1272,9 @@ describe('native workflow editor', () => {
       }
     ]
     await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/native-editor-canvas.png'
@@ -1290,7 +1293,7 @@ describe('native workflow editor', () => {
       .element(page.getByRole('group', { name: '节点 review', exact: true }))
       .not.toBeInTheDocument()
     await page.getByRole('button', { name: '撤销', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(4)
     expect(records[0].definition.nodes).toHaveLength(4)
     expect(records[0].definition.flows).toHaveLength(6)
@@ -1299,20 +1302,20 @@ describe('native workflow editor', () => {
       selection: { mode: 'one' }
     })
     await addBlank()
-    await page.getByRole('button', { name: '返回工作流列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     await expect
       .element(page.getByRole('dialog', { name: '放弃未保存的修改？', exact: true }))
       .toBeVisible()
     await page.getByRole('button', { name: '放弃修改', exact: true }).click()
     expect(records[0].definition.nodes).toHaveLength(4)
     await expect
-      .element(page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }))
+      .element(page.getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true }))
       .toBeVisible()
   })
 
-  it('adds a template by drag and saves entry, loop, exit and a one-of-two selection group', async () => {
+  it('adds a conversation agent by drag and saves entry, loop, exit and a one-of-two selection group', async () => {
     await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('开发和审查')
     await openStructure()
     await addBlank()
@@ -1320,32 +1323,20 @@ describe('native workflow editor', () => {
     await page.getByRole('textbox', { name: '这个节点需要做什么', exact: true }).fill('实现需求。')
     await connectCards('根智能体 · 输入', '开发')
     await page.getByRole('button', { name: '添加节点', exact: true }).click()
-    await page.getByRole('textbox', { name: '搜索模板', exact: true }).fill('审查')
-    await expect
-      .element(page.getByRole('button', { name: /^审查员模板/ }))
-      .toHaveTextContent('模型 A')
-    await expect
-      .element(page.getByRole('button', { name: /^审查员模板/ }))
-      .not.toHaveTextContent('代码审查')
     await page
-      .getByRole('button', { name: /^审查员模板/ })
+      .getByRole('button', { name: '新建智能体', exact: true })
       .dropTo(page.elementLocator(document.querySelector('.workflow-canvas')!), {
         targetPosition: { x: 250, y: 530 }
       })
     expect(document.querySelector('.workflow-graph-inspector')).toBeNull()
-    await configureNode('审查员模板')
+    await configureNode('未命名节点')
+    await page.getByRole('textbox', { name: '节点名称', exact: true }).fill('审查员模板')
+    await page
+      .getByRole('textbox', { name: '这个节点需要做什么', exact: true })
+      .fill('核实实际问题并附证据。')
     await expect
-      .element(page.getByRole('textbox', { name: '节点名称', exact: true }))
-      .toHaveValue('审查员模板')
-    await expect
-      .element(page.getByRole('textbox', { name: '这个节点需要做什么', exact: true }))
-      .toHaveValue('核实实际问题并附证据。')
-    await expect
-      .element(page.getByRole('textbox', { name: '模型', exact: true }))
-      .toHaveValue('模型 A')
-    await expect
-      .element(page.getByRole('textbox', { name: '模型', exact: true }))
-      .toHaveAttribute('readonly')
+      .element(page.getByRole('button', { name: '选择模型', exact: true }))
+      .toHaveTextContent('模型 A')
     await connectCards('开发', '审查员模板')
     await connectCards('审查员模板', '开发')
     await connectCards('审查员模板', '根智能体 · 输出')
@@ -1362,7 +1353,7 @@ describe('native workflow editor', () => {
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/native-editor-rules.png'
     })
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(1)
     const definition = records[0].definition
     expect(definition.nodes).toHaveLength(4)
@@ -1371,9 +1362,9 @@ describe('native workflow editor', () => {
       processingMode: 'individual'
     })
     const reviewer = definition.nodes.find(
-      (node) => node.kind === 'agent' && node.templateId === 'review-template'
+      (node) => node.kind === 'agent' && node.name === '审查员模板'
     )!
-    expect(reviewer).toMatchObject({ modelConfigId: null })
+    expect(reviewer).toMatchObject({ modelConfigId: 'model', permissionMode: 'default' })
     const outputGate = definition.nodes.find((node) => node.kind === 'outputGate')!
     expect(outputGate.selection).toMatchObject({ mode: 'custom', groups: [{ min: 1, max: 1 }] })
     expect(new Set(outputGate.selection.groups[0].flowIds)).toEqual(
@@ -1388,53 +1379,79 @@ describe('native workflow editor', () => {
     await expect.element(page.getByRole('button', { name: '适应画布', exact: true })).toBeVisible()
   })
 
-  it('locks the template model and permits choosing a model after detaching the template', async () => {
+  it('edits conversation permissions independently of models and preserves them after reopening', async () => {
     for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, classicDarkTheme)))
       document.documentElement.style.setProperty(key, value)
-    await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    let view = await renderWorkflow()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
+    await page.getByRole('textbox', { name: '名称', exact: true }).fill('独立对话协作')
     await openStructure()
-    await addBlank()
-    await page.getByRole('textbox', { name: '节点名称', exact: true }).fill('发布验收')
-    const canvasNode = page.getByRole('group', { name: '节点 发布验收', exact: true })
-    const templatePicker = page.getByRole('button', { name: '子智能体模板', exact: true })
+    await addBlank(false)
+    const permissionPicker = page.getByRole('button', { name: '权限', exact: true })
+    await expect.element(permissionPicker).toHaveTextContent('默认权限')
+    expect(permissionPicker.element().querySelector('.lucide-shield-plus')).not.toBeNull()
+    expect(
+      page.getByRole('button', { name: '选择模型', exact: true }).element().getBoundingClientRect()
+        .left
+    ).toBeGreaterThan(permissionPicker.element().getBoundingClientRect().right)
+    expect(document.body.textContent).not.toContain('子智能体')
     await page.getByRole('button', { name: '选择模型', exact: true }).click()
     await page.getByRole('option', { name: '模型 B', exact: true }).click()
-    await templatePicker.click()
-    const templateOption = page.getByRole('option', { name: /审查员模板/ })
-    await expect.element(templateOption).toHaveTextContent('模型 A')
-    await expect.element(templateOption).not.toHaveTextContent('代码审查')
-    await page.screenshot({ path: '../../../../../.cache/workflow-authoring/template-picker.png' })
-    await templateOption.click()
-    await expect.element(templatePicker).toHaveFocus()
+    for (const [label, mode, icon] of [
+      ['自定义权限', 'custom', 'shield-check'],
+      ['完全权限', 'full', 'shield-alert'],
+      ['默认权限', 'default', 'shield-plus']
+    ]) {
+      await permissionPicker.click()
+      expect(document.querySelectorAll('[role="option"]')).toHaveLength(3)
+      expect(
+        page
+          .getByRole('option', { name: label, exact: true })
+          .element()
+          .querySelector(`.lucide-${icon}`)
+      ).not.toBeNull()
+      await page.screenshot({
+        path: '../../../../../.cache/workflow-authoring/conversation-permissions-dark.png'
+      })
+      await page.getByRole('option', { name: label, exact: true }).click()
+      await expect.element(permissionPicker).toHaveFocus()
+      await expect.element(permissionPicker).toHaveTextContent(label)
+      await expect
+        .element(page.getByRole('button', { name: '选择模型', exact: true }))
+        .toHaveTextContent('模型 B')
+      await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+      await expect
+        .poll(() => records[0]?.definition.nodes[0])
+        .toMatchObject({ permissionMode: mode, modelConfigId: 'model-b' })
+      expect(records[0].definition.nodes[0]).not.toHaveProperty('templateId')
+    }
+    await permissionPicker.click()
+    await userEvent.keyboard('{End}{Enter}')
+    await expect.element(permissionPicker).toHaveTextContent('自定义权限')
+    await page.getByRole('button', { name: '撤销', exact: true }).click()
+    await expect.element(permissionPicker).toHaveTextContent('默认权限')
+    await page.getByRole('button', { name: '重做', exact: true }).click()
+    await expect.element(permissionPicker).toHaveTextContent('自定义权限')
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect
-      .element(page.getByRole('textbox', { name: '模型', exact: true }))
-      .toHaveValue('模型 A')
+      .poll(() => records[0]?.definition.nodes[0])
+      .toMatchObject({ permissionMode: 'custom' })
+    await view.unmount()
+    view = await renderWorkflow()
+    await page.getByRole('button', { name: '编辑工作流模板 独立对话协作', exact: true }).click()
+    await openStructure()
+    await page.getByRole('group', { name: '节点 未命名节点', exact: true }).click()
+    await expect.element(permissionPicker).toHaveTextContent('自定义权限')
     await expect
       .element(page.getByRole('button', { name: '选择模型', exact: true }))
-      .not.toBeInTheDocument()
-    await expect.element(canvasNode).toHaveTextContent('模型 A')
-    await expect.element(canvasNode).not.toHaveTextContent('审查员模板')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
-    await expect
-      .poll(() => records[0]?.definition.nodes[0])
-      .toMatchObject({
-        templateId: 'review-template',
-        modelConfigId: null
-      })
-    await templatePicker.click()
-    await userEvent.keyboard('{Home}{Enter}')
-    await expect.element(templatePicker).toHaveFocus()
-    await page.getByRole('button', { name: '选择模型', exact: true }).click()
-    await page.getByRole('option', { name: '模型 B', exact: true }).click()
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
-    await expect
-      .poll(() => records[0]?.definition.nodes[0])
-      .toMatchObject({
-        templateId: null,
-        modelConfigId: 'model-b'
-      })
-    await expect.element(canvasNode).toHaveTextContent('模型 B')
+      .toHaveTextContent('模型 B')
+    for (const [key, value] of Object.entries(getFrontendCssVariables()))
+      document.documentElement.style.setProperty(key, value)
+    await permissionPicker.click()
+    await page.screenshot({
+      path: '../../../../../.cache/workflow-authoring/conversation-permissions-light.png'
+    })
+    await view.unmount()
   })
 
   it('keeps an unavailable saved model until reselected and allows an unconfigured draft', async () => {
@@ -1443,12 +1460,14 @@ describe('native workflow editor', () => {
     definition.nodes[0].modelConfigId = 'retired-model'
     records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
     const view = await renderWorkflow()
-    await page.getByRole('button', { name: '编辑工作流 Develop and review', exact: true }).click()
+    await page
+      .getByRole('button', { name: '编辑工作流模板 Develop and review', exact: true })
+      .click()
     await openStructure()
     await configureNode('implement')
     const modelPicker = page.getByRole('button', { name: '选择模型', exact: true })
     await expect.element(modelPicker).toHaveTextContent('旧模型 · 模型不可用')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.nodes[0]).toMatchObject({ modelConfigId: 'retired-model' })
     await modelPicker.click()
@@ -1463,7 +1482,7 @@ describe('native workflow editor', () => {
     service.models = []
     records = []
     await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await openStructure()
     await addBlank()
     await expect.element(modelPicker).toBeDisabled()
@@ -1471,35 +1490,35 @@ describe('native workflow editor', () => {
     await expect
       .element(page.getByRole('group', { name: '节点 未命名节点', exact: true }))
       .toHaveTextContent('未选择模型')
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     await expect.poll(() => records[0]?.definition.nodes[0]).toMatchObject({ modelConfigId: null })
   })
 
   it('shows save issues only in an acknowledgement dialog and leaves the saved editor ready', async () => {
     await renderWorkflow()
-    await page.getByRole('button', { name: '新建工作流', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('草稿流程')
     validationIssues = [
       { code: 'empty', subject: '' },
       { code: 'entry', subject: '' },
       { code: 'exit', subject: '' }
     ]
-    await page.getByRole('button', { name: '保存工作流', exact: true }).click()
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
     const dialog = page.getByRole('alertdialog', { name: '已保存为草稿', exact: true })
     await expect.element(dialog).toHaveTextContent('请添加至少一个智能体节点。')
     await dialog.getByRole('button', { name: '知道了', exact: true }).click()
     await expect.element(dialog).not.toBeInTheDocument()
     await expect
-      .element(page.getByRole('button', { name: '保存工作流', exact: true }))
+      .element(page.getByRole('button', { name: '保存工作流模板', exact: true }))
       .toHaveFocus()
     expect(document.body.textContent).not.toContain('请添加至少一个智能体节点。')
     expect(service.request.mock.calls.map(([request]) => request.operation)).toEqual([
       'list',
       'save'
     ])
-    await page.getByRole('button', { name: '返回工作流列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
     await expect
-      .element(page.getByRole('button', { name: '编辑工作流 草稿流程', exact: true }))
+      .element(page.getByRole('button', { name: '编辑工作流模板 草稿流程', exact: true }))
       .toBeVisible()
   })
 })

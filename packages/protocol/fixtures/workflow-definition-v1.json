@@ -8,26 +8,26 @@
     {
       "id": "implement",
       "name": "implement",
-      "templateId": null,
       "modelConfigId": null,
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
       "delivers": "Deliver the result to the selected outgoing flow.",
       "x": 280,
       "y": 180,
-      "kind": "agent"
+      "kind": "agent",
+      "permissionMode": "default"
     },
     {
       "id": "review",
       "name": "review",
-      "templateId": null,
       "modelConfigId": null,
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
       "delivers": "Deliver the result to the selected outgoing flow.",
       "x": 580,
       "y": 180,
-      "kind": "agent"
+      "kind": "agent",
+      "permissionMode": "default"
     },
     {
       "id": "implement-input",

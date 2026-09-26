@@ -96,7 +96,7 @@ describe('workflow IPC contract boundary', () => {
     ).toThrow()
     const contradictory = parseWorkflowDefinition(fixture)
     if (contradictory.nodes[0].kind !== 'agent') throw new Error('Expected agent')
-    contradictory.nodes[0].templateId = 'template-review'
+    Object.assign(contradictory.nodes[0], { permissionMode: 'unknown' })
     contradictory.nodes[0].modelConfigId = 'model-override'
     expect(() =>
       server.requestWorkflows({
@@ -104,7 +104,7 @@ describe('workflow IPC contract boundary', () => {
         definition: contradictory,
         expectedRevision: 0
       })
-    ).toThrow('cannot override')
+    ).toThrow('Invalid workflow permission mode')
     expect(rpcRequest).not.toHaveBeenCalled()
     const invalidLayout = parseWorkflowDefinition(fixture)
     invalidLayout.boundaryPositions.output.x = 100001

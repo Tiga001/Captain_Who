@@ -1,4 +1,4 @@
-import { Check, ChevronDown } from 'lucide-react'
+import { Check, ChevronDown, type LucideIcon } from 'lucide-react'
 import { useCallback, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { AnchoredPopover } from '../../components/overlay/AnchoredPopover'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
@@ -6,6 +6,7 @@ import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePoint
 export interface WorkflowPickerOption {
   id: string | null
   name: string
+  icon?: LucideIcon
   detail?: string
   disabled?: boolean
 }
@@ -33,6 +34,7 @@ export function WorkflowOptionPicker({
   const listboxId = useId()
   const selectedIndex = options.findIndex((option) => option.id === value)
   const selected = options[selectedIndex] ?? options[0]!
+  const SelectedIcon = selected.icon
   const close = useCallback(() => setOpen(false), [])
 
   useDismissOnOutsidePointer(rootRef, open, close, (target) =>
@@ -101,6 +103,7 @@ export function WorkflowOptionPicker({
         onClick={() => (open ? close() : openMenu())}
         onKeyDown={(event) => handleKeyDown(event)}
       >
+        {SelectedIcon ? <SelectedIcon aria-hidden="true" /> : null}
         <span className="workflow-template-picker__identity">
           <span>{selected.name}</span>
           {showSelectedDetail && selected.detail ? <small>{selected.detail}</small> : null}
@@ -143,6 +146,7 @@ export function WorkflowOptionPicker({
                   closeAndFocus()
                 }}
               >
+                {option.icon ? <option.icon aria-hidden="true" /> : null}
                 <span className="workflow-template-picker__identity">
                   <span>{option.name}</span>
                   {option.detail ? <small>{option.detail}</small> : null}

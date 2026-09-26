@@ -1,14 +1,14 @@
 // Simplified Chinese UI translation strings.
 export const zhCNTranslations = {
-  'settings.page.workflows': '工作流',
-  'workflows.editorTitle': '编辑工作流',
+  'settings.page.workflows': '工作流模板',
+  'workflows.editorTitle': '编辑工作流模板',
   'workflows.name': '名称',
   'workflows.description': '简短描述',
   'workflows.background': '工作流公共背景',
   'workflows.structure': '编辑工作流结构',
   'workflows.templatesLoading': '正在加载子智能体模板…',
   'workflows.templatesLoadFailed': '子智能体模板加载失败，请重试后打开工作流。',
-  'workflows.settingsTitle': '工作流',
+  'workflows.settingsTitle': '工作流模板',
   'workflows.settingsDescription': '创建和编辑工作流图、节点与连线规则。',
   'configuration.invalidContextCapacityTitle': '上下文窗口不足',
   'configuration.invalidContextCapacity':

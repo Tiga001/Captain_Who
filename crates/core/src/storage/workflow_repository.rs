@@ -30,7 +30,7 @@ fn storage_error(_: impl std::fmt::Display) -> Error {
     Error::Storage("Workflow storage operation failed".into())
 }
 
-/// Validation and mutation share a transaction, including the template availability snapshot.
+/// Validation and mutation share a transaction, without depending on subagent templates.
 /// Model identities come from the service's credential-aware execution projection, never a
 /// second SQL-only interpretation of which configured models are usable.
 pub fn request(
@@ -47,25 +47,24 @@ pub fn request(
     let transaction = connection
         .transaction_with_behavior(behavior)
         .map_err(storage_error)?;
-    let templates = template_ids(&transaction)?;
     let response = match request {
         Request::List => Response {
-            records: list(&transaction, &templates, available_models)?,
+            records: list(&transaction, available_models)?,
             issues: vec![],
         },
         Request::Validate { definition } => Response {
             records: vec![],
             issues: definition
-                .validate(&templates, available_models)
+                .validate(available_models)
                 .map_err(Error::Invalid)?,
         },
         Request::Save {
             definition,
             expected_revision,
         } => {
-            // Missing templates, incomplete tasks and invalid semantic rules remain editable drafts.
+            // Missing models, incomplete tasks and invalid semantic rules remain editable drafts.
             let issues = definition
-                .validate(&templates, available_models)
+                .validate(available_models)
                 .map_err(Error::Invalid)?;
             save(
                 &transaction,
@@ -74,7 +73,7 @@ pub fn request(
                 issues.is_empty(),
             )?;
             Response {
-                records: list(&transaction, &templates, available_models)?,
+                records: list(&transaction, available_models)?,
                 issues: vec![],
             }
         }
@@ -99,7 +98,7 @@ pub fn request(
                 return Err(revision_conflict());
             }
             Response {
-                records: list(&transaction, &templates, available_models)?,
+                records: list(&transaction, available_models)?,
                 issues: vec![],
             }
         }
@@ -113,11 +112,10 @@ pub fn request(
                 &id,
                 enabled,
                 expected_revision,
-                &templates,
                 available_models,
             )?;
             Response {
-                records: list(&transaction, &templates, available_models)?,
+                records: list(&transaction, available_models)?,
                 issues: vec![],
             }
         }
@@ -126,22 +124,7 @@ pub fn request(
     Ok(response)
 }
 
-fn template_ids(connection: &Connection) -> Result<HashSet<String>, Error> {
-    let mut statement = connection
-        .prepare("SELECT template_id FROM agent_templates")
-        .map_err(storage_error)?;
-    let rows = statement
-        .query_map([], |row| row.get(0))
-        .map_err(storage_error)?;
-    rows.collect::<rusqlite::Result<HashSet<_>>>()
-        .map_err(storage_error)
-}
-
-fn list(
-    connection: &Connection,
-    templates: &HashSet<String>,
-    available_models: &HashSet<String>,
-) -> Result<Vec<Record>, Error> {
+fn list(connection: &Connection, available_models: &HashSet<String>) -> Result<Vec<Record>, Error> {
     let (count, bytes) = catalog_size(connection)?;
     if count > MAX_DEFINITIONS || bytes > MAX_CATALOG_BYTES {
         return Err(Error::Storage(
@@ -172,7 +155,7 @@ fn list(
             return Err(Error::Storage("Invalid persisted workflow record".into()));
         }
         let issues = definition
-            .validate(templates, available_models)
+            .validate(available_models)
             .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
         Ok(Record {
             definition,
@@ -248,7 +231,6 @@ fn set_enabled(
     id: &str,
     enabled: bool,
     expected_revision: u64,
-    templates: &HashSet<String>,
     available_models: &HashSet<String>,
 ) -> Result<(), Error> {
     validate_id(id)?;
@@ -277,7 +259,7 @@ fn set_enabled(
         return Err(Error::Storage("Invalid persisted workflow record".into()));
     }
     let issues = definition
-        .validate(templates, available_models)
+        .validate(available_models)
         .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
     if !issues.is_empty() {
         return Err(Error::Invalid(
