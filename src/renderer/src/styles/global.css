@@ -91,6 +91,12 @@ button {
   pointer-events: none;
 }
 
+.app-shell[data-settings-open='true'],
+.app-shell[data-settings-open='true'] * {
+  /* Opacity and inert do not remove Electron's native drag/no-drag hit regions. */
+  -webkit-app-region: initial !important;
+}
+
 .app-shell[data-translucent-sidebar='true'] {
   background: transparent;
 }

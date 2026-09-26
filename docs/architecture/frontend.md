@@ -99,7 +99,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 
 多文件夹项目的 Files 树可独立选择来源；切树保留现有预览，缓存与页面分别携带 folder id，配置变化会失效对应根缓存。Terminal 首次输入前可在同一 PTY 中切换源目录。Git Review 支持单源范围，LastTurn 额外支持所有仓库聚合；三个选择器仅在多文件夹项目显示，不修改主文件夹或冻结 Run。项目变化也会刷新空闲会话的上下文窗口预览；活跃 Run 继续只接收 Host 对本轮冻结配置发布的上下文事件。历史 FileChange、Office 产物和读图卡片向 Main 传递 assistantMessageId，由 Rust Core 使用该轮冻结的工作区解析路径及复验目录实体；缺失快照、未知 alias 或根身份变化均不可回退到当前项目目录。
 
-设置页以覆盖主工作区的全屏视图呈现。`AppShellWorkspace` 在设置打开时保持挂载，但设为 `inert` 和 `aria-hidden`，从而保留会话、终端和浏览器状态，同时隔离焦点和辅助技术树。
+设置页以覆盖主工作区的全屏视图呈现。`AppShellWorkspace` 在设置打开时保持挂载，但设为 `inert` 和 `aria-hidden`，从而保留会话、终端和浏览器状态，同时隔离焦点和辅助技术树。隐藏工作区及其后代的 `-webkit-app-region` 必须重置为 `initial`，同时移除原生 `drag` 和 `no-drag` 区域；仅设置透明度、`pointer-events` 和 `inert` 不能阻止后台标题栏截获设置页点击。设置页保留自己的窗口拖动区域，流程编辑器显式使用 `no-drag`。
 
 会话视图分两种能力面：
 

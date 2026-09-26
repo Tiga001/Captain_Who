@@ -8,6 +8,8 @@ import {
   getVisibleActiveConversationId
 } from '../AppShellWorkspace'
 import '../../styles/global.css'
+import '../../features/workflows/workflows.css'
+import '../../features/workflows/project/workflowMonitor.css'
 
 describe('AppShellWorkspace', () => {
   it('removes covered content from painting without unmounting it or losing local state', async () => {
@@ -102,6 +104,57 @@ describe('AppShellWorkspace', () => {
     expect(right.hasAttribute('aria-hidden')).toBe(false)
     expect(mainLifecycle.mock.calls).toEqual([['mount']])
     expect(rightLifecycle.mock.calls).toEqual([['mount']])
+  })
+
+  it('removes hidden workflow native hit regions while preserving settings controls and workspace state', async () => {
+    const lifecycleSpy = vi.fn()
+    const renderShell = (settingsOpen: boolean) => (
+      <>
+        <AppShellWorkspace className="app-shell" settingsOpen={settingsOpen}>
+          <header className="workflow-monitor__header" data-testid="workflow-drag-region">
+            <button type="button" className="workflow-monitor__back">
+              workflow back
+            </button>
+          </header>
+          <StatefulWorkspaceChild onLifecycle={lifecycleSpy} />
+        </AppShellWorkspace>
+        {settingsOpen ? (
+          <header className="workflow-page-header" data-testid="settings-drag-region">
+            <button type="button" className="workflow-icon-button">
+              settings back
+            </button>
+          </header>
+        ) : null}
+      </>
+    )
+    const screen = await render(renderShell(false))
+    const workflowHeader = screen.getByTestId('workflow-drag-region').element()
+    const workflowButton = screen.getByRole('button', { name: 'workflow back' }).element()
+    const appRegion = (element: Element) =>
+      getComputedStyle(element).getPropertyValue('-webkit-app-region')
+    expect(appRegion(workflowHeader)).toBe('drag')
+    expect(appRegion(workflowButton)).toBe('no-drag')
+    await screen.getByRole('button', { name: 'count 0' }).click()
+
+    await screen.rerender(renderShell(true))
+
+    // Opacity, pointer-events and inert alone do not remove Electron's native hit regions.
+    // Hidden no-drag regions must also disappear so they cannot cancel the settings drag strip.
+    expect(appRegion(workflowHeader)).toBe('none')
+    expect(appRegion(workflowButton)).toBe('none')
+    expect(appRegion(screen.getByTestId('settings-drag-region').element())).toBe('drag')
+    expect(appRegion(screen.getByRole('button', { name: 'settings back' }).element())).toBe(
+      'no-drag'
+    )
+    expect(lifecycleSpy.mock.calls).toEqual([['mount']])
+
+    await screen.rerender(renderShell(false))
+
+    expect(screen.getByTestId('workflow-drag-region').element()).toBe(workflowHeader)
+    expect(appRegion(workflowHeader)).toBe('drag')
+    expect(appRegion(workflowButton)).toBe('no-drag')
+    await expect.element(screen.getByRole('button', { name: 'count 1' })).toBeVisible()
+    expect(lifecycleSpy.mock.calls).toEqual([['mount']])
   })
 
   it('suppresses only the visual conversation selection while scheduled is selected', () => {
