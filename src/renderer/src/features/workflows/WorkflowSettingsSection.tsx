@@ -50,6 +50,19 @@ import {
 } from './workflowHistory'
 import './workflows.css'
 
+function templateUsageNames(
+  usages: WorkflowTemplateUsage[] | undefined,
+  templateId: string
+): string[] {
+  return [
+    ...new Set(
+      (usages?.find((item) => item.templateId === templateId)?.instances ?? [])
+        .map((instance) => instance.name.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
 type WorkflowDeleteTarget = {
   kind: 'template' | 'draft'
   id: string
@@ -94,6 +107,8 @@ export function WorkflowSettingsSection({
   const [editorHidden, setEditorHidden] = useState(false)
   const afterClose = useRef<(() => void) | undefined>(undefined)
   const [pendingDelete, setPendingDelete] = useState<WorkflowDeleteTarget | null>(null)
+  const [usages, setUsages] = useState<WorkflowTemplateUsage[]>([])
+  const [deleteBlockedNames, setDeleteBlockedNames] = useState<string[] | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const sequence = useRef(0)
   const tabId = useId()
@@ -128,6 +143,7 @@ export function WorkflowSettingsSection({
         setEditingDrafts(result.drafts ?? [])
         setInvalidRecords(result.invalidRecords ?? [])
         setInvalidDrafts(result.invalidDrafts ?? [])
+        setUsages(result.usages ?? [])
       }
     } catch (loadError) {
       if (request === sequence.current) {
@@ -219,6 +235,7 @@ export function WorkflowSettingsSection({
     setEditingDrafts(response.drafts ?? [])
     setInvalidRecords(response.invalidRecords ?? [])
     setInvalidDrafts(response.invalidDrafts ?? [])
+    setUsages(response.usages ?? [])
   }
   const handleSaveError = async (saveError: unknown) => {
     const message =
@@ -385,7 +402,9 @@ export function WorkflowSettingsSection({
       redo,
       editing,
       busy,
-      modal: Boolean(saveIssues || pendingDelete || confirmDiscard || usagePrompt)
+      modal: Boolean(
+        saveIssues || pendingDelete || confirmDiscard || usagePrompt || deleteBlockedNames
+      )
     }
   })
   useEffect(() => {
@@ -822,6 +841,24 @@ export function WorkflowSettingsSection({
           }}
         />
       ) : null}
+      {deleteBlockedNames ? (
+        <ConfirmationDialog
+          title={text('deleteBlockedTitle')}
+          description={
+            deleteBlockedNames.length
+              ? `${text('deleteBlockedInUse')}\n${deleteBlockedNames.map((name) => `• ${name}`).join('\n')}`
+              : text('deleteBlockedInUseFallback')
+          }
+          descriptionClassName="workflow-save-issues-description"
+          dialogRole="alertdialog"
+          cancelLabel={text('close')}
+          confirmLabel={text('acknowledge')}
+          confirmVariant="primary"
+          showCancelButton={false}
+          onCancel={() => setDeleteBlockedNames(null)}
+          onConfirm={() => setDeleteBlockedNames(null)}
+        />
+      ) : null}
       {pendingDelete ? (
         <ConfirmationDialog
           title={text(pendingDelete.kind === 'draft' ? 'deleteDraftTitle' : 'deleteTitle')}
@@ -862,6 +899,24 @@ export function WorkflowSettingsSection({
                 }
               }
             } catch (deleteError) {
+              const message =
+                deleteError && typeof deleteError === 'object' && 'message' in deleteError
+                  ? String(deleteError.message)
+                  : ''
+              const templateId = pendingDelete.id
+              setPendingDelete(null)
+              if (message.includes('workflow_template_in_use')) {
+                let names = templateUsageNames(usages, templateId)
+                try {
+                  const response = await requestWorkflows({ operation: 'list' })
+                  acceptResponse(response)
+                  names = templateUsageNames(response.usages, templateId)
+                } catch {
+                  // The conflict already proves the template is in use.
+                }
+                setDeleteBlockedNames(names)
+                return
+              }
               setConflict(
                 Boolean(
                   deleteError &&
@@ -872,7 +927,6 @@ export function WorkflowSettingsSection({
               )
               setError(true)
               setErrorDetail(workflowErrorDetail(deleteError))
-              setPendingDelete(null)
             } finally {
               busyRef.current = false
               onSavingChange?.(false)

@@ -89,6 +89,9 @@ beforeEach(async () => {
       ]
     }
     if (request.operation === 'delete') {
+      if (usages.some((item) => item.templateId === request.id && item.instances.length > 0)) {
+        throw Object.assign(new Error('workflow_template_in_use'), { code: -32009 })
+      }
       const stored =
         records.find((item) => item.definition.id === request.id) ??
         invalidRecords.find((item) => item.id === request.id)
@@ -259,6 +262,35 @@ describe('workflow template lifecycle', () => {
     invalidRecords = []
     await page.getByRole('button', { name: '复制模板 发布验收', exact: true }).click()
     await expect.element(unavailable).not.toBeInTheDocument()
+  })
+
+  it('explains a template still in use with an acknowledgement dialog instead of a page error', async () => {
+    useTemplate()
+    await view()
+    const title = page.getByRole('heading', { name: '工作流模板', exact: true })
+    expect(
+      getComputedStyle(title.element().closest('section')!).marginTop
+    ).toBe('0px')
+    await page.getByRole('button', { name: '删除工作流模板 发布验收', exact: true }).click()
+    await page
+      .getByRole('dialog', { name: '删除这个工作流？', exact: true })
+      .getByRole('button', { name: '删除工作流模板', exact: true })
+      .click()
+    const warning = page.getByRole('alertdialog', { name: '无法删除工作流模板', exact: true })
+    await expect.element(warning).toHaveTextContent('功能验收')
+    await expect.element(warning).toHaveTextContent('独立调研')
+    expect(page.getByRole('alert').query()).toBeNull()
+    expect(records).toHaveLength(1)
+    await page.screenshot({
+      element: warning.element() as HTMLElement,
+      path: '../../../../../.cache/workflow-authoring/template-in-use-warning.png'
+    })
+    await warning.getByRole('button', { name: '知道了', exact: true }).click()
+    await expect.element(warning).not.toBeInTheDocument()
+    await expect
+      .element(page.getByRole('button', { name: '编辑工作流模板 发布验收', exact: true }))
+      .toBeVisible()
+    expect(page.getByRole('alert').query()).toBeNull()
   })
 
   it('shows returned load diagnostics and clears them after a successful retry', async () => {

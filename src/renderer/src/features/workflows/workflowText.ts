@@ -114,6 +114,11 @@ const english = {
   acknowledge: 'Got it',
   close: 'Close',
   deleteTitle: 'Delete this workflow?',
+  deleteBlockedTitle: 'Cannot delete this workflow template',
+  deleteBlockedInUse:
+    'This template is used by these workflows. Remove them before deleting the template.',
+  deleteBlockedInUseFallback:
+    'This template is still used by a workflow. Remove those workflows before deleting the template.',
   deleteDescription: 'The saved definition and its graph will be deleted.',
   discardTitle: 'Discard unsaved changes?',
   discardDescription: 'Your changes since opening this editor have not been saved.',
@@ -300,6 +305,9 @@ const chinese: Record<WorkflowTextKey, string> = {
   acknowledge: '知道了',
   close: '关闭',
   deleteTitle: '删除这个工作流？',
+  deleteBlockedTitle: '无法删除工作流模板',
+  deleteBlockedInUse: '这个模板正在被以下工作流使用。请先移除这些工作流，再删除模板。',
+  deleteBlockedInUseFallback: '这个模板正在被工作流使用。请先移除使用它的工作流，再删除模板。',
   deleteDescription: '将删除已保存的工作流定义及其流程图。',
   discardTitle: '放弃未保存的修改？',
   discardDescription: '本次打开编辑器后的修改尚未保存。',

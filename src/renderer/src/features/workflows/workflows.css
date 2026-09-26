@@ -234,6 +234,9 @@
   flex-shrink: 0;
   border-bottom: 1px solid var(--mc-color-border-subtle);
 }
+.workflows-settings > .workflows-settings__library {
+  margin-top: 0;
+}
 .workflows-settings__library {
   display: grid;
   gap: 16px;
@@ -250,6 +253,7 @@
   color: var(--settings-content-title-color);
   font-size: var(--mc-font-size-settings-title);
   font-weight: var(--mc-font-weight-strong);
+  letter-spacing: 0;
   line-height: var(--mc-line-height-title);
 }
 .workflows-settings__create {
