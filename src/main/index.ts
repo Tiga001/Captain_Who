@@ -266,10 +266,18 @@ function installMenuBarRunningConversations(): void {
   // The brand mark is designed for large surfaces and contains generous transparent padding.
   // Crop that padding before the status-bar resize so its boat reads at the same visual weight as
   // neighbouring menu-bar icons.
-  const icon = sourceIcon
-    .crop({ height: 392, width: 416, x: 48, y: 62 })
-    .resize({ height: 15, width: 15 })
-  icon.setTemplateImage(false)
+  const cropped = sourceIcon.crop({ height: 392, width: 416, x: 48, y: 62 })
+  const icon = nativeImage.createEmpty()
+  for (const scaleFactor of [1, 2]) {
+    const size = 15 * scaleFactor
+    icon.addRepresentation({
+      buffer: cropped.resize({ height: size, width: size, quality: 'best' }).toPNG(),
+      scaleFactor
+    })
+  }
+  // Template images keep only the alpha mask, so macOS tints the boat black or white to match the
+  // current menu-bar appearance, including wallpaper-tinted bars and highlighted states.
+  icon.setTemplateImage(true)
   menuBarTray = new Tray(icon)
   menuBarTray.setToolTip('Captain Who')
   const controller = new MenuBarRunningConversationsController({

@@ -115,7 +115,7 @@ Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permis
 macOS 上 Main 还拥有两个系统级入口，只投影用户可见的根 Conversation 摘要，不向原生菜单暴露 Agent 内部身份：
 
 - **Dock 菜单**（`DockRecentConversationsController`）：最多展示 3 项最近聊天，并提供“更多”子菜单列出其余项；每 5 秒按 Conversation 元数据签名刷新。
-- **菜单栏托盘**（`MenuBarRunningConversationsController`）：列出仍有活动 Run（`queued`、`running`、`waiting_for_approval` 或 `waiting_for_user_input`，或存在 pending assistant 回复）的根聊天，并提供“退出 Captain Who”；除 5 秒定时刷新外，还由根 Agent 事件合并触发刷新。托盘图标是深色品牌标记的裁剪版本，按 15 px 状态栏尺寸渲染。
+- **菜单栏托盘**（`MenuBarRunningConversationsController`）：列出仍有活动 Run（`queued`、`running`、`waiting_for_approval` 或 `waiting_for_user_input`，或存在 pending assistant 回复）的根聊天，并提供“退出 Captain Who”；除 5 秒定时刷新外，还由根 Agent 事件合并触发刷新。托盘图标是品牌标记的裁剪版本，按 15 pt 状态栏尺寸提供 1x/2x 两种分辨率，并设为 macOS 模板图像：系统只使用透明度轮廓，随菜单栏浅色/深色外观自动显示为黑色或白色。
 
 两个控制器都在 Core Server 启动后安装、在 `will-quit` 中停止（清理定时器、解除事件订阅、销毁托盘）；单次刷新失败保留上一个菜单并在下一周期重试，不向用户暴露内部错误。
 
