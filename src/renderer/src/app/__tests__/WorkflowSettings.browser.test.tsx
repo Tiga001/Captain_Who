@@ -139,6 +139,112 @@ beforeEach(async () => {
 })
 
 describe('native workflow editor', () => {
+  it('copies node settings through native clipboard events, pastes repeatedly and supports undo', async () => {
+    const definition = parseWorkflowDefinition(fixture)
+    const original = definition.nodes.find((node) => node.kind === 'agent')!
+    if (original.kind !== 'agent') throw new Error('Expected agent')
+    Object.assign(original, {
+      permissionMode: 'full',
+      modelConfigId: 'model-b',
+      receives: '原始文案',
+      task: '润色文案',
+      delivers: '交付文案'
+    })
+    records = [{ definition, revision: 1, updatedAt: 1, enabled: false, issues: [] }]
+    await renderWorkflow()
+    await page
+      .getByRole('button', { name: `编辑工作流模板 ${definition.name}`, exact: true })
+      .click()
+    await openStructure()
+    await page.getByRole('group', { name: `节点 ${original.name}`, exact: true }).click()
+    const clipboard = new DataTransfer()
+    const copy = new ClipboardEvent('copy', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: clipboard
+    })
+    document.activeElement!.dispatchEvent(copy)
+    expect(copy.defaultPrevented).toBe(true)
+    expect(clipboard.getData('text/plain')).toContain('润色文案')
+    const paste = () => {
+      const event = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard
+      })
+      document.querySelector('.workflow-canvas')!.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+    }
+    const count = () => document.querySelectorAll('[data-workflow-node-id]').length
+    paste()
+    await expect.poll(count).toBe(definition.nodes.length + 1)
+    paste()
+    await expect.poll(count).toBe(definition.nodes.length + 2)
+    await page.getByRole('button', { name: '撤销', exact: true }).click()
+    await expect.poll(count).toBe(definition.nodes.length + 1)
+    await page.getByRole('button', { name: '重做', exact: true }).click()
+    await expect.poll(count).toBe(definition.nodes.length + 2)
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+    await expect.poll(() => records[0].revision).toBe(2)
+    const saved = records[0].definition
+    const copies = saved.nodes.slice(definition.nodes.length)
+    expect(new Set(saved.nodes.map((node) => node.id)).size).toBe(saved.nodes.length)
+    for (const node of copies) {
+      expect(node).toEqual({ ...original, id: node.id, x: node.x, y: node.y })
+      expect({ x: node.x, y: node.y }).not.toEqual({ x: original.x, y: original.y })
+    }
+    expect(copies[0].x !== copies[1].x || copies[0].y !== copies[1].y).toBe(true)
+    expect(saved.flows.map(({ id, source, target }) => ({ id, source, target }))).toEqual(
+      definition.flows.map(({ id, source, target }) => ({ id, source, target }))
+    )
+
+    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
+    await page.getByRole('textbox', { name: '名称', exact: true }).fill('另一个模板')
+    await openStructure()
+    clipboard.clearData('application/x-captain-workflow-node')
+    paste()
+    await expect.poll(count).toBe(1)
+    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+    await expect.poll(() => records[0].definition.name).toBe('另一个模板')
+    expect(records[0].definition.nodes[0]).toMatchObject({
+      name: original.name,
+      modelConfigId: 'model-b',
+      permissionMode: 'full',
+      receives: '原始文案',
+      task: '润色文案',
+      delivers: '交付文案'
+    })
+    expect(records[0].definition.flows).toEqual([])
+  })
+
+  it('leaves text editing clipboard actions alone and ignores ordinary pasted text', async () => {
+    await renderWorkflow()
+    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
+    await openStructure()
+    await addBlank()
+    const clipboard = new DataTransfer()
+    clipboard.setData('text/plain', 'ordinary text')
+    const input = document.querySelector('.workflow-graph-inspector textarea')!
+    for (const type of ['copy', 'paste']) {
+      const event = new ClipboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard
+      })
+      input.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+    }
+    const event = new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: clipboard
+    })
+    document.querySelector('.workflow-canvas')!.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.querySelectorAll('[data-workflow-node-id]')).toHaveLength(1)
+  })
+
   it('edits gate names in the toolbar and shares deletion controls across all selections', async () => {
     await renderWorkflow()
     await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()

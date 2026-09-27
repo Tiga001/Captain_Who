@@ -2,7 +2,7 @@ import { Tooltip } from '../../components/overlay/Tooltip'
 import { AccountAvatar } from '../auth/AccountAvatar'
 import { useAccountAuth } from '../auth/AccountAuthContext'
 import { UserRound, Triangle, Link2, Hand, Plus, Search, Settings, Trash2, X } from 'lucide-react'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ClipboardEvent } from 'react'
 import type {
   WorkflowDefinition,
   WorkflowEndpoint,
@@ -28,6 +28,12 @@ import {
   WORKFLOW_DRAG_TYPE
 } from './workflowAuthoring'
 import { WorkflowCanvas, type WorkflowSelection } from './WorkflowCanvas'
+import {
+  WORKFLOW_NODE_CLIPBOARD_TYPE,
+  serializeWorkflowNode,
+  readWorkflowNodeClipboard,
+  duplicateWorkflowNode
+} from './workflowNodeClipboard'
 import { AgentAvatar } from '../agentCollaboration/AgentAvatar'
 import { WorkflowGateEditor } from './WorkflowGateEditor'
 import { CHAT_PERMISSION_PRESENTATIONS } from '../chat/chatPermissionPresentation'
@@ -357,6 +363,54 @@ export function WorkflowGraphEditor({
   return (
     <div
       className="workflow-graph-editor"
+      onCopy={(event) => {
+        if (!selectedNode || !canUseNodeClipboard(event)) return
+        if (window.getSelection()?.toString()) return
+        const value = serializeWorkflowNode(selectedNode)
+        event.clipboardData.setData(WORKFLOW_NODE_CLIPBOARD_TYPE, value)
+        event.clipboardData.setData('text/plain', value)
+        event.preventDefault()
+      }}
+      onPaste={(event) => {
+        if (graph.nodes.length >= 128 || !canUseNodeClipboard(event)) return
+        const source = readWorkflowNodeClipboard(
+          event.clipboardData.getData(WORKFLOW_NODE_CLIPBOARD_TYPE) ||
+            event.clipboardData.getData('text/plain')
+        )
+        if (!source) return
+        event.preventDefault()
+        const dimensions = workflowNodeSize(source)
+        const origin = canvasOrigin(graphBounds(graph))
+        const area = canvasRef.current
+        const left = graph.viewport.x / graph.viewport.zoom - origin.x
+        const top = graph.viewport.y / graph.viewport.zoom - origin.y
+        const width = (area?.clientWidth ?? 800) / graph.viewport.zoom
+        const height = (area?.clientHeight ?? 600) / graph.viewport.zoom
+        const nearby = { x: source.x + 32, y: source.y + 32 }
+        const visible =
+          nearby.x >= left &&
+          nearby.x + dimensions.width <= left + width &&
+          nearby.y >= top &&
+          nearby.y + dimensions.height <= top + height
+        const position = nearestOpenPosition(
+          [...graph.nodes, graph.boundaryPositions.input],
+          visible
+            ? nearby
+            : {
+                x: left + (width - dimensions.width) / 2,
+                y: top + (height - dimensions.height) / 2
+              },
+          dimensions
+        )
+        const node = duplicateWorkflowNode(source, position)
+        onChange((current) =>
+          current.nodes.length >= 128 ? current : { ...current, nodes: [...current.nodes, node] }
+        )
+        cancelConnection()
+        setPanel(null)
+        select({ kind: 'node', id: node.id })
+        focusCanvas()
+      }}
       onKeyDown={(event) => {
         if (event.defaultPrevented) return
         if (event.key === 'Escape') {
@@ -858,6 +912,18 @@ export function WorkflowGraphEditor({
         ) : null}
       </div>
     </div>
+  )
+}
+
+function canUseNodeClipboard(event: ClipboardEvent<HTMLDivElement>): boolean {
+  const target = event.target
+  return (
+    !event.defaultPrevented &&
+    target instanceof HTMLElement &&
+    event.currentTarget.contains(target) &&
+    !target.isContentEditable &&
+    !target.closest('input, textarea, select, [inert], fieldset:disabled') &&
+    !document.querySelector('[aria-modal="true"]')
   )
 }
 
