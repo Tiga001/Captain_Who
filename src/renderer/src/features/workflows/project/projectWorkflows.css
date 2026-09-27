@@ -394,3 +394,110 @@
     gap: 4px;
   }
 }
+
+/* The sidebar can be narrow even when the application window is wide. */
+.workflow-sidebar-page {
+  container: workflow-sidebar / inline-size;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.workflow-sidebar-page > .project-workflows,
+.workflow-sidebar-page > .workflow-monitor {
+  flex: 1;
+}
+.workflow-sidebar-page .project-workflows__header {
+  flex-wrap: wrap;
+  min-height: 56px;
+  padding: 12px 16px;
+  -webkit-app-region: no-drag;
+}
+.workflow-sidebar-page .project-workflows--editing {
+  padding-top: 0;
+}
+.workflow-sidebar-page .project-workflows__binding-toolbar {
+  flex-wrap: wrap;
+  -webkit-app-region: no-drag;
+}
+.workflow-sidebar-page .project-workflows__template-select,
+.workflow-sidebar-page .project-workflows__project-select {
+  flex: 1;
+}
+.workflow-sidebar-page .project-workflows__notice {
+  flex-wrap: wrap;
+  padding-inline: 16px;
+  overflow-wrap: anywhere;
+}
+@container workflow-sidebar (max-width: 760px) {
+  .workflow-sidebar-page .project-workflows__header {
+    align-items: flex-start;
+  }
+  .workflow-sidebar-page .project-workflows__actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+  .workflow-sidebar-page .project-workflows__actions > button {
+    flex: 1 1 150px;
+    min-width: 0;
+  }
+  .workflow-sidebar-page .project-workflows__binding-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 12px;
+  }
+  .workflow-sidebar-page .project-workflows__binding-actions {
+    justify-content: flex-end;
+  }
+  .workflow-sidebar-page .project-workflows__commit-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    margin-left: 0;
+  }
+}
+@container workflow-sidebar (max-width: 600px) {
+  .workflow-sidebar-page .project-workflows__library {
+    padding: 12px;
+  }
+  .workflow-sidebar-page .project-workflows__instance {
+    display: grid;
+    grid-template-columns: 5px minmax(0, 1fr) 36px repeat(3, 30px);
+    gap: 8px;
+    padding: 10px;
+  }
+  .workflow-sidebar-page .project-workflows__color-dot {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .workflow-sidebar-page .project-workflows__instance-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .workflow-sidebar-page .project-workflows__status {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .workflow-sidebar-page .project-workflows__empty {
+    min-height: 0;
+    padding: 24px 16px;
+  }
+}
+@container workflow-sidebar (max-width: 420px) {
+  .workflow-sidebar-page .project-workflows__binding-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .workflow-sidebar-page .project-workflows__template-field,
+  .workflow-sidebar-page .project-workflows__binding-toolbar > label,
+  .workflow-sidebar-page .project-workflows__project-field {
+    grid-column: 1 / -1;
+  }
+  .workflow-sidebar-page .project-workflows__binding-actions {
+    justify-content: flex-start;
+  }
+  .workflow-sidebar-page .project-workflows__commit-actions {
+    grid-column: 2;
+  }
+}

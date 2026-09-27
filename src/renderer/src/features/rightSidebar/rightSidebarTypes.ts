@@ -5,7 +5,8 @@ import type { Translate } from '../../config/translationFormat'
 import type { AgentSummary, GitReviewTarget } from '@mycopilot/protocol'
 import type { CollaborationTimelineActivity } from '../agentCollaboration/collaborationTimelineModel'
 
-export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review' | 'agent-center'
+export type RightSidebarModuleId =
+  'terminal' | 'browser' | 'files' | 'git-review' | 'agent-center' | 'workflows'
 
 export type RightSidebarSurfaceKind = 'react' | 'webview'
 
@@ -66,6 +67,11 @@ export interface RightSidebarPageUpdate {
 }
 
 export type RightSidebarModulePageState =
+  | {
+      kind: 'workflows'
+      instanceId: string | null
+      navigationId?: number
+    }
   | {
       kind: 'browser-surface'
       surfaceId: string
@@ -161,6 +167,11 @@ export interface RightSidebarAgentNavigationRequest {
   agentId: string
   requestId: number
   rootConversationId: string
+}
+
+export interface RightSidebarWorkflowNavigationRequest {
+  instanceId: string | null
+  requestId: number
 }
 
 export interface RightSidebarModuleNavigationRequest {

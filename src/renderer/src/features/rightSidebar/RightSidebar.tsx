@@ -16,6 +16,7 @@ import { RightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import { useRightSidebarDocumentVisibility } from './rightSidebarActivity'
 import { RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
 import { useRightSidebarModules } from './useRightSidebarModules'
+import { useRightSidebarWorkflowNavigation } from './useRightSidebarWorkflowNavigation'
 import { createRightSidebarWorkspaceSessionKey } from './rightSidebarWorkspace'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import type {
@@ -25,7 +26,9 @@ import type {
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
   RightSidebarModuleNavigationRequest,
+  RightSidebarModuleRenderProps,
   RightSidebarReviewNavigationRequest,
+  RightSidebarWorkflowNavigationRequest,
   RightSidebarWorkspaceReferenceNavigationRequest
 } from './rightSidebarTypes'
 import { useRightSidebarPlatform } from './useRightSidebarPlatform'
@@ -38,6 +41,7 @@ import './RightSidebar.css'
 
 interface RightSidebarProps {
   activeConversationId?: string | null
+  activeWorkflow?: { id: string; name: string; color: string } | null
   agentNavigationRequest?: RightSidebarAgentNavigationRequest | null
   browserSurfaceCommand?: BrowserSurfaceCommand | null
   capabilities?: RightSidebarCapabilities
@@ -54,9 +58,13 @@ interface RightSidebarProps {
   onOpenAgentRootConversation?: (conversationId: string) => void
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   onToggleMaximized: () => void
+  onBeforeWorkflowNavigate?: (proceed: () => void) => void
+  onWorkflowVisibilityChange?: (visible: boolean) => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
   workspaceReferenceNavigationRequest?: RightSidebarWorkspaceReferenceNavigationRequest | null
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
+  renderWorkflow?: (context: RightSidebarModuleRenderProps) => ReactNode
+  workflowNavigationRequest?: RightSidebarWorkflowNavigationRequest | null
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
   projectWorkspaceRevisions?: Readonly<Record<string, string>>
@@ -100,6 +108,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 
 export const RightSidebar = memo(function RightSidebar({
   activeConversationId,
+  activeWorkflow,
   agentNavigationRequest,
   browserSurfaceCommand,
   capabilities,
@@ -116,9 +125,13 @@ export const RightSidebar = memo(function RightSidebar({
   onOpenAgentRootConversation,
   onOpenBrowserSettings,
   onToggleMaximized,
+  onBeforeWorkflowNavigate,
+  onWorkflowVisibilityChange,
   reviewNavigationRequest,
   workspaceReferenceNavigationRequest,
   renderAgentObserver,
+  renderWorkflow,
+  workflowNavigationRequest,
   workspaceKey,
   workspaceKeys,
   projectWorkspaceRevisions,
@@ -150,12 +163,13 @@ export const RightSidebar = memo(function RightSidebar({
   const { childAgents, modules } = useRightSidebarModules({
     activeConversationId,
     collaborationSnapshot,
-    configuredModules
+    configuredModules,
+    workflowEnabled: !!renderWorkflow
   })
   const {
     activatePage,
     activePageId,
-    availableModules,
+    availableModules: registeredAvailableModules,
     closePage,
     moduleAvailability,
     openModule: openPlatformModule,
@@ -171,6 +185,20 @@ export const RightSidebar = memo(function RightSidebar({
     workspaceKeys,
     workspaceName,
     workspacePath
+  })
+  // Membership controls the entry point, never the lifetime of an already open workflow tab.
+  const availableModules = useMemo(
+    () =>
+      registeredAvailableModules.filter((module) => module.id !== 'workflows' || !!activeWorkflow),
+    [activeWorkflow, registeredAvailableModules]
+  )
+  const { openWorkflow, closeWorkflow } = useRightSidebarWorkflowNavigation({
+    enabled: !!renderWorkflow,
+    pages,
+    request: workflowNavigationRequest,
+    onBeforeNavigate: onBeforeWorkflowNavigate,
+    openModule: openPlatformModule,
+    closePage
   })
   const [agentBrowserSurfaces, setAgentBrowserSurfaces] = useState<ReadonlyMap<string, string>>(
     () => new Map()
@@ -402,6 +430,12 @@ export const RightSidebar = memo(function RightSidebar({
   // `data-right-open=false` is the layout's final visibility authority, including while the
   // maximize preference remains set for a later reopen.
   const sidebarVisible = isOpen && isWorkspaceVisible
+  const workflowVisible =
+    sidebarVisible &&
+    pages.some((page) => page.id === activePageId && page.moduleId === 'workflows')
+  useEffect(() => {
+    onWorkflowVisibilityChange?.(workflowVisible)
+  }, [onWorkflowVisibilityChange, workflowVisible])
   const hasForegroundBrowser =
     sidebarVisible &&
     documentVisible &&
@@ -421,7 +455,8 @@ export const RightSidebar = memo(function RightSidebar({
       onOpenProfile,
       onOpenAgentRootConversation,
       onOpenBrowserSettings,
-      renderAgentObserver
+      renderAgentObserver,
+      renderWorkflow
     }),
     [
       projects,
@@ -436,6 +471,7 @@ export const RightSidebar = memo(function RightSidebar({
       onOpenAgentRootConversation,
       onOpenBrowserSettings,
       renderAgentObserver,
+      renderWorkflow,
       workspaceKey
     ]
   )
@@ -462,7 +498,10 @@ export const RightSidebar = memo(function RightSidebar({
 
   const openModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
-      if (moduleId === 'agent-center') {
+      if (moduleId === 'workflows') {
+        if (!activeWorkflow) return
+        openWorkflow(activeWorkflow.id)
+      } else if (moduleId === 'agent-center') {
         if (!activeConversationId || childAgents.length === 0) return
         openPlatformModule(moduleId, {
           kind: 'agent-center',
@@ -474,7 +513,14 @@ export const RightSidebar = memo(function RightSidebar({
       }
       closeTransientUi()
     },
-    [activeConversationId, childAgents.length, closeTransientUi, openPlatformModule]
+    [
+      activeConversationId,
+      activeWorkflow,
+      childAgents.length,
+      closeTransientUi,
+      openPlatformModule,
+      openWorkflow
+    ]
   )
 
   useEffect(() => {
@@ -634,7 +680,11 @@ export const RightSidebar = memo(function RightSidebar({
             }}
             onClosePage={(pageId) => {
               if (pageId === activePageId && hasForegroundBrowser) clearCurrentBrowserSelection()
-              closePage(pageId)
+              if (pages.some((page) => page.id === pageId && page.moduleId === 'workflows')) {
+                closeWorkflow(pageId)
+              } else {
+                closePage(pageId)
+              }
             }}
             onMenuOpenChange={setIsModuleMenuOpen}
             onOpenModule={openModule}

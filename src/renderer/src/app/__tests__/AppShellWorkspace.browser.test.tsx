@@ -160,6 +160,10 @@ describe('AppShellWorkspace', () => {
   it('suppresses only the visual conversation selection while scheduled is selected', () => {
     expect(getVisibleActiveConversationId('conversation', 'conversation-1')).toBe('conversation-1')
     expect(getVisibleActiveConversationId('scheduled', 'conversation-1')).toBeNull()
+    expect(getVisibleActiveConversationId('conversation', 'conversation-1', true)).toBeNull()
+    expect(getVisibleActiveConversationId('conversation', 'conversation-1', false)).toBe(
+      'conversation-1'
+    )
   })
 })
 

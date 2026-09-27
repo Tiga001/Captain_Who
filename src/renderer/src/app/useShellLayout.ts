@@ -181,6 +181,7 @@ export function useShellLayout() {
     leftWidth: layout.leftWidth,
     openBottomPanel,
     openRightSidebar,
+    setRightSidebarMaximized: setRightMaximized,
     rightMaximized,
     rightOpen: layout.rightOpen,
     rightResizeMetrics,

@@ -32,6 +32,7 @@ export interface WorkflowsPageProps {
   onBusyChange?: (busy: boolean) => void
   initialMonitorId?: string | null
   onMonitorChange?: (instanceId: string | null) => void
+  onTitleChange?: (title: string) => void
   onOpenConversation?: (conversationId: string) => void
 }
 
@@ -83,6 +84,7 @@ export function WorkflowsPage({
   onBusyChange,
   initialMonitorId,
   onMonitorChange,
+  onTitleChange,
   onOpenConversation
 }: WorkflowsPageProps) {
   const { language } = useFrontendConfig()
@@ -122,6 +124,13 @@ export function WorkflowsPage({
   const [pendingSync, setPendingSync] = useState<WorkflowResponse | null>(null)
   const requestGeneration = useRef(0)
   const dirty = !!draft && draftKey(draft) !== draft.baseline
+  const pageTitle = monitorId
+    ? (instances.find((instance) => instance.id === monitorId)?.name ?? t('工作流', 'Workflows'))
+    : draft?.name.trim() || t('工作流', 'Workflows')
+
+  useEffect(() => {
+    onTitleChange?.(pageTitle)
+  }, [onTitleChange, pageTitle])
 
   useEffect(() => {
     onDirtyChange?.(dirty)

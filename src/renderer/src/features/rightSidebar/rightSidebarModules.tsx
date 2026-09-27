@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useCallback } from 'react'
-import { Bot, FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
+import { Bot, FileDiff, FolderOpen, Globe2, Network, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type { BrowserPageMetadata } from '../browser/browserTypes'
 import { browserSurfaceIdForPage } from '../browser/browserSurface'
@@ -380,6 +380,11 @@ function renderAgentCenterModule({ onPageUpdate, page, t }: RightSidebarModuleRe
   )
 }
 
+function WorkflowModuleSurface(props: RightSidebarModuleRenderProps) {
+  const { renderWorkflow } = useRightSidebarRuntimeContext()
+  return renderWorkflow?.(props) ?? null
+}
+
 function createWorkspaceFileOpenRequest(
   path: string,
   markdownAnchor?: string,
@@ -475,4 +480,23 @@ export const AGENT_CENTER_RIGHT_SIDEBAR_MODULE: RightSidebarModuleDefinition = {
   surfaceKind: 'react',
   titleKey: 'rightSidebar.agentCenter',
   unavailablePagePolicy: 'close-page'
+}
+
+export const WORKFLOWS_RIGHT_SIDEBAR_MODULE: RightSidebarModuleDefinition = {
+  contextBinding: 'global',
+  createPage: ({ pageId, t }) => ({
+    id: pageId,
+    moduleId: 'workflows',
+    moduleState: { kind: 'workflows', instanceId: null },
+    title: t('sidebar.workflows'),
+    workspaceKey: null
+  }),
+  id: 'workflows',
+  icon: Network,
+  instancePolicy: 'single',
+  render: (props) => <WorkflowModuleSurface {...props} />,
+  retention: 'keep-alive',
+  surfaceKind: 'react',
+  titleKey: 'sidebar.workflows',
+  unavailablePagePolicy: 'retain-page'
 }

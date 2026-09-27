@@ -30,13 +30,19 @@ import type {
 } from '../../features/chat/chatTypes'
 import { CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS } from '../chatMessagePersistence'
 import type { ComposerCommand } from '../../features/chat/components/ComposerCommands'
-import type { RightSidebarModuleNavigationRequest } from '../../features/rightSidebar/rightSidebarTypes'
+import type {
+  RightSidebarModuleNavigationRequest,
+  RightSidebarWorkflowNavigationRequest
+} from '../../features/rightSidebar/rightSidebarTypes'
 
 const testState = vi.hoisted(() => ({
   canOpenBottomPanel: true,
   gitStatus: 'unavailable' as 'available' | 'checking' | 'unavailable',
   openBottomPanel: vi.fn(),
   openRightSidebar: vi.fn(),
+  setRightSidebarMaximized: vi.fn(),
+  rightOpen: false,
+  rightMaximized: false,
   automationEventListeners: new Set<(event: AutomationEvent) => void>(),
   automationOpenRequestListeners: new Set<(request: AutomationOpenRequest) => void>(),
   automationResyncListeners: new Set<(event: AutomationResync) => void>(),
@@ -147,12 +153,13 @@ vi.mock('../useShellLayout', () => ({
     canOpenBottomPanel: testState.canOpenBottomPanel,
     openBottomPanel: testState.openBottomPanel,
     openRightSidebar: testState.openRightSidebar,
+    setRightSidebarMaximized: testState.setRightSidebarMaximized,
     commitSidebarResize: vi.fn(),
     leftResizeMetrics: { maximum: 420, minimum: 220, width: 0 },
     leftOpen: false,
     leftWidth: 0,
-    rightMaximized: false,
-    rightOpen: false,
+    rightMaximized: testState.rightMaximized,
+    rightOpen: testState.rightOpen,
     rightResizeMetrics: { maximum: 1200, minimum: 280, width: 0 },
     rightWidth: 0,
     shellRef: { current: null },
@@ -301,6 +308,7 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
     onNewConversation,
     onOpenSettings,
     onOpenScheduled,
+    onOpenWorkflows,
     onRenameConversation,
     onSelectConversation,
     scheduledAttentionCount,
@@ -313,6 +321,7 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
     onNewConversation: (projectId?: string | null) => void
     onOpenSettings: () => void
     onOpenScheduled: () => void
+    onOpenWorkflows: () => void
     onRenameConversation: (conversationId: string, title: string) => void
     onSelectConversation: (conversationId: string) => void
     scheduledAttentionCount: number
@@ -326,6 +335,9 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
       <output data-testid="scheduled-attention">{scheduledAttentionCount}</output>
       <button type="button" onClick={onOpenScheduled}>
         open-scheduled
+      </button>
+      <button type="button" onClick={onOpenWorkflows}>
+        open-workflows
       </button>
       <button type="button" onClick={onOpenSettings}>
         open-settings
@@ -368,14 +380,17 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
 vi.mock('../../features/rightSidebar/RightSidebar', () => ({
   RightSidebar: ({
     activeConversationId,
-    moduleNavigationRequest
+    moduleNavigationRequest,
+    workflowNavigationRequest
   }: {
     activeConversationId?: string | null
     moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
+    workflowNavigationRequest?: RightSidebarWorkflowNavigationRequest | null
   }) => (
     <>
       <output data-testid="right-sidebar-conversation-id">{activeConversationId ?? 'none'}</output>
       <output data-testid="right-module-request">{JSON.stringify(moduleNavigationRequest)}</output>
+      <output data-testid="workflow-route">{JSON.stringify(workflowNavigationRequest)}</output>
     </>
   )
 }))
@@ -1096,6 +1111,9 @@ beforeEach(() => {
   testState.gitStatus = 'unavailable'
   testState.openBottomPanel.mockReset()
   testState.openRightSidebar.mockReset()
+  testState.setRightSidebarMaximized.mockReset()
+  testState.rightOpen = false
+  testState.rightMaximized = false
   testState.automationEventListeners.clear()
   testState.automationOpenRequestListeners.clear()
   testState.automationResyncListeners.clear()
@@ -1309,6 +1327,70 @@ describe('title project editor removal', () => {
     await expect
       .element(screen.getByRole('heading', { name: 'project.removeTitle' }))
       .not.toBeInTheDocument()
+  })
+})
+
+describe('workflow sidebar migration', () => {
+  it('keeps a covered conversation unread and exposes its sidebar attention while the workflow is maximized', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    await screen.getByRole('button', { name: 'open-workflows', exact: true }).click()
+    testState.rightOpen = true
+    testState.rightMaximized = true
+    await screen.rerender(<AppShell />)
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('none')
+    expect(screen.container.querySelector<HTMLElement>('.main-panel')?.inert).toBe(true)
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'Completed while watching the workflow.'
+    })
+    await expect.element(screen.getByTestId('unread-conversation-a')).toHaveTextContent('true')
+  })
+
+  it('opens the global workflow home maximized without replacing the chat or composer draft', async () => {
+    testState.loadComposerDrafts.mockResolvedValue({
+      'conversation-a': createComposerDraft({
+        message: 'Keep my current draft',
+        modelId: 'model-1',
+        projectId: 'project-a'
+      })
+    })
+    const screen = await renderSelectedConversation()
+    const chat = screen.getByTestId('active-conversation-id').element()
+    const draft = screen.getByTestId('draft-message').element()
+    await screen.getByRole('button', { name: 'open-workflows', exact: true }).click()
+    await expect
+      .element(screen.getByTestId('workflow-route'))
+      .toHaveTextContent('"instanceId":null')
+    expect(testState.openRightSidebar).toHaveBeenCalled()
+    expect(testState.setRightSidebarMaximized).toHaveBeenLastCalledWith(true)
+    expect(screen.container.querySelector('.workflow-page-layer')).toBeNull()
+    expect(screen.getByTestId('active-conversation-id').element()).toBe(chat)
+    expect(screen.getByTestId('draft-message').element()).toBe(draft)
+    expect(draft.textContent).toBe('Keep my current draft')
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+  })
+
+  it('restores the conversation area when leaving scheduled after opening a maximized workflow', async () => {
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-workflows', exact: true }).click()
+    const workflowRoute = screen.getByTestId('workflow-route').element().textContent
+    await screen.getByRole('button', { name: 'open-scheduled', exact: true }).click()
+    await screen.getByRole('button', { name: 'select-conversation-a', exact: true }).click()
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+    expect(testState.setRightSidebarMaximized).toHaveBeenLastCalledWith(false)
+    expect(screen.getByTestId('workflow-route').element().textContent).toBe(workflowRoute)
+    await expect.element(screen.getByTestId('scheduled-selected')).toHaveTextContent('false')
+    await screen.getByRole('button', { name: 'open-workflows', exact: true }).click()
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+    expect(testState.setRightSidebarMaximized).toHaveBeenLastCalledWith(false)
   })
 })
 

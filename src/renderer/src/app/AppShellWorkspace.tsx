@@ -7,13 +7,14 @@ import {
   type ReactNode
 } from 'react'
 
-export type PrimaryView = 'conversation' | 'scheduled' | 'workflows'
+export type PrimaryView = 'conversation' | 'scheduled'
 
 export function getVisibleActiveConversationId(
   primaryView: PrimaryView,
-  activeConversationId: string | null
+  activeConversationId: string | null,
+  covered = false
 ): string | null {
-  return primaryView === 'conversation' ? activeConversationId : null
+  return primaryView === 'conversation' && !covered ? activeConversationId : null
 }
 
 interface AppShellWorkspaceProps extends ComponentPropsWithoutRef<'div'> {

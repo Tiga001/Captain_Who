@@ -1,6 +1,10 @@
 import { useMemo } from 'react'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
-import { AGENT_CENTER_RIGHT_SIDEBAR_MODULE, RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
+import {
+  AGENT_CENTER_RIGHT_SIDEBAR_MODULE,
+  RIGHT_SIDEBAR_MODULES,
+  WORKFLOWS_RIGHT_SIDEBAR_MODULE
+} from './rightSidebarModules'
 import {
   getRightSidebarModuleAvailability,
   resolveRightSidebarModuleAvailabilityMap
@@ -45,11 +49,13 @@ export function useRightSidebarModuleAvailability({
 export function useRightSidebarModules({
   activeConversationId,
   collaborationSnapshot,
-  configuredModules = RIGHT_SIDEBAR_MODULES
+  configuredModules = RIGHT_SIDEBAR_MODULES,
+  workflowEnabled = false
 }: {
   activeConversationId?: string | null
   collaborationSnapshot?: CollaborationStoreSnapshot | null
   configuredModules?: RightSidebarModuleDefinition[]
+  workflowEnabled?: boolean
 }) {
   const childAgents = useMemo(() => {
     const tree = collaborationSnapshot?.tree
@@ -60,13 +66,16 @@ export function useRightSidebarModules({
     ['queued', 'running', 'waiting_approval'].includes(agent.displayStatus)
   ).length
   const modules = useMemo(() => {
-    const withoutAgentCenter = configuredModules.filter((module) => module.id !== 'agent-center')
+    const withoutAgentCenter = configuredModules.filter(
+      (module) => module.id !== 'agent-center' && module.id !== 'workflows'
+    )
+    if (workflowEnabled) withoutAgentCenter.push(WORKFLOWS_RIGHT_SIDEBAR_MODULE)
     return childAgents.length > 0
       ? [
           ...withoutAgentCenter,
           { ...AGENT_CENTER_RIGHT_SIDEBAR_MODULE, badge: activeChildCount || undefined }
         ]
       : withoutAgentCenter
-  }, [activeChildCount, childAgents.length, configuredModules])
+  }, [activeChildCount, childAgents.length, configuredModules, workflowEnabled])
   return { childAgents, modules }
 }

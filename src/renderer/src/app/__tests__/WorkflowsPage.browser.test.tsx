@@ -1,6 +1,11 @@
 import { page, userEvent } from 'vitest/browser'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { useCallback, useEffect, useState } from 'react'
+import type {
+  RightSidebarPage,
+  RightSidebarPageUpdate
+} from '../../features/rightSidebar/rightSidebarTypes'
 import type {
   WorkflowInstance,
   WorkflowRecord,
@@ -54,6 +59,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
 }))
 
 const { WorkflowsPage } = await import('../../features/workflows/project/WorkflowsPage')
+const { WorkflowSidebarPage } = await import('../../features/workflows/project/WorkflowSidebarPage')
 
 const conversation = (id: string, title: string, projectId: string): ChatConversation => ({
   id,
@@ -167,6 +173,18 @@ beforeEach(async () => {
   service.request
     .mockReset()
     .mockImplementation(async (input: WorkflowRequest): Promise<WorkflowResponse> => {
+      if (input.operation === 'nodeMessages') {
+        return {
+          records: [],
+          issues: [],
+          nodeMessages: {
+            instanceId: input.instanceId,
+            nodeId: input.nodeId,
+            messages: [],
+            nextBeforeSequence: null
+          }
+        }
+      }
       if (input.operation === 'saveInstance') {
         if (
           instances.some(
@@ -294,6 +312,102 @@ async function nodeDetails(nodeName: string) {
   return tooltip
 }
 
+function SidebarWorkflowHarness({
+  instanceId = null,
+  navigationId = 1,
+  chats = conversations,
+  onOpenConversation = () => undefined
+}: {
+  instanceId?: string | null
+  navigationId?: number
+  chats?: ChatConversation[]
+  onOpenConversation?: (id: string) => void
+}) {
+  const [tab, setTab] = useState<RightSidebarPage>({
+    id: 'workflow-tab',
+    moduleId: 'workflows',
+    title: '工作流',
+    moduleState: { kind: 'workflows', instanceId, navigationId }
+  })
+  useEffect(() => {
+    setTab((current) => ({
+      ...current,
+      moduleState: { kind: 'workflows', instanceId, navigationId }
+    }))
+  }, [instanceId, navigationId])
+  const onPageUpdate = useCallback((update: RightSidebarPageUpdate) => {
+    setTab((current) => ({ ...current, ...update }))
+  }, [])
+  return (
+    <div style={{ width: '100vw', height: '100vh' }}>
+      <span data-testid="workflow-tab-title">{tab.title}</span>
+      <WorkflowSidebarPage
+        context={{
+          page: tab,
+          activity: 'foreground',
+          availability: 'available',
+          isSelected: true,
+          onPageUpdate,
+          onOpenPage: () => undefined,
+          onSurfaceFocus: () => undefined,
+          t: (key) => key
+        }}
+        conversations={chats}
+        projects={projects}
+        onCommitted={onCommitted}
+        onManageTemplates={() => undefined}
+        onOpenConversation={onOpenConversation}
+      />
+    </div>
+  )
+}
+
+describe('workflow sidebar adapter', () => {
+  it('keeps the live diagram when conversations update and changes the tab title when returning home', async () => {
+    instances = [
+      instance('workflow-a', '交付看板', [{ nodeId: 'analysis', conversationId: 'chat-a' }])
+    ]
+    const openChat = vi.fn()
+    const screen = await render(
+      <SidebarWorkflowHarness instanceId="workflow-a" onOpenConversation={openChat} />
+    )
+    await expect.element(screen.getByTestId('workflow-tab-title')).toHaveTextContent('交付看板')
+    const canvas = document.querySelector('.workflow-monitor__canvas')
+    await screen.rerender(
+      <SidebarWorkflowHarness
+        instanceId="workflow-a"
+        onOpenConversation={openChat}
+        chats={conversations.map((chat) => ({ ...chat, updatedAt: 2 }))}
+      />
+    )
+    expect(document.querySelector('.workflow-monitor__canvas')).toBe(canvas)
+    await screen
+      .getByRole('button', { name: '双击打开对话 · 产品需求讨论', exact: true })
+      .dblClick()
+    expect(openChat).toHaveBeenCalledExactlyOnceWith('chat-a')
+    expect(document.querySelector('.workflow-monitor__canvas')).toBe(canvas)
+    await screen.getByRole('button', { name: '返回工作流', exact: true }).click()
+    await expect.element(screen.getByTestId('workflow-tab-title')).toHaveTextContent('工作流')
+    await expect.element(screen.getByRole('heading', { name: '工作流', exact: true })).toBeVisible()
+  })
+
+  it('preserves an unfinished configuration across chat updates and resets it on accepted external navigation', async () => {
+    const screen = await render(<SidebarWorkflowHarness />)
+    await begin()
+    await screen.getByRole('textbox', { name: '名称', exact: true }).fill('尚未保存的配置')
+    await screen.rerender(<SidebarWorkflowHarness chats={[...conversations]} />)
+    await expect
+      .element(screen.getByRole('textbox', { name: '名称', exact: true }))
+      .toHaveValue('尚未保存的配置')
+    await screen.rerender(<SidebarWorkflowHarness navigationId={2} />)
+    await expect.element(screen.getByRole('heading', { name: '工作流', exact: true })).toBeVisible()
+    expect(screen.container.querySelector('.project-workflows__binding-toolbar')).toBeNull()
+    expect(service.request.mock.calls.some(([input]) => input.operation === 'saveInstance')).toBe(
+      false
+    )
+  })
+})
+
 describe('global workflow management', () => {
   it('opens a separate read-only diagram before the configuration action and opens its bound conversation', async () => {
     instances = [
@@ -324,12 +438,12 @@ describe('global workflow management', () => {
     expect(document.querySelector('.project-workflows__library')).toBeNull()
     expect(document.querySelector('.workflow-binding-node')).toBeNull()
     await expect.element(page.getByText('等待交互', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '打开对话 · 产品需求讨论', exact: true }).click()
+    await page.getByRole('button', { name: '双击打开对话 · 产品需求讨论', exact: true }).dblClick()
     expect(onOpenConversation).toHaveBeenCalledExactlyOnceWith('chat-a')
     expect(onMonitorChange).toHaveBeenCalledWith('workflow-a')
     expect(
       service.request.mock.calls.every(([input]) =>
-        ['list', 'listInstances'].includes(input.operation)
+        ['list', 'listInstances', 'nodeMessages'].includes(input.operation)
       )
     ).toBe(true)
     await page.getByRole('button', { name: '返回工作流', exact: true }).click()
@@ -348,10 +462,10 @@ describe('global workflow management', () => {
     const onOpenConversation = vi.fn()
     const view = await mount({ initialMonitorId: 'workflow-a', onOpenConversation })
     await expect
-      .element(page.getByRole('button', { name: '打开对话 · 产品需求讨论', exact: true }))
+      .element(page.getByRole('button', { name: '双击打开对话 · 产品需求讨论', exact: true }))
       .toBeVisible()
     await view.rerender(renderPage({ initialMonitorId: 'workflow-b', onOpenConversation }))
-    await page.getByRole('button', { name: '打开对话 · 界面设计讨论', exact: true }).click()
+    await page.getByRole('button', { name: '双击打开对话 · 界面设计讨论', exact: true }).dblClick()
     expect(onOpenConversation).toHaveBeenCalledExactlyOnceWith('chat-b')
     expect(document.querySelector('.project-workflows__library')).toBeNull()
     await view.rerender(renderPage({ initialMonitorId: null, onOpenConversation }))
@@ -569,7 +683,7 @@ describe('global workflow management', () => {
     })
     const listRequests = () =>
       service.request.mock.calls.filter(([input]) =>
-        ['list', 'listInstances'].includes(input.operation)
+        ['list', 'listInstances', 'nodeMessages'].includes(input.operation)
       ).length
     const initialReads = listRequests()
     library.scrollTop = 160
@@ -1336,7 +1450,7 @@ describe('global workflow management', () => {
     expect(conversations).toEqual(originalConversations)
     expect(
       service.request.mock.calls.every(([input]) =>
-        ['list', 'listInstances'].includes(input.operation)
+        ['list', 'listInstances', 'nodeMessages'].includes(input.operation)
       )
     ).toBe(true)
     await page.getByRole('button', { name: '激活', exact: true }).click()

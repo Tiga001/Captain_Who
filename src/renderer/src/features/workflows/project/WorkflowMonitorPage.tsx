@@ -4,7 +4,7 @@ import type {
   WorkflowRuntimeInput
 } from '@mycopilot/protocol'
 import { ArrowLeft, Maximize2, Minus, Plus } from 'lucide-react'
-import { useId, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { dismissActiveTooltip, Tooltip } from '../../../components/overlay/Tooltip'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -62,6 +62,28 @@ export function WorkflowMonitorPage({
     instance.id
   )
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const selectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cancelNodeSelection = () => {
+    if (selectionTimer.current !== null) {
+      clearTimeout(selectionTimer.current)
+      selectionTimer.current = null
+    }
+  }
+  useEffect(
+    () => () => {
+      if (selectionTimer.current !== null) clearTimeout(selectionTimer.current)
+    },
+    [instance.id]
+  )
+  const selectNode = (nodeId: string) => {
+    cancelNodeSelection()
+    // Keep the target in place until the browser can deliver a second click.
+    // Opening the panel immediately would cover it or resize the canvas.
+    selectionTimer.current = setTimeout(() => {
+      selectionTimer.current = null
+      setSelectedNodeId(nodeId)
+    }, 300)
+  }
   const [userInput, setUserInput] = useState<WorkflowRuntimeInput | null>(null)
   const [discardInput, setDiscardInput] = useState<WorkflowRuntimeInput | null>(null)
   const [completionError, setCompletionError] = useState<string | null>(null)
@@ -483,11 +505,19 @@ export function WorkflowMonitorPage({
                                   : undefined
                           }
                           aria-label={`${conversationId ? t('双击打开对话', 'Double-click to open conversation') : t('未绑定', 'Unbound')} · ${conversation?.title || node.name}`}
-                          onClick={() => setSelectedNodeId(node.id)}
-                          onDoubleClick={() => conversationId && onOpenConversation(conversationId)}
+                          onClick={(event) => {
+                            if (event.detail < 2) selectNode(node.id)
+                          }}
+                          onDoubleClick={() => {
+                            if (conversationId) {
+                              cancelNodeSelection()
+                              onOpenConversation(conversationId)
+                            }
+                          }}
                           onKeyDown={(event) => {
                             if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) {
                               event.preventDefault()
+                              cancelNodeSelection()
                               if (conversationId) onOpenConversation(conversationId)
                             }
                           }}

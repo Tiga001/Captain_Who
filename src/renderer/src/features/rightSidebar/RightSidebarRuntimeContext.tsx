@@ -1,7 +1,7 @@
 import { createContext, useContext } from 'react'
 import type { ReactNode } from 'react'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
-import type { AgentObserverRenderContext } from './rightSidebarTypes'
+import type { AgentObserverRenderContext, RightSidebarModuleRenderProps } from './rightSidebarTypes'
 import type { AppProject } from '../../config/projectConfig'
 
 interface RightSidebarRuntimeContextValue {
@@ -33,6 +33,7 @@ interface RightSidebarRuntimeContextValue {
   onOpenAgentRootConversation?: (conversationId: string) => void
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
+  renderWorkflow?: (context: RightSidebarModuleRenderProps) => ReactNode
 }
 
 export const RightSidebarRuntimeContext = createContext<RightSidebarRuntimeContextValue>({

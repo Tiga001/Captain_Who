@@ -115,6 +115,7 @@ vi.mock('../useShellLayout', () => ({
     leftOpen: false,
     leftWidth: 0,
     openRightSidebar: vi.fn(),
+    setRightSidebarMaximized: vi.fn(),
     rightMaximized: false,
     rightOpen: true,
     rightResizeMetrics: { maximum: 1200, minimum: 280, width: 360 },

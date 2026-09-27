@@ -121,3 +121,13 @@
   white-space: pre-wrap;
   text-align: left;
 }
+
+.workflow-sidebar-page .workflow-binding-canvas-shell {
+  min-width: 0;
+}
+@container workflow-sidebar (max-width: 600px) {
+  .workflow-sidebar-page .workflow-canvas-actions {
+    right: 12px;
+    bottom: 12px;
+  }
+}
