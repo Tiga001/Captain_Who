@@ -52,6 +52,23 @@ export interface WorkflowRuntimeSnapshot {
   sequence: number
   inputs: WorkflowRuntimeInput[]
   events: WorkflowRuntimeEvent[]
+  pendingMessages?: WorkflowSourceMessage[]
+  pausedConversationIds?: string[]
+  inputRuns?: { inputId: string; status: string }[]
+}
+export interface WorkflowNodeMessage {
+  sequence: number
+  message: WorkflowSourceMessage
+  inputId: string | null
+  status: string
+  runStatus: string | null
+  error: string | null
+}
+export interface WorkflowNodeMessages {
+  instanceId: string
+  nodeId: string
+  messages: WorkflowNodeMessage[]
+  nextBeforeSequence: number | null
 }
 export interface WorkflowMessageSource {
   inputId: string
@@ -206,15 +223,39 @@ export function parseWorkflowRuntimeEvent(value: unknown): WorkflowRuntimeEvent 
   }
 }
 export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSnapshot {
-  const item = record(value, ['instanceId', 'sequence', 'inputs', 'events'])
+  const item = record(
+    value,
+    ['instanceId', 'sequence', 'inputs', 'events'],
+    ['pendingMessages', 'pausedConversationIds', 'inputRuns']
+  )
   const result = {
     instanceId: id(item.instanceId),
     sequence: integer(item.sequence),
     inputs: list(item.inputs, parseWorkflowRuntimeInput, 4096),
-    events: list(item.events, parseWorkflowRuntimeEvent, 4096)
+    events: list(item.events, parseWorkflowRuntimeEvent, 4096),
+    ...(item.pendingMessages !== undefined
+      ? { pendingMessages: list(item.pendingMessages, parseWorkflowSourceMessage, 1024) }
+      : {}),
+    ...(item.pausedConversationIds !== undefined
+      ? { pausedConversationIds: list(item.pausedConversationIds, id, 128) }
+      : {}),
+    ...(item.inputRuns !== undefined
+      ? {
+          inputRuns: list(
+            item.inputRuns,
+            (value) => {
+              const row = record(value, ['inputId', 'status'])
+              return { inputId: id(row.inputId), status: id(row.status) }
+            },
+            4096
+          )
+        }
+      : {})
   }
   if (
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
+    result.pendingMessages?.some((message) => message.instanceId !== result.instanceId) ||
+    result.inputRuns?.some((run) => !result.inputs.some((input) => input.id === run.inputId)) ||
     result.events.some(
       (event) => event.instanceId !== result.instanceId || event.sequence > result.sequence
     ) ||
@@ -224,6 +265,48 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
     )
   )
     throw new Error('Invalid workflow runtime snapshot identity or cursor')
+  return result
+}
+export function parseWorkflowNodeMessages(value: unknown): WorkflowNodeMessages {
+  const item = record(value, ['instanceId', 'nodeId', 'messages', 'nextBeforeSequence'])
+  const result = {
+    instanceId: id(item.instanceId),
+    nodeId: id(item.nodeId),
+    nextBeforeSequence: item.nextBeforeSequence === null ? null : integer(item.nextBeforeSequence),
+    messages: list(
+      item.messages,
+      (value) => {
+        const row = record(value, [
+          'sequence',
+          'message',
+          'inputId',
+          'status',
+          'runStatus',
+          'error'
+        ])
+        return {
+          sequence: integer(row.sequence),
+          message: parseWorkflowSourceMessage(row.message),
+          inputId: nullableId(row.inputId),
+          status: id(row.status),
+          runStatus: row.runStatus === null ? null : id(row.runStatus),
+          error: row.error === null ? null : text(row.error)
+        }
+      },
+      20
+    )
+  }
+  if (
+    result.messages.some(
+      (row, index) =>
+        row.message.instanceId !== result.instanceId ||
+        row.message.targetNodeId !== result.nodeId ||
+        (index > 0 && row.sequence >= result.messages[index - 1].sequence)
+    ) ||
+    (result.nextBeforeSequence !== null &&
+      result.nextBeforeSequence !== result.messages.at(-1)?.sequence)
+  )
+    throw new Error('Invalid workflow node message identity or cursor')
   return result
 }
 export function parseWorkflowMessageSource(value: unknown): WorkflowMessageSource {

@@ -3,6 +3,14 @@ use crate::storage::workflow_execution_repository as repository;
 use crate::workflow_execution::*;
 
 impl StorageService {
+    pub fn workflow_execution_node_messages(
+        &self,
+        instance_id: &str,
+        node_id: &str,
+        before: Option<u64>,
+    ) -> Result<NodeMessages, String> {
+        repository::node_messages(&*self.state.connection()?, instance_id, node_id, before)
+    }
     pub fn workflow_execution_discard_failed(&self, input_id: &str) -> Result<(), String> {
         repository::discard_failed(&mut *self.state.connection()?, input_id)
     }

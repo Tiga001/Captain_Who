@@ -38,6 +38,8 @@ last_verified: 2026-09-26
 
 基本信息和图内容共享撤销/重做历史，删除节点同时记录其连线及规则引用，同一次拖动归为一步。平移和缩放只更新视口，不影响未保存标记或占用撤销步骤；点击保存时会一并持久化当前视口。
 
+流程设计中选中节点后可用 Command/Ctrl+C、Command/Ctrl+V 复制粘贴，也支持跨模板粘贴。副本保留名称、模型、权限、接收/任务/交付说明及逻辑门设置，生成独立 ID，放置在附近空位并自动选中，每次粘贴可单独撤销。连线不复制，输出门的必选出口及分组出口引用清空，但保留模式、分组和数量约束，重新连线后需重新配置出口。固定用户入口不参与复制；输入框内保留原生文字复制粘贴，普通文本不会被当作节点。
+
 添加节点菜单的「智能体」分组提供「新建智能体」，可以拖入或点击添加；不再加载或引用子 Agent 模板。每个智能体节点代表一个待绑定的独立对话位置，对话可来自任意项目或不属于项目。用户节点和逻辑门保持独立。公共背景只有一个值，所有节点共享；节点分别存储接收说明、任务说明和交付说明。坐标和视口属于布局，不决定执行顺序。
 
 智能体节点通过 `modelConfigId` 选择默认模型，通过必填 `permissionMode` 选择 `default`、`custom` 或 `full`，新建默认 `default`。顶部在原模板选择的位置显示权限下拉框，复用对话权限的名称和盾牌图标；右侧模型始终可选。权限仅保存为模板定义，不改变当前对话或工具授权。自定义权限引用软件现有的自定义权限模式，不在工作流里复制权限规则。
@@ -121,7 +123,7 @@ last_verified: 2026-09-26
 
 开启实例的任一绑定对话或其子 Agent 正在运行时，卡片边框显示工作流专属颜色的流水灯，全部结束或关闭实例后停止。动画使用独立覆盖层，不移动卡片内容或替换按钮；系统开启减少动态效果时改用静态颜色轮廓。活动状态通过本地生成消息和任务生命周期事件更新，并在页面可见时低频校准后端状态；后台校准失败保留最近状态，不显示加载闪动，也不改变正在编辑的绑定。
 
-实例卡片的配置按钮前提供「工作流看板」入口，进入独立的只读页面。页面沿用模板原有节点位置、逻辑门、流股和接线，不重新排列成智能体父子树；支持平移、缩放和适应画布。绑定节点显示对话名称，点击通过普通对话导航打开对应对话。每个节点分别根据该对话及其子 Agent 的真实活动呈现专属颜色的呼吸效果，不根据实例级 running 状态点亮所有节点；系统减少动态效果时使用静态轮廓。暂停工作流不隐藏这个只读入口，也不掩盖仍在执行的对话状态。对话顶部在文件夹按钮前显示工作流颜色的入口，点击展开下拉菜单：「查看工作流看板」打开所属工作流的看板；「上游节点」「下游节点」各自展开次级菜单，按节点名称列出当前对话所在节点的上游和下游智能体，点击通过普通对话导航打开对应对话。上下游沿流股查找，穿过逻辑门继续到相邻智能体，遇到智能体即停止，不继续追溯更远的节点；回路中的对方节点同时出现在两侧。用户节点、用户输入入口和未绑定的智能体没有可打开的对话，不在菜单中列出，没有节点时显示「暂无节点」。节点从 `listInstances` 响应附带的模板定义推导，不额外请求。侧栏颜色标记仍只为开启的工作流显示。真实 `sent`、`delivered`、`waiting_user` 事件触发对应连线上的短暂流动动画；初次打开仅建立序列基线，不回放历史，不根据运行状态推测发送。
+实例卡片的配置按钮前提供「工作流看板」入口，进入独立的只读页面。页面沿用模板原有节点位置、逻辑门、流股和接线，不重新排列成智能体父子树；支持空白处拖动自由平移（即使整张图已完整显示）、滚轮围绕鼠标缩放和适应画布。绑定节点显示对话名称，双击通过普通对话导航打开对应对话，键盘聚焦后也可按 Enter 或空格进入；单击不跳转。逻辑门悬停一秒显示具体配置：输入门展示输入处理方式和忙碌策略，输出门展示选择模式、数量约束、必选出口及分组对应的连线和目标名称。视口操作仅改变本地观看位置，不修改模板坐标或实例配置。每个节点分别根据该对话及其子 Agent 的真实活动呈现专属颜色的呼吸效果，不根据实例级 running 状态点亮所有节点；系统减少动态效果时使用静态轮廓。暂停工作流不隐藏这个只读入口，也不掩盖仍在执行的对话状态。对话顶部在文件夹按钮前显示工作流颜色的入口，点击展开下拉菜单：「查看工作流看板」打开所属工作流的看板；「上游节点」「下游节点」各自展开次级菜单，按节点名称列出当前对话所在节点的上游和下游智能体，点击通过普通对话导航打开对应对话。上下游沿流股查找，穿过逻辑门继续到相邻智能体，遇到智能体即停止，不继续追溯更远的节点；回路中的对方节点同时出现在两侧。用户节点、用户输入入口和未绑定的智能体没有可打开的对话，不在菜单中列出，没有节点时显示「暂无节点」。节点从 `listInstances` 响应附带的模板定义推导，不额外请求。侧栏颜色标记仍只为开启的工作流显示。真实 `sent`、`delivered`、`waiting_user` 事件触发对应连线上的短暂流动动画；初次打开仅建立序列基线，不回放历史，不根据运行状态推测发送。
 
 流程图节点使用白色背景和深色文字，并同时展示等待批准、等待交互和未读提示：等待批准优先于等待交互，未读使用独立标记，不因打开流程图而清除。审批合并对话本身及其子 Agent 的真实待批状态；等待交互复用全局提问状态，未读复用对话已读记录。运行节点的呼吸边框叠加同色环绕流水灯，动画覆盖层不改变卡片尺寸和文字位置；减少动态效果时保留静态轮廓。流水灯只沿节点边框运行，不代表流股发送了消息。
 
@@ -177,3 +179,10 @@ Core Server 后台推进完整输入，不依赖 Renderer 或看板打开。queu
 - [ ] 草稿确认前不改对话；确认后保留输入、附件、队列与未变化节点的用户配置。
 - [ ] 开启颜色唯一、绑定唯一、归档保护与模板失效关闭在事务和存储边界仍成立。
 - [ ] 活动校准、只读导航、未读/待处理提示与 reduced-motion 有覆盖；没有把动画解释为消息路由。
+
+
+### Node observability
+
+The monitor snapshot includes body-free unbatched messages, explicit paused conversation IDs, and the actual terminal status of input-associated runs. Pause and resume advance the instance event cursor even with an empty queue. Input gates show one three-layer cylinder stack, counting original messages still collecting or in pending/paused/failed inputs. Zero leaves every layer outlined; 1–3 messages fill one layer, 4–6 fill two, and 7 or more fill all three. The exact count appears above the stack, including counts above nine; more than nine uses a warning color. Applied and historical inputs are not backlog.
+
+A single click opens the collapsible node dashboard; a double click still opens its conversation. The dashboard shows status, current work, batch arrivals by incoming flow, and incoming message history. The read-only `nodeMessages` operation scopes queries to instance and node and returns at most 20 original message bodies per cursor page. Loading history never consumes a queue, resumes a stopped node, or starts a run. Displayed outcomes use the actual run terminal status rather than treating `applied` as successful completion. Runtime broadcasts still omit bodies; message bodies are loaded only while a node panel is open.

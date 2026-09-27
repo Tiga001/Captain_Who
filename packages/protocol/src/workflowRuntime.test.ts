@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   parseWorkflowRuntimeSnapshot,
+  parseWorkflowNodeMessages,
   parseWorkflowMessageSource,
   type WorkflowRuntimeSnapshot,
   type WorkflowSourceMessage
@@ -54,6 +55,55 @@ const snapshot: WorkflowRuntimeSnapshot = {
   ]
 }
 describe('workflow runtime boundary', () => {
+  it('validates queue metadata and node-scoped paginated message bodies', () => {
+    const metadata = {
+      ...snapshot,
+      pendingMessages: [source('a')],
+      pausedConversationIds: ['chat-review'],
+      inputRuns: [{ inputId: 'input', status: 'cancelled' }]
+    }
+    expect(parseWorkflowRuntimeSnapshot(metadata)).toEqual(metadata)
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({
+        ...metadata,
+        pendingMessages: [{ ...source('a'), instanceId: 'other' }]
+      })
+    ).toThrow()
+    const page = {
+      instanceId: 'workflow',
+      nodeId: 'reviewer',
+      messages: [
+        {
+          sequence: 8,
+          message: source('a'),
+          inputId: 'input',
+          status: 'paused',
+          runStatus: null,
+          error: null
+        }
+      ],
+      nextBeforeSequence: 8
+    }
+    expect(parseWorkflowNodeMessages(page)).toEqual(page)
+    expect(
+      parseWorkflowResponse({ records: [], issues: [], nodeMessages: page }).nodeMessages
+    ).toEqual(page)
+    expect(() => parseWorkflowNodeMessages({ ...page, nodeId: 'other' })).toThrow()
+    expect(() => parseWorkflowNodeMessages({ ...page, nextBeforeSequence: 9 })).toThrow()
+    expect(
+      parseWorkflowRequest({
+        operation: 'nodeMessages',
+        instanceId: 'workflow',
+        nodeId: 'reviewer',
+        beforeSequence: 8
+      })
+    ).toEqual({
+      operation: 'nodeMessages',
+      instanceId: 'workflow',
+      nodeId: 'reviewer',
+      beforeSequence: 8
+    })
+  })
   it('round-trips one batch input and all its original sources', () => {
     expect(parseWorkflowRuntimeSnapshot(snapshot)).toEqual(snapshot)
     expect(parseWorkflowResponse({ records: [], issues: [], runtime: snapshot }).runtime).toEqual(

@@ -30,7 +30,10 @@ pub(crate) fn handle_request(
                 .is_some_and(|operation| {
                     matches!(
                         operation,
-                        "runtimeSnapshot" | "completeUserInput" | "discardFailedInput"
+                        "runtimeSnapshot"
+                            | "completeUserInput"
+                            | "discardFailedInput"
+                            | "nodeMessages"
                     )
                 })
             {

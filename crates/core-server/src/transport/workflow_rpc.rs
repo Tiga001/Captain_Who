@@ -36,11 +36,17 @@ mod tests {
 
     #[test]
     fn workflow_runtime_parameters_and_message_origins_reject_spoofed_authority() {
+        assert!(serde_json::from_value::<RuntimeRequest>(
+            json!({"operation":"nodeMessages", "instanceId":"i", "nodeId":"n", "beforeSequence":20})
+        )
+        .is_ok());
         assert!(serde_json::from_value::<RuntimeRequest>(json!({
             "operation":"discardFailedInput", "instanceId":"i", "inputId":"p"
         }))
         .is_ok());
         for params in [
+            json!({"operation":"nodeMessages", "instanceId":"i", "nodeId":"n", "beforeSequence":-1}),
+            json!({"operation":"nodeMessages", "instanceId":"i", "nodeId":"n", "resume":true}),
             json!({"operation":"runtimeSnapshot", "instanceId":"i", "afterSequence":-1}),
             json!({"operation":"discardFailedInput", "instanceId":"i", "inputId":"p", "runId":"spoof"}),
             json!({"operation":"completeUserInput", "instanceId":"i", "inputId":"p", "content":"spoof"}),
@@ -309,6 +315,11 @@ mod management_tests {
     deny_unknown_fields
 )]
 enum RuntimeRequest {
+    NodeMessages {
+        instance_id: String,
+        node_id: String,
+        before_sequence: Option<u64>,
+    },
     RuntimeSnapshot {
         instance_id: String,
         after_sequence: Option<u64>,
@@ -333,6 +344,19 @@ pub(crate) fn handle_workflow_runtime_request(
         Err(error) => return response_error(Some(request.id), -32602, error),
     };
     let result = match input {
+        RuntimeRequest::NodeMessages {
+            instance_id,
+            node_id,
+            before_sequence,
+        } => {
+            return match service.workflow_node_messages(&instance_id, &node_id, before_sequence) {
+                Ok(messages) => response_success(
+                    request.id,
+                    json!({"records":[],"issues":[],"nodeMessages":messages}),
+                ),
+                Err(error) => response_error(Some(request.id), -32000, error),
+            }
+        }
         RuntimeRequest::RuntimeSnapshot {
             instance_id,
             after_sequence,

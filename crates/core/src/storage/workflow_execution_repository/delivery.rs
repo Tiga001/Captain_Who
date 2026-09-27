@@ -206,12 +206,15 @@ pub fn pause_conversation(c: &mut Connection, conversation_id: &str) -> Result<(
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    tx.execute("INSERT INTO workflow_execution_pauses(conversation_id,created_at) VALUES (?1,?2) ON CONFLICT(conversation_id) DO NOTHING",params![conversation_id,now_ms()]).map_err(db)?;
+    let changed = tx.execute("INSERT INTO workflow_execution_pauses(conversation_id,created_at) VALUES (?1,?2) ON CONFLICT(conversation_id) DO NOTHING",params![conversation_id,now_ms()]).map_err(db)?;
     for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status IN ('pending','claimed')",conversation_id)? {
         if input.status==InputStatus::Claimed {
             if has_delivery_proof(&tx,&input)? {apply_proven_input(&tx,&mut input)?;continue;} else {input.status=InputStatus::Failed;input.error=Some("Conversation stopped before the workflow input was durably applied".into());}
         }else{input.status=InputStatus::Paused;}
         write(&tx,&input)?;
+    }
+    if changed > 0 {
+        conversation_event(&tx, conversation_id, "paused")?;
     }
     tx.commit().map_err(db)
 }
@@ -219,18 +222,39 @@ pub fn resume_conversation(c: &mut Connection, conversation_id: &str) -> Result<
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    tx.execute(
-        "DELETE FROM workflow_execution_pauses WHERE conversation_id=?1",
-        [conversation_id],
-    )
-    .map_err(db)?;
+    let changed = tx
+        .execute(
+            "DELETE FROM workflow_execution_pauses WHERE conversation_id=?1",
+            [conversation_id],
+        )
+        .map_err(db)?;
     for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status='failed'",conversation_id)? {
         if input.error.as_deref()==Some("Conversation stopped before the workflow input was durably applied") {
             input.status=InputStatus::Invalidated;write(&tx,&input)?;
         }
     }
     for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status='paused'",conversation_id)? {input.status=InputStatus::Pending;write(&tx,&input)?;}
+    if changed > 0 {
+        conversation_event(&tx, conversation_id, "resumed")?;
+    }
     tx.commit().map_err(db)
+}
+
+fn conversation_event(c: &Connection, conversation_id: &str, kind: &str) -> Result<(), String> {
+    let mut statement = c
+        .prepare(
+            "SELECT DISTINCT instance_id FROM workflow_instance_bindings WHERE conversation_id=?1",
+        )
+        .map_err(db)?;
+    let instances = statement
+        .query_map([conversation_id], |r| r.get::<_, String>(0))
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db)?;
+    for instance in instances {
+        event(c, &instance, None, &[], kind)?;
+    }
+    Ok(())
 }
 /// Called when graph or bindings are replaced, never for a plain enable/disable switch.
 /// Old queued inputs remain inspectable and cannot migrate to a new destination.
@@ -320,11 +344,95 @@ pub fn runtime_snapshot(
         });
     }
     events.reverse();
+    let mut pending_statement = c.prepare("SELECT message_json FROM workflow_execution_messages WHERE instance_id=?1 AND input_id IS NULL AND invalidated=0 ORDER BY sequence").map_err(db)?;
+    let mut pending_messages = pending_statement
+        .query_map([instance_id], |r| r.get::<_, String>(0))
+        .map_err(db)?
+        .map(|row| {
+            let mut message: SourceMessage = parse(&row.map_err(db)?)?;
+            message.content.clear();
+            Ok(message)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    // The queue admission limit also bounds this body-free projection.
+    pending_messages.shrink_to_fit();
+    let mut pauses = c.prepare("SELECT p.conversation_id FROM workflow_execution_pauses p JOIN workflow_instance_bindings b ON b.conversation_id=p.conversation_id WHERE b.instance_id=?1 ORDER BY p.conversation_id").map_err(db)?;
+    let paused_conversation_ids = pauses
+        .query_map([instance_id], |r| r.get(0))
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(db)?;
+    let mut input_runs = Vec::new();
+    let mut run_query = c.prepare("SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1 AND conversation_id=?2 LIMIT 1").map_err(db)?;
+    for input in &inputs {
+        if let Some(status) = run_query
+            .query_row(params![input.run_id, input.conversation_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(db)?
+        {
+            input_runs.push(InputRunState {
+                input_id: input.id.clone(),
+                status,
+            });
+        }
+    }
     Ok(RuntimeSnapshot {
         instance_id: instance_id.into(),
         sequence,
         inputs,
         events,
+        pending_messages,
+        paused_conversation_ids,
+        input_runs,
+    })
+}
+
+/// Message bodies are loaded only for the selected node, in bounded pages. Never replay them.
+pub fn node_messages(
+    c: &Connection,
+    instance_id: &str,
+    node_id: &str,
+    before: Option<u64>,
+) -> Result<NodeMessages, String> {
+    let graph = graph(c, instance_id)?.ok_or("Workflow instance no longer exists")?;
+    if !graph.definition.nodes.iter().any(|node| node.id == node_id) {
+        return Err("Workflow node no longer exists".into());
+    }
+    let mut statement = c.prepare("SELECT m.sequence,m.message_json,m.input_id,CASE WHEN m.invalidated=1 THEN 'invalidated' ELSE COALESCE(i.status,'collecting') END,t.terminal_status,json_extract(i.input_json,'$.error') FROM workflow_execution_messages m LEFT JOIN workflow_execution_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND (?3 IS NULL OR m.sequence<?3) ORDER BY m.sequence DESC LIMIT 21").map_err(db)?;
+    let rows = statement
+        .query_map(params![instance_id, node_id, before], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .map_err(db)?;
+    let mut messages = Vec::new();
+    for row in rows {
+        let (sequence, raw, input_id, status, run_status, error) = row.map_err(db)?;
+        messages.push(NodeMessage {
+            sequence,
+            message: parse(&raw)?,
+            input_id,
+            status,
+            run_status,
+            error,
+        });
+    }
+    let has_more = messages.len() > 20;
+    messages.truncate(20);
+    let next_before_sequence = has_more.then(|| messages.last().unwrap().sequence);
+    Ok(NodeMessages {
+        instance_id: instance_id.into(),
+        node_id: node_id.into(),
+        messages,
+        next_before_sequence,
     })
 }
 

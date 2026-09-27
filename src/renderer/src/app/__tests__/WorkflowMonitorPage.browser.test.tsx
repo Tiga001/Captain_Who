@@ -1,5 +1,5 @@
-import type { WorkflowDefinition, WorkflowInstance } from '@mycopilot/protocol'
-import { page } from 'vitest/browser'
+import type { WorkflowDefinition, WorkflowInstance, WorkflowRule } from '@mycopilot/protocol'
+import { page, userEvent } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
@@ -8,6 +8,11 @@ import type { ChatConversation } from '../../features/chat/chatTypes'
 import type { ConversationAttentionById } from '../../features/chat/useConversationAttention'
 import { graphFlowLayout } from '../../features/workflows/workflowCanvasGeometry'
 import '../../styles/global.css'
+
+const messageService = vi.hoisted(() => ({ request: vi.fn() }))
+vi.mock('../../features/workflows/workflowClient', () => ({
+  requestWorkflows: messageService.request
+}))
 
 const activity = vi.hoisted(() => ({
   running: new Set<string>(),
@@ -181,12 +186,13 @@ const onOpenConversation = vi.fn()
 const renderPage = (
   workflow = instance,
   attention?: ConversationAttentionById,
-  chats = conversations
+  chats = conversations,
+  definition = graph
 ) => (
   <div style={{ width: '100vw', height: '100vh' }}>
     <WorkflowMonitorPage
       instance={workflow}
-      graph={graph}
+      graph={definition}
       conversations={chats}
       conversationAttention={attention}
       models={[{ id: 'model', displayName: 'Qwen3.8MAX', execution: { status: 'available' } }]}
@@ -205,6 +211,16 @@ beforeEach(async () => {
   await page.viewport(1440, 900)
   for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, classicDarkTheme)))
     document.documentElement.style.setProperty(key, value)
+  messageService.request.mockReset().mockImplementation(async (request) => ({
+    records: [],
+    issues: [],
+    nodeMessages: {
+      instanceId: request.instanceId,
+      nodeId: request.nodeId,
+      messages: [],
+      nextBeforeSequence: null
+    }
+  }))
   activity.running = new Set()
   activity.waitingApproval = new Set()
   execution.snapshot = null
@@ -216,6 +232,237 @@ beforeEach(async () => {
 })
 
 describe('workflow read-only monitor', () => {
+  it('shows stopped queues, batch arrivals and paginated messages without navigating on a single click', async () => {
+    const definition = structuredClone(graph)
+    definition.flows.find((flow) => flow.id === 'accept')!.target = {
+      kind: 'node',
+      nodeId: 'build'
+    }
+    const message = (index: number) => ({
+      id: `message-${index}`,
+      instanceId: instance.id,
+      workflowName: instance.name,
+      sourceNodeId: 'review',
+      sourceNodeName: 'reviewer',
+      sourceConversationId: 'chat-review',
+      sourceConversationTitle: 'reviewer',
+      targetNodeId: 'build',
+      flowId: 'report',
+      pathFlowIds: ['report', 'accept'],
+      content: `真实消息 ${index}`,
+      createdAt: index
+    })
+    const waiting = {
+      id: 'input-1',
+      instanceId: instance.id,
+      nodeId: 'build',
+      conversationId: 'chat-build',
+      executionVersion: 'v1',
+      content: '',
+      messages: [message(1), message(2)],
+      busyPolicy: 'queue' as const,
+      status: 'paused' as const,
+      runId: null,
+      deliveryId: null,
+      createdAt: 1,
+      error: null
+    }
+    execution.snapshot = {
+      instanceId: instance.id,
+      sequence: 1,
+      inputs: [waiting],
+      events: [],
+      pendingMessages: [3, 4, 5, 6].map(message),
+      pausedConversationIds: ['chat-build'],
+      inputRuns: []
+    }
+    messageService.request.mockImplementation(async (request) => ({
+      records: [],
+      issues: [],
+      nodeMessages: {
+        instanceId: instance.id,
+        nodeId: request.nodeId,
+        messages: request.beforeSequence
+          ? [
+              {
+                sequence: 1,
+                message: message(1),
+                inputId: 'input-1',
+                status: 'paused',
+                runStatus: null,
+                error: null
+              }
+            ]
+          : [
+              {
+                sequence: 6,
+                message: message(6),
+                inputId: null,
+                status: 'collecting',
+                runStatus: null,
+                error: null
+              }
+            ],
+        nextBeforeSequence: request.beforeSequence ? null : 6
+      }
+    }))
+    const screen = await render(renderPage(instance, undefined, conversations, definition))
+    const indicator = screen.container.querySelector('[data-queue-count]')!
+    expect(indicator.getAttribute('data-queue-count')).toBe('6')
+    expect(indicator.hasAttribute('data-overloaded')).toBe(false)
+    expect(indicator.querySelector('text')?.textContent).toBe('6')
+    expect(indicator.querySelectorAll('[data-filled="true"]')).toHaveLength(2)
+    expect(indicator.querySelectorAll('.workflow-monitor__queue-layer')).toHaveLength(3)
+    await screen.getByRole('button', { name: '双击打开对话 · 开发设置页面', exact: true }).click()
+    const panel = screen.getByRole('complementary', { name: '节点看板' })
+    await expect.element(panel).toHaveTextContent('被停止')
+    await expect.element(panel).toHaveTextContent('向对应对话手动发送消息可恢复')
+    await expect.element(panel).toHaveTextContent('4 条已到达')
+    await expect.element(panel).toHaveTextContent('等待到达')
+    await expect.element(panel).toHaveTextContent('真实消息 6')
+    expect(onOpenConversation).not.toHaveBeenCalled()
+    await panel.getByRole('button', { name: '加载更早消息' }).click()
+    await expect.element(panel).toHaveTextContent('真实消息 1')
+    expect(messageService.request).toHaveBeenCalledWith({
+      operation: 'nodeMessages',
+      instanceId: instance.id,
+      nodeId: 'build',
+      beforeSequence: 6
+    })
+    await page.screenshot({
+      path: '../../../../../.cache/workflow-authoring/workflow-node-queue-panel.png'
+    })
+    await panel.getByRole('button', { name: '收起节点看板' }).click()
+    await expect.element(panel).not.toBeInTheDocument()
+    execution.snapshot = {
+      ...execution.snapshot!,
+      sequence: 2,
+      inputs: [],
+      pendingMessages: [message(3)],
+      pausedConversationIds: []
+    }
+    await screen.rerender(renderPage(instance, undefined, conversations, definition))
+    expect(indicator.getAttribute('data-queue-count')).toBe('1')
+    expect(indicator.hasAttribute('data-overloaded')).toBe(false)
+    expect(indicator.querySelectorAll('[data-filled="true"]')).toHaveLength(1)
+  })
+
+  it('pans a fitted graph and zooms around the mouse without editing the graph', async () => {
+    const before = structuredClone(graph)
+    const screen = await render(renderPage())
+    await waitForCanvasFit(screen.container)
+    const canvas = screen.container.querySelector<HTMLElement>('.workflow-monitor__canvas')!
+    const stage = screen.container.querySelector<HTMLElement>('.workflow-canvas__stage')!
+    const initialLeft = parseFloat(stage.style.left)
+    const initialTop = parseFloat(stage.style.top)
+    const initialZoom = stage.style.transform
+    const capture = vi.spyOn(canvas, 'setPointerCapture').mockImplementation(() => undefined)
+    const pointer = (type: string, x: number, y: number) =>
+      canvas.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          clientX: x,
+          clientY: y
+        })
+      )
+    pointer('pointerdown', 100, 100)
+    pointer('pointermove', 220, 180)
+    await expect.poll(() => parseFloat(stage.style.left)).toBeCloseTo(initialLeft + 120)
+    expect(parseFloat(stage.style.top)).toBeCloseTo(initialTop + 80)
+    pointer('pointercancel', 220, 180)
+    pointer('pointermove', 350, 350)
+    await expect.poll(() => canvas.classList.contains('is-panning')).toBe(false)
+    expect(parseFloat(stage.style.left)).toBeCloseTo(initialLeft + 120)
+    capture.mockRestore()
+    const rect = canvas.getBoundingClientRect()
+    const point = { x: 320, y: 260 }
+    const oldZoom = Number(stage.style.transform.match(/scale\((.+)\)/)![1])
+    const graphPoint = {
+      x: (point.x - parseFloat(stage.style.left)) / oldZoom,
+      y: (point.y - parseFloat(stage.style.top)) / oldZoom
+    }
+    const wheel = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: -120,
+      clientX: rect.left + point.x,
+      clientY: rect.top + point.y
+    })
+    canvas.dispatchEvent(wheel)
+    expect(wheel.defaultPrevented).toBe(true)
+    await expect.poll(() => stage.style.transform).not.toBe(initialZoom)
+    const newZoom = Number(stage.style.transform.match(/scale\((.+)\)/)![1])
+    expect(newZoom).toBeGreaterThan(oldZoom)
+    expect(graphPoint.x * newZoom + parseFloat(stage.style.left)).toBeCloseTo(point.x, 2)
+    expect(graphPoint.y * newZoom + parseFloat(stage.style.top)).toBeCloseTo(point.y, 2)
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100000 })
+    )
+    await expect.poll(() => stage.style.transform).toBe('scale(0.15)')
+    await screen.getByRole('button', { name: '适应画布', exact: true }).click()
+    expect(stage.style.transform).toBe(initialZoom)
+    expect(parseFloat(stage.style.left)).toBe(initialLeft)
+    expect(parseFloat(stage.style.top)).toBe(initialTop)
+    expect(graph).toEqual(before)
+    expect(onOpenConversation).not.toHaveBeenCalled()
+  })
+
+  it('shows input policies and output selections in delayed gate tooltips', async () => {
+    const screen = await render(renderPage())
+    await screen.getByRole('group', { name: '输入门1', exact: true }).hover()
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('按批次处理')
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('所有入流都有消息后')
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('排队')
+    await screen.getByRole('group', { name: '输出门1', exact: true }).hover()
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('全部输出')
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('S3 → 开发工程师')
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent('S4 → Review 专家')
+    expect(onOpenConversation).not.toHaveBeenCalled()
+  })
+
+  it.each<[{ rule: WorkflowRule; expected: string[] }]>([
+    [
+      {
+        rule: { mode: 'exact', min: 2, max: 2, required: [], groups: [] },
+        expected: ['选择 N 条', '数量', '2']
+      }
+    ],
+    [
+      {
+        rule: { mode: 'range', min: 1, max: 2, required: [], groups: [] },
+        expected: ['数量范围', '最少数量', '最多数量']
+      }
+    ],
+    [
+      {
+        rule: {
+          mode: 'custom',
+          min: 0,
+          max: 0,
+          required: ['implement'],
+          groups: [{ id: 'g', flowIds: ['check'], min: 0, max: 1 }]
+        },
+        expected: ['自定义组合', '必选', 'S3 → 开发工程师', '选择分组 1 · 0–1', 'S4 → Review 专家']
+      }
+    ]
+  ])('shows concrete output gate constraints for $rule.mode', async ({ rule, expected }) => {
+    const definition = structuredClone(graph)
+    const gate = definition.nodes.find((node) => node.id === 'split')!
+    if (gate.kind !== 'outputGate') throw new Error('Expected output gate')
+    gate.selection = rule
+    const screen = await render(renderPage(instance, undefined, conversations, definition))
+    await screen.getByRole('group', { name: '输出门1', exact: true }).hover()
+    for (const content of expected)
+      await expect.element(page.getByRole('tooltip')).toHaveTextContent(content)
+    if (rule.mode === 'custom')
+      await page.screenshot({
+        path: '../../../../../.cache/workflow-authoring/workflow-monitor-gate-tooltip.png'
+      })
+  })
+
   it('requires explicit confirmation before skipping a failed input while keeping chat navigation separate', async () => {
     const input: import('@mycopilot/protocol').WorkflowRuntimeInput = {
       id: 'failed-input',
@@ -297,14 +544,20 @@ describe('workflow read-only monitor', () => {
     expect(parseFloat(build.style.top) - parseFloat(plan.style.top)).toBe(-100)
     expect(screen.container.querySelector('.workflow-anchor-handle')).toBeNull()
     expect(screen.container.querySelector('input')).toBeNull()
-    await screen.getByRole('button', { name: '打开对话 · 开发设置页面', exact: true }).click()
-    expect(onOpenConversation).toHaveBeenCalledWith('chat-build')
+    const conversationNode = screen.getByRole('button', {
+      name: '双击打开对话 · 开发设置页面',
+      exact: true
+    })
+    await conversationNode.click()
+    expect(onOpenConversation).not.toHaveBeenCalled()
+    await userEvent.dblClick(conversationNode)
+    expect(onOpenConversation).toHaveBeenCalledExactlyOnceWith('chat-build')
     await screen.getByRole('button', { name: '返回工作流', exact: true }).click()
     expect(onBack).toHaveBeenCalledOnce()
     await screen.rerender(renderPage({ ...instance, bindings: instance.bindings.slice(0, 2) }))
     await expect
       .element(screen.getByRole('button', { name: '未绑定 · Review 专家', exact: true }))
-      .toBeDisabled()
+      .not.toBeDisabled()
   })
 
   it('breathes only on real active nodes without moving any node or synthesizing message flow', async () => {
@@ -420,8 +673,14 @@ describe('workflow read-only monitor', () => {
     expect(screen.container.querySelector('.workflow-monitor__node-attention')).toBeNull()
     expect(screen.container.querySelector('.workflow-monitor__node-unread')).toBeNull()
     expect(snapshot()).toEqual(before)
-    await screen.getByRole('button', { name: '打开对话 · 开发设置页面', exact: true }).click()
-    expect(onOpenConversation).toHaveBeenCalledWith('chat-build')
+    const conversationNode = screen.getByRole('button', {
+      name: '双击打开对话 · 开发设置页面',
+      exact: true
+    })
+    await conversationNode.click()
+    expect(onOpenConversation).not.toHaveBeenCalled()
+    await userEvent.dblClick(conversationNode)
+    expect(onOpenConversation).toHaveBeenCalledExactlyOnceWith('chat-build')
   })
 
   it('combines descendant approvals with conversation attention and supports local state fallback', async () => {

@@ -510,3 +510,76 @@ fn workflow_execution_completion_receipt_updates_unread_once_and_keeps_old_refer
         .iter()
         .any(|e| e.kind == "run_completed"));
 }
+
+#[test]
+fn workflow_execution_monitor_reports_partial_batches_pauses_and_paginated_bodies() {
+    let mut c = fixture(true, false);
+    let chat = conversation(&c, "b");
+    let initial = runtime_snapshot(&c, "instance", None).unwrap();
+    pause_conversation(&mut c, &chat).unwrap();
+    let paused = runtime_snapshot(&c, "instance", Some(initial.sequence)).unwrap();
+    assert!(paused.sequence > initial.sequence);
+    assert_eq!(paused.paused_conversation_ids, vec![chat.clone()]);
+    for index in 0..23 {
+        let r = request(
+            &c,
+            &format!("left-{index}"),
+            &[("left", &format!("body-{index}"))],
+        );
+        send(&mut c, &r).unwrap();
+    }
+    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
+    assert_eq!(snapshot.pending_messages.len(), 23);
+    assert!(snapshot
+        .pending_messages
+        .iter()
+        .all(|m| m.content.is_empty()));
+    assert!(snapshot.inputs.is_empty());
+    let first = node_messages(&c, "instance", "b", None).unwrap();
+    assert_eq!(first.messages.len(), 20);
+    assert_eq!(first.messages[0].message.content, "body-22");
+    assert_eq!(first.messages[0].status, "collecting");
+    let second = node_messages(&c, "instance", "b", first.next_before_sequence).unwrap();
+    assert_eq!(second.messages.len(), 3);
+    assert!(second.next_before_sequence.is_none());
+    assert!(node_messages(&c, "instance", "a", None)
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(node_messages(&c, "other-instance", "b", None).is_err());
+    assert!(node_messages(&c, "instance", "missing-node", None).is_err());
+    let r = request(&c, "right", &[("right", "partner")]);
+    send(&mut c, &r).unwrap();
+    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
+    assert_eq!(snapshot.pending_messages.len(), 22);
+    assert_eq!(snapshot.inputs.len(), 1);
+    assert_eq!(snapshot.inputs[0].status, InputStatus::Paused);
+    assert_eq!(snapshot.inputs[0].messages.len(), 2);
+    assert!(pending_inputs(&c).unwrap().is_empty());
+    resume_conversation(&mut c, &chat).unwrap();
+    let resumed = runtime_snapshot(&c, "instance", Some(snapshot.sequence)).unwrap();
+    assert!(resumed.sequence > snapshot.sequence);
+    assert!(resumed.paused_conversation_ids.is_empty());
+    assert_eq!(resumed.inputs[0].status, InputStatus::Pending);
+}
+
+#[test]
+fn workflow_execution_monitor_keeps_cancelled_run_distinct_from_completed_delivery() {
+    let mut c = fixture(false, false);
+    let r = request(&c, "delivery", &[("direct", "review body")]);
+    let receipt = send(&mut c, &r).unwrap();
+    let chat = conversation(&c, "b");
+    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('target-assistant',?1,'assistant','',1,0)", [&chat]).unwrap();
+    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at,completed_at) VALUES ('target-assistant',?1,'target-run',1,'cancelled',0,1,1,2)", [&chat]).unwrap();
+    let mut input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
+    input.run_id = Some("target-run".into());
+    input.status = InputStatus::Applied;
+    c.execute("UPDATE workflow_execution_inputs SET status='applied',run_id='target-run',input_json=?1 WHERE input_id=?2", params![json(&input).unwrap(), input.id]).unwrap();
+    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
+    assert_eq!(snapshot.inputs[0].status, InputStatus::Applied);
+    assert_eq!(snapshot.input_runs[0].status, "cancelled");
+    let history = node_messages(&c, "instance", "b", None).unwrap();
+    assert_eq!(history.messages[0].status, "applied");
+    assert_eq!(history.messages[0].run_status.as_deref(), Some("cancelled"));
+    assert_eq!(history.messages[0].message.content, "review body");
+}
