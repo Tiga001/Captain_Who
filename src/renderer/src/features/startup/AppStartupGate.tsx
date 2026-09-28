@@ -15,24 +15,39 @@ import './AppStartupScreen.css'
 const MINIMUM_STARTUP_SCREEN_MS = 280
 const STARTUP_TIMEOUT_MS = 60_000
 const STARTUP_EXIT_MS = 180
+const SESSION_CHECK_LOGIN_DELAY_MS = 2_000
 
 export function AppStartupGate({ children }: { children: ReactNode }) {
   const startup = useAppStartupStatus()
   const auth = useAccountAuth()
   const [hasEnteredWorkspace, setHasEnteredWorkspace] = useState(false)
+  const [sessionCheckDelayed, setSessionCheckDelayed] = useState(false)
   const authBlocking = Boolean(
     auth && ((!hasEnteredWorkspace && auth.state.status !== 'signedIn') || auth.loginRequested)
   )
   const accessBlocking = authBlocking
   // Startup session check: show the ambient waiting surface instead of the login block.
   const authVerifying = Boolean(auth && !hasEnteredWorkspace && auth.state.status === 'checking')
-  const showLoginDialog = authBlocking && !authVerifying
+  const showLoginDialog = authBlocking && (!authVerifying || sessionCheckDelayed)
   const { resolvedColorScheme, t } = useFrontendConfig()
   const supportsNativeTranslucency = isMacOS()
   const [interactive, setInteractive] = useState(false)
   const [overlayMounted, setOverlayMounted] = useState(true)
   const [timedOut, setTimedOut] = useState(false)
   const startupAttempt = startup?.attempt
+
+  useEffect(() => {
+    if (!authVerifying) {
+      setSessionCheckDelayed(false)
+      return
+    }
+    // A slow cloud restore must not prevent signing in with a local account.
+    const timeoutId = window.setTimeout(
+      () => setSessionCheckDelayed(true),
+      SESSION_CHECK_LOGIN_DELAY_MS
+    )
+    return () => window.clearTimeout(timeoutId)
+  }, [authVerifying])
 
   useEffect(() => {
     if (accessBlocking) {
@@ -108,7 +123,7 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
               aria-hidden="true"
             />
             {showLoginDialog ? (
-              <AccountLoginForm canDismiss={hasEnteredWorkspace} />
+              <AccountLoginForm canDismiss={hasEnteredWorkspace} allowDuringSessionCheck />
             ) : authVerifying ? (
               <>
                 <StartupAmbientText />

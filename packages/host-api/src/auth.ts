@@ -1,4 +1,4 @@
-/** Cloud account DTOs. Session tokens and passwords must never be returned to Renderer. */
+/** Account DTOs. Session tokens and passwords must never be returned to Renderer. */
 export interface AccountProfile {
   userId: string
   displayName: string
@@ -6,10 +6,13 @@ export interface AccountProfile {
   avatarDataUrl: string | null
   occupation: string
   organization: string
+  /** Presentation metadata only. Local execution authority is owned by Main. */
+  localAccount?: { username: string; avatarSeed: string }
 }
 
 export type AuthErrorCode =
   | 'network'
+  | 'serviceUnavailable'
   | 'credentials'
   | 'inactive'
   | 'profile'

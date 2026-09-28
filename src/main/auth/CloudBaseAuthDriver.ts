@@ -67,7 +67,12 @@ function recordSdkFailure(operation: string, error: unknown): void {
 }
 
 export function sdkFailure(error: unknown, fallback: AuthErrorCode): AuthFailure {
-  const value = error as { code?: unknown; errorCode?: unknown; message?: unknown }
+  const value = error as {
+    code?: unknown
+    errorCode?: unknown
+    status?: unknown
+    message?: unknown
+  }
   const codes = [value?.code, value?.errorCode]
     .filter((code): code is string | number => typeof code === 'string' || typeof code === 'number')
     .map((code) => String(code).trim().toLowerCase())
@@ -81,6 +86,16 @@ export function sdkFailure(error: unknown, fallback: AuthErrorCode): AuthFailure
     numericCodes.some((code) => code === 16 || code === 401)
   ) {
     return new AuthFailure('expired')
+  }
+  // CloudBase labels a stopped PostgreSQL environment as RESOURCE_EXHAUSTED / 8,
+  // which its SDK also calls RATE_LIMITED. An explicit stopped resource must take
+  // precedence over that generic code; never expose the raw infrastructure message.
+  if (
+    codes.includes('res_stopped') ||
+    (typeof value?.status === 'string' && value.status.trim().toLowerCase() === 'res_stopped') ||
+    /\bres_stopped\b/i.test(message)
+  ) {
+    return new AuthFailure('serviceUnavailable')
   }
   if (message.includes('CAPTAIN_WHO_INTERACTIVE_VERIFICATION_REQUIRED')) {
     return new AuthFailure('verificationUnavailable')
@@ -128,8 +143,8 @@ const DESKTOP_AUTH_OPTIONS: Pick<AuthOptions, 'captchaOptions'> & { persistence:
   }
 }
 
-export class CloudBaseAuthDriver implements AuthDriver {
-  private readonly auth = cloudbase
+function createCloudAuth(): ReturnType<ReturnType<typeof cloudbase.init>['auth']> {
+  return cloudbase
     .init({
       env: ACCOUNT_CONFIG.env,
       region: ACCOUNT_CONFIG.region,
@@ -140,6 +155,15 @@ export class CloudBaseAuthDriver implements AuthDriver {
       auth: { detectSessionInUrl: false }
     })
     .auth(DESKTOP_AUTH_OPTIONS)
+}
+
+export class CloudBaseAuthDriver implements AuthDriver {
+  private cloudAuth: ReturnType<typeof createCloudAuth> | undefined
+
+  // Offline accounts never initialize a cloud SDK session or its background activity.
+  private get auth(): ReturnType<typeof createCloudAuth> {
+    return (this.cloudAuth ??= createCloudAuth())
+  }
 
   private challenge: {
     email: string
@@ -242,7 +266,8 @@ export class CloudBaseAuthDriver implements AuthDriver {
 
   async logout(): Promise<void> {
     this.challenge = null
+    if (!this.cloudAuth) return
     // Revoke this session only, not all devices or the website's session.
-    await this.auth.signOut()
+    await this.cloudAuth.signOut()
   }
 }

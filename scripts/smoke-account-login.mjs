@@ -17,7 +17,7 @@ try {
   })
   const page = await application.firstWindow()
   await page.locator('.account-login').waitFor({ timeout: 30_000 })
-  await page.locator('.account-login input[type="email"]').waitFor()
+  await page.locator('.account-login input[autocomplete="username"]').waitFor()
   const state = await page.evaluate(() => window.mycopilot.host.auth.getState())
   if (state.status !== 'signedOut' || state.profile !== null)
     throw new Error('Fresh installation must require login')

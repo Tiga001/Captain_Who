@@ -70,6 +70,7 @@ import { useAppStartupStage } from '../../features/startup/AppStartupContext'
 import type { AppStartupStageId } from '../../features/startup/appStartupStages'
 import { ProfileSettingsPage } from '../../features/settings/pages/ProfileSettingsPage'
 import { AccountAvatar } from '../../features/auth/AccountAvatar'
+import { getAgentAvatarUrl } from '../../features/agentCollaboration/agentAvatarAssignment'
 import '../../styles/global.css'
 import '../../features/rightSidebar/RightSidebar.css'
 import '../../features/rightSidebar/surfaces/WebviewSurface.css'
@@ -81,6 +82,13 @@ const cloudProfile = {
   avatarDataUrl: null,
   occupation: '',
   organization: ''
+}
+const localProfile = {
+  ...cloudProfile,
+  userId: 'local:captainwho',
+  displayName: '大副',
+  email: '',
+  localAccount: { username: 'captainwho', avatarSeed: 'local-test-avatar' }
 }
 function emit(patch: Partial<AuthState>): void {
   mocks.state = { ...mocks.state, ...patch, revision: mocks.state.revision + 1 }
@@ -217,6 +225,85 @@ describe('startup account login and reusable overlay', () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(1)
   })
 
+  it('accepts the offline username and uses its bundled avatar without fetching a cloud profile', async () => {
+    mocks.login.mockImplementationOnce(async () => {
+      emit({ status: 'signedIn', profile: localProfile, error: null, remembered: true })
+      return { ok: true }
+    })
+    const screen = await render(<Harness />)
+    const account = screen.getByRole('textbox', { name: 'auth.accountOrEmail', exact: true })
+    await account.fill('captainwho')
+    expect(account.element().getAttribute('type')).toBe('text')
+    await screen.getByLabelText('auth.password', { exact: true }).fill('captainwho')
+    await screen.getByRole('button', { name: 'auth.login', exact: true }).click()
+    expect(mocks.login).toHaveBeenCalledWith({ email: 'captainwho', password: 'captainwho' })
+    await expect.element(screen.getByRole('heading', { name: '大副' })).toBeVisible()
+    await expect.element(screen.getByRole('heading', { name: 'auth.localProfile' })).toBeVisible()
+    await expect.element(screen.getByTestId('can-send')).toHaveTextContent('true')
+    expect(screen.container.textContent).toContain('captainwho')
+    expect(screen.container.textContent).not.toContain('auth.editProfile')
+    expect(screen.container.textContent).not.toContain('auth.refresh')
+    expect(mocks.refresh).not.toHaveBeenCalled()
+    expect(mocks.open).not.toHaveBeenCalled()
+    const avatar = screen.container.querySelector<HTMLImageElement>('.profile-settings-avatar img')!
+    expect(avatar.getAttribute('src')).toBe(getAgentAvatarUrl(localProfile.localAccount.avatarSeed))
+    await expect.poll(() => avatar.naturalWidth).toBeGreaterThan(0)
+  })
+
+  it('still requires an email address when requesting an email code', async () => {
+    const screen = await render(<Harness />)
+    await screen
+      .getByRole('textbox', { name: 'auth.accountOrEmail', exact: true })
+      .fill('captainwho')
+    await screen.getByRole('button', { name: 'auth.codeMode' }).click()
+    const email = screen.getByRole('textbox', { name: 'auth.email', exact: true })
+    expect(email.element().getAttribute('type')).toBe('email')
+    await expect.element(screen.getByRole('button', { name: 'auth.sendCode' })).toBeDisabled()
+    expect(mocks.sendCode).not.toHaveBeenCalled()
+  })
+
+  it('does not carry a cloud profile error into the local account after switching identities', async () => {
+    mocks.state = { ...mocks.state, status: 'signedIn', profile: cloudProfile, remembered: true }
+    mocks.refresh.mockResolvedValueOnce({ ok: false, error: 'serviceUnavailable' })
+    const screen = await render(
+      <AccountAuthProvider>
+        <ProfileSettingsPage />
+      </AccountAuthProvider>
+    )
+    await expect
+      .element(screen.getByRole('alert'))
+      .toHaveTextContent('auth.error.serviceUnavailable')
+    emit({ status: 'signedIn', profile: localProfile, error: null, remembered: true })
+    await expect.element(screen.getByRole('heading', { name: '大副' })).toBeVisible()
+    await expect.element(screen.getByRole('alert')).not.toBeInTheDocument()
+    expect(mocks.refresh).toHaveBeenCalledOnce()
+  })
+
+  it('allows local sign-in while a previous cloud session check remains pending', async () => {
+    mocks.state = { ...mocks.state, status: 'checking' }
+    mocks.login.mockImplementationOnce(async () => {
+      emit({ status: 'signedIn', profile: localProfile, error: null, remembered: true })
+      return { ok: true }
+    })
+    const screen = await render(<Harness />)
+    expect(screen.container.querySelector('.account-login')).toBeNull()
+    await expect
+      .poll(() => screen.container.querySelector('.account-login input'), { timeout: 4_000 })
+      .not.toBeNull()
+    expect(mocks.state.status).toBe('checking')
+    await screen
+      .getByRole('textbox', { name: 'auth.accountOrEmail', exact: true })
+      .fill('captainwho')
+    await screen.getByLabelText('auth.password', { exact: true }).fill('captainwho')
+    await screen.getByRole('button', { name: 'auth.login', exact: true }).click()
+    expect(mocks.login).toHaveBeenCalledWith({ email: 'captainwho', password: 'captainwho' })
+    await expect
+      .poll(() =>
+        screen.container.querySelector('.app-startup-root')?.getAttribute('data-interactive')
+      )
+      .toBe('true')
+  })
+
   it('requires both core readiness and login, then logout leaves the mounted workspace running', async () => {
     let coreReady!: (value: unknown) => void
     mocks.ping.mockReturnValue(
@@ -234,7 +321,7 @@ describe('startup account login and reusable overlay', () => {
     await expect.element(screen.getByRole('button', { name: 'auth.register' })).toBeVisible()
     await expect.element(screen.getByRole('button', { name: 'auth.reset' })).toBeVisible()
     await screen
-      .getByRole('textbox', { name: 'auth.email', exact: true })
+      .getByRole('textbox', { name: 'auth.accountOrEmail', exact: true })
       .fill('CAPTAIN@example.com')
     await screen.getByLabelText('auth.password', { exact: true }).fill('local-test-password')
     await screen.getByRole('button', { name: 'auth.login', exact: true }).click()
@@ -393,6 +480,32 @@ describe('startup account login and reusable overlay', () => {
     await expect.element(screen.getByRole('button', { name: 'auth.sendCode' })).toBeVisible()
     expect(screen.container.textContent).toContain('auth.error.verificationUnavailable')
   })
+  it.each(['password', 'email-code'] as const)(
+    'shows a service outage for %s without replacing it with a rate-limit message',
+    async (mode) => {
+      mocks.login.mockResolvedValueOnce({ ok: false, error: 'serviceUnavailable' })
+      mocks.sendCode.mockResolvedValueOnce({ ok: false, error: 'serviceUnavailable' })
+      const screen = await render(<Harness />)
+      await screen
+        .getByRole('textbox', { name: 'auth.accountOrEmail', exact: true })
+        .fill('captain@example.com')
+      if (mode === 'password') {
+        await screen.getByLabelText('auth.password', { exact: true }).fill('synthetic-password')
+        await screen.getByRole('button', { name: 'auth.login', exact: true }).click()
+      } else {
+        await screen.getByRole('button', { name: 'auth.codeMode' }).click()
+        await screen.getByRole('button', { name: 'auth.sendCode' }).click()
+        await expect.element(screen.getByRole('button', { name: 'auth.sendCode' })).toBeEnabled()
+      }
+      await expect
+        .element(screen.getByRole('alert'))
+        .toHaveTextContent('auth.error.serviceUnavailable')
+      expect(screen.container.textContent).not.toContain('auth.error.rateLimit')
+      expect(
+        screen.container.querySelector('.app-startup-root')?.getAttribute('data-interactive')
+      ).toBe('false')
+    }
+  )
   it('retains the overlay on validation errors and offers a retry', async () => {
     mocks.state = { ...mocks.state, status: 'error', error: 'network' }
     const screen = await render(<Harness />)

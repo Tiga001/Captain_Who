@@ -683,7 +683,10 @@ export function WorkflowGraphEditor({
           >
             <div className="workflow-selection-field">
               <span className="workflow-selection-avatar workflow-user-avatar">
-                <AccountAvatar src={profile?.avatarDataUrl} />
+                <AccountAvatar
+                  src={profile?.avatarDataUrl}
+                  localAvatarSeed={profile?.localAccount?.avatarSeed}
+                />
               </span>
               <input aria-label={text('user')} readOnly value={userName} />
             </div>

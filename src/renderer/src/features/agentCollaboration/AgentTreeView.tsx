@@ -161,7 +161,10 @@ export function AgentTreeView({
                 type="button"
               >
                 <span className="agent-avatar agent-tree__avatar">
-                  <AccountAvatar src={profile?.avatarDataUrl} />
+                  <AccountAvatar
+                    src={profile?.avatarDataUrl}
+                    localAvatarSeed={profile?.localAccount?.avatarSeed}
+                  />
                 </span>
               </button>
               <div className="agent-tree__copy">

@@ -10,7 +10,7 @@ export class LicenseManagementService {
   private lastRecheck = -Infinity
 
   constructor(
-    private readonly auth: Pick<AuthService, 'getState'>,
+    private readonly auth: Pick<AuthService, 'getState' | 'isLocalAccount'>,
     private readonly license: Pick<LicenseService, 'refreshAfterManagement'>,
     private readonly openExternal: (url: string) => Promise<void>,
     private readonly now: () => number = Date.now
@@ -20,13 +20,28 @@ export class LicenseManagementService {
     const state = this.auth.getState()
     const userId = state.status === 'signedIn' ? state.profile?.userId : null
     if (!userId) return Promise.reject(new Error('ACCOUNT_LOGIN_REQUIRED'))
+    if (this.auth.isLocalAccount()) {
+      this.pending = null
+      return Promise.resolve()
+    }
     if (this.opening) return this.opening
     if (this.now() - this.lastOpened < 10_000) return Promise.resolve()
     const visit = { userId, openedAt: this.now(), blurred: false }
     this.pending = visit
     this.lastOpened = visit.openedAt
     this.opening = Promise.resolve()
-      .then(() => this.openExternal(ACCOUNT_PAGES.profile))
+      .then(() => {
+        const current = this.auth.getState()
+        if (
+          this.auth.isLocalAccount() ||
+          current.status !== 'signedIn' ||
+          current.profile?.userId !== userId
+        ) {
+          if (this.pending === visit) this.pending = null
+          return
+        }
+        return this.openExternal(ACCOUNT_PAGES.profile)
+      })
       .catch(() => {
         if (this.pending === visit) this.pending = null
         this.lastOpened = -Infinity
@@ -51,6 +66,7 @@ export class LicenseManagementService {
       age < 0 ||
       age > 10 * 60_000 ||
       state.status !== 'signedIn' ||
+      this.auth.isLocalAccount() ||
       state.profile?.userId !== visit.userId ||
       this.now() - this.lastRecheck < 30_000
     )

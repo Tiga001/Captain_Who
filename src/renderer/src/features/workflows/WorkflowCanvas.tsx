@@ -710,7 +710,10 @@ export function WorkflowCanvas({
                   onKeyDown={(event) => moveCardKey(event, { kind: 'boundary', id: side })}
                 >
                   <span className="workflow-node__avatar workflow-user-avatar">
-                    <AccountAvatar src={profile?.avatarDataUrl} />
+                    <AccountAvatar
+                      src={profile?.avatarDataUrl}
+                      localAvatarSeed={profile?.localAccount?.avatarSeed}
+                    />
                   </span>
                   <div className="workflow-node__copy">
                     <strong>{userName}</strong>
@@ -765,7 +768,10 @@ export function WorkflowCanvas({
                   <>
                     {node.kind === 'user' ? (
                       <span className="workflow-node__avatar workflow-user-avatar">
-                        <AccountAvatar src={profile?.avatarDataUrl} />
+                        <AccountAvatar
+                          src={profile?.avatarDataUrl}
+                          localAvatarSeed={profile?.localAccount?.avatarSeed}
+                        />
                       </span>
                     ) : (
                       <AgentAvatar agentId={node.id} className="workflow-node__avatar" />

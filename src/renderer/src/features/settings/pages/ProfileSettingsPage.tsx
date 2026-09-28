@@ -13,10 +13,13 @@ export function ProfileSettingsPage() {
   const auth = useAccountAuth()
   const profile = auth?.state.profile
   const userId = profile?.userId
+  const isLocalAccount = Boolean(profile?.localAccount)
+  const accountName = profile?.localAccount?.username || profile?.email
+  const accountTitle = isLocalAccount ? 'auth.localProfile' : 'auth.cloudProfile'
   const [error, setError] = useState<AuthErrorCode | null>(null)
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    if (!userId) return
+    if (!userId || isLocalAccount) return
     let cancelled = false
     void hostClient.auth
       .refreshProfile()
@@ -29,36 +32,39 @@ export function ProfileSettingsPage() {
     return () => {
       cancelled = true
     }
-  }, [userId])
+  }, [userId, isLocalAccount])
   return (
     <article className="settings-list-page profile-settings-page" data-setting-id="profile.account">
       <h1>{t('settings.page.profile')}</h1>
-      <section className="profile-settings-hero" aria-label={t('auth.cloudProfile')}>
+      <section className="profile-settings-hero" aria-label={t(accountTitle)}>
         <div
           className="profile-settings-avatar"
           aria-label={t('profile.avatar')}
           data-setting-id="profile.avatar"
         >
-          <AccountAvatar src={profile?.avatarDataUrl} />
+          <AccountAvatar
+            src={profile?.avatarDataUrl}
+            localAvatarSeed={profile?.localAccount?.avatarSeed}
+          />
           <span className="app-startup-screen__sr-only">{t('profile.avatar')}</span>
         </div>
         <div className="profile-settings-hero__text">
           <h2>{profile?.displayName || t('auth.signedOut')}</h2>
-          {profile?.email ? <p>{profile.email}</p> : null}
+          {accountName ? <p>{accountName}</p> : null}
         </div>
       </section>
       <section className="settings-list-section" aria-labelledby="profile-account-heading">
-        <h2 id="profile-account-heading">{t('auth.cloudProfile')}</h2>
+        <h2 id="profile-account-heading">{t(accountTitle)}</h2>
         <div className="settings-list">
           <div className="settings-list-row" data-setting-id="profile.displayName">
             <span>{t('profile.displayName')}</span>
             <span>{profile?.displayName || '—'}</span>
           </div>
           <div className="settings-list-row" data-setting-id="profile.email">
-            <span>{t('auth.email')}</span>
-            <span>{profile?.email || '—'}</span>
+            <span>{t(isLocalAccount ? 'auth.username' : 'auth.email')}</span>
+            <span>{accountName || '—'}</span>
           </div>
-          {profile ? (
+          {profile && !isLocalAccount ? (
             <div className="settings-list-row profile-settings-avatar-actions">
               <button
                 className="profile-settings-button"
@@ -92,7 +98,7 @@ export function ProfileSettingsPage() {
           ) : null}
         </div>
       </section>
-      {error ? <p role="alert">{t(`auth.error.${error}`)}</p> : null}
+      {error && !isLocalAccount ? <p role="alert">{t(`auth.error.${error}`)}</p> : null}
       {profile && !auth?.state.remembered ? <p role="status">{t('auth.memoryOnly')}</p> : null}
       <LicenseStatus />
       <LocalTokenActivity />

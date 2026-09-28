@@ -53,6 +53,7 @@ import {
 } from './appearance/appearanceThemeStore'
 import { registerStartupReadiness, type StartupReadinessController } from './startupReadiness'
 import { AuthService } from './auth/AuthService'
+import { LocalAccountStore } from './auth/LocalAccountStore'
 import { CloudBaseAuthDriver } from './auth/CloudBaseAuthDriver'
 import { SessionStore } from './auth/SessionStore'
 import { ACCOUNT_SESSION_SCOPE } from './auth/accountConfig'
@@ -451,7 +452,8 @@ async function initializeApplication(): Promise<void> {
   accountAuth = new AuthService(
     new CloudBaseAuthDriver(),
     new SessionStore(appDataRoot, safeStorage, ACCOUNT_SESSION_SCOPE),
-    fetchAccountProfile
+    fetchAccountProfile,
+    new LocalAccountStore(appDataRoot)
   )
   const disposeAuthIpc = registerAuthIpc(accountAuth, isTrustedRendererEvent)
   app.once('will-quit', disposeAuthIpc)

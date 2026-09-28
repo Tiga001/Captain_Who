@@ -2,18 +2,26 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # Captain Who desktop account login
 
-The desktop client uses `@cloudbase/js-sdk@3.9.2` in Electron Main. Public environment configuration lives in `src/main/auth/accountConfig.ts`. The publishable key is a distributable anonymous client identifier, not a user session or server API key. Website OAuth/deep-link authorization is not implemented.
+Cloud accounts use `@cloudbase/js-sdk@3.9.2` in Electron Main. Public environment configuration lives in `src/main/auth/accountConfig.ts`. The publishable key is a distributable anonymous client identifier, not a user session or server API key. Website OAuth/deep-link authorization is not implemented. An explicitly supported built-in local account is also available; it does not use CloudBase.
+
+## Built-in offline account
+
+Password mode accepts the account name `captainwho` and password `captainwho`. Its display name is `大副`. Main validates these credentials locally and grants permanent local application access; no cloud identity, password verification, profile request or online license is required. This is an intentionally distributed local account, not a cloud administrator or a server credential. Normal cloud accounts still use the gates below, and this account does not change model API connectivity, tool permissions, or approval rules.
+
+`local-account.json` in Electron userData remembers the local sign-in choice and a randomly generated avatar seed. It contains no password or access/refresh token, has no expiry, and does not require Keychain access. The renderer resolves its seed through the bundled subagent avatar library, so the image is available offline and stays the same across restarts and explicit re-logins. Logout clears its remembered sign-in while retaining the avatar assignment. Switching identities clears the old saved sign-in before accepting the new one. Corrupt or unknown local records never grant access; an explicit correct login can replace them. Failure to save the local account is reported as a storage error rather than claiming it is remembered.
+
+Only the Main-owned local session grants permanent admission. `AccountProfile.localAccount` is presentation metadata, not an authorization source; cloud profile parsing never supplies it. Main never manufactures cloud bearer tokens for the local account. Cloud SDK initialization is lazy, and local restoration, login, foreground/profile refresh and logout do not initialize or call it. A local login fences outstanding cloud requests and proceeds without waiting for them. Cloud driver calls remain serialized independently, so a late SDK restoration cannot overwrite a later cloud sign-in. The existing renewable, bounded Main-to-Core Server execution lease still applies and is revoked on logout or account changes. Packaging privacy checks exclude `local-account.json` and its temporary companion.
 
 ## Startup and account lifetime
 
 - React and the account form render before full Host initialization. CloudBase restoration and backend startup run concurrently.
-- While the initial session check is pending, the ambient startup screen stays visible rather than briefly presenting a sign-in form. Form mode and password visibility are local UI state; revealing a password does not submit it or switch login mode.
-- The startup overlay exits when Electron Host/Core Server and local data hydration are ready and `/account-api/v1/me?includeEntitlements=false` returns HTTP 200 with a non-null, active profile. License verification is independent and never blocks entry. See [local usage and licensing](local-token-usage-and-license.md) for new-turn admission and the 24-hour license cache.
+- While the initial session check is pending, the ambient startup screen stays visible for up to two seconds rather than briefly presenting a sign-in form. If restoration is still pending after that, the sign-in form becomes available so a user can enter the built-in local account without waiting for a cloud timeout. Form mode and password visibility are local UI state; revealing a password does not submit it or switch login mode.
+- The startup overlay exits when Electron Host/Core Server and local data hydration are ready and an account is signed in. Cloud sign-in requires `/account-api/v1/me?includeEntitlements=false` to return HTTP 200 with a non-null, active profile; the built-in local account requires only its local validation. License verification is independent and never blocks entry. See [local usage and licensing](local-token-usage-and-license.md) for new-turn admission and the cloud account's 24-hour license cache.
 - Password and email OTP login share this gate. OTP uses the SDK's verification callback with `shouldCreateUser: false`; registration stays on the website.
 - Logout invalidates pending authentication requests, clears the saved session, and attempts to revoke the current cloud session. It does not stop Core Server, terminals, agents, automation schedules, or tools.
 - After first entry, logout does not cover the workspace. It blocks new user-initiated turns (including rewrites and queued user messages starting another turn) and new automation turns, but allows existing runs, steering, approvals and tools to continue. Clicking Sign in reuses the overlay without remounting the workspace. Background schedule denial records that occurrence as not executed without opening a login page; the schedule remains enabled for its next normal time.
@@ -28,7 +36,7 @@ Profile mapping: display name and avatar come from `data.profile.displayName` an
 
 The bottom-left account button displays only the avatar and a single-line username. The expanded menu header displays the avatar, username and email; a separate read-only “软件许可” row above Settings displays license validity. This row is not clickable or keyboard-focusable and never opens a website. A concrete expiry uses its Shanghai calendar date, and a verified allowed license with no expiry displays “长期有效”. Unknown/unavailable or signed-out states never imply an unlimited license. Email also remains available on the profile page.
 
-An initial network outage retains saved credentials but does not bypass login. Transient runtime outages retain the last validated session; definite expiry or account deactivation blocks new turns without stopping existing work. The SDK adapter recognizes terminal symbolic errors (`unauthenticated`, `invalid_grant`, `user_blocked`) independently of numeric metadata, including rejected SDK promises, so definitive invalidation is not mistaken for a network outage. Account revalidation runs every five minutes and on foreground/profile refresh (foreground requests are throttled). License permission is process-local for at most 24 hours and must be freshly checked online after a cold restart or account change; saved login credentials still support automatic session restoration. This is not an always-online licensing/anti-tamper system.
+For cloud accounts, an initial network outage retains saved credentials but does not bypass login. Transient runtime outages retain the last validated session; definite expiry or account deactivation blocks new turns without stopping existing work. The SDK adapter recognizes terminal symbolic errors (`unauthenticated`, `invalid_grant`, `user_blocked`) independently of numeric metadata, including rejected SDK promises, so definitive invalidation is not mistaken for a network outage. Account revalidation runs every five minutes and on foreground/profile refresh (foreground requests are throttled). Cloud license permission is process-local for at most 24 hours and must be freshly checked online after a cold restart or account change; saved cloud login credentials still support automatic session restoration. The built-in local account is exempt from cloud revalidation and license expiry. This is not an always-online licensing/anti-tamper system.
 
 Password-provider configuration failures are not reported as wrong passwords. The adapter distinguishes explicit invalid-credential messages from a disabled/unconfigured CloudBase password-login provider, which remains a safe `unknown` error. Email-code cooldown starts only after CloudBase accepts the send request: a failed request is immediately retryable, while an accepted request starts the 60-second local window. CloudBase may independently rate-limit requests.
 
@@ -38,14 +46,15 @@ Auth diagnostics log only bounded SDK code/category/status/request ID fields, ne
 
 ```sh
 pnpm typecheck
-pnpm exec vitest run --project unit src/main/core/accountAuth.test.ts src/main/core/accountAuthDriver.test.ts src/main/core/accountAuthIpc.test.ts
+pnpm exec vitest run --project unit src/main/core/accountAuth.test.ts src/main/core/accountAuthDriver.test.ts src/main/core/accountAuthIpc.test.ts src/main/core/localAccount.test.ts
 pnpm exec vitest run --project browser src/renderer/src/app/__tests__/AccountLogin.browser.test.tsx
 node --test scripts/verify-packaged-privacy.test.mjs
 pnpm build
 node scripts/smoke-account-login.mjs
+node scripts/smoke-local-account.mjs
 ```
 
-The Electron smoke script uses a new temporary data directory, captures both login modes, and closes the test app. It does not send email or use a real account. The website administrator has confirmed email OTP login is enabled. Before release, personally verify password login, OTP receipt/login, remembered login after restart, profile data, logout while a real task is running, and switching accounts without changing local data. A signed packaged-app check is still required for the actual macOS Keychain identity. No new DMG is produced by these implementation tests.
+The login-screen Electron smoke script uses a new temporary data directory, captures both login modes, and closes the test app. It does not send email or use a real account. The local-account smoke script blocks remote networking, signs into the built-in account through the production form, checks its permanent license, restarts with the same temporary data, and verifies that logout stays signed out on the next launch. The website administrator has confirmed email OTP login is enabled. Before release, personally verify cloud password login, OTP receipt/login, remembered cloud login after restart, profile data, logout while a real task is running, and switching accounts without changing local data. A signed packaged-app check is still required for the actual macOS Keychain identity. No new DMG is produced by these implementation tests.
 
 If CloudBase requires an additional interactive graphical captcha or MFA, this first version reports an additional-verification error instead of bypassing it or waiting forever for a browser callback. That flow requires a separate approved integration if enabled by the account service.
 

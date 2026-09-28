@@ -50,7 +50,7 @@ export function LicenseStatus({ startup = false }: { startup?: boolean }) {
             <span>{t('license.noExpiry')}</span>
           </div>
         ) : null}
-        {state.status !== 'signedOut' ? (
+        {state.status !== 'signedOut' && !auth?.state.profile?.localAccount ? (
           <div
             className={startup ? undefined : 'settings-list-row profile-settings-avatar-actions'}
           >

@@ -81,8 +81,9 @@ alias 或手工修改 SQLite 也不能作为绕过正式副作用边界的入口
 
 ### 账号与新回合许可
 
-Main 持有加密登录会话与进程内许可，Renderer 和 Core Server 不取得账号 token。冷启动/切换账号必须重新在线验证
-许可；Core Server 的新根回合与 Automation admission 还验证 Main 同步的有界 execution lease。既有 Run、审批和
+Main 持有登录会话与进程内许可，Renderer 和 Core Server 不取得云端账号 token。云端账号的冷启动/切换必须重新在线验证
+许可；明确支持的内置本地账号由 Main 的独立会话状态授予永久离线准入，资料字段不能赋予此资格，不获得任何云端身份或服务权限。
+两类账号的 Core Server 新根回合与 Automation admission 都验证 Main 同步的有界 execution lease。既有 Run、审批和
 子任务不会因退出或许可变化被取消。该 lease 信任 Main，不是服务端签名 DRM；掌控本机程序的管理员仍在边界之外。
 账号之间共享现有本机数据库，不构成账号级本地数据隔离。详见[本机 Token 与许可](../subsystems/local-token-usage-and-license.md)。
 

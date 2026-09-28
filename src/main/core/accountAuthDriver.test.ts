@@ -42,13 +42,14 @@ beforeEach(() => {
 describe('CloudBase 3.9.2 adapter', () => {
   it('uses memory-only SDK persistence and obtains email from the authenticated identity', async () => {
     const driver = new CloudBaseAuthDriver()
-    expect(sdk.init).toHaveBeenCalledWith(
-      expect.objectContaining({ persistence: 'none', auth: { detectSessionInUrl: false } })
-    )
+    expect(sdk.init).not.toHaveBeenCalled()
     expect(await driver.login('submitted@example.com', 'password')).toEqual({
       ...tokens,
       email: 'identity@example.com'
     })
+    expect(sdk.init).toHaveBeenCalledWith(
+      expect.objectContaining({ persistence: 'none', auth: { detectSessionInUrl: false } })
+    )
   })
   it('uses OTP callback bound by the SDK and does not auto-register users', async () => {
     const driver = new CloudBaseAuthDriver()
@@ -268,5 +269,79 @@ describe('safe SDK error normalization', () => {
         'credentials'
       ).code
     ).toBe('unknown')
+  })
+})
+
+function stoppedEnvironmentError() {
+  return new AuthError({
+    error: 'resource_exhausted',
+    error_code: '8',
+    error_description:
+      'rpc error: code = ResourceExhausted desc = get auth config error: PG环境 synthetic-env 当前状态为 res_stopped，无法处理请求，请检查是否资源用尽，套餐过期或者账号欠费'
+  })
+}
+
+describe('stopped CloudBase authentication environment', () => {
+  it.each(['login', 'sendCode'] as const)(
+    'reports the service outage for %s instead of advising a one-minute cooldown',
+    async (operation) => {
+      const driver = new CloudBaseAuthDriver()
+      for (const rejection of [false, true]) {
+        const error = stoppedEnvironmentError()
+        if (rejection) sdk[operation].mockRejectedValueOnce(error)
+        else sdk[operation].mockResolvedValueOnce({ error })
+        const attempt =
+          operation === 'login'
+            ? driver.login('identity@example.com', 'synthetic-password')
+            : driver.sendCode('identity@example.com')
+        await expect(attempt).rejects.toMatchObject({
+          code: 'serviceUnavailable',
+          message: 'serviceUnavailable'
+        })
+      }
+      expect(sdk.getUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps saved credentials on failed restoration and restores after the service recovers', async () => {
+    const { service, store, fetchProfile } = setupService()
+    sdk.restore.mockResolvedValueOnce({ error: stoppedEnvironmentError() })
+    expect(await service.restoreSession()).toEqual({ ok: false, error: 'serviceUnavailable' })
+    expect(service.getState()).toMatchObject({ status: 'signedOut', error: 'serviceUnavailable' })
+    expect(() => service.assertCanStartTurn()).toThrow('ACCOUNT_LOGIN_REQUIRED')
+    expect(store.clear).not.toHaveBeenCalled()
+    expect(fetchProfile).not.toHaveBeenCalled()
+    expect(await service.restoreSession()).toEqual({ ok: true })
+    expect(service.getState().status).toBe('signedIn')
+  })
+
+  it('treats an outage during refresh as transient without invalidating a validated account', async () => {
+    const { service, store } = setupService()
+    await login(service)
+    store.clear.mockClear()
+    sdk.refresh.mockResolvedValueOnce({ error: stoppedEnvironmentError() })
+    expect(await service.refreshProfile()).toEqual({ ok: false, error: 'serviceUnavailable' })
+    expect(service.getState().status).toBe('signedIn')
+    expect(store.clear).not.toHaveBeenCalled()
+    expect(await service.refreshProfile()).toEqual({ ok: true })
+  })
+
+  it.each([{ code: 'RES_STOPPED' }, { status: 'res_stopped', errorCode: 8 }])(
+    'recognizes an explicit stopped resource status without forwarding provider details',
+    (error) => {
+      expect(sdkFailure(error, 'credentials')).toMatchObject({
+        code: 'serviceUnavailable',
+        message: 'serviceUnavailable'
+      })
+    }
+  )
+
+  it('preserves actual throttling when resource exhaustion has no stopped-environment marker', () => {
+    const error = new AuthError({
+      error: 'resource_exhausted',
+      error_code: '8',
+      error_description: 'Too many requests. Please retry later.'
+    })
+    expect(sdkFailure(error, 'credentials').code).toBe('rateLimit')
   })
 })

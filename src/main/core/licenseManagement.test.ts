@@ -5,10 +5,11 @@ import { ACCOUNT_PAGES } from '../auth/accountConfig'
 
 function setup() {
   let state = { status: 'signedIn', profile: { userId: 'a' } } as AuthState
+  let local = false
   const open = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined)
   const refresh = vi.fn().mockResolvedValue({ status: 'allowed' })
   const service = new LicenseManagementService(
-    { getState: () => state },
+    { getState: () => state, isLocalAccount: () => local },
     { refreshAfterManagement: refresh },
     open
   )
@@ -16,7 +17,8 @@ function setup() {
     service,
     open,
     refresh,
-    account: (userId: string | null) => {
+    account: (userId: string | null, localAccount = false) => {
+      local = !!userId && localAccount
       state = {
         status: userId ? 'signedIn' : 'signedOut',
         profile: userId ? { userId } : null
@@ -84,6 +86,36 @@ it('does not refresh after disposal', async () => {
   await s.service.open()
   s.service.onBlur()
   s.service.dispose()
+  s.service.onFocus()
+  expect(s.refresh).not.toHaveBeenCalled()
+})
+
+it('never opens or refreshes cloud management for the permanent local account', async () => {
+  const s = setup()
+  s.account('local-account', true)
+  await s.service.open()
+  s.service.onBlur()
+  s.service.onFocus()
+  expect(s.open).not.toHaveBeenCalled()
+  expect(s.refresh).not.toHaveBeenCalled()
+})
+
+it('drops a queued cloud management visit when switching to a local account', async () => {
+  const s = setup()
+  const pending = s.service.open()
+  s.account('a', true)
+  await pending
+  s.service.onBlur()
+  s.service.onFocus()
+  expect(s.open).not.toHaveBeenCalled()
+  expect(s.refresh).not.toHaveBeenCalled()
+})
+
+it('does not revalidate cloud management after switching to a local account with the same id', async () => {
+  const s = setup()
+  await s.service.open()
+  s.service.onBlur()
+  s.account('a', true)
   s.service.onFocus()
   expect(s.refresh).not.toHaveBeenCalled()
 })

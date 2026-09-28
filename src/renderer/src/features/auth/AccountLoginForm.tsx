@@ -6,7 +6,13 @@ import { hostClient } from '../../host/hostClient'
 import { useAccountAuth } from './AccountAuthContext'
 import './AccountLoginForm.css'
 
-export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean }) {
+export function AccountLoginForm({
+  canDismiss = false,
+  allowDuringSessionCheck = false
+}: {
+  canDismiss?: boolean
+  allowDuringSessionCheck?: boolean
+}) {
   const auth = useAccountAuth()
   const { t } = useFrontendConfig()
   const [mode, setMode] = useState<'password' | 'code'>('password')
@@ -51,7 +57,7 @@ export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean 
   }
   const visibleError = error ?? auth.state.error
   const normalizedEmail = email.trim().toLowerCase()
-  const checking = auth.state.status === 'checking'
+  const checking = auth.state.status === 'checking' && !allowDuringSessionCheck
   return (
     <section className="account-login" aria-label={t('auth.title')} aria-busy={busy || checking}>
       <h1>{t('auth.title')}</h1>
@@ -93,10 +99,10 @@ export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean 
             }}
           >
             <label>
-              {t('auth.email')}
+              {t(mode === 'password' ? 'auth.accountOrEmail' : 'auth.email')}
               <input
                 ref={inputRef}
-                type="email"
+                type={mode === 'password' ? 'text' : 'email'}
                 autoComplete="username"
                 required
                 maxLength={254}

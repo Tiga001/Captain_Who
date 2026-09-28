@@ -403,3 +403,47 @@ it('shows the actual expiry for time-limited licenses instead of no fixed expiry
   expect(screen.container.querySelector('time')?.getAttribute('datetime')).toBe(expiresAt)
   expect(screen.container.textContent).not.toContain('license.noExpiry')
 })
+
+it('shows the permanent local license without cloud verification or management buttons', async () => {
+  const screen = await render(
+    <AccountAuthContext.Provider
+      value={{
+        state: {
+          revision: 1,
+          status: 'signedIn',
+          profile: {
+            userId: 'local:captainwho',
+            displayName: '大副',
+            email: '',
+            avatarDataUrl: null,
+            occupation: '',
+            organization: '',
+            localAccount: { username: 'captainwho', avatarSeed: 'local-license-avatar' }
+          },
+          error: null,
+          remembered: true
+        },
+        loginRequested: false,
+        requestLogin: mocks.requestLogin,
+        dismissLogin: vi.fn(),
+        canStartTurn: () => true,
+        logout: mocks.logout
+      }}
+    >
+      <LicenseContext.Provider
+        value={{
+          state: { ...mocks.state, status: 'allowed', expiresAt: null },
+          canStartTurn: () => true,
+          requestAccess: mocks.openManagement,
+          refresh: mocks.refresh
+        }}
+      >
+        <LicenseStatus />
+      </LicenseContext.Provider>
+    </AccountAuthContext.Provider>
+  )
+  await expect.element(screen.getByText('license.noExpiry')).toBeVisible()
+  expect(screen.container.querySelector('button')).toBeNull()
+  expect(mocks.openManagement).not.toHaveBeenCalled()
+  expect(mocks.refresh).not.toHaveBeenCalled()
+})

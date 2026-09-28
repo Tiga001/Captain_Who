@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { AuthState, LicenseState } from '@mycopilot/host-api'
+import type { AccountProfile, AuthState, LicenseState } from '@mycopilot/host-api'
+import { getAgentAvatarUrl } from '../../features/agentCollaboration/agentAvatarAssignment'
 import { getTranslation } from '../../config/frontendTranslations'
 import { AccountAuthContext } from '../../features/auth/AccountAuthContext'
 import { LicenseContext } from '../../features/license/LicenseContext'
@@ -29,11 +30,13 @@ const profile = {
 function renderFooter({
   authStatus = 'signedIn',
   licenseStatus = 'allowed',
-  expiresAt = null
+  expiresAt = null,
+  accountProfile = profile
 }: {
   authStatus?: AuthState['status']
   licenseStatus?: LicenseState['status']
   expiresAt?: string | null
+  accountProfile?: AccountProfile
 } = {}) {
   const state: LicenseState = {
     revision: 1,
@@ -50,7 +53,7 @@ function renderFooter({
         state: {
           revision: 1,
           status: authStatus,
-          profile: authStatus === 'signedIn' ? profile : null,
+          profile: authStatus === 'signedIn' ? accountProfile : null,
           error: null,
           remembered: true
         },
@@ -155,6 +158,31 @@ it('shows long-term validity only in the license row for a signed-in allowed lic
   expect(screen.container.querySelector('.left-sidebar__account-text')?.textContent).toBe(
     profile.displayName
   )
+})
+
+it('shows the local username and the same bundled avatar in the footer and account menu', async () => {
+  const localProfile = {
+    ...profile,
+    displayName: '大副',
+    email: '',
+    localAccount: { username: 'captainwho', avatarSeed: 'local-menu-avatar' }
+  }
+  const screen = await renderFooter({ accountProfile: localProfile })
+  const avatarUrl = getAgentAvatarUrl(localProfile.localAccount.avatarSeed)
+  expect(screen.container.querySelector('img')?.getAttribute('src')).toBe(avatarUrl)
+  await openMenu(screen)
+  const menuHeader = screen.container.querySelector('.left-sidebar__account-menu-profile-text')!
+  expect(Array.from(menuHeader.children, (element) => element.textContent)).toEqual([
+    '大副',
+    'captainwho'
+  ])
+  const avatars = screen.container.querySelectorAll('.left-sidebar__account-avatar img')
+  expect(avatars).toHaveLength(2)
+  expect(Array.from(avatars, (avatar) => avatar.getAttribute('src'))).toEqual([
+    avatarUrl,
+    avatarUrl
+  ])
+  expect(licenseText(screen.container)).toBe('长期有效')
 })
 
 it('retains the known expiry date for an expired license without claiming it is active', async () => {

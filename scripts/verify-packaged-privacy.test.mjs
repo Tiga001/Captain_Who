@@ -141,9 +141,11 @@ test('packaged privacy gate rejects host paths, sensitive state, credentialed UR
   for (const filename of [
     'account-session.enc',
     'account-license.enc',
-    'account-license.enc.tmp'
+    'account-license.enc.tmp',
+    'local-account.json',
+    'local-account.json.tmp'
   ]) {
-    await t.test(`encrypted account state: ${filename}`, async () => {
+    await t.test(`local account state: ${filename}`, async () => {
       const { directory, app } = await fixture()
       await writeFile(join(app, 'Contents', filename), Buffer.from([1, 2, 3]))
       await assert.rejects(

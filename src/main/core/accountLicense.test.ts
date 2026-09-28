@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuthState } from '@mycopilot/host-api'
+import { EXECUTION_ACCESS_MAX_TTL_MS } from '@mycopilot/protocol'
 import { LicenseService } from '../auth/LicenseService'
 import {
   LicenseFailure,
@@ -17,11 +18,16 @@ const grant = (ttl = LICENSE_CACHE_MS): VerifiedLicense => ({
   verifiedAt: new Date(Date.now()).toISOString(),
   cacheValidUntil: new Date(Date.now() + ttl).toISOString()
 })
-function setup(clock?: { wall: number; mono: number }) {
-  let authState = { status: 'signedOut', profile: null } as AuthState
+function setup(clock?: { wall: number; mono: number }, initialLocal = false) {
+  let localAccount = initialLocal
+  let authState = {
+    status: initialLocal ? 'signedIn' : 'signedOut',
+    profile: initialLocal ? { userId: 'local-account' } : null
+  } as AuthState
   let listener: ((state: AuthState) => void) | undefined
   const auth = {
     getState: () => authState,
+    isLocalAccount: () => localAccount,
     subscribe: (next: (state: AuthState) => void) => {
       listener = next
       return () => {
@@ -39,7 +45,8 @@ function setup(clock?: { wall: number; mono: number }) {
     clock ? () => clock.mono : undefined
   )
   services.push(service)
-  const account = (userId: string | null): void => {
+  const account = (userId: string | null, local = false): void => {
+    localAccount = !!userId && local
     authState = {
       status: userId ? 'signedIn' : 'signedOut',
       profile: userId ? { userId } : null
@@ -55,6 +62,99 @@ beforeEach(() => {
 afterEach(() => {
   for (const service of services.splice(0)) service.dispose()
   vi.useRealTimers()
+})
+
+describe('permanent local account admission', () => {
+  it('admits a restored local account without requesting a token or online license', async () => {
+    const s = setup(undefined, true)
+    await s.service.refresh()
+    await s.service.refreshAfterManagement()
+    expect(s.service.getState()).toMatchObject({
+      status: 'allowed',
+      reason: 'active',
+      expiresAt: null,
+      verifiedAt: null,
+      cacheValidUntil: null,
+      error: null
+    })
+    expect(s.service.getExecutionLease()).toEqual({
+      reason: 'allowed',
+      remainingMs: EXECUTION_ACCESS_MAX_TTL_MS
+    })
+    expect(() => s.service.assertCanStartTurn()).not.toThrow()
+    expect(s.fetch).not.toHaveBeenCalled()
+    expect(s.auth.getAccessToken).not.toHaveBeenCalled()
+    expect(s.auth.refreshProfile).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('remains allowed years later and across restarts without renewing in the cloud', async () => {
+    const clock = { wall: base, mono: 0 }
+    const s = setup(clock, true)
+    clock.wall += 10 * 365 * 24 * 60 * 60_000
+    clock.mono += 10 * 365 * 24 * 60 * 60_000
+    await s.service.refresh()
+    expect(s.service.getExecutionLease().reason).toBe('allowed')
+    clock.wall = base - 10 * 365 * 24 * 60 * 60_000
+    expect(s.service.getExecutionLease().reason).toBe('allowed')
+    s.service.dispose()
+    const restarted = setup(clock, true)
+    expect(() => restarted.service.assertCanStartTurn()).not.toThrow()
+    expect(s.fetch).not.toHaveBeenCalled()
+    expect(restarted.fetch).not.toHaveBeenCalled()
+  })
+
+  it('fences late cloud responses and distinguishes cloud/local sessions with the same id', async () => {
+    const s = setup()
+    let complete!: (value: VerifiedLicense) => void
+    s.fetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve
+        })
+    )
+    s.account('same-id')
+    const pending = s.service.refresh()
+    const signal = s.fetch.mock.calls[0][1] as AbortSignal
+    s.account('same-id', true)
+    expect(signal.aborted).toBe(true)
+    complete({ ...grant(), allowed: false, reason: 'revoked' })
+    await pending
+    expect(s.service.getState()).toMatchObject({ status: 'allowed', error: null })
+    expect(s.service.getExecutionLease().remainingMs).toBe(EXECUTION_ACCESS_MAX_TTL_MS)
+
+    s.fetch.mockRejectedValue(new LicenseFailure('network'))
+    s.account('same-id', false)
+    expect(s.service.getExecutionLease().reason).not.toBe('allowed')
+    await s.service.refresh()
+    expect(s.service.getState().status).toBe('unavailable')
+    expect(s.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('revokes local admission immediately at logout', () => {
+    const s = setup(undefined, true)
+    s.account(null)
+    expect(s.service.getState().status).toBe('signedOut')
+    expect(s.service.getExecutionLease()).toEqual({
+      reason: 'account_signed_out',
+      remainingMs: 0
+    })
+    expect(() => s.service.assertCanStartTurn()).toThrow('ACCOUNT_LOGIN_REQUIRED')
+    expect(s.fetch).not.toHaveBeenCalled()
+  })
+
+  it('does not infer local authority from an account name or profile metadata', async () => {
+    const s = setup()
+    s.fetch.mockRejectedValue(new LicenseFailure('network'))
+    s.account('captainwho')
+    Object.assign(s.auth.getState().profile!, {
+      displayName: '大副',
+      localAccount: { username: 'captainwho', avatarSeed: 'spoofed' }
+    })
+    await s.service.refresh()
+    expect(s.service.getExecutionLease().reason).not.toBe('allowed')
+    expect(s.fetch).toHaveBeenCalledOnce()
+  })
 })
 
 describe('24-hour account license admission', () => {

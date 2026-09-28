@@ -52,6 +52,7 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
   const [logoutError, setLogoutError] = useState(false)
   const profile = auth?.state.status === 'signedIn' ? auth.state.profile : null
   const profileDisplayName = profile?.displayName || t('auth.signedOut')
+  const accountName = profile?.localAccount?.username || profile?.email
   const licenseValue =
     auth?.state.status === 'signedIn'
       ? licenseSubtitle(license?.state, t)
@@ -73,11 +74,14 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
         >
           <div className="left-sidebar__account-menu-profile" aria-hidden="true">
             <span className="left-sidebar__account-avatar left-sidebar__account-avatar--small">
-              <AccountAvatar src={profile?.avatarDataUrl} />
+              <AccountAvatar
+                src={profile?.avatarDataUrl}
+                localAvatarSeed={profile?.localAccount?.avatarSeed}
+              />
             </span>
             <span className="left-sidebar__account-menu-profile-text">
               <span>{profileDisplayName}</span>
-              {profile?.email ? <span>{profile.email}</span> : null}
+              {accountName ? <span>{accountName}</span> : null}
             </span>
           </div>
 
@@ -136,7 +140,10 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
         onClick={() => setAccountMenuOpen((isOpen) => !isOpen)}
       >
         <span className="left-sidebar__account-avatar">
-          <AccountAvatar src={profile?.avatarDataUrl} />
+          <AccountAvatar
+            src={profile?.avatarDataUrl}
+            localAvatarSeed={profile?.localAccount?.avatarSeed}
+          />
         </span>
         <span className="left-sidebar__account-text">
           <span>{profileDisplayName}</span>

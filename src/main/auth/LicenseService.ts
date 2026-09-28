@@ -1,9 +1,12 @@
 import type { AuthState, LicenseState } from '@mycopilot/host-api'
 import type { AuthService } from './AuthService'
-import type { ExecutionAccessReason } from '@mycopilot/protocol'
+import { EXECUTION_ACCESS_MAX_TTL_MS, type ExecutionAccessReason } from '@mycopilot/protocol'
 import { LicenseFailure, parseVerifiedLicense, type VerifiedLicense } from './LicenseApiClient'
 
-type Auth = Pick<AuthService, 'getState' | 'subscribe' | 'getAccessToken' | 'refreshProfile'>
+type Auth = Pick<
+  AuthService,
+  'getState' | 'subscribe' | 'getAccessToken' | 'refreshProfile' | 'isLocalAccount'
+>
 type FetchLicense = (accessToken: string, signal: AbortSignal) => Promise<VerifiedLicense>
 interface MemoryLicense {
   userId: string
@@ -20,13 +23,15 @@ const EMPTY: Omit<LicenseState, 'revision'> = {
 }
 
 /**
- * Account-specific, process-local admission. Only a fresh authenticated HTTPS response can
- * create a grant; on-disk data is never an authorization source, even after a restart.
+ * Cloud grants require a fresh authenticated HTTPS response; on-disk cloud license data
+ * never grants access. The explicitly supported local account has permanent offline access,
+ * determined only by AuthService's Main-owned session, not profile metadata.
  * Never owns a run, Core Server, or shutdown lifecycle.
  */
 export class LicenseService {
   private state: LicenseState = { revision: 0, ...EMPTY }
   private userId: string | null = null
+  private localAccount = false
   private epoch = 0
   private lease: MemoryLicense | null = null
   private monotonicDeadline = 0
@@ -60,18 +65,30 @@ export class LicenseService {
   }
   private accountChanged = (auth: AuthState): void => {
     const next = auth.status === 'signedIn' ? (auth.profile?.userId ?? null) : null
-    if (next === this.userId) return
+    const localAccount = !!next && this.auth.isLocalAccount()
+    if (next === this.userId && localAccount === this.localAccount) return
     ++this.epoch
     this.controller?.abort()
     this.controller = null
     this.pending = null
     this.clearTimer()
     this.userId = next
+    this.localAccount = localAccount
     this.lease = null
+    this.monotonicDeadline = 0
     this.retryAt = 0
     this.failures = 0
-    this.publish({ ...EMPTY, status: next ? 'checking' : 'signedOut' })
-    if (next) void this.refresh()
+    this.publish({
+      ...EMPTY,
+      status: localAccount ? 'allowed' : next ? 'checking' : 'signedOut',
+      reason: localAccount ? 'active' : null
+    })
+    if (next && !localAccount) void this.refresh()
+  }
+  private hasLocalAccess(): boolean {
+    if (!this.localAccount || !this.auth.isLocalAccount()) return false
+    const state = this.auth.getState()
+    return state.status === 'signedIn' && state.profile?.userId === this.userId
   }
   private clearTimer(): void {
     if (this.timer) clearTimeout(this.timer)
@@ -131,6 +148,7 @@ export class LicenseService {
     return true
   }
   private expire(): void {
+    if (this.hasLocalAccess()) return
     if (this.state.status !== 'allowed' || this.valid()) return
     const knownExpiry =
       !!this.lease && this.lease.license.expiresAt === this.lease.license.cacheValidUntil
@@ -143,6 +161,7 @@ export class LicenseService {
     })
   }
   getState = (): LicenseState => {
+    if (this.hasLocalAccess()) return structuredClone(this.state)
     this.expire()
     if (
       this.userId &&
@@ -169,6 +188,8 @@ export class LicenseService {
   }
   /** Main-only bounded authority for the local scheduler; never contains a user or token. */
   getExecutionLease(): { reason: ExecutionAccessReason; remainingMs: number } {
+    if (this.hasLocalAccess())
+      return { reason: 'allowed', remainingMs: EXECUTION_ACCESS_MAX_TTL_MS }
     this.expire()
     if (!this.userId) return { reason: 'account_signed_out', remainingMs: 0 }
     if (this.valid() && this.state.status === 'allowed')
@@ -198,6 +219,7 @@ export class LicenseService {
     return this.refresh()
   }
   refresh = (): Promise<LicenseState> => {
+    if (this.hasLocalAccess()) return Promise.resolve(structuredClone(this.state))
     if (!this.userId) return Promise.resolve(structuredClone(this.state))
     if (this.pending) return this.pending
     if (this.now() < this.retryAt) return Promise.resolve(structuredClone(this.state))

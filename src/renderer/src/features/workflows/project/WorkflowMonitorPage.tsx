@@ -255,7 +255,10 @@ export function WorkflowMonitorPage({
                   }}
                 >
                   <span className="workflow-node__avatar workflow-user-avatar">
-                    <AccountAvatar src={profile?.avatarDataUrl} />
+                    <AccountAvatar
+                      src={profile?.avatarDataUrl}
+                      localAvatarSeed={profile?.localAccount?.avatarSeed}
+                    />
                   </span>
                   <div className="workflow-node__copy">
                     <strong>{userName}</strong>
@@ -360,7 +363,10 @@ export function WorkflowMonitorPage({
                             aria-label={`${node.name || userName}${waiting ? ` · ${t('等待用户操作', 'Waiting for user action')}` : ''}`}
                           >
                             <span className="workflow-node__avatar workflow-user-avatar">
-                              <AccountAvatar src={profile?.avatarDataUrl} />
+                              <AccountAvatar
+                                src={profile?.avatarDataUrl}
+                                localAvatarSeed={profile?.localAccount?.avatarSeed}
+                              />
                             </span>
                             <span className="workflow-node__copy">
                               <strong>{userName}</strong>

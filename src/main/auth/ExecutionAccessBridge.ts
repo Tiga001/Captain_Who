@@ -15,7 +15,7 @@ export class ExecutionAccessBridge {
   private readonly timer: ReturnType<typeof setInterval>
 
   constructor(
-    private readonly auth: Pick<AuthService, 'getState' | 'subscribe'>,
+    private readonly auth: Pick<AuthService, 'getState' | 'subscribe' | 'isLocalAccount'>,
     private readonly license: Pick<LicenseService, 'getExecutionLease' | 'subscribe'>,
     private readonly core: Core,
     private readonly now: () => number = Date.now
@@ -34,7 +34,10 @@ export class ExecutionAccessBridge {
   async sync(): Promise<void> {
     if (this.disposed || !this.core.isRunning()) return
     const auth = this.auth.getState()
-    const nextIdentity = auth.status === 'signedIn' ? (auth.profile?.userId ?? null) : null
+    const userId = auth.status === 'signedIn' ? (auth.profile?.userId ?? null) : null
+    const nextIdentity = userId
+      ? `${this.auth.isLocalAccount() ? 'local' : 'cloud'}:${userId}`
+      : null
     if (nextIdentity !== this.identity) {
       this.identity = nextIdentity
       ++this.identityEpoch

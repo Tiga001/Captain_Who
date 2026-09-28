@@ -183,7 +183,10 @@ export function WorkflowBindingCanvas({
               }}
             >
               <span className="workflow-node__avatar workflow-user-avatar">
-                <AccountAvatar src={profile?.avatarDataUrl} />
+                <AccountAvatar
+                  src={profile?.avatarDataUrl}
+                  localAvatarSeed={profile?.localAccount?.avatarSeed}
+                />
               </span>
               <div className="workflow-node__copy">
                 <strong>{userName}</strong>
@@ -222,7 +225,10 @@ export function WorkflowBindingCanvas({
                 return (
                   <div key={node.id} className="workflow-node" style={style}>
                     <span className="workflow-node__avatar workflow-user-avatar">
-                      <AccountAvatar src={profile?.avatarDataUrl} />
+                      <AccountAvatar
+                        src={profile?.avatarDataUrl}
+                        localAvatarSeed={profile?.localAccount?.avatarSeed}
+                      />
                     </span>
                     <div className="workflow-node__copy">
                       <strong>{userName}</strong>

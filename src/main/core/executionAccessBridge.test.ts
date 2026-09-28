@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuthState, LicenseState } from '@mycopilot/host-api'
 import { ExecutionAccessBridge } from '../auth/ExecutionAccessBridge'
-import { parseExecutionAccessSnapshot, parseExecutionAccessReceipt } from '@mycopilot/protocol'
+import { LicenseService } from '../auth/LicenseService'
+import {
+  EXECUTION_ACCESS_MAX_TTL_MS,
+  parseExecutionAccessSnapshot,
+  parseExecutionAccessReceipt
+} from '@mycopilot/protocol'
 
 const bridges: ExecutionAccessBridge[] = []
 function setup(running = true) {
   let state = { status: 'signedOut', profile: null } as AuthState
+  let local = false
   let onAuth!: (state: AuthState) => void
   let onLicense!: (state: LicenseState) => void
   let started!: () => void
@@ -20,6 +26,7 @@ function setup(running = true) {
   }
   const auth = {
     getState: () => state,
+    isLocalAccount: () => local,
     subscribe: (handler: (state: AuthState) => void) => {
       onAuth = handler
       return vi.fn()
@@ -43,7 +50,8 @@ function setup(running = true) {
       started()
     },
     emitLicense: () => onLicense({} as LicenseState),
-    account: (userId: string | null) => {
+    account: (userId: string | null, localAccount = false) => {
+      local = !!userId && localAccount
       state = {
         status: userId ? 'signedIn' : 'signedOut',
         profile: userId ? { userId } : null
@@ -117,6 +125,65 @@ describe('local execution access mirroring', () => {
     s.core.setExecutionAccess.mockResolvedValue({ revision: 0 })
     s.start()
     await expect(s.bridge.sync()).rejects.toThrow('not applied')
+  })
+  it('changes identity generations when cloud and local sessions share a profile id', () => {
+    const s = setup()
+    s.account('same-id')
+    expect(s.core.setExecutionAccess.mock.lastCall?.[0].identityEpoch).toBe(1)
+    s.account('same-id', true)
+    expect(s.core.setExecutionAccess.mock.lastCall?.[0].identityEpoch).toBe(2)
+    s.account('same-id', false)
+    expect(s.core.setExecutionAccess.mock.lastCall?.[0].identityEpoch).toBe(3)
+  })
+
+  it('renews permanent local access as bounded IPC leases and revokes it immediately at logout', async () => {
+    let state = { status: 'signedIn', profile: { userId: 'local-account' } } as AuthState
+    let local = true
+    const listeners = new Set<(state: AuthState) => void>()
+    const auth = {
+      getState: () => state,
+      isLocalAccount: () => local,
+      subscribe: (listener: (state: AuthState) => void) => {
+        listeners.add(listener)
+        return () => {
+          listeners.delete(listener)
+        }
+      },
+      getAccessToken: vi.fn(),
+      refreshProfile: vi.fn()
+    }
+    const fetch = vi.fn()
+    const license = new LicenseService(auth, fetch)
+    const core = {
+      isRunning: () => true,
+      onStarted: () => vi.fn(),
+      setExecutionAccess: vi.fn(async (snapshot) => ({ revision: snapshot.revision }))
+    }
+    const bridge = new ExecutionAccessBridge(auth, license, core)
+    bridges.push(bridge)
+    try {
+      const first = parseExecutionAccessSnapshot(core.setExecutionAccess.mock.lastCall![0])
+      expect(first.reason).toBe('allowed')
+      expect(first.validUntil - first.issuedAt).toBe(EXECUTION_ACCESS_MAX_TTL_MS)
+      await vi.advanceTimersByTimeAsync(90_000)
+      const renewed = parseExecutionAccessSnapshot(core.setExecutionAccess.mock.lastCall![0])
+      expect(renewed.reason).toBe('allowed')
+      expect(renewed.validUntil).toBeGreaterThan(first.validUntil)
+      expect(renewed.validUntil - renewed.issuedAt).toBe(EXECUTION_ACCESS_MAX_TTL_MS)
+      expect(fetch).not.toHaveBeenCalled()
+      expect(auth.getAccessToken).not.toHaveBeenCalled()
+
+      state = { status: 'signedOut', profile: null } as AuthState
+      local = false
+      for (const listener of listeners) listener(state)
+      const revoked = parseExecutionAccessSnapshot(core.setExecutionAccess.mock.lastCall![0])
+      expect(revoked.reason).toBe('account_signed_out')
+      expect(revoked.validUntil).toBe(revoked.issuedAt)
+      expect(revoked.identityEpoch).toBeGreaterThan(renewed.identityEpoch)
+    } finally {
+      bridge.dispose()
+      license.dispose()
+    }
   })
 })
 
