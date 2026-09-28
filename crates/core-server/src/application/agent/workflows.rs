@@ -7,6 +7,25 @@ impl AgentService {
     /// Binding changes only the next composer input. Serialize with ordinary model/context
     /// maintenance admission so an in-flight transition cannot overwrite the new defaults.
     pub(crate) fn workflow_request(&self, request: Request) -> Result<Response, Error> {
+        let changes_readiness = matches!(
+            &request,
+            Request::Save { .. }
+                | Request::SaveWithUsage { .. }
+                | Request::Delete { .. }
+                | Request::Manage(
+                    ManagementRequest::SaveInstance { .. }
+                        | ManagementRequest::SetInstanceEnabled { .. }
+                        | ManagementRequest::DeleteInstance { .. }
+                )
+        );
+        let result = self.workflow_request_inner(request);
+        if result.is_ok() && changes_readiness {
+            self.wake_workflow_deliveries();
+        }
+        result
+    }
+
+    fn workflow_request_inner(&self, request: Request) -> Result<Response, Error> {
         if let Request::Manage(ManagementRequest::SaveInstance { id, bindings, .. }) = &request {
             let _admission = self
                 .conversation_admission

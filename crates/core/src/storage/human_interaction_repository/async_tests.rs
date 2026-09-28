@@ -258,6 +258,99 @@ fn async_guidance_requires_exact_trace_and_atomically_marks_applied() {
 }
 
 #[test]
+fn async_guidance_hot_publication_commits_both_proofs_before_marking_applied() {
+    let fixture = Fixture::new();
+    let request = accepted(&fixture, "hot-publication");
+    bind(&fixture, &request, "hot-guidance").unwrap();
+    fixture
+        .connect()
+        .execute(
+            "UPDATE conversation_turn_traces SET schema_version=?1",
+            [crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
+        )
+        .unwrap();
+    let service = StorageService::open_for_development_reset(&fixture.path).unwrap();
+    let mut recorder = crate::ConversationTraceRecorder::default();
+    let mut cursor = crate::storage::service::ConversationTraceCommitCursor::default();
+    service
+        .append_trusted_conversation_trace_publication(
+            &mut cursor,
+            &recorder.publication(),
+            "chat",
+            "assistant",
+            "run",
+            2,
+            21,
+        )
+        .unwrap();
+
+    let guidance = record(&request, "hot-guidance");
+    let sequence = recorder
+        .record_user_guidance(
+            &guidance.guidance_id,
+            &guidance.client_message_id,
+            &guidance.content,
+            &[],
+            &[],
+            21,
+        )
+        .unwrap();
+    recorder
+        .record_model_message(
+            sequence,
+            0,
+            &crate::llm::LlmMessage::text(crate::llm::LlmMessageRole::User, &guidance.content),
+        )
+        .unwrap();
+    let publication = recorder.publication();
+    let outcome = service
+        .append_trusted_conversation_trace_publication(
+            &mut cursor,
+            &publication,
+            "chat",
+            "assistant",
+            "run",
+            2,
+            22,
+        )
+        .unwrap();
+    assert!(outcome.changed);
+    assert!(
+        outcome.previous_publication.is_some(),
+        "must exercise the hot path"
+    );
+    let applied = reload(&fixture, &request).delivery.unwrap();
+    assert_eq!(applied.status, HumanInteractionDeliveryStatus::Applied);
+    assert_eq!(
+        count(&fixture.connect(), "conversation_turn_trace_items"),
+        1
+    );
+    assert_eq!(
+        count(&fixture.connect(), "conversation_model_context_items"),
+        1
+    );
+    assert!(
+        !service
+            .append_trusted_conversation_trace_publication(
+                &mut cursor,
+                &publication,
+                "chat",
+                "assistant",
+                "run",
+                2,
+                23,
+            )
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        reload(&fixture, &request).delivery.unwrap().revision,
+        applied.revision
+    );
+    assert!(list_pending_async(&fixture.connect()).unwrap().is_empty());
+}
+
+#[test]
 fn async_stop_cancels_only_accepted_scope_and_preserves_open_batches() {
     let fixture = Fixture::new();
     let submitted = accepted(&fixture, "a");

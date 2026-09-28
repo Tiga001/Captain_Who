@@ -99,28 +99,45 @@ impl AgentService {
             .map_err(|error| error.to_string())
     }
 
-    pub(super) fn conversation_id_for_run(&self, run_id: &str) -> Option<String> {
-        self.active_runs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(run_id)
-            .map(|control| control.conversation_id.clone())
-            .or_else(|| {
-                self.usage_contexts
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .get(run_id)
-                    .map(|state| state.context.conversation_id.clone())
-            })
-            .or_else(|| {
-                self.pending_actions
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .values()
-                    .find(|record| record.snapshot.run_id == run_id)
-                    .and_then(|record| record.snapshot.conversation_id.clone())
-            })
-            .or_else(|| self.command_sessions.conversation_for_origin_run(run_id))
+    /// Resolves a sequencing hint, never authority. The fallback reads durable state and some
+    /// registries are held by persistence paths, so transport must call this in a bounded blocking
+    /// worker, never while reading stdin. Handlers still perform their normal authorization.
+    pub(crate) fn conversation_id_for_run(&self, run_id: &str) -> Option<String> {
+        // Do not retain a registry guard across the next registry or SQLite fallback. In
+        // particular an unknown/retired run must not hold active_runs while waiting for storage.
+        let conversation = {
+            self.active_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(run_id)
+                .map(|control| control.conversation_id.clone())
+        };
+        if conversation.is_some() {
+            return conversation;
+        }
+        let conversation = {
+            self.usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(run_id)
+                .map(|state| state.context.conversation_id.clone())
+        };
+        if conversation.is_some() {
+            return conversation;
+        }
+        let conversation = {
+            self.pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .find(|record| record.snapshot.run_id == run_id)
+                .and_then(|record| record.snapshot.conversation_id.clone())
+        };
+        if conversation.is_some() {
+            return conversation;
+        }
+        self.command_sessions
+            .conversation_for_origin_run(run_id)
             .or_else(|| {
                 self.storage
                     .load_sync_human_interaction_for_run(run_id)

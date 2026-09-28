@@ -1,13 +1,6 @@
 impl AgentService {
     pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
-        {
-            let _admission = self
-                .conversation_admission
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            self.workflow_dispatch_stopped
-                .store(true, Ordering::Release);
-        }
+        self.stop_workflow_delivery_admissions();
         let manual_tokens = self
             .manual_context_compaction_cancellations
             .lock()

@@ -43,9 +43,7 @@ pub(crate) fn handle_request(
                     request,
                 )
             } else {
-                let response = handle_workflow_request(storage, Some(agent_service), request);
-                agent_service.schedule_workflow_deliveries(notification_tx);
-                response
+                handle_workflow_request(storage, Some(agent_service), request)
             }
         }
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),

@@ -128,53 +128,6 @@ pub(crate) struct CoreRequestServices {
     pub(crate) mcp_management_tasks: Arc<McpManagementRequestTracker>,
 }
 
-fn is_blocking_read_method(method: &str) -> bool {
-    matches!(
-        method,
-        AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
-            | mycopilot_protocol_rs::AGENT_COLLABORATION_GET_SETTINGS_METHOD
-            | AGENT_COLLABORATION_GET_TREE_METHOD
-            | AGENT_COLLABORATION_GET_AGENT_METHOD
-            | AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD
-            | AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD
-            | AGENT_COLLABORATION_LIST_EVENTS_METHOD
-            | AGENT_COLLABORATION_TEMPLATES_LIST_METHOD
-            | AGENT_COLLABORATION_APPROVALS_LIST_METHOD
-            | AGENT_COMMAND_SESSIONS_LIST_METHOD
-            | AGENT_COMMAND_SESSIONS_GET_METHOD
-            | AGENT_LIST_PENDING_ACTIONS_METHOD
-            | AGENT_GET_USAGE_SUMMARY_METHOD
-            | AGENT_GET_LOCAL_TOKEN_USAGE_METHOD
-            | AGENT_READ_FILE_CHANGE_METHOD
-            | AGENT_GET_FILE_CHANGE_DIFF_METHOD
-            | AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD
-            | SEARCH_SEARCH_CHATS_METHOD
-            | STORAGE_LOAD_MODEL_SETTINGS_METHOD
-            | STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD
-            | STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD
-            | STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD
-            | STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD
-            | STORAGE_LOAD_PROJECTS_METHOD
-            | STORAGE_LOAD_CONVERSATIONS_METHOD
-            | STORAGE_LOAD_CONVERSATION_METAS_METHOD
-            | mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
-            | mycopilot_protocol_rs::HUMAN_INTERACTION_GET_ATTENTION_METHOD
-            | STORAGE_LOAD_CONVERSATION_METHOD
-            | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
-            | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
-            | mycopilot_protocol_rs::STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD
-            | mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD
-            | mycopilot_protocol_rs::STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD
-            | mycopilot_protocol_rs::STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD
-            | mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD
-            | STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD
-            | STORAGE_LIST_BROWSER_DOWNLOADS_METHOD
-            | STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD
-            | STORAGE_LOAD_COMPOSER_DRAFTS_METHOD
-            | STORAGE_LOAD_UI_PREFERENCES_METHOD
-    )
-}
-
 pub(crate) async fn run_request_loop<R>(
     input: R,
     services: CoreRequestServices,
@@ -188,6 +141,7 @@ where
     R: AsyncBufRead + Unpin,
 {
     let forks = ForkRequestDispatcher::new(outbounds.normal.clone());
+    let rpc = RpcRequestDispatcher::new(outbounds.normal.clone());
     let result = run_request_loop_inner(
         input,
         services,
@@ -197,10 +151,13 @@ where
         dispatchers,
         outbounds,
         &forks,
+        &rpc,
     )
     .await;
     // Also drain on EOF and parse/transport failure; accepted writes never outlive their owner.
-    forks.shutdown().await?;
+    let (rpc_result, fork_result) = tokio::join!(rpc.shutdown(), forks.shutdown());
+    rpc_result?;
+    fork_result?;
     result
 }
 
@@ -214,6 +171,7 @@ pub(super) async fn run_request_loop_inner<R>(
     dispatchers: &RequestDispatchers<'_>,
     outbounds: RequestOutbounds<'_>,
     forks: &ForkRequestDispatcher,
+    rpc: &RpcRequestDispatcher,
 ) -> io::Result<Option<JsonRpcId>>
 where
     R: AsyncBufRead + Unpin,
@@ -258,6 +216,11 @@ where
 
         if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
             forks.begin_shutdown();
+            rpc.begin_shutdown();
+            let stopping_service = agent_service.clone();
+            let workflow_stop = tokio::task::spawn_blocking(move || {
+                stopping_service.stop_workflow_delivery_admissions();
+            });
             let shutdown_id = request.id;
             if let Some(coordinator) = browser_risk_coordinator.as_ref() {
                 coordinator.cancel_all();
@@ -298,7 +261,7 @@ where
                                             completion_request,
                                         ))
                                     }
-                                    _ => None,
+                                    _ => Some(bounded_dispatch::unavailable_response(completion_request.id, false)),
                                 };
                                 if let Some(response) = response {
                                     enqueue_outbound(outbound, response)?;
@@ -308,6 +271,9 @@ where
                     }
                 }
             }
+            workflow_stop.await.map_err(|error| {
+                io::Error::other(format!("workflow shutdown fence failed: {error}"))
+            })?;
             return Ok(Some(shutdown_id));
         }
 
@@ -509,7 +475,7 @@ where
                 let request_storage = Arc::clone(&storage);
                 let request_agent_service = agent_service.clone();
                 let request_outbound = image_artifact_outbound.clone();
-                tokio::spawn(async move {
+                rpc.track_artifact(async move {
                     let response =
                         handle_image_generation_artifact_request_with_observer_authority(
                             request_store,
@@ -569,72 +535,6 @@ where
                 }
                 continue;
             }
-            if is_automation_request_method(&request.method) {
-                let request_id = request.id.clone();
-                let request_storage = Arc::clone(&storage);
-                let request_agent_service = agent_service.clone();
-                let request_scheduler_wake = automation_scheduler_wake.clone();
-                let request_outbound = outbound.clone();
-                tokio::spawn(async move {
-                    let response = match tokio::task::spawn_blocking(move || {
-                        handle_automation_request_with_access(
-                            &request_storage,
-                            Some(&request_agent_service),
-                            Some(&request_scheduler_wake),
-                            request,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(_) => automation_internal_error_response(request_id),
-                    };
-                    let _ = enqueue_outbound(&request_outbound, response);
-                });
-                continue;
-            }
-            if is_notification_request_method(&request.method) {
-                let request_id = request.id.clone();
-                let request_storage = Arc::clone(&storage);
-                let request_outbound = outbound.clone();
-                tokio::spawn(async move {
-                    let response = match tokio::task::spawn_blocking(move || {
-                        handle_notification_request(&request_storage, request)
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => response_error(
-                            Some(request_id),
-                            -32000,
-                            format!("Notification storage task failed: {error}"),
-                        ),
-                    };
-                    let _ = enqueue_outbound(&request_outbound, response);
-                });
-                continue;
-            }
-            if request.method == OFFICE_GET_STATUS_METHOD {
-                let request_outbound = outbound.clone();
-                let request_service = agent_service.clone();
-                tokio::spawn(async move {
-                    let request_id = request.id.clone();
-                    let response = match tokio::task::spawn_blocking(move || {
-                        handle_office_status_request(&request_service, request)
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => response_error(
-                            Some(request_id),
-                            -32000,
-                            format!("Office status probe task failed: {error}"),
-                        ),
-                    };
-                    let _ = enqueue_outbound(&request_outbound, response);
-                });
-                continue;
-            }
             if request.method == STORAGE_FORK_CONVERSATION_METHOD {
                 let request_storage = Arc::clone(&storage);
                 let request_service = agent_service.clone();
@@ -649,36 +549,6 @@ where
                 }) {
                     enqueue_outbound(outbound, response)?;
                 }
-                continue;
-            }
-            if is_blocking_read_method(&request.method)
-                || request.method == mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD
-            {
-                let request_id = request.id.clone();
-                let request_storage = Arc::clone(&storage);
-                let request_service = agent_service.clone();
-                let request_outbound = outbound.clone();
-                let request_notifications = request_outbound.clone();
-                tokio::spawn(async move {
-                    let response = match tokio::task::spawn_blocking(move || {
-                        handle_request(
-                            &request_storage,
-                            &request_service,
-                            request_notifications,
-                            request,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => response_error(
-                            Some(request_id),
-                            -32000,
-                            format!("Storage read task failed: {error}"),
-                        ),
-                    };
-                    let _ = enqueue_outbound(&request_outbound, response);
-                });
                 continue;
             }
             if let Some(priority) = git_request_priority(&request.method) {
@@ -812,8 +682,67 @@ where
             }
         }
 
-        let response = handle_request(&storage, agent_service, outbound.clone(), request);
-        enqueue_outbound(outbound, response)?;
+        // The control plane handles only bounded, in-memory work inline. All potentially
+        // blocking handlers use non-waiting admission; a full queue never stops stdin.
+        if request.jsonrpc != "2.0" || request.method == CORE_PING_METHOD {
+            let response = handle_request(&storage, agent_service, outbound.clone(), request);
+            enqueue_outbound(outbound, response)?;
+            continue;
+        }
+        let class = rpc_dispatch_class(&request);
+        let ordering_key = bounded_dispatch::rpc_ordering_key(&request);
+        let owner_resolver: Option<bounded_dispatch::RpcOwnerResolver> =
+            if class == bounded_dispatch::RpcDispatchClass::Control {
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("runId"))
+                    .and_then(Value::as_str)
+                    .map(|run_id| {
+                        let run_id = run_id.to_string();
+                        let owner_service = agent_service.clone();
+                        Box::new(move || {
+                            owner_service
+                                .conversation_id_for_run(&run_id)
+                                .map(|conversation| format!("conversation:{conversation}"))
+                        }) as bounded_dispatch::RpcOwnerResolver
+                    })
+            } else {
+                None
+            };
+        let request_storage = Arc::clone(&storage);
+        let request_service = agent_service.clone();
+        let request_notifications = outbound.clone();
+        let scheduler_wake = automation_scheduler_wake.clone();
+        if let Err(response) = rpc.try_submit_with_owner_resolution(
+            class,
+            request.id.clone(),
+            ordering_key,
+            owner_resolver,
+            move || {
+                if is_automation_request_method(&request.method) {
+                    let request_id = request.id.clone();
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_automation_request_with_access(
+                            &request_storage,
+                            Some(&request_service),
+                            Some(&scheduler_wake),
+                            request,
+                        )
+                    }))
+                    .unwrap_or_else(|_| automation_internal_error_response(request_id))
+                } else {
+                    handle_request(
+                        &request_storage,
+                        &request_service,
+                        request_notifications,
+                        request,
+                    )
+                }
+            },
+        ) {
+            enqueue_outbound(outbound, response)?;
+        }
     }
     Ok(None)
 }
@@ -1037,6 +966,7 @@ pub(crate) fn is_skills_method(method: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::bounded_dispatch::is_blocking_read_method;
     use super::*;
 
     #[test]
@@ -1056,11 +986,13 @@ mod tests {
             mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD,
             mycopilot_protocol_rs::STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD,
             mycopilot_protocol_rs::STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD,
-            mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD,
         ] {
-            assert!(is_blocking_read_method(method));
+            assert!(!is_blocking_read_method(method));
         }
 
+        assert!(is_blocking_read_method(
+            mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD
+        ));
         assert!(is_blocking_read_method(STORAGE_LOAD_UI_PREFERENCES_METHOD));
         assert!(is_blocking_read_method(STORAGE_LOAD_COMPOSER_DRAFTS_METHOD));
         assert!(is_blocking_read_method(AGENT_COMMAND_SESSIONS_LIST_METHOD));

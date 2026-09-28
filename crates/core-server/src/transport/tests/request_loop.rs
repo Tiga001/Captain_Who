@@ -171,6 +171,7 @@ async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract(
         "\"forkPoint\":{\"kind\":\"latest\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"core.ping\"}\n"
     );
+    let rpc = RpcRequestDispatcher::new(outbound_tx.clone());
     super::super::request_loop::run_request_loop_inner(
         BufReader::new(input.as_bytes()),
         test_core_request_services(storage),
@@ -192,6 +193,7 @@ async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract(
             image_artifact: &image_tx,
         },
         &forks,
+        &rpc,
     )
     .await
     .unwrap();
@@ -212,6 +214,7 @@ async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract(
     let response = response.unwrap();
     assert_eq!(response["error"]["code"], -32000);
     assert_eq!(response["error"]["message"], "原任务不存在。");
+    rpc.shutdown().await.unwrap();
     forks.shutdown().await.unwrap();
     git.shutdown().await.unwrap();
     skills.shutdown().await.unwrap();
@@ -261,6 +264,7 @@ async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
         })
         .is_ok());
     let input = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"core.shutdown\"}\n";
+    let rpc = RpcRequestDispatcher::new(outbound_tx.clone());
     let request_loop = super::super::request_loop::run_request_loop_inner(
         BufReader::new(input.as_bytes()),
         services,
@@ -282,6 +286,7 @@ async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
             image_artifact: &image_tx,
         },
         &forks,
+        &rpc,
     );
     let driver = async {
         // Admission closes at the start of the risk shutdown; reaching this barrier proves that
@@ -314,6 +319,7 @@ async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
     };
     let (shutdown_id, ()) = tokio::join!(request_loop, driver);
     assert!(matches!(shutdown_id.unwrap(), Some(JsonRpcId::Number(3))));
+    rpc.shutdown().await.unwrap();
     forks.shutdown().await.unwrap();
     git.shutdown().await.unwrap();
     skills.shutdown().await.unwrap();
@@ -1113,4 +1119,88 @@ async fn core_shutdown_settles_the_managed_playwright_runtime_before_outbound_cl
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
     image_generation_dispatcher.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saturated_rpc_reads_preserve_ping_cancel_ids_and_eof_responses() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_office_engine(Arc::new(SlowOfficeStatusEngine));
+    let (outbound, mut responses) = mpsc::unbounded_channel();
+    let (image_outbound, _image_responses) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
+    let git = GitDispatcher::new(outbound.clone());
+    let skills = SkillsDispatcher::new(outbound.clone());
+    let images = ImageGenerationConfigurationDispatcher::new(outbound.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git,
+        skills: &skills,
+        skill_acquisition: &skills,
+        image_generation_configuration: &images,
+    };
+    let mut input = String::new();
+    for id in 1..=70 {
+        input.push_str(&format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"office.getStatus\"}}\n"
+        ));
+    }
+    input.push_str("{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"core.ping\"}\n");
+    input.push_str("{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"agent.cancelRun\",\"params\":{\"runId\":\"missing-run\"}}\n");
+    run_request_loop(
+        BufReader::new(input.as_bytes()),
+        test_core_request_services(storage),
+        &agent,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations: Arc::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            ),
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        RequestOutbounds {
+            normal: &outbound,
+            image_artifact: &image_outbound,
+        },
+    )
+    .await
+    .unwrap();
+    let mut received = Vec::new();
+    while let Ok(response) = responses.try_recv() {
+        received.push(response);
+    }
+    assert_eq!(
+        received.len(),
+        72,
+        "EOF must drain every accepted response, including late reads"
+    );
+    let first_status = received
+        .iter()
+        .position(|r| r["result"]["schemaVersion"] == 1)
+        .unwrap();
+    let ping = received.iter().position(|r| r["id"] == 71).unwrap();
+    let cancel = received.iter().position(|r| r["id"] == 72).unwrap();
+    assert!(
+        ping < first_status && cancel < first_status,
+        "slow reads blocked control responses"
+    );
+    assert_eq!(received[cancel]["result"]["cancelled"], false);
+    assert_eq!(
+        received
+            .iter()
+            .filter(|r| r["error"]["data"]["code"] == "overloaded")
+            .count(),
+        6
+    );
+    let mut ids: Vec<_> = received.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+    ids.sort();
+    assert_eq!(ids, (1..=72).collect::<Vec<_>>());
+    git.shutdown().await.unwrap();
+    skills.shutdown().await.unwrap();
+    images.shutdown().await.unwrap();
 }

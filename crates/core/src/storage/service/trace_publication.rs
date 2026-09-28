@@ -100,7 +100,6 @@ impl StorageService {
                     item,
                 )
                 .map_err(storage_error)?;
-                apply_guidance(&transaction, item, updated_at)?;
             }
             conversation_model_context_repository::insert_validated_suffix(
                 &transaction,
@@ -110,6 +109,11 @@ impl StorageService {
                     .map(AsRef::as_ref),
             )
             .map_err(storage_error)?;
+            // Async guidance requires both its exact trace and model-context proof. Publish
+            // both journals before changing delivery state, within the same transaction.
+            for item in &publication.trace_items[trace_count..] {
+                apply_guidance(&transaction, item, updated_at)?;
+            }
             if changed {
                 transaction.execute("UPDATE conversation_turn_traces SET truncated=?1, updated_at=?2 WHERE assistant_message_id=?3",
                     params![publication.is_truncated(), updated_at, assistant_message_id]).map_err(storage_error)?;

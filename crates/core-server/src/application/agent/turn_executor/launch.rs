@@ -509,6 +509,7 @@ impl AgentService {
         if durable_terminal || deletion_cleanup {
             service.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
             service.release_turn_concurrency_permit(&worker_run_id);
+            service.wake_workflow_deliveries();
         }
         if deletion_cleanup || (durable_terminal && !keep_trace_snapshot) {
             service.discard_trace_snapshot(&worker_run_id);

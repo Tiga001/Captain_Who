@@ -159,7 +159,7 @@ impl AgentService {
     ) {
         self.schedule_ready_human_input_resumes(notifications.clone());
         self.schedule_async_human_input_deliveries(notifications.clone());
-        self.schedule_workflow_deliveries(notifications);
+        self.wake_workflow_deliveries();
     }
 
     /// Events are wake-up hints only; response acceptance order and all delivery claims live in

@@ -149,6 +149,7 @@ mod turn_executor;
 mod usage;
 mod web_search_policy;
 mod workflow_execution;
+mod workflow_scheduler;
 mod workflows;
 
 use action_execution::*;
@@ -665,7 +666,7 @@ pub struct AgentService {
     conversation_admission: Arc<Mutex<()>>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
-    workflow_delivery_dispatch: Arc<Mutex<()>>,
+    workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake,
     workflow_dispatch_stopped: Arc<AtomicBool>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
@@ -873,7 +874,7 @@ impl AgentService {
                 execution_access::ExecutionAccessState::default(),
             )),
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
-            workflow_delivery_dispatch: Arc::new(Mutex::new(())),
+            workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake::default(),
             workflow_dispatch_stopped: Arc::new(AtomicBool::new(false)),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),

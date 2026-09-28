@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # Core Server 架构与运行时
@@ -59,6 +59,7 @@ mycopilot-core       adapters
 
 - `bootstrap.rs`：数据根、数据库锁、service 构造、启动对账、通知、Dispatcher、request loop 和关停。
 - `request_loop.rs`：逐行 JSON-RPC、请求分类、异步 owner、并发 admission 和 outbound writer。
+- `bounded_dispatch.rs`：普通阻塞 RPC 的操作级读/写/控制分类、有界队列、顺序栅栏与已接纳任务的 drain。
 - `request_handler.rs` 与各 `*_rpc.rs`：参数解码、application 调用、DTO/错误映射。
 - `rpc.rs`：安全响应辅助函数。
 - `storage_root.rs`：Host 数据根与独立诊断数据库路径边界。
@@ -101,20 +102,27 @@ mycopilot-core       adapters
 
 request loop 当前按风险与阻塞特征分流：
 
-| 类别                        |              默认边界 | owner/执行方式                                                                     |
-| --------------------------- | --------------------: | ---------------------------------------------------------------------------------- |
-| MCP management              |               16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                    |
-| Browser risk                |               32 并发 | 独立 tracker；关停先取消授权                                                       |
-| 大型图片 Artifact 读取      |                2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                 |
-| Automation/Notification RPC |      无专用 semaphore | Tokio request task 内 `spawn_blocking`；SQLite 串行化，Scheduler 另有独立并发 gate |
-| SQLite/历史等 blocking read | 由方法 allowlist 判定 | `spawn_blocking`，避免阻塞 async loop                                              |
-| Conversation fork           |   运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                         |
-| Git/Skill/图片配置写入      |       各自 dispatcher | 显式队列和独立 shutdown                                                            |
-| 普通响应/notification       |         无界 outbound | 单一 writer 串行刷 stdout                                                          |
+| 类别                   |                     默认边界 | owner/执行方式                                                                             |
+| ---------------------- | ---------------------------: | ------------------------------------------------------------------------------------------ |
+| MCP management         |                      16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                            |
+| Browser risk           |                      32 并发 | 独立 tracker；关停先取消授权                                                               |
+| 大型图片 Artifact 读取 |                       2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                         |
+| 普通查询 RPC           | 4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、工作流只读、Automation/Notification 查询；阻塞处理离开接收循环 |
+| 普通修改 RPC           | 1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和工作流/交互修改；保留业务准入锁、CAS 与幂等                       |
+| 停止/取消 RPC          | 2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                    |
+| Conversation fork      |          运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                                 |
+| Git/Skill/图片配置写入 |              各自 dispatcher | 显式队列和独立 shutdown                                                                    |
+| 普通响应/notification  |                无界 outbound | 单一 writer 串行刷 stdout                                                                  |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
 
-附件导入的 begin/append/finish/cancel 与派生预览也经过 blocking 方法分流。大文件先在 Host 受管存储中形成 durable import，聊天、草稿与引导请求只携带短引用；这与大图片 outbound semaphore 是两个不同边界。契约见[会话输入](../subsystems/conversation-inputs.md)。
+工作流按具体 `operation` 分类；未知操作保守进入修改队列，再由原 handler 拒绝非法输入。普通查询等待此前已接收修改完成，后续修改也等待此前控制操作完成，避免读取越过既有写入；响应仍通过 request ID 关联，不能依赖跨请求完成顺序。控制操作使用的 run/conversation key 只用于排队，不构成授权，最终仍经过原身份和终态校验。若此前存在按 conversation 排队的修改，按 run 取消会在有界阻塞工作池中解析其 conversation，并仅等待准入时捕获的对应依赖；解析也可能读取 SQLite，不能放回 stdin 循环。跨实例修改仍由领域准入锁、CAS 与终态校验裁决，不凭请求文本猜测多会话授权。共享数据库锁、对话准入锁仍可能造成等待，应与队列耗时分开测量。
+
+队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。普通 outbound 仍无界，本次有界的是处理任务；writer 背压属于独立边界。
+
+上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
+
+附件导入的 begin/append/finish/cancel 进入修改队列，派生预览进入查询队列。大文件先在 Host 受管存储中形成 durable import，聊天、草稿与引导请求只携带短引用；这与大图片 outbound semaphore 是两个不同边界。契约见[会话输入](../subsystems/conversation-inputs.md)。
 
 ## 4. 启动流程
 
@@ -155,15 +163,15 @@ Managed Playwright 的 Tool execution 预算由 Electron Main 拥有：显式 Br
 
 `core.shutdown` 的顺序由 `request_loop.rs` 与 `bootstrap.rs` 共同拥有：
 
-1. request loop 取消 Browser risk，并给已接纳的 Browser risk 请求 1 秒收口。
+1. request loop 关闭普通 RPC/fork admission，拒绝尚未开始的普通任务，并停止新的工作流准入；取消 Browser risk，给已接纳的 Browser risk 请求 1 秒收口。
 2. 在 stdin 仍可读时关闭 Managed Playwright runtime；此阶段只处理 `mcp.builtinPlaywright.complete` 与 `mcp.builtinPlaywright.dispatchPhase`。若 stdin EOF，则先关闭精确 bridge 再等待 runtime 结束。
-3. request loop 返回后，先停止 Automation 的新 due scan/claim admission。已 admission 的 Automation HumanRoot Turn 和 observer 暂时保留，让后续 Agent shutdown 写出权威 Trace 终态。
+3. 已经开始的普通阻塞 handler 和受管图片响应由各自 owner 等待完成，再离开 request loop；不能 abort 外层 future 后假称 SQLite 修改已经取消。工作流 scheduler 停止准入并 drain 已开始的扫描，然后停止 Automation 的新 due scan/claim admission。已 admission 的 Automation HumanRoot Turn 和 observer 暂时保留，让后续 Agent shutdown 写出权威 Trace 终态。
 4. Core Server 停止 MCP management admission，终止 collaboration notifier 和可选 MCP startup coordinator，关闭短生命周期执行材料 reconciler，并使仅进程内可恢复的 MCP action 失效。Automation 与 shared Notification notifier 此时仍保持工作，以发送关停结算产生的持久事件。
 5. Git/Skill/Skill acquisition/图片配置 dispatcher、图片执行、Multi-Agent Dispatcher、活动 Run、已接纳 MCP management 请求和 MCP Manager 并行有界关停；当前显式外层 grace 多为 2 秒。Multi-Agent Dispatcher 的 `shutdown_grace` 默认为 5 秒，算法可先等待一个 grace，再在请求取消后扫描第二个 grace，因此最坏路径可接近 10 秒。
 6. Automation Scheduler 做一次最终 bound-Run Trace reconciliation，随后终止本地 observer；真正仍为非终态的 Trace 留给下次启动恢复。完成后才终止 Automation notifier，并在持久通知事件已可重放后终止 Notification notifier。
 7. Core Server 最后入队 `core.shutdown` 响应，关闭 outbound admission，并让单一 writer 刷完已接纳消息。超时任务不得伪造成功；持久事实留给下一次启动对账。
 
-EOF 或 request-loop 错误没有 shutdown response，但仍走同一幂等清理路径。新增长期任务必须明确插入上述 owner/admission/drain 顺序。当前 Main 的 6 秒 watchdog 小于 Multi-Agent Dispatcher 的理论最坏收口路径；超时后 Main 会强制停止 Core Server，正确性依赖 SQLite 恢复。修改任一预算时必须同步修正并测试两端。
+EOF 或 request-loop 错误没有 shutdown response；已经接纳的普通请求仍 drain 并尝试发送原 request ID 的响应。显式 `core.shutdown` 才将尚未开始的普通任务结算为关停错误。新增长期任务必须明确插入上述 owner/admission/drain 顺序。当前 Main 的 6 秒 watchdog 小于 Multi-Agent Dispatcher 的理论最坏收口路径，已经开始的阻塞 handler 也无法由 Tokio 安全强停；超时后 Main 会强制停止 Core Server，正确性依赖 SQLite 恢复。修改任一预算时必须同步修正并测试两端。
 
 ## 7. Multi-Agent 调度边界
 
@@ -233,7 +241,7 @@ pnpm test:automation-core-e2e
 - 当前没有多进程横向扩展协议；数据库实例锁要求一个 exact DB 只有一个 Core Server 生命周期 owner。
 - Automation 没有可配置并发、Run 总超时或 admission 最大尝试次数；长期等待审批和重复容量退避依赖用户处理或后续状态变化。
 - `notifications.*` 的 delivery 子集的 Host-only 隔离由 Main/Preload invoke allowlist 实现；Core Server stdin 是受信 Main transport，不提供逐请求调用方身份鉴别。
-- 工作流 RPC 只维护模板、草稿、实例、绑定与启停状态；开启实例不会创建模型 Run、消费图上的消息或执行逻辑门，见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+- 工作流管理 RPC 维护模板、草稿、实例、绑定与启停状态；就绪变更只发出调度唤醒，由独立调度器按持久输入、实例版本与对话占用规则执行后续投递，见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 - Main 的 6 秒 shutdown watchdog 与 Multi-Agent Dispatcher 最坏约 10 秒的内部收口预算尚未对齐；超时路径必须按强制终止与启动恢复处理，不能宣称所有 Run 都已优雅结束。
 
 ## 13. 变更检查表

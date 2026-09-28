@@ -124,6 +124,12 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = unbounded_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(
+            notifications.clone(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
     service
         .start_conversation_turn(
             root_input(&source, "Human trigger 79318"),
@@ -234,6 +240,7 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
                 && message.content.contains("Workflow artifact 51892")),
         "UI projection must never replay as HumanText"
     );
+    scheduler.shutdown().await.unwrap();
     provider.abort();
 }
 
@@ -279,6 +286,12 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = unbounded_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(
+            notifications.clone(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
     let target_turn = service
         .start_conversation_turn(
             root_input(&target, "Target waiting 81762"),
@@ -321,7 +334,7 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
     })
     .await
     .unwrap();
-    service.schedule_workflow_deliveries(notifications.clone());
+    service.wake_workflow_deliveries();
     let before = storage.workflow_execution_runtime("instance").unwrap();
     assert_eq!(before.inputs.len(), 1);
     assert_eq!(before.inputs[0].status, InputStatus::Pending);
@@ -383,6 +396,7 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
             .len(),
         1
     );
+    scheduler.shutdown().await.unwrap();
     provider.abort();
 }
 
@@ -452,7 +466,7 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
         ModelCapabilities::default(),
         AgentPermissions::default(),
     );
-    service.schedule_workflow_deliveries(notifications.clone());
+    service.dispatch_workflow_deliveries(notifications.clone());
     assert_eq!(
         storage
             .workflow_execution_load_input(&receipt.input_ids[0])
@@ -473,7 +487,7 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
         .unwrap();
     service.unregister_cancellation("target-run");
     service.release_conversation_turn_if_current(&target, "target-run");
-    service.schedule_workflow_deliveries(notifications);
+    service.dispatch_workflow_deliveries(notifications);
     assert_eq!(
         storage
             .workflow_execution_load_input(&receipt.input_ids[0])
@@ -560,6 +574,12 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = unbounded_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(
+            notifications.clone(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
     let first = service
         .start_conversation_turn(root_input(&a, "A trigger 5412"), notifications.clone())
         .unwrap();
@@ -659,5 +679,181 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
         }
     }
     assert_eq!(target_samples.len(), 1);
+    scheduler.shutdown().await.unwrap();
     provider.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_without_polling() {
+    let directory = tempdir().unwrap();
+    let storage =
+        Arc::new(StorageService::open(&directory.path().join("busy-recovery.sqlite")).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    storage.save_model_settings(settings).unwrap();
+    let (source, target) = workflow_fixture(&storage, "queue");
+    let (captured, mut requests) = unbounded_channel();
+    let (finish_busy, busy_finished) = tokio::sync::oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let mut busy_finished = Some(busy_finished);
+        let mut source_sent = false;
+        let mut workers = tokio::task::JoinSet::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = request_body(&mut stream).await;
+            let raw = request.to_string();
+            captured.send(raw.clone()).unwrap();
+            if raw.contains("Busy target 92317") && busy_finished.is_some() {
+                let busy_finished = busy_finished.take().unwrap();
+                workers.spawn(async move {
+                    busy_finished.await.unwrap();
+                    respond(
+                        &mut stream,
+                        json!({"role":"assistant","content":"Busy work complete."}),
+                        "stop",
+                    )
+                    .await;
+                });
+            } else if raw.contains("Queue trigger 76234") && !source_sent {
+                source_sent = true;
+                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":"queue-send","type":"function","function":{"name":"workflow_send","arguments":"{\"outputs\":[{\"flowId\":\"direct\",\"message\":\"Queued artifact 92134\"}]}"}}]}), "tool_calls").await;
+            } else {
+                respond(
+                    &mut stream,
+                    json!({"role":"assistant","content":"Complete."}),
+                    "stop",
+                )
+                .await;
+            }
+        }
+    });
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let (notifications, mut events) = unbounded_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(
+            notifications.clone(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    service
+        .start_conversation_turn(
+            root_input(&target, "Busy target 92317"),
+            notifications.clone(),
+        )
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.contains("Busy target 92317"));
+    let source_turn = service
+        .start_conversation_turn(
+            root_input(&source, "Queue trigger 76234"),
+            notifications.clone(),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["params"]["type"] == "done" && event["params"]["runId"] == source_turn.run_id {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let queued = storage.workflow_execution_runtime("instance").unwrap();
+    assert_eq!(queued.inputs.len(), 1);
+    assert_eq!(queued.inputs[0].status, InputStatus::Pending);
+    assert_eq!(
+        storage
+            .list_conversation_turn_traces(&target)
+            .unwrap()
+            .len(),
+        1
+    );
+    finish_busy.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["params"]["type"] == "done"
+                && storage
+                    .workflow_execution_runtime("instance")
+                    .unwrap()
+                    .inputs[0]
+                    .status
+                    == InputStatus::Applied
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .list_conversation_turn_traces(&target)
+            .unwrap()
+            .len(),
+        2
+    );
+    scheduler.shutdown().await.unwrap();
+    provider.abort();
+}
+
+#[test]
+fn workflow_scheduler_read_microbenchmark() {
+    if std::env::var_os("MYCOPILOT_WORKFLOW_SCHEDULER_BENCH").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&directory.path().join("reads.sqlite")).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let (_source, _) = workflow_fixture(&storage, "queue");
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let (notifications, _) = unbounded_channel();
+    let read = || {
+        service
+            .workflow_request(mycopilot_core::workflow::Request::List)
+            .unwrap();
+    };
+    for _ in 0..100 {
+        read();
+        service.dispatch_workflow_deliveries(notifications.clone());
+    }
+    let mut old = Vec::with_capacity(1000);
+    let mut new = Vec::with_capacity(1000);
+    // Alternate pair order to avoid systematically assigning warm-cache/time effects to one path.
+    for index in 0..1000 {
+        for inline_scan in if index % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            let started = Instant::now();
+            read();
+            if inline_scan {
+                service.dispatch_workflow_deliveries(notifications.clone());
+            }
+            let elapsed = started.elapsed().as_nanos() as u64;
+            if inline_scan {
+                old.push(elapsed);
+            } else {
+                new.push(elapsed);
+            }
+        }
+    }
+    old.sort_unstable();
+    new.sort_unstable();
+    // Replays the original handler's exact list + schedule sequence on the same current build;
+    // this isolates removed work rather than claiming an end-to-end application speedup.
+    let old = (old[500], old[950]);
+    let new = (new[500], new[950]);
+    println!("workflow list, 1000 samples, ns: old inline-scan p50={} p95={}; new read-only p50={} p95={}", old.0, old.1, new.0, new.1);
 }

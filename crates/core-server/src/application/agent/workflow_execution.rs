@@ -105,8 +105,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
         drop(tokens);
         self.service
             .publish_workflow_runtime(&receipt.instance_id, &self.notifications);
-        self.service
-            .schedule_workflow_deliveries(self.notifications.clone());
+        self.service.wake_workflow_deliveries();
         Ok(receipt)
     }
 }
@@ -310,6 +309,7 @@ impl AgentService {
             return Err("Workflow input belongs to another workflow.".into());
         }
         self.storage.workflow_execution_complete_user(input_id)?;
+        self.wake_workflow_deliveries();
         let snapshot = self.storage.workflow_execution_runtime(instance_id)?;
         let _ = notifications.send(
             json!({"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":snapshot}),
@@ -331,7 +331,7 @@ impl AgentService {
         }
         self.storage.workflow_execution_discard_failed(input_id)?;
         self.publish_workflow_runtime(instance_id, notifications);
-        self.schedule_workflow_deliveries(notifications.clone());
+        self.wake_workflow_deliveries();
         self.storage.workflow_execution_runtime(instance_id)
     }
     pub(super) fn publish_workflow_runtime(
@@ -375,6 +375,9 @@ impl AgentService {
                 }
             }
         }
+        if !changed.is_empty() {
+            self.wake_workflow_deliveries();
+        }
         for id in changed {
             self.publish_workflow_runtime(&id, notifications);
         }
@@ -402,15 +405,15 @@ impl AgentService {
         }
         Ok(())
     }
-    /// Events accelerate delivery; the startup-owned periodic wake handles capacity/configuration
-    /// recovery without depending on an open Renderer page. A busy scan is simply coalesced.
-    pub(crate) fn schedule_workflow_deliveries(&self, notifications: CoreServerNotificationSender) {
+    /// Called only by the single scheduler worker; durable claims retain FIFO/idempotency.
+    pub(super) fn dispatch_workflow_deliveries(&self, notifications: CoreServerNotificationSender) {
+        #[cfg(test)]
+        self.workflow_scheduler_wake
+            .scans
+            .fetch_add(1, Ordering::Relaxed);
         if self.workflow_dispatch_stopped.load(Ordering::Acquire) {
             return;
         }
-        let Ok(_dispatch) = self.workflow_delivery_dispatch.try_lock() else {
-            return;
-        };
         let inputs = match self.storage.workflow_execution_pending_inputs() {
             Ok(inputs) => inputs,
             Err(error) => {
@@ -419,6 +422,9 @@ impl AgentService {
             }
         };
         for input in inputs {
+            if self.workflow_dispatch_stopped.load(Ordering::Acquire) {
+                break;
+            }
             let Some(conversation_id) = input.conversation_id.as_deref() else {
                 continue;
             };
@@ -490,7 +496,7 @@ impl AgentService {
                 target_model_id: model_id.clone(),
             })?;
         if transition.decision == AgentProviderTransitionDecision::RequiresCompaction {
-            self.start_provider_transition(
+            self.start_workflow_provider_transition(
                 AgentProviderTransitionStartInput {
                     conversation_id: conversation_id.into(),
                     target_model_id: model_id,
