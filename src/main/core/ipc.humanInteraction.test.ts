@@ -16,6 +16,9 @@ const fixture = JSON.parse(
 )
 function core() {
   return {
+    getHumanInteractionAttention: vi
+      .fn()
+      .mockResolvedValue({ requestSequence: 0, requests: [], approvalConversationIds: [] }),
     getHumanInteractionSettings: vi.fn().mockResolvedValue(fixture.settings),
     updateHumanInteractionSettings: vi.fn().mockResolvedValue(fixture.settingsUpdated),
     listHumanInteractionRequests: vi
@@ -63,13 +66,17 @@ describe('Trusted human interaction IPC', () => {
     })
     expect(sync).toHaveBeenCalledOnce()
   })
-  it('registers five authenticated calls and wraps real Core results and errors', async () => {
+  it('registers six authenticated calls and wraps real Core results and errors', async () => {
     const server = core()
     registerHumanInteractionIpc(
       createTrustedIpcMain(() => true),
       server as never
     )
     const event = {} as IpcMainInvokeEvent
+    await expect(handler(HOST_CHANNELS.humanInteraction.getAttention)(event, {})).resolves.toEqual({
+      ok: true,
+      value: { requestSequence: 0, requests: [], approvalConversationIds: [] }
+    })
     await expect(handler(HOST_CHANNELS.humanInteraction.getSettings)(event, {})).resolves.toEqual({
       ok: true,
       value: fixture.settings
@@ -95,13 +102,19 @@ describe('Trusted human interaction IPC', () => {
         error: { message: error.message, code: error.code, data: error.data }
       })
     }
-    expect(handle).toHaveBeenCalledTimes(5)
+    expect(handle).toHaveBeenCalledTimes(6)
   })
 
   it('rejects invalid fields without calling Core and blocks untrusted senders', async () => {
     const server = core()
     const trusted = vi.fn().mockReturnValue(true)
     registerHumanInteractionIpc(createTrustedIpcMain(trusted), server as never)
+    await expect(
+      handler(HOST_CHANNELS.humanInteraction.getAttention)({} as never, {
+        conversationId: 'invalid-filter'
+      })
+    ).resolves.toMatchObject({ ok: false })
+    expect(server.getHumanInteractionAttention).not.toHaveBeenCalled()
     await expect(
       handler(HOST_CHANNELS.humanInteraction.ignore)({} as never, {
         ...fixture.ignore,

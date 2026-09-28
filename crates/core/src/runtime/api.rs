@@ -212,7 +212,7 @@ fn validate_steer_input(input: &crate::AgentSteerInput) -> AgentResult<()> {
 
 pub type AgentEventEmitter = Arc<dyn Fn(AgentEvent) + Send + Sync + 'static>;
 pub type AgentConversationTraceObserver = Arc<
-    dyn Fn(ConversationTraceSnapshot) -> AgentResult<Option<AgentContextBaseline>>
+    dyn Fn(crate::ConversationTracePublication) -> AgentResult<Option<AgentContextBaseline>>
         + Send
         + Sync
         + 'static,

@@ -10,6 +10,8 @@ import {
   invalidProtocolValue
 } from './skills/validation'
 
+export * from './humanInteractionAttention'
+
 export const HUMAN_INTERACTION_SCHEMA_VERSION = 1 as const
 export const HUMAN_INTERACTION_MAX_INPUT_BYTES = 262_144
 export const HUMAN_INTERACTION_MAX_TITLE_BYTES = 8_192

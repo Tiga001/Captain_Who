@@ -3,6 +3,7 @@ pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
 pub const HUMAN_INTERACTION_GET_SETTINGS_METHOD: &str = "humanInteraction.getSettings";
 pub const HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD: &str = "humanInteraction.updateSettings";
 pub const HUMAN_INTERACTION_LIST_REQUESTS_METHOD: &str = "humanInteraction.listRequests";
+pub const HUMAN_INTERACTION_GET_ATTENTION_METHOD: &str = "humanInteraction.getAttention";
 pub const HUMAN_INTERACTION_SUBMIT_METHOD: &str = "humanInteraction.submit";
 pub const HUMAN_INTERACTION_IGNORE_METHOD: &str = "humanInteraction.ignore";
 pub const HUMAN_INTERACTION_SETTINGS_CHANGED_METHOD: &str = "humanInteraction.settingsChanged";

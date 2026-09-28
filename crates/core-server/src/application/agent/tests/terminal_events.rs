@@ -1855,7 +1855,10 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
             .trace_snapshots
             .lock()
             .unwrap_or_else(|lock_error| lock_error.into_inner())
-            .insert(run_id.to_string(), ConversationTraceSnapshot::default());
+            .insert(
+                run_id.to_string(),
+                ConversationTraceSnapshot::default().into(),
+            );
     }
     super::deletion::seed_observer_stream(
         &service,

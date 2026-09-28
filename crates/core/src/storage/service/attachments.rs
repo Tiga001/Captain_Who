@@ -981,12 +981,7 @@ impl StorageService {
             &self.attachment_root,
             &attachment.storage_rel_path,
         )?;
-        let file = fs::File::open(storage_path).ok()?;
-        let url =
-            crate::file_input::image_delivery::thumbnail_data_url(std::io::BufReader::new(file))
-                .ok()?;
-        url.strip_prefix("data:image/png;base64,")
-            .map(ToString::to_string)
+        self.attachment_preview_cache.read(&storage_path)
     }
 
     pub(super) fn cleanup_attachment_files(
@@ -1003,6 +998,7 @@ impl StorageService {
                 continue;
             };
 
+            self.attachment_preview_cache.invalidate(&storage_path);
             match fs::remove_file(&storage_path) {
                 Ok(()) => self.prune_empty_attachment_dirs(storage_path.parent(), &mut errors),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1099,6 +1095,7 @@ impl StorageService {
                 continue;
             }
 
+            self.attachment_preview_cache.invalidate(&path);
             match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1175,6 +1172,7 @@ fn cleanup_new_attachment_files(service: &StorageService, paths: &[PathBuf]) {
         {
             continue;
         }
+        service.attachment_preview_cache.invalidate(path);
         match fs::remove_file(path) {
             Ok(()) => service.prune_empty_attachment_dirs(path.parent(), &mut errors),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

@@ -2136,7 +2136,7 @@ mod tests {
                 trace_snapshots_for_observer
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push(snapshot);
+                    .push(snapshot.into_snapshot());
                 Ok(None)
             }));
         let emitter: AgentEventEmitter = Arc::new(|_| {});

@@ -22,15 +22,27 @@ pub(crate) fn commit_items_in_connection(
     items: &[ConversationModelContextItem],
 ) -> rusqlite::Result<bool> {
     validate_log_identity(connection, conversation_id, assistant_message_id)?;
-    validate_items(items)?;
     let trace =
         conversation_trace_repository::get_trace_for_message(connection, assistant_message_id)?
             .ok_or_else(|| {
                 invalid_input("model context item requires a committed conversation trace")
             })?;
-    validate_model_context_prefix(&trace, items).map_err(invalid_input)?;
     let existing = load_items_for_message(connection, assistant_message_id)?;
-    if existing.len() > items.len() || existing != items[..existing.len()] {
+    commit_items_with_loaded_prefix(connection, &trace, items, &existing)
+}
+
+/// The trace has been committed, and `existing` loaded, in this same write transaction.
+/// Reusing those values avoids decoding the audit and compressed model journals a second time.
+pub(crate) fn commit_items_with_loaded_prefix(
+    connection: &Connection,
+    trace: &crate::ConversationTurnTrace,
+    items: &[ConversationModelContextItem],
+    existing: &[ConversationModelContextItem],
+) -> rusqlite::Result<bool> {
+    let assistant_message_id = &trace.assistant_message_id;
+    validate_items(items)?;
+    validate_model_context_prefix(trace, items).map_err(invalid_input)?;
+    if existing.len() > items.len() || existing != &items[..existing.len()] {
         let mismatch = existing
             .iter()
             .zip(items)
@@ -63,7 +75,16 @@ pub(crate) fn commit_items_in_connection(
     if existing.len() == items.len() {
         return Ok(false);
     }
-    for item in &items[existing.len()..] {
+    insert_validated_suffix(connection, assistant_message_id, &items[existing.len()..])?;
+    Ok(true)
+}
+
+pub(crate) fn insert_validated_suffix<'a>(
+    connection: &Connection,
+    assistant_message_id: &str,
+    items: impl IntoIterator<Item = &'a ConversationModelContextItem>,
+) -> rusqlite::Result<()> {
+    for item in items {
         let payload = serde_json::to_vec(item)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let content_hash = format!("sha256:{:x}", Sha256::digest(&payload));
@@ -88,7 +109,7 @@ pub(crate) fn commit_items_in_connection(
             ],
         )?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn model_item_hash(item: &ConversationModelContextItem) -> rusqlite::Result<String> {
@@ -189,10 +210,12 @@ fn validate_items(items: &[ConversationModelContextItem]) -> rusqlite::Result<()
     Ok(())
 }
 
-fn load_items_for_message(
+pub(crate) fn load_items_for_message(
     connection: &Connection,
     assistant_message_id: &str,
 ) -> rusqlite::Result<Vec<ConversationModelContextItem>> {
+    #[cfg(test)]
+    crate::storage::trace_performance_metrics::context_load();
     let mut statement = connection.prepare(
         "
         SELECT sequence, ordinal, content_hash, uncompressed_bytes, compression, payload
@@ -238,6 +261,8 @@ fn load_items_for_message(
                 "model context item failed length or hash validation",
             ));
         }
+        #[cfg(test)]
+        crate::storage::trace_performance_metrics::decompressed(decoded.len());
         let item =
             serde_json::from_slice::<ConversationModelContextItem>(&decoded).map_err(|error| {
                 corrupt_data(

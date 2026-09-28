@@ -109,6 +109,26 @@ fn human_interaction_settlement_rpc_reports_persisted_pending_facts_and_keeps_ig
             },
         )
     };
+    let attention = call(HUMAN_INTERACTION_GET_ATTENTION_METHOD, json!({}));
+    assert_eq!(attention["result"]["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        attention["result"]["requests"][0]["requestId"],
+        sync.request_id
+    );
+    assert_eq!(
+        attention["result"]["requests"][0]
+            .as_object()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert_eq!(
+        call(
+            HUMAN_INTERACTION_GET_ATTENTION_METHOD,
+            json!({"conversationId":"ignored"})
+        )["error"]["code"],
+        -32602
+    );
     call(
         HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD,
         json!({"enabled":false,"expectedRevision":0}),
@@ -151,6 +171,9 @@ fn human_interaction_settlement_rpc_reports_persisted_pending_facts_and_keeps_ig
         receiver.try_recv().is_err(),
         "settlement must not emit run/steer events"
     );
+    let attention = call(HUMAN_INTERACTION_GET_ATTENTION_METHOD, json!({}));
+    assert_eq!(attention["result"]["requests"], json!([]));
+    assert_eq!(attention["result"]["requestSequence"], ignored.sequence);
     assert_eq!(
         storage
             .load_conversation("question-chat")

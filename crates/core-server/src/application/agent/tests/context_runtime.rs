@@ -420,7 +420,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         notifications,
     );
 
-    observer(ConversationTraceSnapshot::default()).unwrap();
+    observer(ConversationTraceSnapshot::default().into()).unwrap();
     let initial = receiver.try_recv().unwrap();
     let initial_tokens = initial["params"]["snapshot"]["inputTokens"]
         .as_u64()
@@ -444,12 +444,15 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         tool_calls: Vec::new(),
         is_error: false,
     };
-    observer(ConversationTraceSnapshot {
-        items: vec![narration.clone()],
-        model_context_items: vec![narration_context.clone()],
-        next_sequence: 1,
-        truncated: false,
-    })
+    observer(
+        ConversationTraceSnapshot {
+            items: vec![narration.clone()],
+            model_context_items: vec![narration_context.clone()],
+            next_sequence: 1,
+            truncated: false,
+        }
+        .into(),
+    )
     .unwrap();
     let narrated = receiver.try_recv().unwrap();
     let narrated_tokens = narrated["params"]["snapshot"]["inputTokens"]
@@ -503,12 +506,15 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         }],
         is_error: false,
     };
-    observer(ConversationTraceSnapshot {
-        items: vec![narration.clone(), call.clone()],
-        model_context_items: vec![narration_context.clone(), call_context.clone()],
-        next_sequence: 2,
-        truncated: false,
-    })
+    observer(
+        ConversationTraceSnapshot {
+            items: vec![narration.clone(), call.clone()],
+            model_context_items: vec![narration_context.clone(), call_context.clone()],
+            next_sequence: 2,
+            truncated: false,
+        }
+        .into(),
+    )
     .unwrap();
     assert!(receiver.try_recv().is_err());
     assert_eq!(
@@ -555,12 +561,15 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         tool_calls: Vec::new(),
         is_error: false,
     };
-    observer(ConversationTraceSnapshot {
-        items: vec![narration, call, result],
-        model_context_items: vec![narration_context, call_context, result_context],
-        next_sequence: 3,
-        truncated: false,
-    })
+    observer(
+        ConversationTraceSnapshot {
+            items: vec![narration, call, result],
+            model_context_items: vec![narration_context, call_context, result_context],
+            next_sequence: 3,
+            truncated: false,
+        }
+        .into(),
+    )
     .unwrap();
     let closed = receiver.try_recv().unwrap();
     let closed_tokens = closed["params"]["snapshot"]["inputTokens"]
@@ -757,12 +766,15 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
         is_error: false,
     };
 
-    let error = observer(ConversationTraceSnapshot {
-        items: vec![call.clone()],
-        model_context_items: vec![call_context.clone()],
-        next_sequence: 1,
-        truncated: false,
-    })
+    let error = observer(
+        ConversationTraceSnapshot {
+            items: vec![call.clone()],
+            model_context_items: vec![call_context.clone()],
+            next_sequence: 1,
+            truncated: false,
+        }
+        .into(),
+    )
     .unwrap_err();
 
     assert_eq!(
@@ -898,7 +910,7 @@ fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_comm
         notifications,
     );
 
-    let error = observer(ConversationTraceSnapshot::default()).unwrap_err();
+    let error = observer(ConversationTraceSnapshot::default().into()).unwrap_err();
 
     assert_eq!(error.code(), Some("conversation_trace_persistence_failed"));
     assert_eq!(
@@ -1126,7 +1138,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
         2,
     );
 
-    let baseline = observer(ConversationTraceSnapshot::default()).unwrap();
+    let baseline = observer(ConversationTraceSnapshot::default().into()).unwrap();
 
     assert!(baseline.is_some());
     assert!(receiver.try_recv().is_err());

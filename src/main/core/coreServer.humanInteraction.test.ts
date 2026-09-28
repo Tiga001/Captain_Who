@@ -54,6 +54,24 @@ beforeEach(() => {
 })
 
 describe('Core human interaction transport', () => {
+  it('uses one strict sparse attention RPC and rejects detail data or an invalid watermark', async () => {
+    const server = new CoreServer()
+    const snapshot = {
+      requestSequence: 1,
+      requests: [{ requestId: 'r', conversationId: 'chat', sequence: 1, revision: 0 }],
+      approvalConversationIds: ['chat']
+    }
+    request.mockResolvedValueOnce(snapshot)
+    await expect(server.getHumanInteractionAttention({})).resolves.toEqual(snapshot)
+    expect(request).toHaveBeenCalledExactlyOnceWith('humanInteraction.getAttention', {})
+    request.mockResolvedValueOnce({ ...snapshot, requestSequence: 0 })
+    await expect(server.getHumanInteractionAttention({})).rejects.toThrow()
+    request.mockResolvedValueOnce({
+      ...snapshot,
+      requests: [{ ...snapshot.requests[0], questions: [] }]
+    })
+    await expect(server.getHumanInteractionAttention({})).rejects.toThrow()
+  })
   it('routes all five RPCs with strict input/output contracts and preserves independent delivery', async () => {
     const server = new CoreServer()
     request

@@ -28,7 +28,8 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(run_id)
-            .cloned();
+            .cloned()
+            .map(StoredConversationTraceSnapshot::into_snapshot);
         let terminal = match (
             record.snapshot.conversation_id.as_deref(),
             record.snapshot.assistant_message_id.as_deref(),

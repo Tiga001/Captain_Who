@@ -1248,6 +1248,17 @@ impl ContextFrame {
         Ok(baseline)
     }
 
+    /// Identity of the current contents and ledger; freezing chunks or measuring preserves it.
+    /// The ledger uses copy-on-write, so metadata-only observation changes are covered as well.
+    pub(crate) fn content_revision(&self) -> (u64, u64, usize) {
+        (
+            self.revision,
+            self.persistent_revision,
+            Arc::as_ptr(&self.conversation_world_state_records)
+                as *const crate::AnchoredWorldStateRecord as usize,
+        )
+    }
+
     pub(crate) fn push(&mut self, mut item: ContextItem) {
         let usage_class = item.metadata.usage_class();
         if usage_class.is_persistent() {

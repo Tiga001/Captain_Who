@@ -24,9 +24,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 include!("conversation_trace/model.rs");
 include!("conversation_trace/validation.rs");
+include!("conversation_trace/incremental_validation.rs");
 include!("conversation_trace/recovery.rs");
 include!("conversation_trace/interruption.rs");
 include!("conversation_trace/recorder.rs");
+include!("conversation_trace/append_transaction.rs");
+include!("conversation_trace/publication.rs");
 include!("conversation_trace/projection.rs");
 
 #[cfg(test)]

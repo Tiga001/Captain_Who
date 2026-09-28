@@ -50,6 +50,8 @@ const REINITIALIZE_TABLES: &[&str] = &[
     "conversation_history_fts",
     "conversation_history_index_entries",
     "conversation_history_timeline",
+    // The copied trace creates a fresh database journal epoch through its insert triggers.
+    "conversation_trace_journal_revisions",
     "conversation_world_state_epochs",
 ];
 

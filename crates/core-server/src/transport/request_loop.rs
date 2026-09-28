@@ -158,6 +158,7 @@ fn is_blocking_read_method(method: &str) -> bool {
             | STORAGE_LOAD_CONVERSATIONS_METHOD
             | STORAGE_LOAD_CONVERSATION_METAS_METHOD
             | mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
+            | mycopilot_protocol_rs::HUMAN_INTERACTION_GET_ATTENTION_METHOD
             | STORAGE_LOAD_CONVERSATION_METHOD
             | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
             | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
@@ -1040,6 +1041,9 @@ mod tests {
 
     #[test]
     fn storage_reads_use_the_non_blocking_dispatch_path() {
+        assert!(is_blocking_read_method(
+            mycopilot_protocol_rs::HUMAN_INTERACTION_GET_ATTENTION_METHOD
+        ));
         assert!(is_blocking_read_method(
             STORAGE_LOAD_CONVERSATION_METAS_METHOD
         ));

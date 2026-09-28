@@ -594,7 +594,8 @@ fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
             model_context_items: vec![pending_model_context_item(&call)],
             next_sequence: 1,
             truncated: false,
-        },
+        }
+        .into(),
     );
 
     let mut output = AgentChatOutput {
@@ -798,7 +799,8 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
             model_context_items: Vec::new(),
             next_sequence: 1,
             truncated: false,
-        },
+        }
+        .into(),
     );
 
     service.persist_forced_cancelled_runs(&["run-forced-recovery".to_string()]);
@@ -1445,14 +1447,28 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         trace.terminal_status,
         ConversationTurnTraceTerminalStatus::Cancelled
     );
+    assert!(
+        matches!(
+            // A user-stop BackendState is a valid terminal postlude after the command result.
+            trace.items.iter().rev().find(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. })),
+            Some(ConversationTurnTraceItem::ToolResult {
+                status: ConversationTraceToolResultStatus::Cancelled,
+                call_id,
+                archive,
+                ..
+            }) if call_id == "command-cancel"
+                && archive.archived_completely == Some(true)
+                && archive.archive_ref.is_some()
+        ),
+        "unexpected cancellation trace: {trace:?}"
+    );
     assert!(matches!(
         trace.items.last(),
-        Some(ConversationTurnTraceItem::ToolResult {
-            status: ConversationTraceToolResultStatus::Cancelled,
-            archive,
+        Some(ConversationTurnTraceItem::BackendState {
+            event_id,
+            placement: mycopilot_core::ConversationBackendStatePlacement::AfterMessage,
             ..
-        }) if archive.archived_completely == Some(true)
-            && archive.archive_ref.is_some()
+        }) if event_id == "user-stop"
     ));
     let model_log = storage
         .get_conversation_model_context_log("assistant-command-cancel")

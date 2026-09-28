@@ -526,6 +526,47 @@ struct ConversationContextStateUpdate {
     snapshot: Option<AgentContextWindowSnapshot>,
 }
 
+/// Runtime publications share immutable history; terminal/recovery paths materialize only once.
+#[derive(Debug, Clone)]
+enum StoredConversationTraceSnapshot {
+    Snapshot(ConversationTraceSnapshot),
+    Publication(mycopilot_core::ConversationTracePublication),
+}
+
+impl StoredConversationTraceSnapshot {
+    fn into_snapshot(self) -> ConversationTraceSnapshot {
+        match self {
+            Self::Snapshot(snapshot) => snapshot,
+            Self::Publication(publication) => publication.into_snapshot(),
+        }
+    }
+}
+
+impl From<ConversationTraceSnapshot> for StoredConversationTraceSnapshot {
+    fn from(snapshot: ConversationTraceSnapshot) -> Self {
+        Self::Snapshot(snapshot)
+    }
+}
+
+impl From<mycopilot_core::ConversationTracePublication> for StoredConversationTraceSnapshot {
+    fn from(publication: mycopilot_core::ConversationTracePublication) -> Self {
+        Self::Publication(publication)
+    }
+}
+
+// Assertion fixtures may inspect a materialized snapshot. Production must opt in explicitly at
+// a terminal/recovery boundary, so an innocent field access cannot clone all running history.
+#[cfg(test)]
+impl std::ops::Deref for StoredConversationTraceSnapshot {
+    type Target = ConversationTraceSnapshot;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Snapshot(snapshot) => snapshot,
+            Self::Publication(publication) => publication,
+        }
+    }
+}
+
 struct PersistedConversationContextState {
     /// Model-facing history uses the active summary and its uncovered suffix.
     preview_input: AgentChatInput,
@@ -611,7 +652,7 @@ pub struct AgentService {
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     startup_recoverable_mcp_approvals: Arc<Mutex<HashSet<String>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
-    trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
+    trace_snapshots: Arc<Mutex<HashMap<String, StoredConversationTraceSnapshot>>>,
     observer_streams: Arc<Mutex<HashMap<String, observer_stream::ObserverStreamState>>>,
     running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
     /// The selector directory shown to this run, shared by live execution and read-only previews.

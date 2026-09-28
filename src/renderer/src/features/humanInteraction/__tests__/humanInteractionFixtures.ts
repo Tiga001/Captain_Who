@@ -75,6 +75,21 @@ export function fakeHost(initial: HumanInteractionRequestSnapshot[] = []) {
   const requestListeners = new Set<(request: HumanInteractionRequestSnapshot) => void>()
   const resyncListeners = new Set<() => void>()
   const api = {
+    getAttention: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        requestSequence: Math.max(0, ...[...database.values()].map((request) => request.sequence)),
+        requests: [...database.values()]
+          .filter((request) => request.status === 'open')
+          .map(({ requestId, conversationId, sequence, revision }) => ({
+            requestId,
+            conversationId,
+            sequence,
+            revision
+          })),
+        approvalConversationIds: [] as string[]
+      }
+    })),
     getSettings: vi.fn(async () => ({
       ok: true as const,
       value: { enabled: true, revision: 0, updatedAt: 0 }

@@ -1,16 +1,17 @@
 use super::*;
 
-/// Applies a multi-item Trace mutation to a private clone and publishes it to the live recorder
-/// only after every invariant check succeeds. ToolCall/ToolResult and their model-context item
-/// must never become partially visible to later terminal settlement.
+/// The mutex keeps an append journal private until every invariant check succeeds. An error (or
+/// panic) rolls it back before releasing the mutex, without cloning the historical recorder.
 pub(super) fn update_trace_atomically<T>(
     recorder: &Arc<Mutex<ConversationTraceRecorder>>,
-    update: impl FnOnce(&mut ConversationTraceRecorder) -> AgentResult<T>,
+    update: impl FnOnce(
+        &mut crate::conversation_trace::ConversationTraceAppendTransaction<'_>,
+    ) -> AgentResult<T>,
 ) -> AgentResult<T> {
     let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-    let mut staged = recorder.clone();
+    let mut staged = recorder.begin_append();
     let value = update(&mut staged)?;
-    *recorder = staged;
+    staged.commit();
     Ok(value)
 }
 
@@ -19,7 +20,7 @@ pub(super) fn publish_trace_recorder_snapshot(
     observer: Option<&AgentConversationTraceObserver>,
 ) -> AgentResult<Option<AgentContextBaseline>> {
     if let Some(observer) = observer {
-        return observer(recorder.snapshot());
+        return observer(recorder.publication());
     }
     Ok(None)
 }

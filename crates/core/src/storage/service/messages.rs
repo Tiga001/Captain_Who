@@ -1,6 +1,88 @@
 use super::*;
 use crate::storage::human_interaction_repository;
 
+pub(super) fn append_trace_with_previous_projection_in_transaction(
+    transaction: &rusqlite::Connection,
+    trace: &ConversationTurnTrace,
+    model_context_items: &[ConversationModelContextItem],
+    created_at: i64,
+    updated_at: i64,
+) -> Result<ConversationTraceAppendOutcome, String> {
+    let previous_trace = conversation_trace_repository::get_base_trace_for_message(
+        transaction,
+        &trace.assistant_message_id,
+    )
+    .map_err(storage_error)?;
+    let previous_model_context_items =
+        conversation_model_context_repository::load_items_for_message(
+            transaction,
+            &trace.assistant_message_id,
+        )
+        .map_err(storage_error)?;
+    let changed = conversation_trace_repository::commit_trace_with_loaded_prefix(
+        transaction,
+        trace,
+        previous_trace.as_ref(),
+        created_at,
+        updated_at,
+    )
+    .map_err(storage_error)?;
+    let model_context_changed =
+        conversation_model_context_repository::commit_items_with_loaded_prefix(
+            transaction,
+            trace,
+            model_context_items,
+            &previous_model_context_items,
+        )
+        .map_err(storage_error)?;
+    for item in &trace.items {
+        let ConversationTurnTraceItem::UserGuidance {
+            guidance_id,
+            sequence,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        match guidance_repository::mark_guidance_applied(
+            transaction,
+            guidance_id,
+            *sequence,
+            updated_at,
+        )
+        .map_err(storage_error)?
+        {
+            AgentRunGuidanceTransitionOutcome::Updated
+            | AgentRunGuidanceTransitionOutcome::Idempotent => {}
+            AgentRunGuidanceTransitionOutcome::NotFound => {
+                return Err(format!(
+                    "conversation trace references missing guidance journal `{guidance_id}`"
+                ));
+            }
+            AgentRunGuidanceTransitionOutcome::Conflict { current_status } => {
+                return Err(format!(
+                        "conversation trace guidance `{guidance_id}` conflicts with journal status `{}`",
+                        current_status.as_str()
+                    ));
+            }
+        }
+    }
+    provider_continuation_repository::promote_staged_trace_projections_in_connection(
+        transaction,
+        &trace.conversation_id,
+        &trace.assistant_message_id,
+        &trace.run_id,
+        updated_at,
+    )
+    .map_err(storage_error)?;
+    Ok(ConversationTraceAppendOutcome {
+        changed: changed || model_context_changed,
+        previous_trace,
+        previous_model_context_items,
+        previous_publication: None,
+    })
+}
+
 /// Outcome of publishing a Runtime's `WaitingForApproval` projection.
 ///
 /// The two non-persisted outcomes are expected lifecycle races. Identity corruption, a missing
@@ -20,6 +102,16 @@ pub enum AgentWaitingForApprovalPersistenceOutcome {
 pub enum AgentWaitingSegmentUsagePersistenceOutcome {
     Persisted,
     TurnTerminal,
+}
+
+/// Previous authoritative journals observed under the same write transaction as this append.
+/// Host projections may use them after commit without independently restoring either journal.
+#[derive(Debug)]
+pub struct ConversationTraceAppendOutcome {
+    pub changed: bool,
+    pub previous_trace: Option<ConversationTurnTrace>,
+    pub previous_model_context_items: Vec<ConversationModelContextItem>,
+    pub previous_publication: Option<crate::ConversationTracePublication>,
 }
 
 impl StorageService {
@@ -169,65 +261,43 @@ impl StorageService {
         created_at: i64,
         updated_at: i64,
     ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let changed = conversation_trace_repository::commit_trace_in_connection(
-            &transaction,
+        self.append_conversation_trace_with_previous_projection(
             trace,
+            model_context_items,
             created_at,
             updated_at,
         )
-        .map_err(storage_error)?;
-        let model_context_changed =
-            conversation_model_context_repository::commit_items_in_connection(
-                &transaction,
-                &trace.conversation_id,
-                &trace.assistant_message_id,
-                model_context_items,
-            )
+        .map(|outcome| outcome.changed)
+    }
+
+    pub fn append_conversation_trace_with_previous_projection(
+        &self,
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+        created_at: i64,
+        updated_at: i64,
+    ) -> Result<ConversationTraceAppendOutcome, String> {
+        #[cfg(test)]
+        let lock_started = std::time::Instant::now();
+        let mut connection = self.state.connection()?;
+        #[cfg(test)]
+        crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
+        #[cfg(test)]
+        let transaction_started = std::time::Instant::now();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        for item in &trace.items {
-            let ConversationTurnTraceItem::UserGuidance {
-                guidance_id,
-                sequence,
-                ..
-            } = item
-            else {
-                continue;
-            };
-            match guidance_repository::mark_guidance_applied(
-                &transaction,
-                guidance_id,
-                *sequence,
-                updated_at,
-            )
-            .map_err(storage_error)?
-            {
-                AgentRunGuidanceTransitionOutcome::Updated
-                | AgentRunGuidanceTransitionOutcome::Idempotent => {}
-                AgentRunGuidanceTransitionOutcome::NotFound => {
-                    return Err(format!(
-                        "conversation trace references missing guidance journal `{guidance_id}`"
-                    ));
-                }
-                AgentRunGuidanceTransitionOutcome::Conflict { current_status } => {
-                    return Err(format!(
-                        "conversation trace guidance `{guidance_id}` conflicts with journal status `{}`",
-                        current_status.as_str()
-                    ));
-                }
-            }
-        }
-        provider_continuation_repository::promote_staged_trace_projections_in_connection(
+        let outcome = append_trace_with_previous_projection_in_transaction(
             &transaction,
-            &trace.conversation_id,
-            &trace.assistant_message_id,
-            &trace.run_id,
+            trace,
+            model_context_items,
+            created_at,
             updated_at,
-        )
-        .map_err(storage_error)?;
+        )?;
         transaction.commit().map_err(storage_error)?;
-        Ok(changed || model_context_changed)
+        #[cfg(test)]
+        crate::storage::trace_performance_metrics::transaction(transaction_started.elapsed());
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]

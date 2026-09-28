@@ -3,6 +3,7 @@ use super::*;
 pub struct StorageService {
     pub(super) state: StorageState,
     pub(super) attachment_root: PathBuf,
+    pub(super) attachment_preview_cache: attachment_preview_cache::AttachmentPreviewCache,
     pub(super) image_artifact_root: PathBuf,
     pub(super) managed_artifact_root: PathBuf,
     pub(super) managed_command_workspaces: ManagedCommandWorkspaceRegistry,
@@ -91,6 +92,7 @@ impl StorageService {
         let service = Self {
             state: StorageState::open(database_path)?,
             attachment_root,
+            attachment_preview_cache: attachment_preview_cache::AttachmentPreviewCache::default(),
             image_artifact_root,
             managed_artifact_root,
             managed_command_workspaces: ManagedCommandWorkspaceRegistry::new(

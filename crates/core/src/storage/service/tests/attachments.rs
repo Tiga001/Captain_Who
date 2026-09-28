@@ -27,6 +27,67 @@ fn png_image(width: u32, height: u32) -> Vec<u8> {
 }
 
 #[test]
+fn attachment_preview_hydration_does_not_need_the_database_connection() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut conversations = vec![conversation("preview-lock", None, "preview-message")];
+    service.save_conversation(conversations[0].clone()).unwrap();
+    let relative = attachment_storage_rel_path(
+        "preview-lock",
+        "preview-message",
+        "preview-picture",
+        "picture.png",
+    );
+    let path = service.attachment_root.join(&relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = png_image(640, 320);
+    fs::write(&path, &bytes).unwrap();
+    let connection = service.state.connection().unwrap();
+    attachment_repository::save_attachment(
+        &connection,
+        &AttachmentRecord {
+            id: "preview-picture".into(),
+            conversation_id: "preview-lock".into(),
+            message_id: "preview-message".into(),
+            project_id: None,
+            kind: "image".into(),
+            original_name: "picture.png".into(),
+            mime_type: Some("image/png".into()),
+            size_bytes: bytes.len() as u64,
+            storage_rel_path: slash_path(&relative),
+            created_at: 1,
+        },
+    )
+    .unwrap();
+    let attachments = service
+        .attach_message_attachments(&connection, &mut conversations)
+        .unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            service.hydrate_message_attachment_previews(&mut conversations, attachments);
+            sender.send(()).unwrap();
+        });
+        let completed = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        // Release even on failure so the regression reports instead of deadlocking the suite.
+        drop(connection);
+        assert!(
+            completed.is_ok(),
+            "thumbnail work waited for the SQLite connection"
+        );
+    });
+    let preview = conversations[0].messages[0].attachments[0]
+        .preview_data
+        .as_ref()
+        .unwrap();
+    let loaded = service.load_conversation("preview-lock").unwrap().unwrap();
+    assert_eq!(
+        loaded.messages[0].attachments[0].preview_data.as_ref(),
+        Some(preview)
+    );
+}
+
+#[test]
 fn input_attachments_are_persisted_and_rehydrated() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

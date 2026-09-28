@@ -13,6 +13,23 @@ pub const HUMAN_INTERACTION_MAX_ANSWER_BYTES: usize = 32_768;
 pub const HUMAN_INTERACTION_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const HUMAN_INTERACTION_MAX_DISPLAY_BYTES: usize = 1_048_576;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HumanInteractionAttentionRequest {
+    pub request_id: String,
+    pub conversation_id: String,
+    pub sequence: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HumanInteractionAttentionSnapshot {
+    pub request_sequence: u64,
+    pub requests: Vec<HumanInteractionAttentionRequest>,
+    pub approval_conversation_ids: Vec<String>,
+}
+
 /// Bounded, self-contained history material for one submitted synchronous question batch.
 /// Kept in its original ToolResult, including when a completed turn is copied into a fork.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

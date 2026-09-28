@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use crate::human_interaction::*;
 
+mod attention;
+pub use attention::load_attention;
+
 type Result<T> = std::result::Result<T, HumanInteractionError>;
 
 /// Native Host ownership, deliberately not serializable/deserializable as model or IPC input.

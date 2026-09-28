@@ -132,9 +132,9 @@ pub use conversation_trace::{
     ConversationCommandSessionLifecycle, ConversationCommandSessionLifecyclePhase,
     ConversationContextImageRef, ConversationContextMaterialKind,
     ConversationHistoryArchiveTraceMetadata, ConversationModelContextItem,
-    ConversationModelContextLog, ConversationTraceAttachment, ConversationTraceRecorder,
-    ConversationTraceSnapshot, ConversationTraceToolResultStatus, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ConversationModelContextLog, ConversationTraceAttachment, ConversationTracePublication,
+    ConversationTraceRecorder, ConversationTraceSnapshot, ConversationTraceToolResultStatus,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     TerminalConversationTraceProjection, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 pub use llm::{

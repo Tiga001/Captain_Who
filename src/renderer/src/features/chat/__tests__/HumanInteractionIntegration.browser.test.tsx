@@ -866,6 +866,55 @@ describe('Human interaction in the real conversation surface', () => {
     expect(getComputedStyle(assistantText).color).toBe('rgb(26, 28, 31)')
   })
 
+  it('updates cached history from independent receipts, then restores the same answer from durable history', async () => {
+    const request = { ...batch('cached'), mode: 'sync' as const }
+    const host = fakeHost([request])
+    boundary.api = host.api
+    const value = conversation([request])
+    const screen = await render(<Workspace value={value} />)
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
+    await expect.element(panel).toBeVisible()
+    const accepted = submitted(request)
+    // Only the request subscription changes. The conversation and message identities stay fixed.
+    host.notify(accepted)
+    await expect.poll(() => panel.elements().length).toBe(0)
+    await expect
+      .poll(() => screen.container.querySelectorAll('.human-interaction-answer').length)
+      .toBe(1)
+    const initialAnswer = screen.container.querySelector('.human-interaction-answer')!
+    expect(initialAnswer.textContent).toContain('cached：选择外观已跳过cached：补充需求已跳过')
+    // Duplicate receipts and unrelated tail updates cannot append another answer or remount it.
+    host.notify({ ...accepted, delivery: { ...accepted.delivery!, revision: 1 } })
+    const streaming = {
+      ...value,
+      messages: [
+        ...value.messages,
+        { id: 'tail', role: 'assistant' as const, content: '恢复后继续输出', createdAt: 6 }
+      ]
+    }
+    await screen.rerender(<Workspace value={streaming} />)
+    expect(screen.container.querySelector('.human-interaction-answer')).toBe(initialAnswer)
+    expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(1)
+
+    const restored = structuredClone(value)
+    restored.messages[1].agentRun!.toolResults.push({
+      callId: request.toolCallId,
+      tool: 'request_user_input',
+      ok: true,
+      result: humanInteractionResponseDisplay(accepted)!
+    })
+    await screen.unmount()
+    boundary.api = fakeHost([]).api
+    const reloaded = await render(<Workspace value={restored} />)
+    await expect
+      .poll(() => reloaded.container.querySelectorAll('.human-interaction-answer').length)
+      .toBe(1)
+    expect(reloaded.container.querySelector('.human-interaction-answer')!.textContent).toContain(
+      'cached：选择外观已跳过cached：补充需求已跳过'
+    )
+    expect(reloaded.getByRole('dialog', { name: '交互', exact: true }).elements()).toHaveLength(0)
+  })
+
   it('does not query or expose question controls in a child observer conversation', async () => {
     const request = { ...batch('child'), conversationId: 'child' },
       host = fakeHost([request])

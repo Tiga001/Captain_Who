@@ -54,6 +54,8 @@ pub(crate) mod provider_continuation_repository;
 pub mod provider_transition_repository;
 pub mod service;
 pub mod skill_enablement_repository;
+#[cfg(test)]
+pub(crate) mod trace_performance_metrics;
 pub mod turn_diff_repository;
 pub mod usage_repository;
 pub mod workflow_execution_repository;
@@ -135,6 +137,9 @@ impl StorageEventNotifications {
 pub struct StorageState {
     connection: Mutex<Connection>,
     event_notifications: StorageEventNotifications,
+    // A cursor may outlive this connection. Retaining this allocation prevents identity ABA and
+    // keeps an opened database's identity stable when StorageService is moved in memory.
+    instance_identity: Arc<()>,
 }
 
 impl StorageState {
@@ -160,6 +165,7 @@ impl StorageState {
         Ok(Self {
             connection: Mutex::new(connection),
             event_notifications,
+            instance_identity: Arc::new(()),
         })
     }
 

@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron'
 import { captureHostInvocation, HOST_CHANNELS } from '@mycopilot/host-api'
 import {
+  parseHumanInteractionAttentionSnapshot,
   parseHumanInteractionSettingsGetInput,
   parseHumanInteractionSettings,
   parseHumanInteractionSettingsUpdate,
@@ -29,6 +30,13 @@ export function registerHumanInteractionIpc(
   coreServer: CoreServer,
   syncExecutionAccess?: () => Promise<void>
 ): () => void {
+  ipcMain.handle(HOST_CHANNELS.humanInteraction.getAttention, (_event, input) =>
+    captureHostInvocation(async () =>
+      parseHumanInteractionAttentionSnapshot(
+        await coreServer.getHumanInteractionAttention(parseHumanInteractionSettingsGetInput(input))
+      )
+    )
+  )
   ipcMain.handle(HOST_CHANNELS.humanInteraction.getSettings, (_event, input) =>
     captureHostInvocation(async () =>
       parseHumanInteractionSettings(

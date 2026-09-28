@@ -403,7 +403,7 @@ pub(crate) fn validate_model_context_prefix(
     Ok(())
 }
 
-fn validate_model_item_against_trace(
+pub(crate) fn validate_model_item_against_trace(
     item: &ConversationModelContextItem,
     trace_item: &ConversationTurnTraceItem,
 ) -> Result<(), String> {

@@ -11,6 +11,7 @@ export function createHumanInteractionIpcBridge(
   ipcRenderer: HumanInteractionIpcRenderer
 ): HumanInteractionHostApi {
   return {
+    getAttention: (input) => ipcRenderer.invoke(HOST_CHANNELS.humanInteraction.getAttention, input),
     getSettings: (input) => ipcRenderer.invoke(HOST_CHANNELS.humanInteraction.getSettings, input),
     updateSettings: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.humanInteraction.updateSettings, input),

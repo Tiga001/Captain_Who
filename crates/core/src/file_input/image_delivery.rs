@@ -11,6 +11,9 @@ const MAX_DECODE_PIXELS: u64 = 40_000_000;
 const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DECODE_EDGE: u32 = 32_768;
 const MAX_THUMBNAIL_DATA_URL_BYTES: usize = 192 * 1024;
+// Included in the storage preview cache identity. Bump when thumbnail decoding/encoding changes.
+pub(crate) const THUMBNAIL_ALGORITHM_VERSION: u32 = 1;
+pub(crate) const THUMBNAIL_MAX_EDGE: u32 = 256;
 // Bound aggregate decoding memory across imports, direct reads, and history hydration.
 static IMAGE_DECODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -125,7 +128,7 @@ fn encode_png(image: &DynamicImage) -> AgentResult<Vec<u8>> {
 }
 
 fn thumbnail_from_image(image: &DynamicImage) -> AgentResult<String> {
-    let mut edge = 256;
+    let mut edge = THUMBNAIL_MAX_EDGE;
     loop {
         let bytes = if image.width().max(image.height()) > edge {
             encode_png(&image.thumbnail(edge, edge))?

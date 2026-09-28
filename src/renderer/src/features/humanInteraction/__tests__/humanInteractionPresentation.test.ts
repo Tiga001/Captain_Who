@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import type { ChatConversation, ChatGuidanceTimelineItem } from '../../chat/chatTypes'
 import { applyAgentEventToChatMessage, ensureAgentRun } from '../../agentRun/agentEventReducer'
 import {
   getUnanchoredHumanInteractionRequests,
-  projectHumanInteractionConversation,
+  createHumanInteractionConversationSelector,
+  projectHumanInteractionConversation as projectOnce,
   readHumanInteractionDisplay
 } from '../humanInteractionPresentation'
 import { humanInteractionResponseDisplay } from '../humanInteractionState'
@@ -55,7 +56,12 @@ function allResponses(chat: ChatConversation) {
     ])
     .filter(Boolean)
 }
-describe('human interaction history projection', () => {
+describe.each(['uncached', 'cached'])('human interaction history projection (%s)', (mode) => {
+  let projectHumanInteractionConversation = projectOnce
+  beforeEach(() => {
+    projectHumanInteractionConversation =
+      mode === 'cached' ? createHumanInteractionConversationSelector() : projectOnce
+  })
   it('keeps each open batch at its original tool call position and preserves durable chronology', () => {
     const chat = conversation(),
       run = chat.messages[0].agentRun!,

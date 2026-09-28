@@ -32,6 +32,17 @@ pub(crate) fn terminal_record_needed(
 
 pub(crate) struct ConversationTraceRenderer;
 
+#[cfg(test)]
+thread_local! {
+    static MODEL_RENDER_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Counts actual model-row rendering and its content payload, isolated per test thread.
+#[cfg(test)]
+pub(super) fn take_model_render_work() -> (usize, usize) {
+    MODEL_RENDER_WORK.with(|work| work.replace((0, 0)))
+}
+
 impl ConversationTraceRenderer {
     pub(crate) fn render_with_model_context(
         trace: &ConversationTurnTrace,
@@ -373,11 +384,16 @@ impl ConversationTraceRenderer {
     }
 }
 
-fn model_context_item(
+pub(super) fn model_context_item(
     item: &ConversationModelContextItem,
     assistant_message_id: &str,
     trace_item: &ConversationTurnTraceItem,
 ) -> AgentResult<ContextItem> {
+    #[cfg(test)]
+    MODEL_RENDER_WORK.with(|work| {
+        let (rows, bytes) = work.get();
+        work.set((rows + 1, bytes + item.content.len()));
+    });
     if let ConversationTurnTraceItem::ContextMaterial {
         material_kind,
         content,

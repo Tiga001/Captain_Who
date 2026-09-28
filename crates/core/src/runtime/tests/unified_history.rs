@@ -189,7 +189,7 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
                     100 + index,
                 )
                 .map_err(AgentError::new)?;
-            *recorded_for_observer.lock().unwrap() = Some(snapshot);
+            *recorded_for_observer.lock().unwrap() = Some(snapshot.into_snapshot());
             Ok(None)
         });
         let output = timeout(

@@ -164,3 +164,4 @@ include!("tests/async_question_inheritance.rs");
 include!("tests/workspace_binding.rs");
 
 include!("tests/planning_reuse.rs");
+include!("tests/trace_journal.rs");

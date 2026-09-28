@@ -109,12 +109,17 @@ impl AgentService {
         let assistant_message_id = assistant_message_id.to_string();
         let configuration_revision = conversation_context_configuration_revision(&agent_input)
             .map_err(|error| error.to_string());
+        let commit_cursor =
+            Mutex::new(mycopilot_core::storage::service::ConversationTraceCommitCursor::default());
         Arc::new(move |snapshot| {
             let configuration_revision = configuration_revision
                 .as_deref()
                 .map_err(|error| AgentError::new(format!("无法准备会话上下文状态：{error}")))?;
             let tool_projection = tool_set_snapshot.projection();
-            let persisted = service.persist_in_progress_trace_snapshot(
+            let persisted = service.persist_in_progress_trace_publication(
+                &mut commit_cursor
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
                 &run_id,
                 &conversation_id,
                 &assistant_message_id,
@@ -127,7 +132,10 @@ impl AgentService {
             );
             if persisted.is_ok() {
                 service
-                    .acknowledge_workflow_trace(&snapshot, &notifications)
+                    .acknowledge_workflow_trace(
+                        snapshot.trace_items().iter().map(AsRef::as_ref),
+                        &notifications,
+                    )
                     .map_err(AgentError::new)?;
             }
             // A rejected append is not a new authoritative snapshot. In particular a Host tool
@@ -141,7 +149,7 @@ impl AgentService {
                 snapshots
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .insert(run_id.clone(), snapshot);
+                    .insert(run_id.clone(), snapshot.into());
             }
             persisted.map_err(|error| error.into_agent_error(&run_id, &conversation_id))
         })
@@ -516,6 +524,229 @@ impl AgentService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn persist_in_progress_trace_publication(
+        &self,
+        cursor: &mut mycopilot_core::storage::service::ConversationTraceCommitCursor,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        created_at: i64,
+        agent_input: &AgentChatInput,
+        notifications: &CoreServerNotificationSender,
+        publication: &mycopilot_core::ConversationTracePublication,
+        configuration_revision: &str,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
+    ) -> Result<Option<AgentContextBaseline>, InProgressTraceSnapshotError> {
+        let append = self
+            .storage
+            .append_trusted_conversation_trace_publication(
+                cursor,
+                publication,
+                conversation_id,
+                assistant_message_id,
+                run_id,
+                created_at,
+                now_ms(),
+            )
+            .map_err(InProgressTraceSnapshotError::NotCommitted)?;
+        let previous_sequence = append
+            .previous_publication
+            .as_ref()
+            .and_then(|value| value.trace_items().last().map(|item| item.sequence()))
+            .or_else(|| {
+                append
+                    .previous_trace
+                    .as_ref()
+                    .and_then(|trace| trace.items.last().map(|item| item.sequence()))
+            });
+        let suffix_start = publication.trace_items().partition_point(|item| {
+            previous_sequence.is_some_and(|sequence| item.sequence() <= sequence)
+        });
+        if append.changed
+            && publication.trace_items()[suffix_start..]
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.as_ref(),
+                        ConversationTurnTraceItem::UserGuidance { .. }
+                    )
+                })
+        {
+            self.publish_human_delivery_changes(conversation_id, notifications);
+        }
+        let committed_trace_count = publication_committed_trace_count(publication);
+        let native_deferred =
+            (|| {
+                if !publication.trace_items()[..committed_trace_count]
+                    .iter()
+                    .any(|item| matches!(item.as_ref(), ConversationTurnTraceItem::ToolCall { .. }))
+                {
+                    return Ok(false);
+                }
+                let Some(key) = agent_input.provider_protocol_key.as_ref() else {
+                    return Ok(false);
+                };
+                Ok::<_, String>(mycopilot_core::resolve_provider_runtime_capabilities(key)
+                .map_err(|error| error.to_string())?.partial_trace()
+                == mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed)
+            })()
+            .map_err(|error| {
+                self.invalidate_derived_context_after_durable_trace(conversation_id);
+                InProgressTraceSnapshotError::DerivedContextAfterCommit(error)
+            })?;
+        if native_deferred {
+            self.invalidate_conversation_context_state(conversation_id);
+            return Ok(None);
+        }
+        let update = self
+            .update_running_conversation_context_publication(
+                agent_input,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                publication,
+                configuration_revision,
+                tool_projection,
+                append.previous_publication.is_some(),
+            )
+            .map_err(|error| {
+                self.invalidate_derived_context_after_durable_trace(conversation_id);
+                InProgressTraceSnapshotError::DerivedContextAfterCommit(error)
+            })?;
+        let previous_model_count = append
+            .previous_publication
+            .as_ref()
+            .map(publication_committed_model_count)
+            .or_else(|| {
+                append.previous_trace.as_ref().map(|trace| {
+                    let open_sequence = trace
+                        .items
+                        .iter()
+                        .rev()
+                        .find_map(|item| match item {
+                            ConversationTurnTraceItem::ToolCall { sequence, .. } => {
+                                Some(Some(*sequence))
+                            }
+                            ConversationTurnTraceItem::ToolResult { .. } => Some(None),
+                            _ => None,
+                        })
+                        .flatten();
+                    open_sequence.map_or(append.previous_model_context_items.len(), |sequence| {
+                        append
+                            .previous_model_context_items
+                            .partition_point(|item| item.sequence < sequence)
+                    })
+                })
+            });
+        let model_context_changed = previous_model_count
+            .is_none_or(|previous| previous != publication_committed_model_count(publication));
+        if append.changed && model_context_changed {
+            self.emit_derived_context_window_snapshot(
+                notifications,
+                agent_input,
+                run_id,
+                conversation_id,
+                update.snapshot,
+            );
+        }
+        Ok(Some(update.baseline))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_running_conversation_context_publication(
+        &self,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        publication: &mycopilot_core::ConversationTracePublication,
+        configuration_revision: &str,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
+        trusted_previous: bool,
+    ) -> Result<ConversationContextStateUpdate, String> {
+        if trusted_previous {
+            let mut states = self
+                .conversation_context_states
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(entry) = states.get_mut(conversation_id) {
+                if !entry.terminal
+                    && entry.configuration_revision == configuration_revision
+                    && entry.active_run_id.as_deref() == Some(run_id)
+                    && entry.active_assistant_message_id.as_deref() == Some(assistant_message_id)
+                {
+                    if let Some(count) = entry
+                        .state
+                        .append_trace_publication(
+                            publication,
+                            assistant_message_id,
+                            run_id,
+                            entry.committed_activity_items,
+                        )
+                        .map_err(|error| error.to_string())?
+                    {
+                        entry.committed_activity_items = count;
+                        entry.last_access = self.next_conversation_context_state_access();
+                        let baseline = entry
+                            .state
+                            .shared_baseline()
+                            .map_err(|error| error.to_string())?;
+                        let snapshot = if agent_input.context_window_indicator_enabled {
+                            Some(
+                                match tool_projection {
+                                    Some(projection) => entry
+                                        .state
+                                        .snapshot_with_skill_overlays_and_tool_projection(
+                                            agent_input.skill_discovery.as_ref(),
+                                            agent_input.skill_activation.as_ref(),
+                                            projection,
+                                        ),
+                                    None => entry.state.snapshot_with_skill_overlays(
+                                        agent_input.skill_discovery.as_ref(),
+                                        agent_input.skill_activation.as_ref(),
+                                    ),
+                                }
+                                .map_err(|error| error.to_string())?,
+                            )
+                        } else {
+                            None
+                        };
+                        return Ok(ConversationContextStateUpdate { baseline, snapshot });
+                    }
+                }
+            }
+        }
+        // A cache/configuration/compaction boundary is reconstructed from the journals that just
+        // committed. This also handles a narration projection replaced by a later Generic call.
+        self.invalidate_conversation_context_state(conversation_id);
+        let update = self.rebuild_conversation_context_state(
+            agent_input,
+            conversation_id,
+            Some(run_id),
+            agent_input.skill_activation.as_ref(),
+            tool_projection,
+        )?;
+        let mut states = self
+            .conversation_context_states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(entry) = states.get_mut(conversation_id) {
+            if !entry.terminal
+                && entry.active_run_id.as_deref() == Some(run_id)
+                && entry.active_assistant_message_id.as_deref() == Some(assistant_message_id)
+            {
+                entry.state.seed_trace_publication_cursor(
+                    publication,
+                    assistant_message_id,
+                    run_id,
+                    entry.committed_activity_items,
+                );
+            }
+        }
+        Ok(update)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_in_progress_trace_snapshot(
         &self,
         run_id: &str,
@@ -533,29 +764,25 @@ impl AgentService {
         // rendering still consumes only `committed_snapshot`, so the open exchange never reaches
         // a model before its ToolResult is durably appended.
         let committed_snapshot = snapshot.committed_prefix();
-        let context_trace =
-            committed_snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
-        let previous_trace = self
-            .storage
-            .get_conversation_turn_trace(assistant_message_id)
-            .map_err(InProgressTraceSnapshotError::NotCommitted)?;
-        let previous_model_context_items = self
-            .storage
-            .get_conversation_model_context_log(assistant_message_id)
-            .map_err(InProgressTraceSnapshotError::NotCommitted)?
-            .map(|log| log.items)
-            .unwrap_or_default();
+        let context_trace = committed_snapshot.in_progress_audit_trace(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+        );
         let audit_trace =
             snapshot.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
-        let changed = self
+        let append = self
             .storage
-            .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            .append_conversation_trace_with_previous_projection(
                 &audit_trace,
                 &snapshot.model_context_items,
                 created_at,
                 now_ms(),
             )
             .map_err(InProgressTraceSnapshotError::NotCommitted)?;
+        let changed = append.changed;
+        let previous_trace = append.previous_trace;
+        let previous_model_context_items = append.previous_model_context_items;
 
         // Delivery receipts commit with the guidance Trace/ModelContext append, never merely
         // with queue admission. Notify the answer projection only for newly committed guidance.
@@ -812,11 +1039,14 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .entry(run_id.to_string())
-            .or_insert_with(|| ConversationTraceSnapshot {
-                items: checkpoint.conversation_trace_items.clone(),
-                model_context_items: checkpoint.conversation_model_context_items.clone(),
-                next_sequence: checkpoint.next_conversation_trace_sequence,
-                truncated: checkpoint.conversation_trace_truncated,
+            .or_insert_with(|| {
+                ConversationTraceSnapshot {
+                    items: checkpoint.conversation_trace_items.clone(),
+                    model_context_items: checkpoint.conversation_model_context_items.clone(),
+                    next_sequence: checkpoint.next_conversation_trace_sequence,
+                    truncated: checkpoint.conversation_trace_truncated,
+                }
+                .into()
             });
     }
 
@@ -857,7 +1087,7 @@ impl AgentService {
         self.trace_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(run_id.to_string(), snapshot.clone());
+            .insert(run_id.to_string(), snapshot.clone().into());
         let configuration_revision =
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
@@ -1035,7 +1265,7 @@ impl AgentService {
         self.trace_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(run_id.to_string(), snapshot);
+            .insert(run_id.to_string(), snapshot.into());
         if provider_native_tool_trace_is_in_progress(&record.agent_input, &trace)? {
             self.invalidate_conversation_context_state(conversation_id);
             return Ok(());
@@ -1214,7 +1444,7 @@ impl AgentService {
                 self.trace_snapshots
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .insert(run_id.to_string(), snapshot);
+                    .insert(run_id.to_string(), snapshot.into());
                 match conversation_context_configuration_revision(&record.agent_input) {
                     Ok(configuration_revision) => {
                         let tool_projection = self
@@ -1475,6 +1705,35 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner())
             .remove(run_id);
     }
+}
+
+fn publication_committed_trace_count(
+    publication: &mycopilot_core::ConversationTracePublication,
+) -> usize {
+    publication
+        .trace_items()
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, item)| match item.as_ref() {
+            ConversationTurnTraceItem::ToolCall { .. } => Some(index),
+            ConversationTurnTraceItem::ToolResult { .. } => Some(publication.trace_items().len()),
+            _ => None,
+        })
+        .unwrap_or(publication.trace_items().len())
+}
+
+fn publication_committed_model_count(
+    publication: &mycopilot_core::ConversationTracePublication,
+) -> usize {
+    let trace_count = publication_committed_trace_count(publication);
+    if trace_count == publication.trace_items().len() {
+        return publication.model_items().len();
+    }
+    let sequence = publication.trace_items()[trace_count].sequence();
+    publication
+        .model_items()
+        .partition_point(|item| item.sequence < sequence)
 }
 
 fn provider_native_tool_trace_is_in_progress(

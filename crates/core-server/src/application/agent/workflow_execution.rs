@@ -346,13 +346,13 @@ impl AgentService {
             Err(error) => eprintln!("workflow runtime projection failed: {error}"),
         }
     }
-    pub(super) fn acknowledge_workflow_trace(
+    pub(super) fn acknowledge_workflow_trace<'a>(
         &self,
-        snapshot: &mycopilot_core::ConversationTraceSnapshot,
+        items: impl IntoIterator<Item = &'a mycopilot_core::ConversationTurnTraceItem>,
         notifications: &CoreServerNotificationSender,
     ) -> Result<(), String> {
         let mut changed = HashSet::new();
-        for item in &snapshot.items {
+        for item in items {
             if let mycopilot_core::ConversationTurnTraceItem::WorkflowDelivery {
                 input_id,
                 instance_id,

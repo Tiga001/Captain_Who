@@ -2,6 +2,9 @@ use super::*;
 use crate::storage::{agent_graph_repository, migrations};
 use std::sync::{Arc, Barrier};
 
+#[path = "attention_tests.rs"]
+mod attention_tests;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     path: std::path::PathBuf,

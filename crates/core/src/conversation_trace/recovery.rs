@@ -509,11 +509,26 @@ fn terminal_trace_without_items(
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ConversationTraceRecorder {
     items: Vec<ConversationTurnTraceItem>,
     model_context_items: Vec<ConversationModelContextItem>,
     next_sequence: u64,
     truncated: bool,
     items_are_durable: bool,
+    publication: std::sync::Mutex<ConversationTracePublicationState>,
+}
+
+impl Clone for ConversationTraceRecorder {
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            model_context_items: self.model_context_items.clone(),
+            next_sequence: self.next_sequence,
+            truncated: self.truncated,
+            items_are_durable: self.items_are_durable,
+            // Independent mutable recorders may diverge. They never share append authority.
+            publication: Default::default(),
+        }
+    }
 }

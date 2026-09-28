@@ -20,6 +20,7 @@ impl ConversationTraceRecorder {
             // Resuming it may append a ToolResult, but must never rewrite the frozen ToolCall
             // approval state after a restart.
             items_are_durable: true,
+            publication: Default::default(),
         }
     }
 
@@ -40,6 +41,7 @@ impl ConversationTraceRecorder {
             next_sequence: next_sequence.max(inferred_next),
             truncated,
             items_are_durable: true,
+            publication: Default::default(),
         }
     }
 
@@ -57,6 +59,7 @@ impl ConversationTraceRecorder {
             next_sequence: snapshot.next_sequence.max(inferred_next),
             truncated: snapshot.truncated,
             items_are_durable: true,
+            publication: Default::default(),
         }
     }
 
@@ -314,6 +317,13 @@ impl ConversationTraceRecorder {
             return Ok(());
         }
         let (item, truncated) = model_context_item_from_message(sequence, ordinal, message)?;
+        if self
+            .model_context_items
+            .last()
+            .is_some_and(|previous| (previous.sequence, previous.ordinal) > (sequence, ordinal))
+        {
+            self.invalidate_publication();
+        }
         self.model_context_items.push(item);
         self.model_context_items
             .sort_by_key(|item| (item.sequence, item.ordinal));
@@ -360,6 +370,13 @@ impl ConversationTraceRecorder {
                     .to_string(),
             );
         }
+        if self
+            .model_context_items
+            .last()
+            .is_some_and(|previous| (previous.sequence, previous.ordinal) > (sequence, ordinal))
+        {
+            self.invalidate_publication();
+        }
         self.model_context_items.push(item);
         self.model_context_items
             .sort_by_key(|item| (item.sequence, item.ordinal));
@@ -373,6 +390,7 @@ impl ConversationTraceRecorder {
         if omitted_call_ids.is_empty() {
             return;
         }
+        self.invalidate_publication();
         for item in &mut self.model_context_items {
             if item.role == "assistant" {
                 item.tool_calls
@@ -564,26 +582,41 @@ impl ConversationTraceRecorder {
         &mut self,
         delivery: &crate::AgentWorkflowDelivery,
     ) -> Result<bool, String> {
-        if delivery.input_id.trim().is_empty() || delivery.instance_id.trim().is_empty()
-            || delivery.workflow_name.trim().is_empty() || delivery.content.trim().is_empty()
-            || delivery.created_at < 0 {
+        if delivery.input_id.trim().is_empty()
+            || delivery.instance_id.trim().is_empty()
+            || delivery.workflow_name.trim().is_empty()
+            || delivery.content.trim().is_empty()
+            || delivery.created_at < 0
+        {
             return Err("Workflow delivery identity is invalid".into());
         }
         let item = ConversationTurnTraceItem::WorkflowDelivery {
-            sequence: delivery.trace_sequence, input_id: delivery.input_id.clone(),
-            instance_id: delivery.instance_id.clone(), workflow_name: delivery.workflow_name.clone(),
-            content: delivery.content.clone(), created_at: delivery.created_at, truncated: false,
+            sequence: delivery.trace_sequence,
+            input_id: delivery.input_id.clone(),
+            instance_id: delivery.instance_id.clone(),
+            workflow_name: delivery.workflow_name.clone(),
+            content: delivery.content.clone(),
+            created_at: delivery.created_at,
+            truncated: false,
         };
         if let Some(existing) = self.items.iter().find(|item| matches!(item,
             ConversationTurnTraceItem::WorkflowDelivery { input_id, .. } if input_id == &delivery.input_id)) {
             return if existing == &item { Ok(false) } else { Err("Workflow delivery conflicts with its durable trace".into()) };
         }
-        if self.next_sequence != delivery.trace_sequence || matches!(self.items.last(), Some(ConversationTurnTraceItem::ToolCall { .. })) {
+        if self.next_sequence != delivery.trace_sequence
+            || matches!(
+                self.items.last(),
+                Some(ConversationTurnTraceItem::ToolCall { .. })
+            )
+        {
             return Err("Workflow delivery must follow the exact safe sampling boundary".into());
         }
         self.items.push(item);
-        self.record_model_message(delivery.trace_sequence, 0,
-            &LlmMessage::text(crate::llm::LlmMessageRole::User, delivery.content.clone()))?;
+        self.record_model_message(
+            delivery.trace_sequence,
+            0,
+            &LlmMessage::text(crate::llm::LlmMessageRole::User, delivery.content.clone()),
+        )?;
         self.next_sequence = self.next_sequence.saturating_add(1);
         Ok(true)
     }
@@ -803,6 +836,7 @@ impl ConversationTraceRecorder {
                 (&approval.call_id, approval.approval_status)
             }
         };
+        self.invalidate_publication();
         if let Some(ConversationTurnTraceItem::ToolCall {
             approval_status: current,
             ..
@@ -849,6 +883,10 @@ impl ConversationTraceRecorder {
             });
         }
         if !self.items_are_durable {
+            if matches!(&self.items[call_index], ConversationTurnTraceItem::ToolCall { approval_status, .. } if *approval_status != call.approval_status)
+            {
+                self.invalidate_publication();
+            }
             if let ConversationTurnTraceItem::ToolCall {
                 approval_status, ..
             } = &mut self.items[call_index]
@@ -1123,7 +1161,9 @@ pub(crate) fn render_user_guidance_content(
         sections.push(content.to_string());
     }
     if !attachments.is_empty() {
-        sections.push(format!("Attachments supplied with this user guidance:\n{attachment_list}"));
+        sections.push(format!(
+            "Attachments supplied with this user guidance:\n{attachment_list}"
+        ));
     }
     if !folder_references.is_empty() {
         let folder_list = folder_references
@@ -1131,7 +1171,9 @@ pub(crate) fn render_user_guidance_content(
             .map(|reference| format!("- {} ({})", reference.model_path(), reference.name))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!("Folders supplied with this user guidance:\n{folder_list}"));
+        sections.push(format!(
+            "Folders supplied with this user guidance:\n{folder_list}"
+        ));
     }
     sections.join("\n\n")
 }

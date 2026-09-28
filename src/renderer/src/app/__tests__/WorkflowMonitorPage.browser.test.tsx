@@ -728,6 +728,11 @@ describe('workflow read-only monitor', () => {
     )
     expect(build.dataset.waiting).toBeUndefined()
     expect(build.querySelector('[aria-label="未读消息"]')).toBeNull()
+    await screen.getByRole('button', { name: '双击打开对话 · 开发设置页面', exact: true }).click()
+    const panel = screen.getByRole('complementary', { name: '节点看板' })
+    await expect.element(panel).toBeVisible()
+    expect(panel.element().querySelector('header')?.textContent).not.toContain('等待交互')
+    expect(panel.element().querySelector('header')?.textContent).not.toContain('等待批准')
     activity.waitingApproval = new Set(['chat-build'])
     await screen.rerender(
       renderPage(instance, {

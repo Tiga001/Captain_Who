@@ -30,9 +30,17 @@ fn checkpoint_tool_result_trace_item(
 fn project_durable_trace_items(
     items: &[ConversationTurnTraceItem],
 ) -> (Vec<ConversationTurnTraceItem>, bool) {
-    let mut projected = Vec::with_capacity(items.len());
     let mut operations = BTreeMap::<String, Value>::new();
     let mut failure_signatures = BTreeMap::<String, String>::new();
+    project_durable_trace_suffix(items, &mut operations, &mut failure_signatures)
+}
+
+fn project_durable_trace_suffix(
+    items: &[ConversationTurnTraceItem],
+    operations: &mut BTreeMap<String, Value>,
+    failure_signatures: &mut BTreeMap<String, String>,
+) -> (Vec<ConversationTurnTraceItem>, bool) {
+    let mut projected = Vec::with_capacity(items.len());
     let mut trace_truncated = false;
 
     for item in items {
@@ -174,6 +182,7 @@ fn project_durable_trace_items(
                     observation,
                     error.as_deref(),
                 );
+                operations.remove(call_id);
                 let mut projected_observation = observation.value;
                 let mut projected_error = projected_error;
                 let mut projection_truncated = observation.truncated || error_truncated;

@@ -16,6 +16,8 @@ use crate::protocol::{
 };
 use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnapshot};
 
+include!("state_trace_publication.rs");
+
 #[derive(Clone)]
 pub struct AgentContextWindowToolProjection {
     tool_set: AgentRunToolSetCheckpoint,
@@ -451,6 +453,7 @@ pub struct AgentConversationContextState {
     /// Exact Host head last synchronized into the cache. Host-only changes advance this cursor
     /// even when they produce no model item; adoption can change at an otherwise identical head.
     world_state_head: Option<(String, u64, String)>,
+    trace_publication_cursor: Option<TracePublicationRenderCursor>,
 }
 
 impl AgentConversationContextState {
@@ -494,6 +497,7 @@ impl AgentConversationContextState {
             frame,
             timing,
             world_state_head,
+            trace_publication_cursor: None,
         }
     }
 
@@ -603,6 +607,7 @@ impl AgentConversationContextState {
         model_context_items: &[ConversationModelContextItem],
         committed_item_count: usize,
     ) -> AgentResult<usize> {
+        self.trace_publication_cursor = None;
         let rendered =
             ConversationTraceRenderer::render_with_model_context(trace, model_context_items)?;
         let model_context_item_count = rendered.activity_items.len();

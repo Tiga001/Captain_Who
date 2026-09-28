@@ -22,6 +22,7 @@ describe('Human interaction Preload bridge', () => {
     const bridge = createHumanInteractionIpcBridge({ invoke, on: vi.fn(), removeListener: vi.fn() })
     await expect(bridge.getSettings({})).resolves.toEqual(envelope)
     await bridge.updateSettings(fixture.settingsUpdate)
+    await bridge.getAttention({})
     await bridge.listRequests(fixture.listInput)
     await bridge.submit(fixture.submit)
     invoke.mockResolvedValueOnce(failure)
@@ -29,6 +30,7 @@ describe('Human interaction Preload bridge', () => {
     expect(invoke.mock.calls).toEqual([
       [HOST_CHANNELS.humanInteraction.getSettings, {}],
       [HOST_CHANNELS.humanInteraction.updateSettings, fixture.settingsUpdate],
+      [HOST_CHANNELS.humanInteraction.getAttention, {}],
       [HOST_CHANNELS.humanInteraction.listRequests, fixture.listInput],
       [HOST_CHANNELS.humanInteraction.submit, fixture.submit],
       [HOST_CHANNELS.humanInteraction.ignore, fixture.ignore]

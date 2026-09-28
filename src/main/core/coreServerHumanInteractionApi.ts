@@ -1,4 +1,7 @@
 import {
+  HUMAN_INTERACTION_GET_ATTENTION_METHOD,
+  parseHumanInteractionAttentionSnapshot,
+  type HumanInteractionAttentionSnapshot,
   HUMAN_INTERACTION_GET_SETTINGS_METHOD,
   HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD,
   HUMAN_INTERACTION_LIST_REQUESTS_METHOD,
@@ -27,6 +30,15 @@ import { CoreServerManagementApi } from './coreServerManagementApi'
 
 /** Stateless transport adapter. Core owns settings, request admission, responses and delivery. */
 export class CoreServerHumanInteractionApi extends CoreServerManagementApi {
+  async getHumanInteractionAttention(
+    input: HumanInteractionSettingsGetInput
+  ): Promise<HumanInteractionAttentionSnapshot> {
+    const request = parseHumanInteractionSettingsGetInput(input)
+    return parseHumanInteractionAttentionSnapshot(
+      await this.rpc.request<unknown>(HUMAN_INTERACTION_GET_ATTENTION_METHOD, request)
+    )
+  }
+
   async getHumanInteractionSettings(
     input: HumanInteractionSettingsGetInput
   ): Promise<HumanInteractionSettings> {

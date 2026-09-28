@@ -343,7 +343,10 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
                 updated_at,
             )
             .map_err(AgentError::new)?;
-        snapshots_for_observer.lock().unwrap().push(snapshot);
+        snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         Ok(None)
     });
 

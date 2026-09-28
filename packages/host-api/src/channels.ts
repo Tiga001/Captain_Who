@@ -134,6 +134,7 @@ export const HOST_CHANNELS = {
     openRequested: 'host:notifications.openRequested'
   },
   humanInteraction: {
+    getAttention: 'host:humanInteraction.getAttention',
     getSettings: 'host:humanInteraction.getSettings',
     updateSettings: 'host:humanInteraction.updateSettings',
     listRequests: 'host:humanInteraction.listRequests',

@@ -119,7 +119,10 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
         if result_count == 1 {
             cancellation_for_observer.cancel();
         }
-        trace_snapshots_for_observer.lock().unwrap().push(snapshot);
+        trace_snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         Ok(None)
     });
     let mut input = conversation_context_input(vec![message(
@@ -346,7 +349,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
             terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
             terminal_error: None,
             truncated: snapshot.truncated,
-            items: snapshot.items,
+            items: snapshot.items.clone(),
         };
         storage_for_observer
             .append_in_progress_conversation_turn_trace(&committed, 1, 2)
@@ -615,7 +618,10 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     let snapshots = Arc::new(Mutex::new(Vec::<ConversationTraceSnapshot>::new()));
     let snapshots_for_observer = Arc::clone(&snapshots);
     let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
-        snapshots_for_observer.lock().unwrap().push(snapshot);
+        snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         Ok(None)
     });
     let first_error = AgentRuntime::default()
@@ -1540,7 +1546,10 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
                 updated_at,
             )
             .map_err(AgentError::new)?;
-        snapshots_for_observer.lock().unwrap().push(snapshot);
+        snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         Ok(None)
     });
 

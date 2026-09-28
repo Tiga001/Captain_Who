@@ -20,6 +20,7 @@ import type {
   HumanInteractionSettingsUpdate,
   HumanInteractionListInput,
   HumanInteractionListOutput,
+  HumanInteractionAttentionSnapshot,
   HumanInteractionSubmitInput,
   HumanInteractionIgnoreInput,
   HumanInteractionRequestSnapshot,
@@ -394,6 +395,9 @@ export interface OfficeHostApi {
 }
 
 export interface HumanInteractionHostApi {
+  getAttention(
+    input: HumanInteractionSettingsGetInput
+  ): Promise<HostInvocationResult<HumanInteractionAttentionSnapshot>>
   getSettings(
     input: HumanInteractionSettingsGetInput
   ): Promise<HostInvocationResult<HumanInteractionSettings>>

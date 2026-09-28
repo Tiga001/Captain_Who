@@ -118,13 +118,15 @@ export function WorkflowMonitorPage({
     const paused = snapshot?.pausedConversationIds?.includes(conversationId)
     if (paused) return t('被停止', 'Stopped')
     const attention = conversationAttention?.[conversationId]
-    if (waitingApprovalConversationIds?.has(conversationId) || attention?.waitingApproval)
-      return t('等待批准', 'Waiting for approval')
     const latestRun = conversationById
       .get(conversationId)
       ?.messages.findLast((message) => message.role === 'assistant')?.agentRun
-    if (latestRun?.status === 'waiting_for_approval') return t('等待批准', 'Waiting for approval')
-    if (attention?.waitingAnswer || latestRun?.status === 'waiting_for_user_input')
+    if (
+      waitingApprovalConversationIds?.has(conversationId) ||
+      (attention?.waitingApproval ?? latestRun?.status === 'waiting_for_approval')
+    )
+      return t('等待批准', 'Waiting for approval')
+    if (attention?.waitingAnswer ?? latestRun?.status === 'waiting_for_user_input')
       return t('等待交互', 'Waiting for interaction')
     if (runningConversationIds.has(conversationId)) return t('活跃中', 'Active')
     if (!snapshot) return t('正在读取状态', 'Loading state')

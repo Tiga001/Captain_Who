@@ -59,6 +59,25 @@ pub(crate) fn commit_trace_in_connection(
     created_at: i64,
     committed_at: i64,
 ) -> rusqlite::Result<bool> {
+    let existing = get_base_trace_for_message(connection, &trace.assistant_message_id)?;
+    commit_trace_with_loaded_prefix(
+        connection,
+        trace,
+        existing.as_ref(),
+        created_at,
+        committed_at,
+    )
+}
+
+/// Reuses a prefix read under the caller's current write transaction. This is deliberately
+/// crate-private: callers must never supply a prefix observed before taking that transaction.
+pub(crate) fn commit_trace_with_loaded_prefix(
+    connection: &Connection,
+    trace: &ConversationTurnTrace,
+    existing: Option<&ConversationTurnTrace>,
+    created_at: i64,
+    committed_at: i64,
+) -> rusqlite::Result<bool> {
     trace.validate().map_err(invalid_trace_input)?;
     if committed_at < created_at {
         return Err(invalid_trace_input(
@@ -91,8 +110,7 @@ pub(crate) fn commit_trace_in_connection(
         }
     }
 
-    let existing = get_base_trace_for_message(connection, &trace.assistant_message_id)?;
-    let existing_item_count = if let Some(existing) = &existing {
+    let existing_item_count = if let Some(existing) = existing {
         validate_append_only_transition(existing, trace)?;
         existing.items.len()
     } else {
@@ -321,7 +339,7 @@ fn validate_append_only_transition(
     Ok(())
 }
 
-fn insert_trace_item(
+pub(crate) fn insert_trace_item(
     connection: &Connection,
     assistant_message_id: &str,
     item: &ConversationTurnTraceItem,
@@ -355,7 +373,7 @@ pub fn get_trace_for_message(
         .transpose()
 }
 
-fn get_base_trace_for_message(
+pub(crate) fn get_base_trace_for_message(
     connection: &Connection,
     assistant_message_id: &str,
 ) -> rusqlite::Result<Option<ConversationTurnTrace>> {
@@ -608,6 +626,10 @@ fn load_trace(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    crate::storage::trace_performance_metrics::trace(
+        rows.iter().map(|(_, _, json)| json.len()).sum(),
+    );
     trace_from_stored_items(header, rows)
 }
 

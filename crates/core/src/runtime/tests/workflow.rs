@@ -94,7 +94,7 @@ async fn workflow_wakes_empty_chat_without_human_message_and_revokes_tool_on_nex
                     .with_workflow_runtime(host.clone())
                     .with_workflow_inbox(host)
                     .with_trace_observer(Arc::new(move |snapshot| {
-                        recorded.lock().unwrap().push(snapshot);
+                        recorded.lock().unwrap().push(snapshot.into_snapshot());
                         Ok(None)
                     })),
             ),

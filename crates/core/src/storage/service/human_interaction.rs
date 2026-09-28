@@ -4,6 +4,13 @@ use crate::storage::{human_interaction_repository as repository, now_ms};
 use repository::HostHumanInteractionOwner;
 
 impl StorageService {
+    pub fn load_human_interaction_attention(
+        &self,
+    ) -> Result<HumanInteractionAttentionSnapshot, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::load_attention(&mut connection)
+    }
+
     pub fn get_human_interaction_request(
         &self,
         conversation_id: &str,

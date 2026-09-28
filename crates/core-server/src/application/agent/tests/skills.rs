@@ -165,7 +165,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
         RunContextToolProjection::new(tool_projection),
         notifications,
     );
-    observer(ConversationTraceSnapshot::default()).unwrap();
+    observer(ConversationTraceSnapshot::default().into()).unwrap();
     let notification = receiver.try_recv().unwrap();
     assert_eq!(
         notification["params"]["snapshot"]["inputTokens"]

@@ -3,7 +3,11 @@ use rusqlite::{config::DbConfig, types::Value};
 
 fn initialize_v59(connection: &Connection) {
     connection
-        .execute_batch(&CANONICAL_SCHEMA.replace(history_timeline_schema(), ""))
+        .execute_batch(
+            &CANONICAL_SCHEMA
+                .replace(trace_publication_schema(), "")
+                .replace(history_timeline_schema(), ""),
+        )
         .unwrap();
     connection
         .pragma_update(None, "foreign_keys", true)
@@ -66,7 +70,10 @@ fn v59_timeline_migration_preserves_journal_and_backfills_recorded_order() {
         })
         .collect();
     run_migrations(&connection).unwrap();
-    assert_eq!(read_schema_version(&connection).unwrap(), 60);
+    assert_eq!(
+        read_schema_version(&connection).unwrap(),
+        STORAGE_SCHEMA_VERSION
+    );
     for (table, expected) in tables.iter().zip(before) {
         assert_eq!(
             rows(
@@ -169,12 +176,17 @@ fn timeline_projection_tracks_reindexing_and_deletion_with_disabled_user_trigger
 fn v59_and_current_snapshots_restore_with_consistent_timeline_projection() {
     use crate::storage::database_snapshot::create_verified_sqlite_snapshot;
     let directory = tempfile::tempdir().unwrap();
-    for version in [59, 60] {
+    for version in [59, 60, STORAGE_SCHEMA_VERSION] {
         let source_path = directory.path().join(format!("source-{version}.sqlite"));
         let restored_path = directory.path().join(format!("restored-{version}.sqlite"));
         let source = Connection::open(&source_path).unwrap();
         if version == 59 {
             initialize_v59(&source);
+        } else if version == 60 {
+            source
+                .execute_batch(&CANONICAL_SCHEMA.replace(trace_publication_schema(), ""))
+                .unwrap();
+            source.pragma_update(None, "user_version", 60).unwrap();
         } else {
             run_migrations(&source).unwrap();
         }

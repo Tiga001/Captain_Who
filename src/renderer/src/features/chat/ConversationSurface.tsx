@@ -69,7 +69,7 @@ import {
 import { HumanInteractionPanel } from '../humanInteraction/HumanInteractionPanel'
 import { HumanInteractionTimelineEntry } from '../humanInteraction/HumanInteractionTimelineEntry'
 import {
-  projectHumanInteractionConversation,
+  createHumanInteractionConversationSelector,
   getUnanchoredHumanInteractionRequests,
   humanInteractionUserDisplay
 } from '../humanInteraction/humanInteractionPresentation'
@@ -303,9 +303,13 @@ export const ChatMessageList = memo(function ChatMessageList({
   showTokenUsageDetails,
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
+  const selectPresentedConversation = useMemo(
+    () => createHumanInteractionConversationSelector(),
+    []
+  )
   const presentedConversation = useMemo(
-    () => projectHumanInteractionConversation(conversation, humanInteraction?.requests ?? []),
-    [conversation, humanInteraction?.requests]
+    () => selectPresentedConversation(conversation, humanInteraction?.requests ?? []),
+    [conversation, humanInteraction?.requests, selectPresentedConversation]
   )
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = onOpenCollaborationAgent

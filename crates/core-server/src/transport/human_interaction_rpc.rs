@@ -13,6 +13,7 @@ pub(crate) fn is_human_interaction_method(method: &str) -> bool {
         HUMAN_INTERACTION_GET_SETTINGS_METHOD
             | HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD
             | HUMAN_INTERACTION_LIST_REQUESTS_METHOD
+            | HUMAN_INTERACTION_GET_ATTENTION_METHOD
             | HUMAN_INTERACTION_SUBMIT_METHOD
             | HUMAN_INTERACTION_IGNORE_METHOD
     )
@@ -35,6 +36,11 @@ pub(crate) fn handle_human_interaction_request(
         }),
         HUMAN_INTERACTION_LIST_REQUESTS_METHOD => {
             parse_and_run(id, request.params, |input| service.list(input))
+        }
+        HUMAN_INTERACTION_GET_ATTENTION_METHOD => {
+            parse_and_run(id, request.params, |_: EmptyInput| {
+                storage.load_human_interaction_attention()
+            })
         }
         HUMAN_INTERACTION_SUBMIT_METHOD => parse_and_run(id, request.params, |input| {
             service.submit(input, &notifications)

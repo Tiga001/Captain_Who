@@ -56,6 +56,7 @@ mod agent_templates;
 mod agent_workspaces;
 mod attachment_image_cache;
 mod attachment_imports;
+mod attachment_preview_cache;
 mod attachments;
 mod automations;
 mod browser_data;
@@ -81,6 +82,7 @@ mod pending_actions;
 mod provider_continuations;
 mod provider_transitions;
 mod settings;
+mod trace_publication;
 mod trace_reconciliation;
 mod turn_diffs;
 mod workflow_execution;
@@ -99,6 +101,7 @@ pub use managed_artifacts::{
 };
 pub use messages::{
     AgentWaitingForApprovalPersistenceOutcome, AgentWaitingSegmentUsagePersistenceOutcome,
+    ConversationTraceAppendOutcome,
 };
 pub use model_projection::{ModelProjection, ModelProjectionEntry};
 pub(crate) use pending_actions::manual_file_effect_has_authoritative_settlement;
@@ -111,6 +114,7 @@ pub use pending_actions::{
 pub use settings::ModelProviderCredentialReconciliationReport;
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;
+pub use trace_publication::ConversationTraceCommitCursor;
 
 /// A renderer-facing Conversation and every durable actor origin captured from the same
 /// SQLite read transaction. Keeping the provenance map beside the Conversation prevents

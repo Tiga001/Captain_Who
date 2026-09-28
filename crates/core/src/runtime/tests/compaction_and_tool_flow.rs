@@ -455,7 +455,10 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
             .push(snapshot);
     });
     let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
-        trace_snapshots_for_observer.lock().unwrap().push(snapshot);
+        trace_snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         let baseline = if commit_count_for_trace.load(Ordering::SeqCst) == 0 {
             uncompacted_baseline.clone()
         } else {
@@ -924,7 +927,10 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     let snapshots_for_prepare = trace_snapshots.clone();
     let snapshots_for_observer = trace_snapshots.clone();
     let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
-        snapshots_for_observer.lock().unwrap().push(snapshot);
+        snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot.into_snapshot());
         Ok(None)
     });
     let recursive_prefix_for_prepare = recursive_prefix.clone();

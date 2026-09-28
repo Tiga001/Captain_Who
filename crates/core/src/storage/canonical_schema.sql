@@ -6997,3 +6997,68 @@ BEGIN
       AND NEW.ref_key = 'trace:' || item.assistant_message_id || ':' || item.sequence
       AND item.item_kind != 'agent_mailbox_delivery';
 END;
+
+-- Trusted Trace publication revisions and interaction attention, schema v61.
+CREATE TABLE conversation_trace_journal_revisions (
+    assistant_message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    epoch TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
+CREATE TRIGGER trace_journal_header_insert
+AFTER INSERT ON conversation_turn_traces
+BEGIN
+    INSERT INTO conversation_trace_journal_revisions(assistant_message_id, revision)
+    VALUES (NEW.assistant_message_id, 1)
+    ON CONFLICT(assistant_message_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER trace_journal_header_update
+AFTER UPDATE ON conversation_turn_traces
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+CREATE TRIGGER trace_journal_header_delete
+AFTER DELETE ON conversation_turn_traces
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id = OLD.assistant_message_id;
+END;
+CREATE TRIGGER trace_journal_item_insert
+AFTER INSERT ON conversation_turn_trace_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id = NEW.assistant_message_id;
+END;
+CREATE TRIGGER trace_journal_item_update
+AFTER UPDATE ON conversation_turn_trace_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+CREATE TRIGGER trace_journal_item_delete
+AFTER DELETE ON conversation_turn_trace_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id = OLD.assistant_message_id;
+END;
+CREATE TRIGGER trace_journal_model_insert
+AFTER INSERT ON conversation_model_context_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id = NEW.assistant_message_id;
+END;
+CREATE TRIGGER trace_journal_model_update
+AFTER UPDATE ON conversation_model_context_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+CREATE TRIGGER trace_journal_model_delete
+AFTER DELETE ON conversation_model_context_items
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id = OLD.assistant_message_id;
+END;
+CREATE INDEX idx_human_interaction_requests_attention
+ON human_interaction_requests(sequence, conversation_id, request_id, revision)
+WHERE status = 'open';

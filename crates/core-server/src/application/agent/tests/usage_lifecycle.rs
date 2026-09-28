@@ -523,7 +523,7 @@ fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_contex
         .trace_snapshots
         .lock()
         .unwrap()
-        .insert(RUN_ID.to_string(), snapshot.clone());
+        .insert(RUN_ID.to_string(), snapshot.clone().into());
     let runtime_terminal_trace = terminal_conversation_trace_from_snapshot(
         snapshot,
         RUN_ID,
@@ -709,7 +709,7 @@ fn precommitted_wait_result_survives_stale_or_conflicting_terminal_snapshots() {
                 .trace_snapshots
                 .lock()
                 .unwrap()
-                .insert(run_id.into(), unpublished);
+                .insert(run_id.into(), unpublished.into());
             if cancelled {
                 let mut output = AgentChatOutput {
                     content: String::new(),
