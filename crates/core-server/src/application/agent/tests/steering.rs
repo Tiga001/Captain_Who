@@ -302,7 +302,7 @@ fn external_steering_cannot_forge_host_answer_identity_or_publish_a_fake_project
         "assistant-answer-forgery",
         false,
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     for client_id in ["human-answer-forged", "  human-answer-forged  "] {
         let mut input = text_input(
             "run-answer-forgery",
@@ -354,7 +354,7 @@ fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
         "assistant-steer",
         false,
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let input = text_input("run-steer", "conversation-steer", "client-steer");
 
     let queued = service
@@ -378,7 +378,7 @@ fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
         .storage
         .mark_agent_run_guidance_applied(&queued.guidance_id, 4, now_ms())
         .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let applied = service.steer_run(input, notifications).unwrap();
     assert_eq!(applied.guidance_id, queued.guidance_id);
     assert_eq!(applied.status, AgentSteerRunResultStatus::Applied);
@@ -396,7 +396,7 @@ fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
         "assistant-approval-steer",
         true,
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut input = text_input(
         "run-approval-steer",
         "conversation-approval-steer",
@@ -481,7 +481,7 @@ fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
         ModelCapabilities { image_input: false },
         AgentPermissions::default(),
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     service
         .unregister_active_run_control(
@@ -522,7 +522,7 @@ fn failed_host_cleanup_settles_only_the_inbox_it_still_owns() {
             "assistant-cleanup",
             false,
         );
-        let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut events) = crate::transport::outbound_channel();
         let first = service
             .steer_run(
                 text_input(
@@ -588,7 +588,7 @@ fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admissi
         "assistant-handoff",
         false,
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut first = text_input("run-handoff", "conversation-handoff", "client-first");
     first.attachments = vec![encoded_attachment(
         &storage,
@@ -693,7 +693,7 @@ fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
         "assistant-validation",
         false,
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let wrong_conversation = service
         .steer_run(
@@ -737,7 +737,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
         "assistant-attachment-matrix",
         true,
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let cases = vec![
         encoded_attachment(
             &storage,
@@ -934,7 +934,7 @@ fn large_managed_guidance_history_does_not_limit_following_imports() {
     }
     let mut input = text_input("large-managed-run", "large-managed-conversation", "first");
     input.attachments = vec![storage.finish_attachment_import(&id).unwrap()];
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     assert_eq!(
         service
             .steer_run(input, notifications.clone())
@@ -995,7 +995,7 @@ fn managed_guidance_retries_reuse_admitted_identity_and_reject_different_bytes()
         "managed-retry-client",
     );
     input.attachments = vec![import(b"first")];
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let accepted = service
         .steer_run(input.clone(), notifications.clone())
         .unwrap();
@@ -1032,7 +1032,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         "assistant-attachment-validation",
         true,
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let mut invalid_base64 = text_input(
         "run-attachment-validation",
@@ -1201,7 +1201,7 @@ fn attachment_persistence_failure_never_enters_the_runtime_queue() {
         "text/plain",
         b"candidate",
     )];
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let output = service.steer_run(input, notifications).unwrap();
 
     assert_eq!(output.status, AgentSteerRunResultStatus::Rejected);
@@ -1338,7 +1338,7 @@ async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() 
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1485,7 +1485,7 @@ async fn acknowledged_guidance_is_explicitly_rejected_when_network_retries_are_e
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1580,7 +1580,7 @@ async fn guidance_attachment_metadata_and_images_refresh_context_and_tools_after
     settings.models[0].supports_image = true;
     storage.save_model_settings(settings).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1776,7 +1776,7 @@ async fn approval_retains_accepted_guidance_until_explicit_stop() {
         ))
         .unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1840,7 +1840,7 @@ async fn approval_retains_accepted_guidance_until_explicit_stop() {
         .unwrap()
         .unwrap();
     assert_eq!(journal.status, AgentGuidanceStatus::Queued);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let after_approval = service
         .steer_run(
             text_input(
@@ -1929,7 +1929,7 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
         ))
         .unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -2137,7 +2137,7 @@ async fn guidance_is_accepted_during_approved_command_and_survives_a_second_reje
         ))
         .unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {

@@ -474,7 +474,7 @@ impl AgentService {
                 .as_ref()
                 .filter(|(active_run, _)| effective_run_id == Some(active_run.as_str()))
                 .map(|(_, assistant)| assistant.clone());
-            let (preview_notifications, _preview_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (preview_notifications, _preview_receiver) = crate::transport::outbound_channel();
             let harness = crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
                 Arc::clone(&self.storage),
                 self.clone(),

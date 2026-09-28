@@ -7,7 +7,7 @@ async fn attachment_import_rpc_round_trip_validates_reference_and_preview_shapes
     let storage = Arc::new(StorageService::open(&temporary.path().join("storage.sqlite")).unwrap());
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let request = |method: &str, params: Value| {
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         handle_request(
             &storage,
             &agent,

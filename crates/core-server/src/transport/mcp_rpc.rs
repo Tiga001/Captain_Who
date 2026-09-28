@@ -20,7 +20,7 @@ use mycopilot_protocol_rs::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use crate::application::mcp::management::{McpManagementFailure, McpManagementService};
 
@@ -154,7 +154,7 @@ pub(crate) fn mcp_management_unavailable_response(id: JsonRpcId, method: &str) -
 pub(crate) async fn run_mcp_changed_notifier(
     mut events: broadcast::Receiver<McpEvent>,
     service: Arc<McpManagementService>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
 ) {
     const DEBOUNCE: Duration = Duration::from_millis(50);
     const MAX_PENDING_SERVERS: usize = 1_024;
@@ -246,7 +246,7 @@ pub(crate) async fn run_mcp_changed_notifier(
 }
 
 fn send_changed_notification(
-    outbound: &mpsc::UnboundedSender<Value>,
+    outbound: &crate::transport::OutboundSender,
     notification: mycopilot_protocol_rs::McpChangedNotification,
 ) -> bool {
     outbound
@@ -754,7 +754,7 @@ mod tests {
         let low_id =
             McpServerId::from_str("00000000-0000-4000-8000-000000000001").expect("valid low UUID");
         let (event_sender, event_receiver) = broadcast::channel(8);
-        let (outbound, mut notifications) = mpsc::unbounded_channel();
+        let (outbound, mut notifications) = crate::transport::outbound_channel();
         let notifier = tokio::spawn(run_mcp_changed_notifier(
             event_receiver,
             Arc::clone(&harness.service),
@@ -836,7 +836,7 @@ mod tests {
                 current: McpServerState::Ready,
             })
             .expect("send retained event");
-        let (outbound, mut notifications) = mpsc::unbounded_channel();
+        let (outbound, mut notifications) = crate::transport::outbound_channel();
         let notifier = tokio::spawn(run_mcp_changed_notifier(
             event_receiver,
             Arc::clone(&harness.service),
@@ -870,7 +870,7 @@ mod tests {
     async fn changed_notification_pending_overflow_collapses_to_one_global_resync() {
         let harness = RpcHarness::new();
         let (event_sender, event_receiver) = broadcast::channel(2_048);
-        let (outbound, mut notifications) = mpsc::unbounded_channel();
+        let (outbound, mut notifications) = crate::transport::outbound_channel();
         let notifier = tokio::spawn(run_mcp_changed_notifier(
             event_receiver,
             Arc::clone(&harness.service),

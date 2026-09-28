@@ -5,7 +5,6 @@ use mycopilot_core::{
     WorldStateSectionEnvelope, WorldStateSectionId,
 };
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::unbounded_channel;
 
 const CONVERSATION: &str = "world-state-compacted-boundary";
 const ASSISTANT: &str = "world-state-compacted-assistant";
@@ -187,7 +186,7 @@ async fn prepared_request_survives_exact_trace_compaction_and_real_host_rebuild(
         Some(&pending_boundary)
     );
     assert!(!rebased[1].model_observed);
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let compaction = service.context_compaction_services(
         RUN,
         CONVERSATION,

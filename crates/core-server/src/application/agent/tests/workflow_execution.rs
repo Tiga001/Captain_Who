@@ -123,7 +123,7 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
         }
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let scheduler = service
         .start_workflow_delivery_scheduler_with_interval(
             notifications.clone(),
@@ -285,7 +285,7 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
         }
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let scheduler = service
         .start_workflow_delivery_scheduler_with_interval(
             notifications.clone(),
@@ -455,7 +455,7 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
             }],
         })
         .unwrap();
-    let (notifications, _events) = unbounded_channel();
+    let (notifications, _events) = crate::transport::outbound_channel();
     let token = AgentCancellationToken::new();
     service.register_cancellation("target-run", token.clone());
     service.register_active_run_control(
@@ -573,7 +573,7 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
         }
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let scheduler = service
         .start_workflow_delivery_scheduler_with_interval(
             notifications.clone(),
@@ -732,7 +732,7 @@ async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_with
         }
     });
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let scheduler = service
         .start_workflow_delivery_scheduler_with_interval(
             notifications.clone(),
@@ -817,7 +817,7 @@ fn workflow_scheduler_read_microbenchmark() {
     storage.save_model_settings(test_model_settings()).unwrap();
     let (_source, _) = workflow_fixture(&storage, "queue");
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, _) = unbounded_channel();
+    let (notifications, _) = crate::transport::outbound_channel();
     let read = || {
         service
             .workflow_request(mycopilot_core::workflow::Request::List)
@@ -856,4 +856,489 @@ fn workflow_scheduler_read_microbenchmark() {
     let old = (old[500], old[950]);
     let new = (new[500], new[950]);
     println!("workflow list, 1000 samples, ns: old inline-scan p50={} p95={}; new read-only p50={} p95={}", old.0, old.1, new.0, new.1);
+}
+
+// Synthetic databases only. The reference freezes the pre-13 path up to the exact
+// missing-model return: global 128 query, occupancy, full conversation, every draft.
+fn pre13_missing_model_scan(service: &AgentService) {
+    for input in service.storage.workflow_execution_pending_inputs().unwrap() {
+        let target = input.conversation_id.as_deref().unwrap();
+        if service.has_conversation_turn_occupancy(target).unwrap() {
+            continue;
+        }
+        let conversation = service.storage.load_conversation(target).unwrap().unwrap();
+        assert!(conversation.archived_at.is_none());
+        let draft = service
+            .storage
+            .load_composer_drafts()
+            .unwrap()
+            .into_iter()
+            .find(|draft| draft.scope_id == target)
+            .unwrap();
+        assert!(draft.model_id.or(conversation.model_id).is_none());
+    }
+}
+fn scan_complete_workflow_population(
+    service: &AgentService,
+    notifications: &CoreServerNotificationSender,
+) {
+    for _ in 0..100 {
+        service.dispatch_workflow_deliveries(notifications.clone());
+        if service.workflow_retry.lock().unwrap().cursor == 0 {
+            return;
+        }
+    }
+    panic!("workflow candidate traversal did not finish");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_waiting_population_microbenchmark() {
+    if std::env::var_os("MYCOPILOT_WORKFLOW_WAITING_BENCH").is_none() {
+        return;
+    }
+    for count in [100, 1000] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("waiting.sqlite");
+        let storage = Arc::new(StorageService::open(&path).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut settings = test_model_settings();
+        settings.api_url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        storage.save_model_settings(settings).unwrap();
+        let mut last_target = String::new();
+        workflow_fixture(&storage, "queue");
+        let mut db = rusqlite::Connection::open(&path).unwrap();
+        for index in 0..count {
+            let result = storage.workflow_request(serde_json::from_value(json!({
+                "operation":"saveInstance", "id":if index == 0 { "instance".into() } else { format!("waiting-{index}") },
+                "templateId":"template", "name":"Waiting", "color":format!("#{:06x}", index + 1),
+                "bindings":[{"nodeId":"a","conversationId":null},{"nodeId":"b","conversationId":null}],
+                "expectedRevision":if index == 0 { 1 } else { 0 },"expectedTemplateRevision":1
+            })).unwrap()).unwrap();
+            let target = &result.instances[0]
+                .bindings
+                .iter()
+                .find(|b| b.node_id == "b")
+                .unwrap()
+                .conversation_id;
+            last_target = target.clone();
+            let mut input =
+                synthetic_workflow_input(&storage, target, &format!("waiting-input-{index}"));
+            input.content = "synthetic waiting input".into();
+            let tx = db.transaction().unwrap();
+            tx.execute(
+                "UPDATE composer_drafts SET model_id=NULL WHERE scope_id=?1",
+                [target],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE conversations SET model_id=NULL WHERE id=?1",
+                [target],
+            )
+            .unwrap();
+            for message in 0..40 {
+                tx.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES(?1,?2,'user',?3,1,?4)",rusqlite::params![format!("history-{index}-{message}"),target,"x".repeat(256),message]).unwrap();
+            }
+            tx.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",rusqlite::params![input.id,input.instance_id,input.execution_version,input.node_id,target,serde_json::to_string(&input).unwrap()]).unwrap();
+            tx.commit().unwrap();
+        }
+
+        let service = AgentService::new_authorized_for_test(storage.clone());
+        let (notifications, mut events) = crate::transport::outbound_channel();
+        let started = Instant::now();
+        scan_complete_workflow_population(&service, &notifications);
+        let initial_us = started.elapsed().as_micros();
+        assert_eq!(service.workflow_retry.lock().unwrap().attempts, count);
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for index in 0..20 {
+            for legacy in if index % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let started = Instant::now();
+                if legacy {
+                    pre13_missing_model_scan(&service);
+                } else {
+                    scan_complete_workflow_population(&service, &notifications);
+                }
+                if legacy {
+                    old.push(started.elapsed().as_micros());
+                } else {
+                    new.push(started.elapsed().as_micros());
+                }
+            }
+        }
+        old.sort_unstable();
+        new.sort_unstable();
+        let mut draft = storage.load_composer_draft(&last_target).unwrap().unwrap();
+        draft.model_id = Some("model-1".into());
+        draft.updated_at += 1;
+        storage.save_composer_draft(draft).unwrap();
+        db.execute(
+            "UPDATE conversations SET model_id='model-1' WHERE id=?1",
+            [&last_target],
+        )
+        .unwrap();
+        let restored_at = Instant::now();
+        service.workflow_readiness_changed(Some(&last_target));
+        scan_complete_workflow_population(&service, &notifications);
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let request = request_body(&mut stream).await;
+        assert!(request.to_string().contains("synthetic waiting input"));
+        let recovery_us = restored_at.elapsed().as_micros();
+        respond(
+            &mut stream,
+            json!({"role":"assistant","content":"recovered"}),
+            "stop",
+        )
+        .await;
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if event["params"]["type"] == "done" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .list_conversation_turn_traces(&last_target)
+                .unwrap()
+                .len(),
+            1
+        );
+        println!("workflow-waiting count={count} history=40x256B samples=20 old_first128_p50_us={} old_first128_p95_us={} new_full_population_initial_us={initial_us} new_full_population_p50_us={} new_full_population_p95_us={} repaired_last_owner_to_provider_us={recovery_us}",old[10],old[19],new[10],new[19]);
+    }
+}
+
+fn synthetic_workflow_input(
+    storage: &StorageService,
+    target: &str,
+    id: &str,
+) -> mycopilot_core::workflow_execution::Input {
+    let snapshot = storage
+        .workflow_execution_snapshot(target)
+        .unwrap()
+        .unwrap();
+    let source = &snapshot.predecessors[0];
+    let message = mycopilot_core::workflow_execution::SourceMessage {
+        id: format!("source-{id}"),
+        instance_id: snapshot.instance_id.clone(),
+        workflow_name: snapshot.name.clone(),
+        source_node_id: source.node_id.clone(),
+        source_node_name: source.node_name.clone(),
+        source_conversation_id: source.conversation_id.clone().unwrap(),
+        source_conversation_title: source.node_name.clone(),
+        target_node_id: snapshot.node_id.clone(),
+        flow_id: "direct".into(),
+        path_flow_ids: vec!["direct".into()],
+        content: "Authoritative workflow delivery 61391".into(),
+        created_at: 1,
+    };
+    mycopilot_core::workflow_execution::Input {
+        id: id.into(),
+        instance_id: snapshot.instance_id,
+        node_id: snapshot.node_id,
+        conversation_id: Some(target.into()),
+        execution_version: snapshot.execution_version,
+        content: "Authoritative workflow delivery 61391".into(),
+        messages: vec![message],
+        busy_policy: mycopilot_core::workflow::BusyPolicy::Queue,
+        status: InputStatus::Pending,
+        run_id: None,
+        delivery_id: None,
+        created_at: 1,
+        error: None,
+    }
+}
+fn insert_workflow_test_input(
+    db: &rusqlite::Connection,
+    input: &mycopilot_core::workflow_execution::Input,
+) {
+    db.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",rusqlite::params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,serde_json::to_string(input).unwrap()]).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_once() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("repair.sqlite");
+    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    let mut second = settings.models[0].clone();
+    second.id = "model-2".into();
+    second.provider_model_id = "repaired-model".into();
+    second.display_name = "Repaired".into();
+    settings.models.push(second);
+    storage.save_model_settings(settings).unwrap();
+    let (_, target) = workflow_fixture(&storage, "queue");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    insert_workflow_test_input(
+        &db,
+        &synthetic_workflow_input(&storage, &target, "repair-input"),
+    );
+    db.execute(
+        "UPDATE composer_drafts SET model_id=NULL WHERE scope_id=?1",
+        [&target],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE conversations SET model_id=NULL WHERE id=?1",
+        [&target],
+    )
+    .unwrap();
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let (notifications, mut events) = crate::transport::outbound_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(notifications, Duration::from_secs(60))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if service.workflow_retry.lock().unwrap().attempts > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Let the first check finish so this verifies early invalidation of an installed cooldown.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        storage
+            .workflow_execution_load_input("repair-input")
+            .unwrap()
+            .unwrap()
+            .status,
+        InputStatus::Pending
+    );
+    let mut draft = storage.load_composer_draft(&target).unwrap().unwrap();
+    draft.model_id = Some("model-2".into());
+    draft.updated_at += 1;
+    storage.save_composer_draft(draft).unwrap();
+    let repaired_at = Instant::now();
+    service.workflow_readiness_changed(Some(&target));
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}; retry={:?}; preflight={:?}",
+                service.workflow_retry.lock().unwrap(),
+                service.preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                    conversation_id: target.clone(),
+                    target_model_id: "model-2".into()
+                })
+            )
+        })
+        .unwrap();
+    let request = request_body(&mut stream).await;
+    assert_eq!(request["model"], "repaired-model");
+    assert!(request
+        .to_string()
+        .contains("Authoritative workflow delivery 61391"));
+    respond(
+        &mut stream,
+        json!({"role":"assistant","content":"Done"}),
+        "stop",
+    )
+    .await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if event["params"]["type"] == "done" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .workflow_execution_load_input("repair-input")
+            .unwrap()
+            .unwrap()
+            .status,
+        InputStatus::Applied
+    );
+    assert_eq!(
+        storage
+            .load_conversation_meta(&target)
+            .unwrap()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some("model-2")
+    );
+    assert_eq!(
+        storage
+            .list_conversation_turn_traces(&target)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(repaired_at.elapsed() < Duration::from_secs(5));
+    scheduler.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("fair.sqlite");
+    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    storage.save_model_settings(settings).unwrap();
+    let (_, target) = workflow_fixture(&storage, "queue");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let input = synthetic_workflow_input(&storage, &target, "fair-ready");
+    for index in 0..1000 {
+        let mut other = input.clone();
+        other.id = format!("ineligible-{index}");
+        other.conversation_id = Some(format!("removed-{index}"));
+        insert_workflow_test_input(&db, &other);
+    }
+    insert_workflow_test_input(&db, &input);
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let (notifications, mut events) = crate::transport::outbound_channel();
+    let scheduler = service
+        .start_workflow_delivery_scheduler_with_interval(notifications, Duration::from_secs(60))
+        .unwrap();
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}; preflight={:?}",
+                service.preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                    conversation_id: target.clone(),
+                    target_model_id: "model-1".into()
+                })
+            )
+        })
+        .unwrap();
+    assert!(request_body(&mut stream)
+        .await
+        .to_string()
+        .contains("Authoritative workflow delivery 61391"));
+    respond(
+        &mut stream,
+        json!({"role":"assistant","content":"Done"}),
+        "stop",
+    )
+    .await;
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            if event["params"]["type"] == "done" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .workflow_execution_load_input(&input.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        InputStatus::Applied
+    );
+    assert!(service.workflow_retry.lock().unwrap().attempts >= 1001);
+    scheduler.shutdown().await.unwrap();
+}
+
+#[test]
+fn workflow_capacity_release_retries_waiting_owner_without_clearing_configuration() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("capacity.sqlite");
+    let storage = Arc::new(StorageService::open(&path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let (_, target) = workflow_fixture(&storage, "queue");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    insert_workflow_test_input(
+        &db,
+        &synthetic_workflow_input(&storage, &target, "capacity-input"),
+    );
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        storage.clone(),
+        None,
+        1,
+    )
+    .unwrap();
+    service.grant_execution_access_for_test();
+    let permit = service.turn_concurrency_gate().try_acquire().unwrap();
+    let remaining_clone = permit.clone();
+    service
+        .register_turn_concurrency_permit("other-owner", permit)
+        .unwrap();
+    let (notifications, _events) = crate::transport::outbound_channel();
+    service.dispatch_workflow_deliveries(notifications.clone());
+    let candidate = storage
+        .workflow_execution_pending_candidates(0, 128)
+        .unwrap()
+        .remove(0);
+    let mut config = candidate.clone();
+    config.id = "configuration-wait".into();
+    config.conversation_id = Some("different".into());
+    let old_generation;
+    {
+        let mut retries = service.workflow_retry.lock().unwrap();
+        old_generation = retries.generation;
+        assert!(!retries.is_due(&candidate, Instant::now()));
+        retries.defer(
+            &config,
+            crate::application::agent::workflow_retry::RetryReason::Configuration,
+            old_generation,
+            Instant::now(),
+        );
+    }
+    service.release_turn_concurrency_permit("other-owner");
+    {
+        let mut retries = service.workflow_retry.lock().unwrap();
+        assert!(retries.is_due(&candidate, Instant::now()));
+        assert!(!retries.is_due(&config, Instant::now()));
+        retries.defer(
+            &candidate,
+            crate::application::agent::workflow_retry::RetryReason::Capacity,
+            old_generation,
+            Instant::now(),
+        );
+        assert!(
+            retries.is_due(&candidate, Instant::now()),
+            "release during a check wins over the old capacity observation"
+        );
+    }
+    // A remaining Dispatcher lease may keep the slot full despite the early hint. Never start
+    // on the hint alone; retry at the original one-second bound after the final clone drops.
+    service.dispatch_workflow_deliveries(notifications);
+    assert_eq!(
+        storage
+            .workflow_execution_load_input(&candidate.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        InputStatus::Pending
+    );
+    drop(remaining_clone);
+    assert!(service
+        .workflow_retry
+        .lock()
+        .unwrap()
+        .is_due(&candidate, Instant::now() + Duration::from_secs(1)));
 }

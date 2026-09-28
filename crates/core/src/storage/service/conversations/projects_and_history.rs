@@ -177,6 +177,10 @@ impl StorageService {
             .collect()
     }
 
+    pub fn load_conversation_meta(&self, conversation_id: &str) -> Result<Option<ChatConversationMetaRecord>, String> {
+        chat_repository::get_conversation_meta(&*self.state.connection()?, conversation_id).map_err(storage_error)
+    }
+
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
         let connection = self.state.connection()?;
         chat_repository::list_root_conversation_metas(&connection).map_err(storage_error)

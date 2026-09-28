@@ -26,7 +26,9 @@ use mycopilot_protocol_rs::{
     MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
 };
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+#[cfg(test)]
+use tokio::sync::mpsc;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::{Uuid, Version};
 
@@ -140,7 +142,7 @@ impl PendingRequest {
 /// it never logs command arguments or results. Completion is one-shot and keyed by canonical UUIDv4.
 pub(crate) struct ManagedPlaywrightHostBridge {
     server_id: McpServerId,
-    outbound: StdMutex<Option<mpsc::UnboundedSender<Value>>>,
+    outbound: StdMutex<Option<crate::transport::OutboundSender>>,
     pending: StdMutex<HashMap<Uuid, PendingRequest>>,
     authorization_contexts:
         StdMutex<HashMap<McpInvocationId, ManagedPlaywrightAuthorizationContext>>,
@@ -203,7 +205,7 @@ impl ManagedPlaywrightHostBridge {
 
     pub(crate) fn attach_outbound(
         &self,
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
     ) -> Result<(), McpError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(McpError::shutdown("managed Playwright bridge is closed"));

@@ -489,7 +489,7 @@ fn assert_file_change_receipt_surfaces_match(
     storage: &StorageService,
     storage_id: &str,
     run_id: &str,
-    notifications: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    notifications: &mut crate::transport::OutboundReceiver,
     receipt: &serde_json::Value,
 ) {
     let audit = storage
@@ -929,7 +929,7 @@ async fn remaining_run_approval_survives_redacted_content_trace_and_drives_the_n
         "first.txt",
         "first\n",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let first = service
         .approve_action_with_scope(
             run_id,
@@ -1371,7 +1371,7 @@ async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_s
         "single.txt",
         "written exactly once\n",
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     let first = service
         .approve_action_with_scope(
@@ -1413,7 +1413,7 @@ async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_s
             run_id,
             action_id,
             AgentApprovalScopeDto::RemainingApplyPatchInRun,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .unwrap_err()
         .to_string()
@@ -1423,7 +1423,7 @@ async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_s
             "run-single-action-response-lost-forged",
             action_id,
             AgentApprovalScopeDto::SingleAction,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .is_err());
     assert!(service
@@ -1431,7 +1431,7 @@ async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_s
             run_id,
             "call-single-action-response-lost-forged",
             AgentApprovalScopeDto::SingleAction,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .is_err());
     assert_eq!(
@@ -1481,7 +1481,7 @@ async fn run_grant_storage_failure_returns_only_typed_safe_approval_rpc_data() {
             run_id,
             action_id,
             AgentApprovalScopeDto::RemainingApplyPatchInRun,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .unwrap_err();
 
@@ -1535,7 +1535,7 @@ async fn remaining_scope_response_lost_retry_preserves_the_exact_grant_and_recei
         "remaining.txt",
         "remembered exactly once\n",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let first = service
         .approve_action_with_scope(
@@ -1577,7 +1577,7 @@ async fn remaining_scope_response_lost_retry_preserves_the_exact_grant_and_recei
             run_id,
             action_id,
             AgentApprovalScopeDto::SingleAction,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .unwrap_err()
         .to_string()
@@ -1642,7 +1642,7 @@ async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once()
                 run_id,
                 action_id,
                 AgentApprovalScopeDto::RemainingApplyPatchInRun,
-                tokio::sync::mpsc::unbounded_channel().0,
+                crate::transport::outbound_channel().0,
             )
         });
         entered.wait();
@@ -1652,7 +1652,7 @@ async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once()
                 run_id,
                 action_id,
                 AgentApprovalScopeDto::RemainingApplyPatchInRun,
-                tokio::sync::mpsc::unbounded_channel().0,
+                crate::transport::outbound_channel().0,
             )
         });
         release.wait();
@@ -1722,7 +1722,7 @@ async fn restart_retry_of_a_durable_in_flight_approval_is_outcome_unknown_and_ne
             run_id,
             action_id,
             AgentApprovalScopeDto::SingleAction,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .expect("an exact in-flight retry returns a typed uncertainty receipt");
     let receipt = assert_strict_file_change_execution_json(&output, "outcome_unknown");
@@ -2157,7 +2157,7 @@ fn manual_direct_durable_dispatch_before_publication_recovers_as_not_executed() 
     );
     inject_direct_file_change_outcome_unknown(call_id);
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .approve_action(run_id, call_id, notifications)
         .unwrap_err();
@@ -2225,7 +2225,7 @@ fn manual_direct_publication_before_binding_receipt_recovers_without_replay() {
     );
     inject_direct_file_change_post_commit_binding_failure(call_id);
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .approve_action(run_id, call_id, notifications)
         .unwrap_err();
@@ -2316,7 +2316,7 @@ async fn manual_direct_post_receipt_error_adopts_exact_timeline_once() {
     let storage_id = pending_action_storage_id(run_id, call_id);
     inject_manual_action_audit_post_commit_failure(&storage_id, "completed");
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let output = service
         .approve_action(run_id, call_id, notifications)
         .expect("the post-commit error must be adopted from the authoritative receipt");
@@ -2384,7 +2384,7 @@ async fn manual_file_change_approve_rpc_has_only_the_strict_typed_result() {
         "strict approve receipt\n",
     );
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let output = service
         .approve_action(run_id, call_id, notifications)
         .expect("manual FileChange approval succeeds");
@@ -2431,7 +2431,7 @@ async fn manual_file_change_reject_rpc_has_only_the_strict_typed_result() {
             "must never be published\n",
         );
 
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         let output = service
             .reject_action(run_id, call_id, message.map(str::to_string), notifications)
             .unwrap_or_else(|error| panic!("{case}: manual FileChange rejection failed: {error}"));
@@ -2578,7 +2578,7 @@ async fn manual_file_change_audit_failure_publishes_one_typed_outcome_unknown_re
     inject_manual_action_audit_failure(&storage_id, "completed");
     inject_manual_action_audit_failure(&storage_id, "completed");
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let output = service
         .approve_action(run_id, call_id, notifications)
         .expect("typed outcome_unknown fallback settles durably");
@@ -2761,7 +2761,7 @@ fn active_run_grant_continuation_fixture(
         "created.txt",
         "created\n",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let result = service
         .approve_action_with_scope(
             run_id,
@@ -2820,7 +2820,7 @@ async fn identity_mismatch_terminalizes_claimed_continuation_and_revokes_active_
         .as_mut()
         .unwrap()
         .collaboration_identity = Some(mismatched_collaboration_identity(conversation_id));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     service
         .run_action_continuation(
@@ -2889,7 +2889,7 @@ async fn foreign_turn_owner_revokes_active_run_grant_but_preserves_exact_recover
         .get_pending_agent_action(&record.storage_id)
         .unwrap()
         .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     service
         .run_action_continuation(
@@ -2952,7 +2952,7 @@ async fn pre_runtime_restore_failure_atomically_terminalizes_and_revokes_active_
             version: u32::MAX,
             state: json!({}),
         });
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     service
         .run_action_continuation(
@@ -3003,7 +3003,7 @@ async fn cancelled_pre_runtime_continuation_revokes_active_run_grant_before_done
         active_run_grant_continuation_fixture(&fixture, run_id, conversation_id);
     let cancellation = AgentCancellationToken::new();
     cancellation.cancel();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     service
         .run_action_continuation(

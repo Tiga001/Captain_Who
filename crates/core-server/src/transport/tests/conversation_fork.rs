@@ -51,7 +51,7 @@ fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identit
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let response = handle_request(
         &storage,
         &agent_service,
@@ -75,7 +75,7 @@ fn fork_request_accepts_camel_case_assistant_reply_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -105,7 +105,7 @@ fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -212,7 +212,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
         })
         .unwrap();
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let response = handle_request(
         storage.as_ref(),
         &agent_service,
@@ -285,7 +285,7 @@ fn fork_request_rejects_retired_or_extra_fields() {
             }),
         ),
     ] {
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         let response = handle_request(
             storage.as_ref(),
             &agent_service,

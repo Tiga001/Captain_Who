@@ -55,6 +55,26 @@ impl StorageService {
     pub fn workflow_execution_pending_inputs(&self) -> Result<Vec<Input>, String> {
         repository::pending_inputs(&*self.state.connection()?)
     }
+    pub fn workflow_execution_pending_candidates(
+        &self,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<Vec<PendingInputCandidate>, String> {
+        repository::pending_candidates(&*self.state.connection()?, after_sequence, limit)
+    }
+    pub fn workflow_execution_eligible_pending_input(
+        &self,
+        input_id: &str,
+    ) -> Result<Option<Input>, String> {
+        repository::eligible_pending_input(&*self.state.connection()?, input_id)
+    }
+    pub fn workflow_execution_pending_injection(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<Input>, String> {
+        repository::pending_injection(&*self.state.connection()?, conversation_id, run_id)
+    }
     pub fn workflow_execution_bound_inputs(&self, run_id: &str) -> Result<Vec<Input>, String> {
         repository::bound_inputs(&*self.state.connection()?, run_id)
     }

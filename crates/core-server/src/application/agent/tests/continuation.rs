@@ -99,7 +99,7 @@ async fn continuation_can_approve_a_command_and_apply_guidance_without_repeating
         ))
         .unwrap();
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut input = turn_input("model-1");
     input.project_id = Some("continuation-approval-project".into());
     input.content = "Run the requested command after approval.".into();
@@ -257,7 +257,7 @@ async fn continuation_preserves_stop_history_is_idempotent_and_never_repeats_the
         None,
     );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut initial = turn_input("model-1");
     initial.conversation_id = Some("conversation-continuation".into());
     initial.content = "Original task must occur exactly once.".into();
@@ -560,7 +560,7 @@ async fn continuation_rejects_generic_cancellation_without_mutating_history() {
     storage
         .replace_conversation_turn_trace(&trace, 2, 3)
         .unwrap();
-    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _) = crate::transport::outbound_channel();
     let error = service
         .continue_conversation_turn(
             AgentConversationTurnContinueInput {
@@ -644,7 +644,7 @@ async fn continuation_retains_completed_tool_exchanges_before_the_stop() {
         ))
         .unwrap();
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut input = turn_input("model-1");
     input.project_id = Some("continuation-project".into());
     input.content = "Read the file and use its contents.".into();

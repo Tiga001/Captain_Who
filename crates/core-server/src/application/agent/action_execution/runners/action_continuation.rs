@@ -675,6 +675,7 @@ impl AgentService {
         if durable_turn_terminal || deletion_cleanup {
             self.release_conversation_turn_if_current(&turn_conversation_id, &run_id);
             self.release_turn_concurrency_permit(&run_id);
+            self.workflow_readiness_changed(Some(&turn_conversation_id));
         }
         if deletion_cleanup || (durable_turn_terminal && !keep_trace_snapshot) {
             self.discard_trace_snapshot(&run_id);

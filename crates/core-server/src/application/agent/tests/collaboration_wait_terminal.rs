@@ -122,7 +122,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(
     )
     .unwrap();
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {

@@ -95,7 +95,7 @@ fn human_interaction_settlement_rpc_reports_persisted_pending_facts_and_keeps_ig
             &tool_input,
         )
         .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let call = |method: &str, params: Value| {
         handle_request(
             &storage,
@@ -191,7 +191,7 @@ fn human_interaction_settings_rpc_commits_cas_before_notification_and_rejects_un
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let call = |method: &str, params: Value| {
         handle_request(
             &storage,

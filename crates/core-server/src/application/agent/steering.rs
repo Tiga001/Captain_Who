@@ -580,8 +580,7 @@ impl AgentService {
         let Some((queue, notifications)) = current else {
             return;
         };
-        let notifications =
-            notifications.unwrap_or_else(|| tokio::sync::mpsc::unbounded_channel().0);
+        let notifications = notifications.unwrap_or_else(|| crate::transport::outbound_channel().0);
         if let Err(error) = self.unregister_active_run_control(
             run_id,
             &queue,

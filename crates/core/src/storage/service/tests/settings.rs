@@ -2834,3 +2834,69 @@ fn save_capacity_boundary_matches_runtime_for_generic_and_registered_profiles() 
         assert_eq!(saved.models[0].context_window_tokens, Some(minimum));
     }
 }
+
+#[test]
+fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_history() {
+    static SELECTS: AtomicUsize = AtomicUsize::new(0);
+    SELECTS.store(0, Ordering::SeqCst);
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation("target", Some("project-1"), "message"))
+        .unwrap();
+    {
+        let mut connection = service.state.connection().unwrap();
+        connection.execute("INSERT INTO composer_drafts(scope_id,message,permission_mode,permission_mode_version,attachments_json,folder_references_json,skills_json,queued_messages_json,updated_at) VALUES('target','keep draft','default',1,'[]','[]','[]','[]',1)",[]).unwrap();
+        connection.execute("INSERT INTO composer_drafts(scope_id,message,permission_mode,permission_mode_version,attachments_json,folder_references_json,skills_json,queued_messages_json,updated_at) VALUES('unrelated','bad queued payload','default',1,'[]','[]','[]','[{}]',1)",[]).unwrap();
+        connection.trace(Some(|sql| {
+            if sql.trim_start().starts_with("SELECT") {
+                SELECTS.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::Read {
+                    table_name: "messages"
+                        | "conversation_turn_traces"
+                        | "conversation_turn_trace_items",
+                    ..
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        }));
+    }
+    let meta = service.load_conversation_meta("target").unwrap().unwrap();
+    assert_eq!(meta.project_id.as_deref(), Some("project-1"));
+    assert_eq!(
+        service
+            .load_composer_draft("target")
+            .unwrap()
+            .unwrap()
+            .message,
+        "keep draft"
+    );
+    assert_eq!(
+        SELECTS.load(Ordering::SeqCst),
+        2,
+        "exact meta + scope draft execute two SELECTs"
+    );
+    println!("workflow precise configuration SQL probe: 2 SELECTs; history table reads denied; one scope draft");
+    assert!(service.load_composer_draft("missing").unwrap().is_none());
+    assert!(
+        service.load_composer_drafts().is_err(),
+        "fixture includes malformed unrelated draft payload"
+    );
+    assert!(
+        service.load_conversation("target").is_err(),
+        "history reads really are forbidden"
+    );
+    service
+        .state
+        .connection()
+        .unwrap()
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+}

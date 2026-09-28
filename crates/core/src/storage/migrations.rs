@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 61;
+pub const STORAGE_SCHEMA_VERSION: i32 = 62;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -14,8 +14,10 @@ const V59_SCHEMA_FINGERPRINT: &str =
     "sha256:b3e50620bff925cbc53da8c13146908b8aa3128ac406be9b28c73069b09fc3c4";
 const V60_SCHEMA_FINGERPRINT: &str =
     "sha256:41581217d0c9d997bafbe82c1c8ded1691c163b3b70c39601f570250fade8683";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V61_SCHEMA_FINGERPRINT: &str =
     "sha256:8909ce2f44597641f7cfb60c7cad159d0fb7ff0e165306992dc5d36785943cd7";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:704ff3fdec03347fc91caa2adb18468e51180aecb91bf28010a4d88bb0bf4ece";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -28,6 +30,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v58 adds durable workflow execution receipts and delivery provenance.
 /// v59 adds a nullable default project for future auto-created workflow conversations.
 /// v60 indexes chronological history metadata without rewriting messages, traces or FTS content.
+/// v61 adds trusted trace publication revisions; v62 adds a pending-only workflow sequence index.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -81,6 +84,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 60 {
         upgrade_trace_publications_v60(connection)?;
+    }
+
+    if read_schema_version(connection)? == 61 {
+        upgrade_workflow_pending_v61(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -353,7 +360,26 @@ fn trace_publication_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
         .find("-- Trusted Trace publication revisions and interaction attention, schema v61.")
         .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Fair pending workflow scheduling, schema v62.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn workflow_pending_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Fair pending workflow scheduling, schema v62.")
+        .unwrap();
     &CANONICAL_SCHEMA[start..]
+}
+
+fn upgrade_workflow_pending_v61(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V61_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_pending_schema())?;
+    transaction.pragma_update(None, "user_version", 62)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 
 fn upgrade_trace_publications_v60(connection: &Connection) -> rusqlite::Result<()> {
@@ -365,7 +391,7 @@ fn upgrade_trace_publications_v60(connection: &Connection) -> rusqlite::Result<(
         SELECT assistant_message_id FROM conversation_turn_traces;",
     )?;
     transaction.pragma_update(None, "user_version", 61)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V61_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 
@@ -417,6 +443,7 @@ fn upgrade_workflow_execution_v57(connection: &Connection) -> rusqlite::Result<(
 
 fn canonical_schema_v57() -> String {
     CANONICAL_SCHEMA
+        .replace(workflow_pending_schema(), "")
         .replace(trace_publication_schema(), "")
         .replace(history_timeline_schema(), "")
         .replace(workflow_default_project_schema(), "")
@@ -589,6 +616,7 @@ mod tests {
         connection
             .execute_batch(
                 &super::CANONICAL_SCHEMA
+                    .replace(super::workflow_pending_schema(), "")
                     .replace(super::trace_publication_schema(), "")
                     .replace(super::history_timeline_schema(), "")
                     .replace(super::workflow_default_project_schema(), ""),
@@ -3840,3 +3868,7 @@ mod history_timeline_tests;
 #[cfg(test)]
 #[path = "migrations_trace_publication_tests.rs"]
 mod trace_publication_tests;
+
+#[cfg(test)]
+#[path = "migrations_workflow_pending_tests.rs"]
+mod workflow_pending_tests;

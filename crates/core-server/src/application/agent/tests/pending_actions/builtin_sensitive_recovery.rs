@@ -280,7 +280,7 @@ fn builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt(
         result: mycopilot_core::builtin_capability_tool_result_persistence_projection(&live_result),
     });
     let completed_at = mycopilot_core::storage::now_ms();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .commit_rejected_mcp_receipt(&record, &persisted_input, completed_at, &notifications)
         .unwrap();

@@ -245,7 +245,7 @@ fn builtin_sensitive_result_commit_failure_terminalizes_and_notifies_once() {
     });
     let cancellation = AgentCancellationToken::new();
     service.register_cancellation(run_id, cancellation.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     inject_manual_action_audit_failure(&record.storage_id, "completed");
 
     let _ = service.commit_builtin_mcp_tool_result_or_terminalize(
@@ -368,7 +368,7 @@ fn builtin_sensitive_post_commit_error_adopts_receipt_and_emits_safe_result() {
         result: mycopilot_core::builtin_capability_tool_result_persistence_projection(&live_result),
     });
     let cancellation = AgentCancellationToken::new();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     inject_manual_action_audit_post_commit_failure(&record.storage_id, "completed");
 
     let _ = service.commit_builtin_mcp_tool_result_or_terminalize(

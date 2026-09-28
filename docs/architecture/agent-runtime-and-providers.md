@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # Agent Runtime 与模型 Provider
@@ -57,6 +57,12 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
 Host 的 [`ModelProjection`](../../crates/core/src/storage/service/model_projection.rs) 是所有模型选择器、协作目录、模板和 Automation 目标共同的可执行性判定。它从同一配置 revision 生成脱敏模型元数据与 typed `execution` 状态，同时检查 enabled、连接/Profile/revision/运行时身份及有效凭据；一个模型失败不使其他模型消失。目录构建复用按配置 revision 缓存的投影，同次构建中共享凭据引用只检查一次。应用外修改凭据可能暂不刷新目录，但 spawn 与实际执行仍重新解析精确模型并拒绝不可用连接，缓存不授予执行权。
 
 普通聊天不再统一设置 30,000 输出 token 上限。[`runtime/output_budget.rs`](../../crates/core/src/runtime/output_budget.rs) 分开解析可选 HTTP 上限与上下文容量预留，真实请求、预览、自动压缩触发和配置指纹使用同一结果。通用 OpenAI-compatible 与受支持的 DeepSeek/Moonshot 请求默认省略输出上限；通用 Anthropic Messages 保留必填的 30,000 兼容值。预留与厂商 allowance 不等价；明确冻结的旧任务预算原值恢复，压缩摘要继续使用独立有限预算。具体规则见[输出上限与上下文预留](./context-management.md#请求输出上限与上下文预留)。
+
+## 实时事件与输出事件日志
+
+`AgentEventStream` 默认同时实时发送并保留完整事件日志；无 emitter 时，返回的 `output.events` 仍是完整回放入口。Core Server 的统一 `run_prepared_turn_segment` 明确启用 transient message delta：实时消费者已经接收的 `MessageDelta` 直接移交，不再复制并保留到回合结束。该选项在没有 emitter 时不删除 delta，且不删除流边界、工具、批准、错误、终态或 Usage；Host 的完成、持久化和累计 Usage 逻辑仍使用这些事件。
+
+此优化只适用于 Host 后台运行段，不作用于 Renderer 会回放的普通 Runtime/动作输出协议。子 Agent 仍保留普通与 observer 两条有消费者的路由；复用一次脱敏投影，observer 快照仍在同一发布锁内递增 cursor。不能为了减少消息量删除身份封装、改变脱敏范围，或把带 cursor 的多次事件合并成无法按快照切分的正文。
 
 ## 一次 Run 的主流程
 

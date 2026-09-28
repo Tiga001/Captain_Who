@@ -271,10 +271,17 @@ impl AgentService {
     }
 
     pub(super) fn release_turn_concurrency_permit(&self, run_id: &str) {
-        self.active_turn_permits
+        let permit = self
+            .active_turn_permits
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(run_id);
+        if let Some(permit) = permit {
+            // Drop our lease before waking. Dispatcher may still own another clone; the next
+            // authoritative admission handles that case, with a one-second capacity retry.
+            drop(permit);
+            self.workflow_capacity_changed();
+        }
     }
 
     pub(crate) fn retain_recovered_turn_concurrency_permit(

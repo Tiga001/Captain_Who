@@ -149,7 +149,13 @@ impl Fixture {
         }
     }
 
-    fn start(&self, index: usize) -> (AgentConversationTurnOutput, mpsc::UnboundedReceiver<Value>) {
+    fn start(
+        &self,
+        index: usize,
+    ) -> (
+        AgentConversationTurnOutput,
+        crate::transport::OutboundReceiver,
+    ) {
         let mut input = super::provider_profiles::turn_input("model-1");
         input.conversation_id = Some(CONVERSATION.into());
         input.user_message_id = Some(format!("accounting-user-{index}"));
@@ -157,7 +163,7 @@ impl Fixture {
         input.content = format!("ACCOUNTING_USER_{index}");
         input.max_tokens = Some(MAX_TOKENS);
         input.permissions = self.permissions;
-        let (notifications, events) = mpsc::unbounded_channel();
+        let (notifications, events) = crate::transport::outbound_channel();
         (
             self.service
                 .start_conversation_turn(input, notifications)
@@ -209,7 +215,7 @@ impl Fixture {
     async fn finish(
         &self,
         run_id: &str,
-        events: &mut mpsc::UnboundedReceiver<Value>,
+        events: &mut crate::transport::OutboundReceiver,
     ) -> Vec<Value> {
         let events = collect_until_done(events).await;
         assert_eq!(
@@ -707,7 +713,7 @@ async fn approval_resume_keeps_frozen_collaboration_and_counts_the_resumed_reque
         .next()
         .expect("the real command request must be waiting for approval");
     set_enabled(&fixture.storage, false);
-    let (notifications, mut resumed_events) = mpsc::unbounded_channel();
+    let (notifications, mut resumed_events) = crate::transport::outbound_channel();
     let decision = fixture
         .service
         .reject_action(&turn.run_id, &approval.action_id, None, notifications)

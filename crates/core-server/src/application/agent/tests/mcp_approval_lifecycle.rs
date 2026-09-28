@@ -375,7 +375,7 @@ async fn run_deepseek_restart(
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -551,7 +551,7 @@ async fn run_deepseek_restart(
     }
     let pending = restarted.list_pending_actions();
     assert_eq!(pending.len(), 1);
-    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (restart_notifications, mut restart_receiver) = crate::transport::outbound_channel();
     match decision {
         RestartedApprovalDecision::Approve => {
             restarted
@@ -593,7 +593,7 @@ async fn run_deepseek_restart(
 
     if switch_to_generic_while_pending {
         restarted.grant_execution_access_for_test();
-        let (generic_notifications, mut generic_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (generic_notifications, mut generic_receiver) = crate::transport::outbound_channel();
         restarted
             .start_conversation_turn(
                 AgentConversationTurnInput {
@@ -862,7 +862,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -928,7 +928,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
             .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let pending = restarted.list_pending_actions();
     assert_eq!(pending.len(), 1);
-    let (resume_notifications, mut resume_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (resume_notifications, mut resume_receiver) = crate::transport::outbound_channel();
     restarted
         .approve_action(&turn.run_id, &pending[0].action_id, resume_notifications)
         .unwrap();
@@ -940,7 +940,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
     assert_eq!(resumed_done["params"]["status"], "completed");
 
     restarted.grant_execution_access_for_test();
-    let (next_notifications, mut next_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (next_notifications, mut next_receiver) = crate::transport::outbound_channel();
     restarted
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1032,7 +1032,7 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
     service.grant_execution_access_for_test();
     let mut run_ids = Vec::new();
     for suffix in ["a", "b"] {
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         let turn = service
             .start_conversation_turn(
                 AgentConversationTurnInput {
@@ -1190,7 +1190,7 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
         .clone()
         .expect("pending MCP approval keeps its frozen ToolCall identity");
     let storage_id = pending_action_storage_id(&run_ids[0], &action.action_id);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let output = restarted
         .approve_action(&run_ids[0], &action.action_id, notifications)
         .expect("the user's approval decision is authoritative");
@@ -1304,7 +1304,7 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1392,7 +1392,7 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
         )
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (restart_notifications, mut restart_receiver) = crate::transport::outbound_channel();
     restarted
         .approve_action(
             &turn.run_id,
@@ -1546,7 +1546,7 @@ async fn agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durabl
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let turn = service
         .start_conversation_turn(
@@ -1736,7 +1736,7 @@ async fn automatic_mcp_tool_error_keeps_model_arguments_live_but_not_durable() {
     );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1841,7 +1841,7 @@ async fn run_approved_behavior(behavior: ApprovalInvocationBehavior) -> (Value, 
     let invoker = ApprovalLifecycleInvoker::with_behavior(lifecycle_descriptor(), behavior);
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1933,7 +1933,7 @@ async fn run_rejected_approval(message: Option<&str>) -> RejectedApprovalScenari
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let assistant_message_id = "assistant-mcp-rejected-approval";
     let turn = service
@@ -2227,7 +2227,7 @@ async fn concurrent_double_reject_has_one_durable_winner_and_one_model_continuat
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let assistant_message_id = "assistant-mcp-double-reject";
     let turn = service
@@ -2416,7 +2416,7 @@ async fn recovered_approved_mcp_rejection_keeps_feedback_and_resumes_with_normal
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let initial = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (initial_notifications, mut initial_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (initial_notifications, mut initial_receiver) = crate::transport::outbound_channel();
     let _initial_notification_guard = initial_notifications.clone();
     let assistant_message_id = "assistant-mcp-recovered-approved-reject";
     let turn = initial
@@ -2478,7 +2478,7 @@ async fn recovered_approved_mcp_rejection_keeps_feedback_and_resumes_with_normal
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].status, PendingActionStatus::Approved);
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let output = restarted
         .reject_action(
@@ -2571,7 +2571,7 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let assistant_message_id = "assistant-mcp-success-then-reject";
     let turn = service
@@ -2779,7 +2779,7 @@ async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispa
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let _notification_guard = notifications.clone();
     let turn = service
         .start_conversation_turn(
@@ -3008,7 +3008,7 @@ async fn cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_r
     );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -3132,7 +3132,7 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -3260,7 +3260,7 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
 }
 
 async fn wait_for_notification_matching(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     predicate: impl Fn(&Value) -> bool,
 ) -> Value {
     wait_for_notification_matching_with_seen(receiver, predicate)
@@ -3269,7 +3269,7 @@ async fn wait_for_notification_matching(
 }
 
 async fn wait_for_notification_matching_with_seen(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     predicate: impl Fn(&Value) -> bool,
 ) -> (Value, Vec<Value>) {
     let mut seen = Vec::new();

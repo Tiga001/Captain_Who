@@ -433,16 +433,40 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let previous = self.storage.load_conversation(&conversation.id)?;
+        let previous = self.storage.load_conversation_meta(&conversation.id)?;
         if previous.as_ref().is_some_and(|previous| {
             previous.archived_at != conversation.archived_at
                 || previous.model_id != conversation.model_id
         }) {
             self.ensure_no_manual_context_compaction(&conversation.id)?;
         }
-        self.storage
-            .save_conversation_meta(conversation)
-            .map_err(Into::into)
+        let readiness_changed = previous.as_ref().is_none_or(|previous| {
+            previous.model_id != conversation.model_id
+                || previous.project_id != conversation.project_id
+                || previous.archived_at != conversation.archived_at
+        });
+        let saved = self.storage.save_conversation_meta(conversation)?;
+        drop(_admission);
+        // save_conversation_meta preserves newer records but returns its input for compatibility.
+        // A stale renderer write must not invalidate retries as though its model was installed.
+        let readiness_changed = readiness_changed
+            && self
+                .storage
+                .load_conversation_meta(&saved.id)
+                .map(|current| match (previous.as_ref(), current.as_ref()) {
+                    (Some(previous), Some(current)) => {
+                        previous.model_id != current.model_id
+                            || previous.project_id != current.project_id
+                            || previous.archived_at != current.archived_at
+                    }
+                    (None, None) => false,
+                    _ => true,
+                })
+                .unwrap_or(true);
+        if readiness_changed {
+            self.workflow_readiness_changed(Some(&saved.id));
+        }
+        Ok(saved)
     }
 
     #[allow(clippy::too_many_arguments)]

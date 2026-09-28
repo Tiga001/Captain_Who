@@ -125,7 +125,9 @@ impl AgentService {
             .execution_access
             .lock()
             .map_err(|_| "Execution access state unavailable".to_string())?;
+        let previous_revision = access.revision;
         let output = access.apply(input, now_ms(), Instant::now());
+        let changed = access.revision != previous_revision;
         if let Err(denial) = access.check() {
             // Consume every already queued/unbound attempt while the denial is authoritative;
             // a subsequent quick login must not revive one that was waiting for a busy target.
@@ -140,6 +142,10 @@ impl AgentService {
                 )?
                 == 100
             {}
+        }
+        drop(access);
+        if changed {
+            self.workflow_readiness_changed(None);
         }
         Ok(output)
     }

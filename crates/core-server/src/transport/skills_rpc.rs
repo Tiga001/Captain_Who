@@ -233,7 +233,7 @@ pub(crate) fn handle_parsed_skills_request(
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
     skill_source_resolution: Option<&SkillSourceResolutionService>,
     image_configuration: Option<&ImageGenerationConfigurationService>,
-    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    notification_tx: Option<&crate::transport::OutboundSender>,
     request: ParsedSkillsRequest,
 ) -> Value {
     match request.operation {
@@ -551,7 +551,7 @@ pub(crate) fn skill_mutation_response_with_invalidation(
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
-    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    notification_tx: Option<&crate::transport::OutboundSender>,
     id: JsonRpcId,
     result: Result<SkillInstallationMutation, SkillInstallationServiceError>,
 ) -> Value {
@@ -576,7 +576,7 @@ pub(crate) fn skill_workflow_commit_error_response_with_invalidation(
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
-    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    notification_tx: Option<&crate::transport::OutboundSender>,
     id: JsonRpcId,
     failure: SkillInspectionFailure,
 ) -> Value {
@@ -597,7 +597,7 @@ pub(crate) fn notify_skills_changed_if_commit_outcome_uncertain(
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
-    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    notification_tx: Option<&crate::transport::OutboundSender>,
     commit_may_have_succeeded: bool,
     skill_id: Option<&str>,
 ) {
@@ -623,7 +623,7 @@ pub(crate) fn notify_skills_changed(
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
-    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    notification_tx: Option<&crate::transport::OutboundSender>,
     reason: SkillsChangedReasonDto,
     skill_id: Option<String>,
 ) {

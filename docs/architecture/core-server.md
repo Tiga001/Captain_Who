@@ -102,23 +102,29 @@ mycopilot-core       adapters
 
 request loop 当前按风险与阻塞特征分流：
 
-| 类别                   |                     默认边界 | owner/执行方式                                                                             |
-| ---------------------- | ---------------------------: | ------------------------------------------------------------------------------------------ |
-| MCP management         |                      16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                            |
-| Browser risk           |                      32 并发 | 独立 tracker；关停先取消授权                                                               |
-| 大型图片 Artifact 读取 |                       2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                         |
-| 普通查询 RPC           | 4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、工作流只读、Automation/Notification 查询；阻塞处理离开接收循环 |
-| 普通修改 RPC           | 1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和工作流/交互修改；保留业务准入锁、CAS 与幂等                       |
-| 停止/取消 RPC          | 2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                    |
-| Conversation fork      |          运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                                 |
-| Git/Skill/图片配置写入 |              各自 dispatcher | 显式队列和独立 shutdown                                                                    |
-| 普通响应/notification  |                无界 outbound | 单一 writer 串行刷 stdout                                                                  |
+| 类别                   |                                    默认边界 | owner/执行方式                                                                             |
+| ---------------------- | ------------------------------------------: | ------------------------------------------------------------------------------------------ |
+| MCP management         |                                     16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                            |
+| Browser risk           |                                     32 并发 | 独立 tracker；关停先取消授权                                                               |
+| 大型图片 Artifact 读取 |                                      2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                         |
+| 普通查询 RPC           |                4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、工作流只读、Automation/Notification 查询；阻塞处理离开接收循环 |
+| 普通修改 RPC           |                1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和工作流/交互修改；保留业务准入锁、CAS 与幂等                       |
+| 停止/取消 RPC          |                2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                    |
+| Conversation fork      |                         运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                                 |
+| Git/Skill/图片配置写入 |                             各自 dispatcher | 显式队列和独立 shutdown                                                                    |
+| 普通响应/notification  | 4 MiB 正文 + 512 KiB 控制预留，最多 8192 帧 | 单 FIFO、相邻正文合并、就绪批量写入；大非正文帧独立单 lease                                |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
 
 工作流按具体 `operation` 分类；未知操作保守进入修改队列，再由原 handler 拒绝非法输入。普通查询等待此前已接收修改完成，后续修改也等待此前控制操作完成，避免读取越过既有写入；响应仍通过 request ID 关联，不能依赖跨请求完成顺序。控制操作使用的 run/conversation key 只用于排队，不构成授权，最终仍经过原身份和终态校验。若此前存在按 conversation 排队的修改，按 run 取消会在有界阻塞工作池中解析其 conversation，并仅等待准入时捕获的对应依赖；解析也可能读取 SQLite，不能放回 stdin 循环。跨实例修改仍由领域准入锁、CAS 与终态校验裁决，不凭请求文本猜测多会话授权。共享数据库锁、对话准入锁仍可能造成等待，应与队列耗时分开测量。
 
-队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。普通 outbound 仍无界，本次有界的是处理任务；writer 背压属于独立边界。
+队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。输出准入独立按字节和帧数限制；不在 Runtime 回调或持业务锁时阻塞等待 stdout。
+
+普通输出由 `outbound.rs` 拥有序列化后的行：4 MiB 正文预算，另为响应和非正文事件预留 512 KiB / 64 帧，总帧上限 8192。普通及 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
+
+既有 JSON-RPC 未限制响应大小，所以允许最多一个超预算完整非 delta 帧（RPC 响应、完整消息或终态等），其 lease 持到 flush；预算按实际已分配缓冲容量记账，为常规队列加一个最大在途完整帧，再加有限 writer batch、序列化临时空间和既有两个图片 Artifact permit。不能把它描述为整个进程严格 4.5 MiB。控制预留保证入队空间，不赋予跨越同 Run 前序正文的权限，慢管道及单个大行仍可延迟控制。
+
+同步生产者耗尽容量时让整条连接明确失败：拒绝后续发送、唤醒请求准入停止，尽可能按 FIFO 刷完已接纳行，再发送固定错误 `id:null / -32002 / data.code=outbound_overloaded`。独立错误槽不占正文预算；失败或关闭开始后 writer 排空最多等 5 秒，正常写入没有这个总时限。Main 立即拒绝 pending 请求，屏蔽该连接的迟到通知，等待旧进程实际退出才允许惰性重启。断管或超时无法保证错误行已送达，按断连和持久恢复处理；已开始的阻塞业务仍需完成收尾，writer 的 5 秒不是进程退出承诺。
 
 上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
 
@@ -234,7 +240,7 @@ pnpm test:automation-core-e2e
 ## 12. 当前限制
 
 - `CoreJsonRpcClient.request` 当前没有通用 per-request timeout；不得用它代替领域 deadline。
-- 普通 outbound 是无界 channel；大图片已有独立有界路径，新大响应必须采用同类机制。
+- 普通输出队列有界，但单个合法大非 delta 帧没有协议硬字节上限；Main/Renderer IPC 与业务持有数据也不属于该队列预算。
 - Main 仍重复定义一部分 RPC method 字符串；应以 fixture/双端测试防漂移，并逐步收敛到 protocol package。
 - `core-server` 的 public library surface 有意很窄，仅为仓库内 MCP E2E 等 fixture 暴露适配器；它不是通用 SDK。
 - 个别源码注释仍保留旧 rollout 轮次描述，不能作为实现状态依据。

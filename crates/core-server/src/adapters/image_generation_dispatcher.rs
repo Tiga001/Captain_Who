@@ -177,13 +177,13 @@ pub(crate) struct ImageGenerationConfigurationDispatcher {
 }
 
 impl ImageGenerationConfigurationDispatcher {
-    pub(crate) fn new(outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(crate) fn new(outbound: crate::transport::OutboundSender) -> Self {
         Self::with_limit_and_shutdown_grace(outbound, DEFAULT_MAX_IN_FLIGHT, DEFAULT_SHUTDOWN_GRACE)
     }
 
     #[cfg(test)]
     fn with_limit_and_grace(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         max_in_flight: usize,
         shutdown_grace: Duration,
     ) -> Self {
@@ -191,7 +191,7 @@ impl ImageGenerationConfigurationDispatcher {
     }
 
     fn with_limit_and_shutdown_grace(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         max_in_flight: usize,
         shutdown_grace: Duration,
     ) -> Self {
@@ -279,7 +279,7 @@ struct StartedConfigurationJob {
 
 async fn run_dispatcher(
     mut receiver: mpsc::Receiver<QueuedConfigurationJob>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     mut shutdown: oneshot::Receiver<()>,
     shutdown_grace: Duration,
 ) {
@@ -330,7 +330,7 @@ async fn run_dispatcher(
 
 fn cancel_queued_jobs(
     receiver: &mut mpsc::Receiver<QueuedConfigurationJob>,
-    outbound: &mpsc::UnboundedSender<Value>,
+    outbound: &crate::transport::OutboundSender,
 ) {
     receiver.close();
     while let Ok(job) = receiver.try_recv() {
@@ -408,7 +408,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_jobs_preserve_the_original_response_identity() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = ImageGenerationConfigurationDispatcher::with_limit_and_grace(
             outbound_tx,
             2,
@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_cancels_queued_reads_and_marks_a_running_mutation_indeterminate() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = ImageGenerationConfigurationDispatcher::with_limit_and_grace(
             outbound_tx,
             2,
@@ -479,7 +479,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_panics_never_become_false_successes() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = ImageGenerationConfigurationDispatcher::with_limit_and_grace(
             outbound_tx,
             2,
@@ -519,7 +519,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_is_bounded_across_running_and_queued_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = ImageGenerationConfigurationDispatcher::with_limit_and_grace(
             outbound_tx,
             1,

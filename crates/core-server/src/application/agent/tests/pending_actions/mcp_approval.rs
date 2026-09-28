@@ -84,7 +84,7 @@ fn assert_recovered_approved_cancellation() {
     assert_eq!(restarted.reconcile_startup_mcp_actions().unwrap(), 0);
     assert_eq!(restarted.list_pending_actions().len(), 1);
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     assert!(restarted.cancel_action(run_id, &action_id).unwrap());
 
     assert!(restarted.list_pending_actions().is_empty());
@@ -232,7 +232,7 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
     let approve_action_id = action_id.clone();
     let approve = tokio::spawn(async move {
         approve_barrier.wait().await;
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         approve_service
             .approve_action(run_id, &approve_action_id, notifications)
             .is_ok()
@@ -242,7 +242,7 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
     let reject_action_id = action_id.clone();
     let reject = tokio::spawn(async move {
         reject_barrier.wait().await;
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         reject_service
             .reject_action(run_id, &reject_action_id, None, notifications)
             .is_ok()
@@ -362,7 +362,7 @@ async fn expired_mcp_approval_accepts_one_decision_and_settles_execution_normall
         )
         .unwrap());
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let accepted = service
         .approve_action(run_id, &action_id, notifications.clone())
         .unwrap();

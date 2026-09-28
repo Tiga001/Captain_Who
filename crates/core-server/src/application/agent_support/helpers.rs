@@ -1,25 +1,54 @@
 use super::*;
 
 pub fn agent_event_notification(event: AgentEvent) -> Value {
-    let mut params = json!(event);
-    redact_renderer_mcp_binding_fields(&mut params);
-    json!({
-        "jsonrpc": "2.0",
-        "method": AGENT_EVENT_NOTIFICATION_METHOD,
-        "params": params
-    })
+    RendererSafeAgentEvent::new(&event).into_notification()
+}
+
+/// The constructor is the single privacy boundary shared by both notification routes. Keeping
+/// the JSON private prevents the observer fast path from accidentally accepting raw Host data.
+#[derive(Clone)]
+pub(crate) struct RendererSafeAgentEvent(Value);
+
+impl RendererSafeAgentEvent {
+    pub(crate) fn new(event: &AgentEvent) -> Self {
+        let mut params = json!(event);
+        redact_renderer_mcp_binding_fields(&mut params);
+        Self(params)
+    }
+
+    fn into_notification(self) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": AGENT_EVENT_NOTIFICATION_METHOD,
+            "params": self.0
+        })
+    }
 }
 
 /// Wraps one ordinary safe Agent event with the exact child identities required by an observer.
 /// The nested event projection is deliberately identical to `agent.event`; this is routing
 /// authority, not a second runtime event or presentation model.
+#[cfg(test)]
 pub(crate) fn child_observer_event_notification(
     identity: &AgentCollaborationIdentity,
     run_id: &str,
     assistant_message_id: &str,
     event: AgentEvent,
 ) -> Value {
-    let safe = agent_event_notification(event);
+    child_observer_event_notification_from_safe(
+        identity,
+        run_id,
+        assistant_message_id,
+        RendererSafeAgentEvent::new(&event),
+    )
+}
+
+pub(crate) fn child_observer_event_notification_from_safe(
+    identity: &AgentCollaborationIdentity,
+    run_id: &str,
+    assistant_message_id: &str,
+    event: RendererSafeAgentEvent,
+) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
@@ -31,7 +60,7 @@ pub(crate) fn child_observer_event_notification(
             "conversationId": identity.conversation_id,
             "runId": run_id,
             "assistantMessageId": assistant_message_id,
-            "event": safe["params"].clone(),
+            "event": event.0,
         }
     })
 }
@@ -45,15 +74,19 @@ pub(crate) fn emit_agent_event_notifications(
     assistant_message_id: &str,
     event: AgentEvent,
 ) {
-    let _ = notifications.send(agent_event_notification(event.clone()));
+    let safe = RendererSafeAgentEvent::new(&event);
     if let Some(identity) = collaboration_identity {
+        let _ = notifications.send(safe.clone().into_notification());
         service.emit_child_observer_event(
             notifications,
             identity,
             run_id,
             assistant_message_id,
-            event,
+            &event,
+            safe,
         );
+    } else {
+        let _ = notifications.send(safe.into_notification());
     }
 }
 

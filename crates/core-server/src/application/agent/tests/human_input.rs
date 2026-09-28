@@ -146,7 +146,7 @@ fn turn_input() -> AgentConversationTurnInput {
 }
 
 pub(super) async fn wait_for_done(
-    receiver: &mut UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     run_id: &str,
     status: &str,
 ) -> Value {
@@ -341,7 +341,7 @@ async fn assert_sync_scenario(question_batches: usize, skip_all: bool, approval_
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let human = HumanInteractionService::new(&storage, &agent);
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
         .unwrap();
@@ -594,7 +594,7 @@ async fn disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human
             .is_none());
 
         let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-        let (notifications, mut events) = unbounded_channel();
+        let (notifications, mut events) = crate::transport::outbound_channel();
         let turn = agent
             .start_conversation_turn(turn_input(), notifications.clone())
             .unwrap();
@@ -781,7 +781,7 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
     );
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
         .unwrap();
@@ -946,7 +946,7 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
             .unwrap(),
         original_directory
     );
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let human = HumanInteractionService::new(&storage, &restarted);
     if answer_committed_before_restart {
         restarted.schedule_ready_human_input_resumes(notifications.clone());
@@ -1036,7 +1036,7 @@ async fn assert_stopped_sync_wait(restart_before_stop: bool) {
     );
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
         .unwrap();
@@ -1128,7 +1128,7 @@ async fn assert_sync_submission_handoff(before_open_publication: bool) {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
         .unwrap();
@@ -1381,7 +1381,7 @@ async fn web_search_toggle_across_sync_and_approval_pauses_preserves_same_run() 
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     configure_storage(&storage, fixture.path(), &address);
     let mut agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
         .unwrap();
@@ -1469,7 +1469,7 @@ async fn web_search_late_model_calls_are_denied_after_committed_off_setting() {
         },
     );
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications)
         .unwrap();
@@ -1513,7 +1513,7 @@ async fn web_search_missing_credential_after_sync_restart_keeps_same_run() {
         },
     );
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications)
         .unwrap();
@@ -1527,7 +1527,7 @@ async fn web_search_missing_credential_after_sync_restart_keeps_same_run() {
     let storage =
         Arc::new(StorageService::open_with_model_credentials(&database_path, credentials).unwrap());
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     HumanInteractionService::new(&storage, &agent)
         .submit(
             HumanInteractionSubmitInput {

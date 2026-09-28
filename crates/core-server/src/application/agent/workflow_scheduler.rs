@@ -1,8 +1,8 @@
 use super::*;
 
-// Keep the existing recovery latency for configuration changes which do not yet publish wakes.
-// Durable input eligibility and FIFO rules remain in workflow_execution_pending_inputs.
-const WORKFLOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
+// Deadline-driven retries and committed readiness changes do normal work. This sparse scan
+// recovers missed external changes; hints never replace durable eligibility/claim checks.
+const WORKFLOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 pub(super) struct WorkflowSchedulerWake {
@@ -35,6 +35,31 @@ impl AgentService {
         }
     }
 
+    /// Invalidate only hints; the next attempt reloads authoritative configuration and claims.
+    pub(crate) fn workflow_readiness_changed(&self, conversation_id: Option<&str>) {
+        self.workflow_retry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .changed(conversation_id);
+        self.wake_workflow_deliveries();
+    }
+
+    pub(super) fn workflow_capacity_changed(&self) {
+        self.workflow_retry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .capacity_changed();
+        self.wake_workflow_deliveries();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workflow_readiness_generation_for_test(&self) -> u64 {
+        self.workflow_retry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .generation
+    }
+
     pub(crate) fn start_workflow_delivery_scheduler(
         &self,
         notifications: CoreServerNotificationSender,
@@ -65,6 +90,7 @@ impl AgentService {
             self.workflow_scheduler_wake.clone(),
             self.workflow_dispatch_stopped.clone(),
             recovery_interval,
+            Some(self.workflow_retry.clone()),
             Arc::new(move || service.dispatch_workflow_deliveries(notifications.clone())),
         );
         Ok(WorkflowDeliveryScheduler {
@@ -115,20 +141,29 @@ fn spawn_worker(
     wake: WorkflowSchedulerWake,
     stopped: Arc<AtomicBool>,
     recovery_interval: Duration,
+    retries: Option<Arc<Mutex<super::workflow_retry::WorkflowRetryState>>>,
     scan: Arc<dyn Fn() + Send + Sync>,
 ) -> tokio::task::JoinHandle<()> {
     wake.wake(); // Startup recovers durable inputs without depending on a renderer request.
     tokio::spawn(async move {
-        let mut recovery = tokio::time::interval_at(
-            tokio::time::Instant::now() + recovery_interval,
-            recovery_interval,
-        );
-        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut recovery = tokio::time::Instant::now() + recovery_interval;
         loop {
+            let retry = retries.as_ref().and_then(|state| {
+                state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .next_delay(Instant::now())
+            });
+            let deadline = retry.map_or(recovery, |delay| {
+                recovery.min(tokio::time::Instant::now() + delay)
+            });
             tokio::select! {
                 biased;
                 _ = wake.notify.notified() => {},
-                _ = recovery.tick() => {},
+                _ = tokio::time::sleep_until(deadline) => {},
+            }
+            if tokio::time::Instant::now() >= recovery {
+                recovery = tokio::time::Instant::now() + recovery_interval;
             }
             if stopped.load(Ordering::Acquire) {
                 break;
@@ -145,6 +180,12 @@ fn spawn_worker(
             .await
             {
                 eprintln!("workflow scheduler scan failed; recovery will retry: {error}");
+                if let Some(retries) = &retries {
+                    retries
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .scan_failed(Instant::now());
+                }
             }
             if stopped.load(Ordering::Acquire) {
                 break;
@@ -184,7 +225,8 @@ mod tests {
         let storage =
             Arc::new(StorageService::open(&directory.path().join("readiness.sqlite")).unwrap());
         let service = AgentService::new_authorized_for_test(storage.clone());
-        let (notifications, _) = mpsc::unbounded_channel();
+        let (notifications, _) = crate::transport::outbound_channel();
+        assert!(take_wake(&service.workflow_scheduler_wake)); // Initial execution-access grant.
         let call = |params| {
             crate::transport::handle_request(
                 &storage,
@@ -263,7 +305,13 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap();
         });
-        let task = spawn_worker(wake.clone(), stopped.clone(), Duration::from_secs(60), scan);
+        let task = spawn_worker(
+            wake.clone(),
+            stopped.clone(),
+            Duration::from_secs(60),
+            None,
+            scan,
+        );
         assert_eq!(receive(&mut started_rx).await, 1);
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -304,6 +352,7 @@ mod tests {
             wake.clone(),
             stopped.clone(),
             Duration::from_millis(20),
+            None,
             Arc::new(move || {
                 let attempt = scan_attempts.fetch_add(1, Ordering::AcqRel) + 1;
                 tx.send(attempt).unwrap();
@@ -334,6 +383,7 @@ mod tests {
             wake.clone(),
             stopped.clone(),
             Duration::from_secs(60),
+            None,
             Arc::new(move || {
                 scan_count.fetch_add(1, Ordering::AcqRel);
                 started_tx.send(()).unwrap();
@@ -371,7 +421,7 @@ mod tests {
         let storage =
             Arc::new(StorageService::open(&directory.path().join("shutdown.sqlite")).unwrap());
         let service = AgentService::new_authorized_for_test(storage);
-        let (notifications, _) = mpsc::unbounded_channel();
+        let (notifications, _) = crate::transport::outbound_channel();
         let scheduler = service
             .start_workflow_delivery_scheduler(notifications.clone())
             .unwrap();
@@ -432,7 +482,139 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("shutting down"));
         assert!(service
-            .start_workflow_delivery_scheduler(mpsc::unbounded_channel().0)
+            .start_workflow_delivery_scheduler(crate::transport::outbound_channel().0)
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use mycopilot_core::workflow_execution::PendingInputCandidate;
+    use tokio::sync::mpsc;
+    fn candidate() -> PendingInputCandidate {
+        PendingInputCandidate {
+            id: "wait".into(),
+            sequence: 1,
+            instance_id: "instance".into(),
+            execution_version: "v1".into(),
+            conversation_id: Some("target".into()),
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_retry_deadline_precedes_sparse_recovery_and_new_wake_precedes_deadline() {
+        let wake = WorkflowSchedulerWake::default();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let retries = Arc::new(Mutex::new(
+            super::super::workflow_retry::WorkflowRetryState::default(),
+        ));
+        retries.lock().unwrap().defer(
+            &candidate(),
+            super::super::workflow_retry::RetryReason::Busy,
+            0,
+            Instant::now() - Duration::from_millis(900),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let count = Arc::new(AtomicU64::new(0));
+        let state = retries.clone();
+        let sequence = count.clone();
+        let task = spawn_worker(
+            wake.clone(),
+            stopped.clone(),
+            Duration::from_secs(60),
+            Some(retries),
+            Arc::new(move || {
+                let n = sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                if n > 1 {
+                    state.lock().unwrap().defer(
+                        &candidate(),
+                        super::super::workflow_retry::RetryReason::Busy,
+                        0,
+                        Instant::now(),
+                    );
+                }
+                tx.send(n).unwrap();
+            }),
+        );
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        wake.wake(); // A newly committed input must not wait for the existing retry's deadline.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .unwrap(),
+            Some(3)
+        );
+        stopped.store(true, Ordering::Release);
+        wake.wake();
+        task.await.unwrap();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_page_sql_failure_backs_off_expired_hints_and_condition_change_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan-fault.sqlite");
+        let storage = Arc::new(StorageService::open(&path).unwrap());
+        let service = AgentService::new_authorized_for_test(storage);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("DROP INDEX workflow_execution_input_pending_sequence", [])
+            .unwrap();
+        let generation = service.workflow_retry.lock().unwrap().generation;
+        service.workflow_retry.lock().unwrap().defer(
+            &candidate(),
+            super::super::workflow_retry::RetryReason::Busy,
+            generation,
+            Instant::now() - Duration::from_secs(5),
+        );
+        let (notifications, _) = crate::transport::outbound_channel();
+        let scheduler = service
+            .start_workflow_delivery_scheduler_with_interval(notifications, Duration::from_secs(60))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service
+                    .workflow_scheduler_wake
+                    .scans
+                    .load(Ordering::Acquire)
+                    > 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            service
+                .workflow_scheduler_wake
+                .scans
+                .load(Ordering::Acquire),
+            1,
+            "expired entry must not retry failing SQL every 10ms"
+        );
+        db.execute("CREATE INDEX workflow_execution_input_pending_sequence ON workflow_execution_inputs(sequence) WHERE status='pending'",[]).unwrap();
+        service.workflow_readiness_changed(None);
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if service
+                    .workflow_scheduler_wake
+                    .scans
+                    .load(Ordering::Acquire)
+                    > 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        scheduler.shutdown().await.unwrap();
     }
 }

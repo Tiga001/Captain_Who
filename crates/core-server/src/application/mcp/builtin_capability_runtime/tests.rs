@@ -778,7 +778,7 @@ async fn main_frozen_origin_replaces_the_model_claim_in_approval_and_scope() {
         .provider
         .attach_managed_runtime(Arc::clone(&managed_runtime))
         .unwrap();
-    let (outbound, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     managed_runtime.bridge().attach_outbound(outbound).unwrap();
 
     let claimed_origin = "https://model-claim.example.test";
@@ -871,7 +871,7 @@ async fn cancelled_target_prepare_drains_late_success_and_releases_exact_binding
         .provider
         .attach_managed_runtime(Arc::clone(&managed_runtime))
         .unwrap();
-    let (outbound, mut commands) = tokio::sync::mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     managed_runtime.bridge().attach_outbound(outbound).unwrap();
 
     let invocation = sensitive_invocation(

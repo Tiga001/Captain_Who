@@ -196,7 +196,7 @@ async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
     // Same-ms optimistic user/assistant, generated before the Host prepares its
     // own authoritative pair. Deliberately distinct, not relying on clock speed.
     let optimistic_timestamp = 1_788_713_110_306;
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let first = service
         .start_conversation_turn(turn_input(model, 0), notifications.clone())
         .unwrap();

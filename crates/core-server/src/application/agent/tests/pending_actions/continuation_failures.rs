@@ -114,7 +114,7 @@ async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupan
             version: u32::MAX,
             state: json!({}),
         });
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .run_action_continuation(
             approved,
@@ -293,7 +293,7 @@ async fn pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recove
             version: u32::MAX,
             state: json!({}),
         });
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .run_action_continuation(
             approved,
@@ -488,7 +488,7 @@ async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releas
             error: None,
         },
     });
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .commit_trace_snapshot_with_continuation(&approved, &resumed_input, &notifications)
         .unwrap();

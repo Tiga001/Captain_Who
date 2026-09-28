@@ -432,7 +432,7 @@ fn production_compaction_services_install_the_current_model_generator() {
         "messages": []
     }))
     .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let _services = service.context_compaction_services(
         "run-production-generator",

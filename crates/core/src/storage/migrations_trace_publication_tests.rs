@@ -4,7 +4,11 @@ use super::*;
 fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
     let connection = Connection::open_in_memory().unwrap();
     connection
-        .execute_batch(&CANONICAL_SCHEMA.replace(trace_publication_schema(), ""))
+        .execute_batch(
+            &CANONICAL_SCHEMA
+                .replace(workflow_pending_schema(), "")
+                .replace(trace_publication_schema(), ""),
+        )
         .unwrap();
     connection.pragma_update(None, "user_version", 60).unwrap();
     connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('chat','Keep',1,1);
@@ -18,7 +22,10 @@ fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
         )
         .unwrap();
     run_migrations(&connection).unwrap();
-    assert_eq!(read_schema_version(&connection).unwrap(), 61);
+    assert_eq!(
+        read_schema_version(&connection).unwrap(),
+        STORAGE_SCHEMA_VERSION
+    );
     assert_eq!(
         connection
             .query_row(
@@ -60,7 +67,11 @@ fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
 fn v61_upgrade_failure_keeps_exact_v60_catalog_and_rows() {
     let connection = Connection::open_in_memory().unwrap();
     connection
-        .execute_batch(&CANONICAL_SCHEMA.replace(trace_publication_schema(), ""))
+        .execute_batch(
+            &CANONICAL_SCHEMA
+                .replace(workflow_pending_schema(), "")
+                .replace(trace_publication_schema(), ""),
+        )
         .unwrap();
     connection.pragma_update(None, "user_version", 60).unwrap();
     connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {

@@ -56,6 +56,8 @@ export class CoreJsonRpcError extends Error {
 export class CoreJsonRpcClient {
   private readonly appDataRoot: string
   private child: ChildProcessWithoutNullStreams | null = null
+  private transportFailure: CoreJsonRpcError | null = null
+  private inputFailure: Error | null = null
   private acceptingRequests = true
   private nextId = 1
   private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
@@ -74,6 +76,8 @@ export class CoreJsonRpcClient {
     if (!this.acceptingRequests) {
       throw new Error('core-server request admission is closed')
     }
+    if (this.transportFailure) throw this.transportFailure
+    if (this.inputFailure) throw this.inputFailure
     if (this.child) {
       return
     }
@@ -85,28 +89,41 @@ export class CoreJsonRpcClient {
       stdio: 'pipe'
     })
 
-    const stdout = createInterface({ input: this.child.stdout })
-    stdout.on('line', (line) => this.handleLine(line))
+    const child = this.child
+    const stdout = createInterface({ input: child.stdout })
+    stdout.on('line', (line) => {
+      // A draining old process must not publish into a restarted Core's subscriptions.
+      if (this.child === child && !this.transportFailure) this.handleLine(line)
+    })
 
     this.child.stderr.on('data', (chunk) => {
       console.error(`[core-server] ${chunk.toString()}`)
     })
 
-    const child = this.child
-    const handleChildFailure = (error: Error): void => {
+    const handleChildFailure = (error: Error, exited = false): void => {
       // The child can close stdin just before Node delivers its `exit` event. Treat both
       // notifications as the same failure and, importantly, consume stdin's `error` event so an
       // EPIPE cannot become an uncaught main-process exception while a startup request is in flight.
       if (this.child !== child) return
+      this.rejectAll(this.transportFailure ?? error)
+      // Stdin can fail before the overload frame arrives on stdout. Fence requests immediately,
+      // but continue reading accepted output and wait for actual exit before replacing Core.
+      if (!exited) {
+        this.inputFailure ??= error
+        return
+      }
       this.child = null
-      this.rejectAll(error)
+      this.transportFailure = null
+      this.inputFailure = null
     }
 
     child.stdin.on('error', (error) => handleChildFailure(error))
-    child.on('error', (error) => handleChildFailure(error))
+    // A failed spawn has no process to await. Other child errors still require the exit fence.
+    child.on('error', (error) => handleChildFailure(error, child.pid === undefined))
     child.on('exit', (code, signal) => {
       handleChildFailure(
-        new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
+        new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`),
+        true
       )
     })
     for (const handler of this.startedHandlers) handler()
@@ -141,6 +158,8 @@ export class CoreJsonRpcClient {
 
     this.child.kill()
     this.child = null
+    this.transportFailure = null
+    this.inputFailure = null
     this.rejectAll(new Error('core-server stopped'))
   }
 
@@ -171,6 +190,8 @@ export class CoreJsonRpcClient {
     method: string,
     params?: TParams
   ): Promise<TResult> {
+    if (this.transportFailure) throw this.transportFailure
+    if (this.inputFailure) throw this.inputFailure
     if (!this.child) {
       throw new Error('core-server is not running')
     }
@@ -199,8 +220,13 @@ export class CoreJsonRpcClient {
           return
         }
 
-        this.pendingRequests.delete(id)
-        reject(error)
+        if (this.child === child) {
+          this.inputFailure ??= error
+          this.rejectAll(this.transportFailure ?? error)
+        } else {
+          this.pendingRequests.delete(id)
+          reject(error)
+        }
       })
     })
   }
@@ -236,6 +262,19 @@ export class CoreJsonRpcClient {
     const response = message
 
     if (response.id === null) {
+      if (this.isErrorResponse(response) && response.error.code === -32002) {
+        const data = response.error.data
+        if (
+          data &&
+          typeof data === 'object' &&
+          'code' in data &&
+          data.code === 'outbound_overloaded'
+        ) {
+          this.transportFailure = new CoreJsonRpcError(response.error)
+          this.rejectAll(this.transportFailure)
+          console.error('[core-server] outbound transport failed', this.transportFailure)
+        }
+      }
       return
     }
 

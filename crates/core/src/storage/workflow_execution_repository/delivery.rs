@@ -1,3 +1,11 @@
+pub(super) const PENDING_CANDIDATES_SQL: &str = "SELECT input_id, sequence, instance_id, execution_version, conversation_id
+        FROM workflow_execution_inputs i INDEXED BY workflow_execution_input_pending_sequence
+        WHERE status='pending' AND sequence>?1
+          AND NOT EXISTS(SELECT 1 FROM workflow_execution_inputs older
+            WHERE older.conversation_id=i.conversation_id
+              AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<i.sequence)
+        ORDER BY sequence LIMIT ?2";
+
 use super::*;
 
 pub fn load_input(c: &Connection, input_id: &str) -> Result<Option<Input>, String> {
@@ -81,6 +89,65 @@ pub fn pending_inputs(c: &Connection) -> Result<Vec<Input>, String> {
     }
     Ok(result)
 }
+/// Advance by durable sequence even when a candidate is disabled or cannot currently start.
+/// The page contains only lightweight hints; no graph, input content, or history is decoded.
+pub fn pending_candidates(
+    c: &Connection,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<Vec<PendingInputCandidate>, String> {
+    let mut statement = c.prepare(PENDING_CANDIDATES_SQL).map_err(db)?;
+    let rows = statement
+        .query_map(params![after_sequence, limit.clamp(1, 128)], |row| {
+            Ok(PendingInputCandidate {
+                id: row.get(0)?,
+                sequence: row.get(1)?,
+                instance_id: row.get(2)?,
+                execution_version: row.get(3)?,
+                conversation_id: row.get(4)?,
+            })
+        })
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db)?;
+    Ok(rows)
+}
+
+pub fn eligible_pending_input(c: &Connection, input_id: &str) -> Result<Option<Input>, String> {
+    let Some(input) = load_input(c, input_id)? else {
+        return Ok(None);
+    };
+    if input.status != InputStatus::Pending || !eligible(c, &input)? {
+        return Ok(None);
+    }
+    Ok(Some(input))
+}
+
+/// A busy run's inbox must never depend on the first global scheduler page. Frozen run identity,
+/// exact node/version, and the same conversation FIFO predecessor rule all remain authoritative.
+pub fn pending_injection(
+    c: &Connection,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<Option<Input>, String> {
+    let Some(identity) = snapshot_for_run(c, conversation_id, run_id)? else {
+        return Ok(None);
+    };
+    let row = c.query_row("SELECT input_json FROM workflow_execution_inputs i
+        WHERE status='pending' AND conversation_id=?1 AND instance_id=?2 AND node_id=?3 AND execution_version=?4
+          AND NOT EXISTS(SELECT 1 FROM workflow_execution_inputs older
+            WHERE older.conversation_id=i.conversation_id
+              AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<i.sequence)
+        ORDER BY sequence LIMIT 1", params![conversation_id,identity.instance_id,identity.node_id,identity.execution_version],
+        |row| row.get::<_,String>(0)).optional().map_err(db)?;
+    let Some(row) = row else { return Ok(None) };
+    let input: Input = parse(&row)?;
+    if input.busy_policy != BusyPolicy::Inject || !eligible(c, &input)? {
+        return Ok(None);
+    }
+    Ok(Some(input))
+}
+
 pub fn bound_inputs(c: &Connection, run_id: &str) -> Result<Vec<Input>, String> {
     let inputs=list(c,"SELECT input_json FROM workflow_execution_inputs WHERE run_id=?1 AND status='claimed' ORDER BY sequence",run_id)?;
     let mut result = vec![];

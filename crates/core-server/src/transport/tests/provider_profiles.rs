@@ -42,7 +42,7 @@ fn successful_model_settings_commit_emits_one_global_collaboration_resync() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -77,7 +77,7 @@ fn duplicate_display_name_is_returned_as_safe_stable_validation_data() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -119,7 +119,7 @@ fn unknown_model_settings_failures_are_redacted_without_error_data() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -157,7 +157,7 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let descriptors = handle_request(
         storage.as_ref(),
@@ -236,7 +236,7 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let vendors = handle_request(
         storage.as_ref(),
@@ -315,7 +315,7 @@ fn renderer_cannot_submit_profile_version_revision_or_capabilities() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let response = handle_request(
         storage.as_ref(),
         &agent_service,

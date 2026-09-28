@@ -1029,7 +1029,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         )
         .unwrap();
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let approved = service
         .approve_action("run-cancel-before-spawn", &command.id, notifications)
         .unwrap();
@@ -1190,7 +1190,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         .unwrap();
     let stale_turn_cancellation = AgentCancellationToken::new();
     service.register_cancellation(run_id, stale_turn_cancellation.clone());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .reject_action(
             run_id,
@@ -1416,7 +1416,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(record.storage_id.clone(), record.clone());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let guard = service
         .process_runs
         .register(&record.storage_id, &record.snapshot.run_id);

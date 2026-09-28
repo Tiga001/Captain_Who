@@ -7062,3 +7062,8 @@ END;
 CREATE INDEX idx_human_interaction_requests_attention
 ON human_interaction_requests(sequence, conversation_id, request_id, revision)
 WHERE status = 'open';
+
+-- Fair pending workflow scheduling, schema v62.
+CREATE INDEX workflow_execution_input_pending_sequence
+ON workflow_execution_inputs(sequence)
+WHERE status = 'pending';

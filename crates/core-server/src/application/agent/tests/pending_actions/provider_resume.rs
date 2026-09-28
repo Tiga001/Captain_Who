@@ -274,7 +274,7 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
             .unwrap()
             .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
 
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         let output = restarted
             .approve_action(&run_id, &action_id, notifications)
             .unwrap();

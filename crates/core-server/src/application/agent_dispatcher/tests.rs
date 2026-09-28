@@ -1454,7 +1454,7 @@ async fn durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply
     let service = crate::application::agent::AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
         Arc::clone(&storage), None, 2,
     ).unwrap();
-    let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _) = crate::transport::outbound_channel();
     let port = SharedAgentTurnExecutionPort::new(service, Arc::clone(&storage), notifications);
     for (index, (status, expected_status, error)) in [
         (

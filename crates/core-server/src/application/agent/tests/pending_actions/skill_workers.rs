@@ -143,7 +143,7 @@ async fn skill_script_worker_setup_failure_persists_receipt_and_runs_continuatio
         })),
         error: Some("fixture Skill worker setup failed".to_string()),
     };
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .finish_skill_script_execution(
             executing,
@@ -339,7 +339,7 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
         }
     }
     let process_guard = service.process_runs.register(&storage_id, run_id);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let queued = service
         .queue_skill_script_execution(executing, call.clone(), process_guard, notifications)
         .unwrap();

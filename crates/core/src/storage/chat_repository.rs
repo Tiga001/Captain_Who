@@ -316,6 +316,17 @@ pub fn list_active_conversations(
     Ok(conversations)
 }
 
+/// Reads one conversation's identity/configuration without hydrating its history.
+pub fn get_conversation_meta(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationMetaRecord>> {
+    connection.query_row(
+        "SELECT id, project_id, model_id, title, created_at, updated_at, pinned_at, archived_at, unread_at FROM conversations WHERE id=?1",
+        [conversation_id], conversation_meta_from_row,
+    ).optional()
+}
+
 pub fn list_conversation_metas(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<ChatConversationMetaRecord>> {

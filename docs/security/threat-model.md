@@ -175,7 +175,7 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed。当前 schema v61 只接受明确的 exact v50–v60 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
+fail closed。当前 schema v62 只接受明确的 exact v50–v61 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
 v59→v60 只按既有 FTS 顺序元数据回填历史顺序投影，不重排历史或改写正文。启动迁移与显式 reset 是不同边界：reset 当前可从 exact v60 提取 allowlist，旧源恢复仍受固定目标版本 gate
 拒绝。不得用手工改 `user_version`、删表或默默丢弃配置绕过。reset 不保留 notification facts、Browser history/download
 records、Agent templates、工作流模板/实例/草稿、本机 Token 统计和 FileChange 运行/审计状态。详见

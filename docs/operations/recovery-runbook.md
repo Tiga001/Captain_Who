@@ -38,14 +38,14 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v61 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v60 可按连续迁移升级到当前版本。v51→v52 保留协作数据与回执，v52→v53 只为未来事件增加请求归属活动；v53→v54 新增工作流定义，v54→v55 将既有模板可用性初始化为禁用，v55→v56 新增独立实例与编辑草稿，v56→v57 新增实例启用和关联会话归档保护；v57→v58 增加工作流持久执行事实与 WorkflowDelivery Trace；v58→v59 增加工作流新建对话的默认项目；v60→v61 仅添加 Trace/header/model-context 修订触发器、随机 epoch 与 revision 表和待处理交互摘要索引，保留全部历史正文；v59→v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影与索引，不重排历史或改写正文。旧活动不推测位置或回填；v50 含旧协作事件时保留原库并要求开发者先处理历史。v49 及更早版本不自动升级。真源：
+当前基线为 **schema v62 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v61 可按连续迁移升级到当前版本。v51→v52 保留协作数据与回执，v52→v53 只为未来事件增加请求归属活动；v53→v54 新增工作流定义，v54→v55 将既有模板可用性初始化为禁用，v55→v56 新增独立实例与编辑草稿，v56→v57 新增实例启用和关联会话归档保护；v57→v58 增加工作流持久执行事实与 WorkflowDelivery Trace；v58→v59 增加工作流新建对话的默认项目；v61→v62 只新增工作流 pending sequence 部分索引，不改写记录或历史；v60→v61 仅添加 Trace/header/model-context 修订触发器、随机 epoch 与 revision 表和待处理交互摘要索引，保留全部历史正文；v59→v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影与索引，不重排历史或改写正文。旧活动不推测位置或回填；v50 含旧协作事件时保留原库并要求开发者先处理历史。v49 及更早版本不自动升级。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
 crates/core/src/storage/canonical_schema.sql
 ```
 
-不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v61 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
+不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v62 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
 
 手动压缩在重启后显示 interrupted 时，可直接继续聊天；旧 active head 保持有效。不得重放原付费请求来“恢复进度”。如果请求已到达厂商但尚未收到响应就崩溃，实际账单可能只有厂商可确认，本地不能编造 token 数量。
 
@@ -102,9 +102,9 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；失去�
 
 ### 旧开发库的配置保留边界
 
-当前 `storage-reset-dev.rs` 可保留 exact current v61 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v61 下拒绝恢复；v49–v60 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v60 升级，文档不能把旧版 reset 支持声明延续到当前版本。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
+当前 `storage-reset-dev.rs` 可保留 exact current v62 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v62 下拒绝恢复；v49–v61 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v61 升级，文档不能把旧版 reset 支持声明延续到当前版本。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
 
-重建后验证 `PRAGMA user_version = 61`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
+重建后验证 `PRAGMA user_version = 62`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
 
 ### 附件、目录引用与工作流配置
 

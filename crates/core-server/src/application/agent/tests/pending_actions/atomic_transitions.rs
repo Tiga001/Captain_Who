@@ -62,7 +62,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
     storage
         .delete_conversation("conversation-missing-transition-row")
         .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let error = service
         .approve_action("run-missing-transition-row", &call.id, notifications)
         .unwrap_err();

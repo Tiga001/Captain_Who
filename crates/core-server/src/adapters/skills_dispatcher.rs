@@ -131,7 +131,7 @@ pub(crate) struct SkillsDispatcher {
 }
 
 impl SkillsDispatcher {
-    pub(crate) fn new(outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(crate) fn new(outbound: crate::transport::OutboundSender) -> Self {
         Self::with_limit_and_shutdown_grace(
             outbound,
             DEFAULT_SKILL_MAX_IN_FLIGHT,
@@ -140,12 +140,12 @@ impl SkillsDispatcher {
     }
 
     #[cfg(test)]
-    fn with_limit(outbound: mpsc::UnboundedSender<Value>, max_in_flight: usize) -> Self {
+    fn with_limit(outbound: crate::transport::OutboundSender, max_in_flight: usize) -> Self {
         Self::with_limit_and_shutdown_grace(outbound, max_in_flight, DEFAULT_SKILL_SHUTDOWN_GRACE)
     }
 
     fn with_limit_and_shutdown_grace(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         max_in_flight: usize,
         shutdown_grace: Duration,
     ) -> Self {
@@ -275,7 +275,7 @@ struct StartedSkillJob {
 
 async fn run_dispatcher(
     mut receiver: mpsc::Receiver<QueuedSkillJob>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     mut shutdown: oneshot::Receiver<()>,
     shutdown_grace: Duration,
 ) {
@@ -327,7 +327,7 @@ async fn run_dispatcher(
 
 fn cancel_queued_jobs(
     receiver: &mut mpsc::Receiver<QueuedSkillJob>,
-    outbound: &mpsc::UnboundedSender<Value>,
+    outbound: &crate::transport::OutboundSender,
 ) {
     receiver.close();
     while let Ok(job) = receiver.try_recv() {
@@ -622,7 +622,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounds_running_and_queued_work_together() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -672,7 +672,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn converts_worker_panics_into_an_error_with_the_original_id() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
 
         dispatcher
@@ -693,7 +693,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_worker_panic_is_conservatively_commit_indeterminate() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
 
         dispatcher
@@ -720,7 +720,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workflow_commit_worker_panic_is_conservatively_commit_indeterminate() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
 
         dispatcher
@@ -926,7 +926,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_cancels_queued_jobs_and_waits_for_running_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
         let queued_ran = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = std_mpsc::channel();
@@ -967,7 +967,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_marks_a_queued_mutation_as_not_started() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
         let queued_ran = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = std_mpsc::channel();
@@ -1024,7 +1024,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_marks_a_queued_workflow_commit_as_not_started() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
         let queued_ran = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = std_mpsc::channel();
@@ -1088,7 +1088,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_has_a_deadline_for_an_unresponsive_filesystem_worker() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
             outbound_tx,
             2,
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_mutation_shutdown_timeout_reports_an_indeterminate_commit() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
             outbound_tx,
             2,
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn running_workflow_commit_shutdown_timeout_reports_an_indeterminate_commit() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
             outbound_tx,
             2,
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_skill_work_does_not_block_outbound_messages() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx.clone(), 2);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();

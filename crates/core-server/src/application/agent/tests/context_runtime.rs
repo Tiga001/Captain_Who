@@ -126,7 +126,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
     }))
     .unwrap();
     freeze_test_pending_provider_configuration(&storage, &mut agent_input);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let services = service.context_compaction_services(
         "run-compaction-host",
         "conversation-compaction-host",
@@ -409,7 +409,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     }))
     .unwrap();
     freeze_test_pending_provider_configuration(&storage, &mut agent_input);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let observer = service.trace_observer(
         "run-live",
         "conversation-live",
@@ -724,7 +724,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
             "run-derived-refresh-failure".to_string(),
             exact_request_snapshot.clone(),
         );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let observer = service.trace_observer(
         "run-derived-refresh-failure",
         "conversation-derived-refresh-failure",
@@ -899,7 +899,7 @@ fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_comm
              END;",
         )
         .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let observer = service.trace_observer(
         "run-trace-append-failure",
         "conversation-trace-append-failure",
@@ -1116,7 +1116,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
     }))
     .unwrap();
     freeze_test_pending_provider_configuration(&storage, &mut agent_input);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let observer = service.trace_observer(
         "run-hidden-indicator",
         "conversation-hidden-indicator",

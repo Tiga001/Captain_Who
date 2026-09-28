@@ -463,7 +463,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .storage
         .latest_notification_change_sequence()
         .map_err(io::Error::other)?;
-    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    let (outbound_tx, outbound_rx) = crate::transport::outbound_channel();
     managed_playwright_bridge
         .attach_outbound(outbound_tx.clone())
         .map_err(|_| io::Error::other("failed to attach managed Playwright Host bridge"))?;
@@ -737,7 +737,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
 
 async fn run_collaboration_event_notifier(
     storage: Arc<StorageService>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     initial_cursor: u64,
 ) {
     let mut cursor = initial_cursor;
@@ -790,7 +790,7 @@ async fn run_collaboration_event_notifier(
 
 pub(crate) async fn run_automation_event_notifier(
     storage: Arc<StorageService>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     initial_cursor: i64,
 ) {
     let mut cursor = initial_cursor;
@@ -846,7 +846,7 @@ pub(crate) async fn run_automation_event_notifier(
 
 pub(crate) async fn run_notification_event_notifier(
     storage: Arc<StorageService>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     initial_cursor: i64,
 ) {
     let mut cursor = initial_cursor;
@@ -1320,7 +1320,7 @@ mod mcp_payload_bootstrap_tests {
             )
             .unwrap();
 
-        let (outbound, mut notifications) = mpsc::unbounded_channel();
+        let (outbound, mut notifications) = crate::transport::outbound_channel();
         let notifier = tokio::spawn(run_collaboration_event_notifier(
             Arc::clone(&storage),
             outbound,

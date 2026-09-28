@@ -444,6 +444,10 @@ impl AgentService {
             })
             .flatten();
         let mut host_services = AgentRuntimeHostServices::new()
+            // Both callers complete a background segment: live notifications carry text,
+            // while persistence uses the canonical trace/content. Neither replays output.events.
+            // Keep terminal and control events for usage projection and completion handling.
+            .with_transient_message_deltas()
             .with_conversation_world_state(self.conversation_world_state_host(
                 &agent_input,
                 &run_id,

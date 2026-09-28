@@ -410,7 +410,7 @@ fn seed_replayable_provider_turn(
 }
 
 async fn wait_for_provider_transition_completed(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
 ) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -495,7 +495,7 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
         .unwrap()
         .unwrap()
         .messages;
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -574,7 +574,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         preflight.decision,
         AgentProviderTransitionDecision::RequiresCompaction
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let running = service
         .start_provider_transition(
             AgentProviderTransitionStartInput {
@@ -719,7 +719,7 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
             AgentProviderTransitionDecision::RequiresCompaction,
             "marker must win for {suffix}"
         );
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         service
             .start_provider_transition(
                 AgentProviderTransitionStartInput {
@@ -792,7 +792,7 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
         preflight.reason,
         AgentProviderTransitionReason::ApiProviderChanged
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .start_provider_transition(
             AgentProviderTransitionStartInput {
@@ -890,7 +890,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         preflight.reason,
         AgentProviderTransitionReason::ProviderProtocolChanged
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .start_provider_transition(
             AgentProviderTransitionStartInput {
@@ -943,7 +943,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
         })
         .unwrap();
     let first_token = first_preflight.transition_token.unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     failing
         .start_provider_transition(
             AgentProviderTransitionStartInput {
@@ -978,7 +978,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
         .unwrap();
     let second_token = second_preflight.transition_token.unwrap();
     assert_ne!(second_token, first_token);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     failing
         .start_provider_transition(
             AgentProviderTransitionStartInput {
@@ -1017,7 +1017,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     let retry_token = retry_preflight.transition_token.unwrap();
     assert_ne!(retry_token, first_token);
     assert_ne!(retry_token, second_token);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     retrying
         .start_provider_transition(
             AgentProviderTransitionStartInput {

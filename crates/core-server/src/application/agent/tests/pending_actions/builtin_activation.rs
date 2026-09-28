@@ -620,7 +620,7 @@ async fn builtin_capability_approval_waits_past_its_proposal_window_and_can_stil
         "waiting past the proposal window must not synthesize a failure result"
     );
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let output = service
         .queue_action_continuation(
             run_id,

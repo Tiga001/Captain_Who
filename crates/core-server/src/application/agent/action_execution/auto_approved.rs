@@ -288,7 +288,7 @@ impl AgentService {
                         .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
                 }
                 let (fallback_notifications, _fallback_receiver) =
-                    tokio::sync::mpsc::unbounded_channel();
+                    crate::transport::outbound_channel();
                 let notifications = notifications.as_ref().unwrap_or(&fallback_notifications);
                 self.finalize_auto_file_change_action_journal(
                     &mut pending,

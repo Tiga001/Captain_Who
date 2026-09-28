@@ -224,7 +224,7 @@ async fn assert_approved_running_command_handoff(case: ApprovedRunningHandoffCas
         CommandSessionManager::default(),
         case.initial_yield,
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -448,7 +448,7 @@ async fn guidance_releases_a_running_command_wait_and_background_exit_never_wake
         CommandSessionManager::default(),
         Duration::from_millis(200),
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let permissions = AgentPermissions {
         write: AgentWritePermission::WorkspaceOnly,
         command: AgentCommandPermission::AutoApprove,
@@ -671,7 +671,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         CommandSessionManager::default(),
         Duration::from_millis(100),
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -859,7 +859,7 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
     storage.save_model_settings(settings).unwrap();
 
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1010,7 +1010,7 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
             .expect("restarted checkpoint keeps the canonical command");
         assert_eq!(checkpoint_command, APPROVED_COMMAND_CANONICAL);
     }
-    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (restart_notifications, mut restart_receiver) = crate::transport::outbound_channel();
     let approval = restarted
         .approve_action(&turn.run_id, &action_id, restart_notifications)
         .unwrap();
@@ -1293,7 +1293,7 @@ async fn assert_rejected_command_after_restart(
     storage.save_model_settings(settings).unwrap();
 
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1381,7 +1381,7 @@ async fn assert_rejected_command_after_restart(
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
             .unwrap();
     assert_eq!(restarted.list_pending_actions().len(), 1);
-    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (restart_notifications, mut restart_receiver) = crate::transport::outbound_channel();
     let rejection = restarted
         .reject_action(
             &turn.run_id,

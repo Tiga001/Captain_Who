@@ -16,6 +16,17 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
     drafts
 }
 
+pub fn get_composer_draft(
+    connection: &Connection,
+    scope_id: &str,
+) -> rusqlite::Result<Option<ComposerDraftRecord>> {
+    connection.query_row(
+        "SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, folder_references_json, skills_json, queued_messages_json, updated_at
+         FROM composer_drafts WHERE scope_id=?1", [scope_id], draft_from_row,
+    ).optional()
+}
+
 fn draft_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ComposerDraftRecord> {
     Ok(ComposerDraftRecord {
         scope_id: row.get(0)?,

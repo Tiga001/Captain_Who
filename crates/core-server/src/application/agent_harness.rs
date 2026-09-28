@@ -1075,7 +1075,7 @@ mod tests {
             2,
         )
         .unwrap();
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         let adapter = AgentCollaborationHarnessAdapter::new(
             Arc::clone(&storage),
             service.clone(),
@@ -1389,7 +1389,7 @@ mod tests {
             2,
         )
         .unwrap();
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         let adapter = AgentCollaborationHarnessAdapter::new(
             Arc::clone(&storage),
             service.clone(),
@@ -1741,7 +1741,7 @@ mod tests {
             2,
         )
         .unwrap();
-        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _receiver) = crate::transport::outbound_channel();
         let adapter = AgentCollaborationHarnessAdapter::new(
             Arc::clone(&storage),
             service.clone(),

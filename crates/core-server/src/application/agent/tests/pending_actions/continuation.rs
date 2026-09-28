@@ -268,7 +268,7 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
         )
         .unwrap();
     let storage_id = pending_action_storage_id(run_id, &call.id);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service.inject_skill_script_post_receipt_panic_once(&call.id);
     let decision = service
         .decide_root_projected_approval(
@@ -630,7 +630,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         )
         .unwrap();
     let storage_id = pending_action_storage_id(run_id, &call.id);
-    let (root_card_notifications, _root_card_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (root_card_notifications, _root_card_receiver) = crate::transport::outbound_channel();
     let direct_child_write =
         service.approve_action(run_id, &call.id, root_card_notifications.clone());
     assert!(
@@ -710,13 +710,13 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     service
         .persist_pending_target_status(&approved, PendingActionStatus::Completed)
         .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .commit_trace_snapshot_with_continuation(&approved, &agent_input, &notifications)
         .unwrap();
     let gate = service.turn_concurrency_gate();
     assert_eq!(gate.active(), 1);
-    let (dispatcher_notifications, _dispatcher_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (dispatcher_notifications, _dispatcher_receiver) = crate::transport::outbound_channel();
     let dispatcher_store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> =
         Arc::new(
             crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(
@@ -820,6 +820,26 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         Some(assistant_message_id)
     );
 
+    let waiting_workflow = mycopilot_core::workflow_execution::PendingInputCandidate {
+        id: "waiting-after-approval".into(),
+        sequence: 1,
+        instance_id: "workflow".into(),
+        execution_version: "v1".into(),
+        conversation_id: Some(child.agent.conversation_id.clone()),
+    };
+    {
+        let mut retries = service.workflow_retry.lock().unwrap();
+        let generation = retries.generation;
+        for _ in 0..4 {
+            retries.defer(
+                &waiting_workflow,
+                crate::application::agent::workflow_retry::RetryReason::Busy,
+                generation,
+                Instant::now(),
+            );
+        }
+        assert!(!retries.is_due(&waiting_workflow, Instant::now()));
+    }
     let shutdown = dispatcher.shutdown().await.unwrap();
     assert_eq!(
         shutdown.cancellation_requested, 1,
@@ -836,5 +856,13 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     );
     assert!(terminal.result_message_id.is_some());
     assert_eq!(gate.active(), 0);
+    assert!(
+        service
+            .workflow_retry
+            .lock()
+            .unwrap()
+            .is_due(&waiting_workflow, Instant::now()),
+        "approval continuation terminal must clear the recipient's Busy cooldown immediately"
+    );
     provider.abort();
 }

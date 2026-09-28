@@ -118,7 +118,7 @@ use mycopilot_core::{
 };
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
-use tokio::sync::{mpsc::UnboundedSender, Notify};
+use tokio::sync::Notify;
 
 mod access;
 mod action_execution;
@@ -149,6 +149,7 @@ mod turn_executor;
 mod usage;
 mod web_search_policy;
 mod workflow_execution;
+mod workflow_retry;
 mod workflow_scheduler;
 mod workflows;
 
@@ -510,7 +511,7 @@ impl OfficeEngine for RefreshableOfficeEngine {
     }
 }
 
-pub type CoreServerNotificationSender = UnboundedSender<Value>;
+pub type CoreServerNotificationSender = crate::transport::OutboundSender;
 
 struct ConversationContextStateEntry {
     state: AgentConversationContextState,
@@ -668,6 +669,7 @@ pub struct AgentService {
     human_input_delivery_dispatch: Arc<Mutex<()>>,
     workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake,
     workflow_dispatch_stopped: Arc<AtomicBool>,
+    workflow_retry: Arc<Mutex<workflow_retry::WorkflowRetryState>>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
     manual_context_compaction_cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
@@ -876,6 +878,7 @@ impl AgentService {
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
             workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake::default(),
             workflow_dispatch_stopped: Arc::new(AtomicBool::new(false)),
+            workflow_retry: Arc::new(Mutex::new(workflow_retry::WorkflowRetryState::default())),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
             manual_context_compaction_cancellations: Arc::new(Mutex::new(HashMap::new())),

@@ -23,7 +23,7 @@ pub(crate) struct ForkRequestDispatcher {
 }
 
 impl ForkRequestDispatcher {
-    pub(crate) fn new(outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(crate) fn new(outbound: crate::transport::OutboundSender) -> Self {
         let admission = Arc::new(Semaphore::new(MAX_IN_FLIGHT_FORKS));
         let stopping = Arc::new(AtomicBool::new(false));
         let worker_stopping = Arc::clone(&stopping);
@@ -112,7 +112,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_is_bounded_and_shutdown_finishes_only_the_running_fork() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let dispatcher = ForkRequestDispatcher::new(outbound);
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = std_mpsc::channel();

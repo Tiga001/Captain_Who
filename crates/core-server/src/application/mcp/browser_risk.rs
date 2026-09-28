@@ -1065,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn post_dispatch_boundary_still_prompts_and_concurrent_requests_deduplicate() {
         let harness = harness();
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _events) = crate::transport::outbound_channel();
         let first = {
             let coordinator = Arc::clone(&harness.coordinator);
             let notifications = notifications.clone();
@@ -1115,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn late_approval_is_accepted_and_reports_expired_runtime_authority_to_the_waiter() {
         let harness = harness();
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _events) = crate::transport::outbound_channel();
         let authorization = {
             let coordinator = Arc::clone(&harness.coordinator);
             let request = input(&harness, Uuid::new_v4());
@@ -1157,7 +1157,7 @@ mod tests {
     #[tokio::test]
     async fn trusted_builtin_auto_permission_mints_the_same_risk_grant_without_a_ui_waiter() {
         let harness = harness();
-        let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut events) = crate::transport::outbound_channel();
         let permissions = AgentPermissions {
             builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
             ..AgentPermissions::default()
@@ -1197,7 +1197,7 @@ mod tests {
             ),
         ] {
             let harness = harness();
-            let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+            let (notifications, _events) = crate::transport::outbound_channel();
             let mut original = input(&harness, Uuid::new_v4());
             original.dispatch_certainty = BrowserRiskDispatchCertaintyDto::DefinitelyNotDispatched;
             let request = harness.coordinator.parse_request(original.clone()).unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_approve_reject_has_exactly_one_winner() {
         let harness = harness();
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _events) = crate::transport::outbound_channel();
         let authorization = {
             let coordinator = Arc::clone(&harness.coordinator);
             let request = input(&harness, Uuid::new_v4());
@@ -1327,7 +1327,7 @@ mod tests {
                 })
                 .accepted
         );
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _events) = crate::transport::outbound_channel();
         let output = harness
             .coordinator
             .authorize(
@@ -1347,7 +1347,7 @@ mod tests {
     #[tokio::test]
     async fn refusal_and_cancel_tombstone_storms_remain_bounded_and_fail_closed() {
         let denial_harness = harness();
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, _events) = crate::transport::outbound_channel();
         for index in 0..=MAX_PENDING_BROWSER_RISK_APPROVALS {
             let mut request = input(&denial_harness, Uuid::new_v4());
             request.destination.normalized_url = format!("http://10.0.0.1:8080/denied-{index}");

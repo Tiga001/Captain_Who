@@ -27,7 +27,7 @@ async fn image_configuration_mutation_invalidates_skill_management() {
         .unwrap()
         .configuration;
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (outbound, mut received) = mpsc::unbounded_channel();
+    let (outbound, mut received) = crate::transport::outbound_channel();
     let (artifacts, _artifact_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound.clone());
@@ -161,7 +161,7 @@ fn image_skill_switch_uses_configuration_admission_and_one_cas_authority() {
         Arc::clone(&storage),
         Arc::new(InMemoryCredentialStore::default()),
     );
-    let (notifications, mut received) = mpsc::unbounded_channel();
+    let (notifications, mut received) = crate::transport::outbound_channel();
     let invoke = |method: &str, params: Value| {
         let request = parse_skills_request(
             serde_json::from_value(json!({

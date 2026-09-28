@@ -106,8 +106,8 @@ struct Fixture {
     credentials: Arc<mycopilot_core::image_generation::InMemoryCredentialStore>,
     storage: Arc<StorageService>,
     agent: AgentService,
-    notifications: UnboundedSender<Value>,
-    events: UnboundedReceiver<Value>,
+    notifications: crate::transport::OutboundSender,
+    events: crate::transport::OutboundReceiver,
     requests: UnboundedReceiver<Value>,
     replies: UnboundedSender<Reply>,
     provider: tokio::task::JoinHandle<()>,
@@ -173,7 +173,7 @@ impl Fixture {
         settings.api_url = format!("http://{address}/v1/chat/completions");
         storage.save_model_settings(settings).unwrap();
         let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-        let (notifications, events) = unbounded_channel();
+        let (notifications, events) = crate::transport::outbound_channel();
         Self {
             _directory: directory,
             database,
@@ -419,7 +419,7 @@ impl Fixture {
             .unwrap();
         self.agent = agent;
         self.storage = storage;
-        let (notifications, events) = unbounded_channel();
+        let (notifications, events) = crate::transport::outbound_channel();
         self.notifications = notifications;
         self.events = events;
         self.agent

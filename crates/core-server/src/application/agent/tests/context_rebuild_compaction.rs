@@ -258,7 +258,7 @@ fn compacted_running_trace_cache_rebuild_continues_from_full_cursor_without_dupl
     fixture.stage(APPENDED);
     let configuration_revision =
         conversation_context_configuration_revision(&fixture.input).unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     fixture
         .service
         .persist_in_progress_trace_snapshot(

@@ -620,7 +620,7 @@ fn assert_session_create_failure_is_fail_closed(
     );
     file_effect_guard.mark_effects_started();
     let mut file_effect_guard = Some(file_effect_guard);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let launch = fixture
         .registry
         .start(StartAgentCommandSession {
@@ -757,7 +757,7 @@ fn wait_for_terminal_cleanup(registry: &AgentCommandSessionRegistry) {
 fn short_command_exits_through_the_same_managed_session_entry() {
     let fixture =
         RunningFixture::new_with_initial_yield("short-managed-entry", Duration::from_millis(500));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let launch = start_owned_session(
         &fixture.registry,
         fixture.workspace.path(),
@@ -805,7 +805,7 @@ fn handed_off_office_artifact_observation_reaches_event_snapshot_and_model_wait(
         additional_roots: Vec::new(),
     });
     let tracker = Arc::new(FileEffectTracker::default());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let launch = start_owned_session_with_request_and_tracker(
         &fixture.registry,
         fixture.workspace.path(),
@@ -1259,7 +1259,7 @@ fn running_transition_failure_has_one_failed_terminal_across_host_and_storage() 
     );
     file_effect_guard.mark_effects_started();
     let mut file_effect_guard = Some(file_effect_guard);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     let launch = fixture
         .registry
@@ -1399,7 +1399,7 @@ fn synchronous_archive_failure_returns_recoverable_session_until_unique_archive_
     let database = Connection::open(&fixture.database_path).unwrap();
     install_archive_rejection(&database, "reject_synchronous_session_archive");
     let tracker = Arc::new(FileEffectTracker::default());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let registry = fixture.registry.clone();
     let workspace = fixture.workspace.path().to_path_buf();
     let conversation_id = fixture.conversation_id.clone();
@@ -1562,7 +1562,7 @@ fn synchronous_settlement_failure_serializes_concurrent_cancel_with_recovery_rec
             release_for_hook.wait();
         }));
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let registry = fixture.registry.clone();
     let workspace = fixture.workspace.path().to_path_buf();
     let conversation_id = fixture.conversation_id.clone();
@@ -1676,7 +1676,7 @@ fn cancelled_pending_handoff_guard_drop_retries_one_terminal_settlement() {
     let database = Connection::open(&fixture.database_path).unwrap();
     install_archive_rejection(&database, "reject_cancelled_handoff_drop_archive");
     let tracker = Arc::new(FileEffectTracker::default());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let launch = start_owned_session_with_tracker(
         &fixture.registry,
         fixture.workspace.path(),
@@ -1837,7 +1837,7 @@ fn durable_start_failure_archive_retry_returns_one_cleared_failed_execution() {
 #[test]
 fn short_large_output_is_archived_before_terminal_visibility_without_a_second_exact_body() {
     let fixture = RunningFixture::new_with_initial_yield("short-exact-cut", Duration::from_secs(2));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let launch = start_owned_session(
         &fixture.registry,
         fixture.workspace.path(),
@@ -2133,7 +2133,7 @@ fn initial_yield_cancellation_cannot_settle_before_file_effect_ownership_is_inst
             hook_release_for_start.wait();
         }));
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let registry = fixture.registry.clone();
     let workspace = fixture.workspace.path().to_path_buf();
     let conversation_id = fixture.conversation_id.clone();
@@ -2277,7 +2277,7 @@ fn absolute_handoff_deadline_reclaims_a_noisy_session_while_guard_is_alive() {
 #[test]
 fn silent_long_command_returns_running_and_emits_started() {
     let fixture = RunningFixture::new("silent-started");
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let (snapshot, tool_result) = fixture.start("sleep 5", Some(notifications));
 
     assert_eq!(snapshot.status, AgentCommandSessionStatus::Running);
@@ -3232,7 +3232,7 @@ fn pre_handoff_abort_uses_host_terminal_after_core_cleanup() {
 #[test]
 fn model_interrupt_terminates_an_adopted_session_and_publishes_one_terminal_event() {
     let fixture = RunningFixture::new("model-interrupt");
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let command = "sleep 5";
     let (snapshot, _) = fixture.start(command, Some(notifications));
     fixture.adopt(&snapshot, command);

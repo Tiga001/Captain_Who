@@ -302,7 +302,7 @@ async fn respond_to_root_request(stream: &mut TcpStream, request: &Value) {
 }
 
 async fn collect_root_until_done(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     root_run_id: &str,
 ) -> Vec<Value> {
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -506,7 +506,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     )
     .unwrap();
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let input = AgentConversationTurnInput {
         conversation_id: Some(ROOT_CONVERSATION_ID.to_string()),
         project_id: Some(PROJECT_ID.to_string()),
@@ -954,7 +954,7 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
         2,
     )
     .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .start_collaboration_dispatcher(notifications)
         .unwrap();
@@ -1142,7 +1142,7 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
         2,
     )
     .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .start_collaboration_dispatcher(notifications)
         .unwrap();
@@ -1397,7 +1397,7 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
         CommandSessionManager::default(),
         Duration::from_millis(20),
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {
@@ -1731,7 +1731,7 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
         1,
     )
     .unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     service
         .start_collaboration_dispatcher(notifications.clone())
         .unwrap();

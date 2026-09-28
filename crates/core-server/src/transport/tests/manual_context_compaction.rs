@@ -5,7 +5,7 @@ fn manual_context_compaction_rpc_rejects_client_selected_context_and_dispatches_
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     for field in [
         "coveredThroughMessageId",
         "sourceRevision",

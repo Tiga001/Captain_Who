@@ -114,7 +114,7 @@ async fn reverse_peer_pre_dispatch_rejections_never_cross_the_queue_boundary() {
     assert_eq!(bridge.pending_request_count(), 0);
 
     let cancelled_bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     cancelled_bridge.attach_outbound(outbound).unwrap();
     let cancellation = McpCancellationToken::new();
     cancellation.cancel();
@@ -145,7 +145,7 @@ async fn reverse_peer_pre_dispatch_rejections_never_cross_the_queue_boundary() {
     ));
     assert_eq!(cancelled_bridge.pending_request_count(), 0);
 
-    let (outbound, commands) = mpsc::unbounded_channel();
+    let (outbound, commands) = crate::transport::outbound_channel();
     drop(commands);
     bridge.attach_outbound(outbound).unwrap();
     let dispatch = McpDispatchTracker::new();
@@ -228,7 +228,7 @@ async fn reverse_peer_pre_dispatch_rejections_never_cross_the_queue_boundary() {
 #[tokio::test]
 async fn reverse_call_tool_wait_has_no_transport_deadline_but_still_cancels() {
     let bridge = ManagedPlaywrightHostBridge::new(McpServerId::new());
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let cancellation = McpCancellationToken::new();
     let request_cancellation = cancellation.clone();
@@ -284,7 +284,7 @@ async fn reverse_call_tool_wait_has_no_transport_deadline_but_still_cancels() {
 async fn reverse_bridge_capacity_rejection_does_not_queue_or_leak_the_rejected_request() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let mut tasks = Vec::new();
     for _ in 0..MAX_PENDING_REQUESTS {
@@ -350,7 +350,7 @@ async fn reverse_bridge_capacity_rejection_does_not_queue_or_leak_the_rejected_r
 async fn dropping_a_reverse_request_future_removes_pending_and_notifies_main() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let task = {
         let bridge = Arc::clone(&bridge);
@@ -390,7 +390,7 @@ async fn dropping_a_reverse_request_future_removes_pending_and_notifies_main() {
 async fn successful_reverse_send_is_the_only_manager_queue_boundary() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let dispatch = McpDispatchTracker::new();
     dispatch.mark_dispatching();
@@ -439,7 +439,7 @@ async fn successful_reverse_send_is_the_only_manager_queue_boundary() {
 async fn cancellation_grace_accepts_exact_pre_dispatch_completion_without_leaking_pending() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let cancellation = McpCancellationToken::new();
     let dispatch = McpDispatchTracker::new();
@@ -519,7 +519,7 @@ fn queue_timeout_is_undispatched_capacity_with_actionable_retry_guidance() {
 async fn cancellation_after_main_dispatch_is_unknown_and_cleans_pending_after_grace() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let cancellation = McpCancellationToken::new();
     let dispatch = McpDispatchTracker::new();
@@ -580,7 +580,7 @@ async fn cancellation_after_main_dispatch_is_unknown_and_cleans_pending_after_gr
 async fn main_dispatch_completion_cannot_regress_acknowledged_certainty() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let dispatch = McpDispatchTracker::new();
     dispatch.mark_dispatching();
@@ -709,7 +709,7 @@ async fn managed_peer_rejects_not_ready_and_missing_invocation_or_authorization_
 async fn connector_flows_through_manager_catalog_without_surface_identity() {
     let server_id = McpServerId::new();
     let bridge = ManagedPlaywrightHostBridge::new(server_id);
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     bridge.attach_outbound(outbound).unwrap();
     let registry = InMemoryMcpRegistry::shared();
     registry
@@ -806,7 +806,7 @@ fn attach_reviewed_runtime_responder_with_call_error(
         ManagedPlaywrightDispatchCertainty,
     )>,
 ) -> tokio::task::JoinHandle<()> {
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     runtime.bridge.attach_outbound(outbound).unwrap();
     let bridge = Arc::clone(&runtime.bridge);
     tokio::spawn(async move {
@@ -1073,7 +1073,7 @@ async fn idle_policy_reuses_one_timer_and_reactivates_for_one_hundred_cycles() {
 #[tokio::test]
 async fn stop_aborts_a_hung_connect_within_the_shutdown_budget() {
     let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     runtime.bridge.attach_outbound(outbound).unwrap();
     runtime.request_start().unwrap();
     let command = tokio::time::timeout(Duration::from_secs(1), commands.recv())
@@ -1119,7 +1119,7 @@ async fn stop_aborts_a_hung_connect_within_the_shutdown_budget() {
 #[tokio::test]
 async fn shutdown_aborts_a_hung_catalog_discovery_within_the_shutdown_budget() {
     let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
-    let (outbound, mut commands) = mpsc::unbounded_channel();
+    let (outbound, mut commands) = crate::transport::outbound_channel();
     runtime.bridge.attach_outbound(outbound).unwrap();
     runtime.request_start().unwrap();
     let connect = tokio::time::timeout(Duration::from_secs(1), commands.recv())
@@ -1215,7 +1215,7 @@ async fn managed_playwright_official_electron_e2e() {
 
     let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
     let bridge = runtime.bridge();
-    let (outbound, mut outbound_commands) = mpsc::unbounded_channel::<Value>();
+    let (outbound, mut outbound_commands) = crate::transport::outbound_channel();
     let fixture_events = outbound.clone();
     // The reader must be able to answer Main's reverse Browser-risk request on the same
     // newline-framed stdin without retaining a Sender forever (which would deadlock fixture
@@ -1225,7 +1225,7 @@ async fn managed_playwright_official_electron_e2e() {
 
     let (_risk_directory, _risk_storage, capability_runtime, risk_coordinator, capability_grant) =
         managed_playwright_e2e_risk_authority();
-    let (risk_notifications, mut risk_approval_events) = mpsc::unbounded_channel::<Value>();
+    let (risk_notifications, mut risk_approval_events) = crate::transport::outbound_channel();
     let approval_coordinator = Arc::clone(&risk_coordinator);
     let approval_count = Arc::new(AtomicUsize::new(0));
     let observed_approval_count = Arc::clone(&approval_count);
@@ -3227,7 +3227,7 @@ async fn invoke_approved_browser_evaluate(
     runtime: &Arc<ManagedPlaywrightMcpRuntime>,
     capability_grant: &CapabilityGrant,
     origin: &str,
-    fixture_events: &mpsc::UnboundedSender<Value>,
+    fixture_events: &crate::transport::OutboundSender,
 ) -> McpToolResult {
     let raw_name = "browser_evaluate";
     let call_reason = "Run one synchronous script in the repository-owned fixture.";
@@ -3301,7 +3301,7 @@ async fn invoke_approved_browser_sensitive_tool_after_waiting_event(
     arguments: Value,
     risks: Vec<BuiltinMcpToolRiskKind>,
     risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
-    fixture_events: &mpsc::UnboundedSender<Value>,
+    fixture_events: &crate::transport::OutboundSender,
 ) -> McpToolResult {
     invoke_approved_browser_sensitive_tool_with_file_preparation(
         runtime,
@@ -3379,7 +3379,7 @@ async fn invoke_approved_browser_sensitive_tool_with_file_preparation(
     risks: Vec<BuiltinMcpToolRiskKind>,
     risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
     file_preparation: Option<ManagedPlaywrightSensitiveFilePreparation>,
-    waiting_event: Option<&mpsc::UnboundedSender<Value>>,
+    waiting_event: Option<&crate::transport::OutboundSender>,
 ) -> McpToolResult {
     let call_reason = arguments["call_reason"]
         .as_str()
@@ -3525,7 +3525,7 @@ async fn invoke_approved_browser_sensitive_tool_with_file_preparation(
 
 #[cfg(target_os = "macos")]
 fn send_fixture_agent_done(
-    fixture_events: &mpsc::UnboundedSender<Value>,
+    fixture_events: &crate::transport::OutboundSender,
     run_id: &str,
     status: AgentRunStatus,
 ) {

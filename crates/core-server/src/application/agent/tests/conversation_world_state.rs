@@ -3,7 +3,7 @@ use super::web_search_policy::save_search_policy;
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::unbounded_channel;
 
 const CONVERSATION: &str = "world-state-cross-run";
 const CREDENTIAL_CANARY: &str = "FAKE_WORLD_STATE_SEARCH_CREDENTIAL";
@@ -40,7 +40,7 @@ async fn read_provider_request(stream: &mut TcpStream) -> Value {
 }
 
 async fn wait_for_done(
-    receiver: &mut UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     run_id: &str,
     status: &str,
 ) -> Value {
@@ -210,7 +210,7 @@ async fn workspace_source_patches_adopt_only_new_root_runs_and_preview_never_wri
     project.folders[0].alias = "app".into();
     storage.save_project(project.clone()).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let permissions = AgentPermissions {
         command: AgentCommandPermission::RequireApproval,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
@@ -414,7 +414,7 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut events) = unbounded_channel();
+    let (notifications, mut events) = crate::transport::outbound_channel();
     let mut turns = Vec::new();
     let mut wires = Vec::new();
     let mut initial_full = None;

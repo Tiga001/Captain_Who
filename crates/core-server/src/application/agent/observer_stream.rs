@@ -114,7 +114,8 @@ impl AgentService {
         identity: &AgentCollaborationIdentity,
         run_id: &str,
         assistant_message_id: &str,
-        event: AgentEvent,
+        event: &AgentEvent,
+        safe_event: RendererSafeAgentEvent,
     ) {
         // Publishing and snapshot reads share this lock. A snapshot contains the complete text
         // through its cursor, and every later notification has a strictly greater sequence.
@@ -145,7 +146,7 @@ impl AgentService {
         } else {
             0
         };
-        state.apply(&event, boundary);
+        state.apply(event, boundary);
         let terminal = matches!(
             event,
             AgentEvent::Done {
@@ -158,8 +159,12 @@ impl AgentService {
                 ..
             }
         );
-        let mut notification =
-            child_observer_event_notification(identity, run_id, assistant_message_id, event);
+        let mut notification = child_observer_event_notification_from_safe(
+            identity,
+            run_id,
+            assistant_message_id,
+            safe_event,
+        );
         notification["params"]["streamCursor"] = json!(state.snapshot.cursor);
         let _ = notifications.send(notification);
         if terminal {
@@ -264,15 +269,120 @@ mod tests {
     }
 
     #[test]
+    fn shared_projection_preserves_both_routes_privacy_identity_and_snapshot_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
+        let service = AgentService::try_new(storage).unwrap();
+        let (sender, mut receiver) = crate::transport::outbound_channel();
+        let identity = identity();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../packages/protocol/fixtures/agent-mcp-renderer-contract-v1.json"
+        ))
+        .unwrap();
+        let mut action = fixture["approvalRequired"]["action"].clone();
+        action["approval"]["identity"]["argumentsDigest"] = json!("host-only-arguments-digest");
+        let events = [
+            started(1),
+            delta("你好 🌍\n```rs\n"),
+            delta(""),
+            delta("```"),
+            AgentEvent::Done {
+                run_id: "run".into(),
+                user_interrupted: None,
+                success: false,
+                status: Some(AgentRunStatus::WaitingForApproval),
+                content: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: vec![serde_json::from_value(action).unwrap()],
+            },
+        ];
+        let mut generation = None;
+        for (index, event) in events.into_iter().enumerate() {
+            emit_agent_event_notifications(
+                &service,
+                &sender,
+                Some(&identity),
+                "run",
+                "assistant",
+                event,
+            );
+            let ordinary = receiver.try_recv().unwrap();
+            let observer = receiver.try_recv().unwrap();
+            assert_eq!(ordinary["method"], AGENT_EVENT_NAME);
+            assert_eq!(observer["params"]["event"], ordinary["params"]);
+            assert_eq!(observer["params"]["agentId"], identity.agent_id);
+            assert_eq!(
+                observer["params"]["conversationId"],
+                identity.conversation_id
+            );
+            assert_eq!(observer["params"]["rootAgentId"], identity.root_agent_id);
+            assert_eq!(
+                observer["params"]["rootConversationId"],
+                identity.root_conversation_id
+            );
+            assert_eq!(observer["params"]["runId"], "run");
+            assert_eq!(observer["params"]["assistantMessageId"], "assistant");
+            assert_eq!(observer["params"]["streamCursor"]["sequence"], index + 1);
+            let cursor = &observer["params"]["streamCursor"]["generation"];
+            if let Some(previous) = generation.as_ref() {
+                assert_eq!(cursor, previous);
+            }
+            generation = Some(cursor.clone());
+            for notification in [ordinary, observer] {
+                let serialized = notification.to_string();
+                assert!(!serialized.contains("argumentsDigest"));
+                assert!(!serialized.contains("host-only-arguments-digest"));
+            }
+        }
+        let snapshots = service.observer_streams.lock().unwrap();
+        let snapshot = &snapshots[&identity.conversation_id].snapshot;
+        assert_eq!(snapshot.cursor.sequence, 5);
+        assert_eq!(
+            snapshot.stream.as_ref().unwrap().content,
+            "你好 🌍\n```rs\n```"
+        );
+        drop(snapshots);
+        emit_agent_event_notifications(
+            &service,
+            &sender,
+            None,
+            "root-run",
+            "root-assistant",
+            delta("root only"),
+        );
+        assert_eq!(receiver.try_recv().unwrap()["params"]["delta"], "root only");
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(service.observer_streams.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn observer_stream_publication_cursors_are_monotonic_and_terminal_cache_is_released() {
         let directory = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
         let service = AgentService::try_new(storage).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = crate::transport::outbound_channel();
         let identity = identity();
-        service.emit_child_observer_event(&sender, &identity, "run", "assistant", started(1));
-        service.emit_child_observer_event(&sender, &identity, "run", "assistant", delta("prefix"));
+        let event = started(1);
+        service.emit_child_observer_event(
+            &sender,
+            &identity,
+            "run",
+            "assistant",
+            &event,
+            RendererSafeAgentEvent::new(&event),
+        );
+        let event = delta("prefix");
+        service.emit_child_observer_event(
+            &sender,
+            &identity,
+            "run",
+            "assistant",
+            &event,
+            RendererSafeAgentEvent::new(&event),
+        );
         let snapshot = service.observer_streams.lock().unwrap()["child-conversation"]
             .snapshot
             .clone();
@@ -285,21 +395,23 @@ mod tests {
             second["params"]["streamCursor"]["generation"],
             snapshot.cursor.generation
         );
+        let event = AgentEvent::Done {
+            run_id: "run".into(),
+            user_interrupted: None,
+            success: true,
+            status: Some(AgentRunStatus::Completed),
+            content: Some("prefix final".into()),
+            usage: None,
+            finish_reason: None,
+            proposed_actions: Vec::new(),
+        };
         service.emit_child_observer_event(
             &sender,
             &identity,
             "run",
             "assistant",
-            AgentEvent::Done {
-                run_id: "run".into(),
-                user_interrupted: None,
-                success: true,
-                status: Some(AgentRunStatus::Completed),
-                content: Some("prefix final".into()),
-                usage: None,
-                finish_reason: None,
-                proposed_actions: Vec::new(),
-            },
+            &event,
+            RendererSafeAgentEvent::new(&event),
         );
         assert!(service.observer_streams.lock().unwrap().is_empty());
         assert_eq!(

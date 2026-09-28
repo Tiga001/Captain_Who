@@ -5,7 +5,7 @@ fn profile_save_notifies_only_persisted_metadata_and_preserves_preferences() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let save = |profile: &str| {
         handle_request(
             &storage,

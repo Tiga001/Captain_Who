@@ -809,7 +809,7 @@ impl AgentService {
             .insert(operation_id.clone(), operation.clone());
         self.release_provider_transition_claim(&conversation.id, &operation_id);
         if operation.status == AgentProviderTransitionOperationStatus::Completed {
-            self.wake_workflow_deliveries();
+            self.workflow_readiness_changed(Some(&conversation.id));
         }
         emit_provider_transition_notification(&notifications, &operation);
         self.schedule_async_human_input_deliveries(notifications.clone());

@@ -60,7 +60,7 @@ fn scheduler_state(
     agent_service: AgentService,
 ) -> (
     Arc<AutomationSchedulerState>,
-    tokio::sync::mpsc::UnboundedReceiver<Value>,
+    crate::transport::OutboundReceiver,
 ) {
     agent_service.grant_execution_access_for_test();
     scheduler_state_without_execution_access(storage, agent_service)
@@ -71,9 +71,9 @@ fn scheduler_state_without_execution_access(
     agent_service: AgentService,
 ) -> (
     Arc<AutomationSchedulerState>,
-    tokio::sync::mpsc::UnboundedReceiver<Value>,
+    crate::transport::OutboundReceiver,
 ) {
-    let (notifications, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, receiver) = crate::transport::outbound_channel();
     (
         Arc::new(AutomationSchedulerState {
             storage,
@@ -1281,7 +1281,7 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
             Some(first_vault),
         )
         .unwrap();
-    let (first_notifications, mut first_events) = tokio::sync::mpsc::unbounded_channel();
+    let (first_notifications, mut first_events) = crate::transport::outbound_channel();
     first_agent.grant_execution_access_for_test();
     let turn = first_agent
         .start_automation_human_root_turn(
@@ -1483,7 +1483,7 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         .count();
     assert_eq!(waiting_event_count, 1);
 
-    let (decision_notifications, _decision_events) = tokio::sync::mpsc::unbounded_channel();
+    let (decision_notifications, _decision_events) = crate::transport::outbound_channel();
     let decision_output = match decision {
         RestartApprovalDecision::Approve => {
             restarted_agent.approve_action(&turn.run_id, &action_id, decision_notifications)

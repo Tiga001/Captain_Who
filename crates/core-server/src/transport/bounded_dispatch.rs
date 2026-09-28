@@ -141,7 +141,7 @@ impl Lane {
         capacity: usize,
         concurrency: usize,
         stopping: Arc<AtomicBool>,
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
     ) -> Self {
         let admission = Arc::new(Semaphore::new(capacity));
         let (sender, mut receiver) = mpsc::channel::<RpcJob>(capacity);
@@ -196,7 +196,7 @@ async fn execute_job(
     class: RpcDispatchClass,
     mut job: RpcJob,
     stopping: Arc<AtomicBool>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     execution: Arc<Semaphore>,
 ) {
     let mut resolution_error = None;
@@ -305,7 +305,7 @@ pub(crate) struct RpcRequestDispatcher {
 }
 
 impl RpcRequestDispatcher {
-    pub(crate) fn new(outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(crate) fn new(outbound: crate::transport::OutboundSender) -> Self {
         Self::with_limits(
             outbound,
             READ_CAPACITY,
@@ -316,7 +316,7 @@ impl RpcRequestDispatcher {
     }
 
     fn with_limits(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         read_capacity: usize,
         read_concurrency: usize,
         write_capacity: usize,
@@ -637,7 +637,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn saturated_reads_and_unrelated_writes_do_not_block_control_admission() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::with_limits(outbound, 2, 1, 2, 2);
         let (started, ready) = oneshot::channel();
         let (release, wait) = sync_mpsc::channel();
@@ -698,7 +698,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_order_and_read_after_write_hold_across_owner_keys() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let state = Arc::new(Mutex::new(vec![]));
         let (started, ready) = oneshot::channel();
@@ -747,7 +747,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_waits_for_same_owner_admission_and_later_writes_wait_for_cancel() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let state = Arc::new(Mutex::new(vec![]));
         let (started, ready) = oneshot::channel();
@@ -799,7 +799,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_database_lock_remains_visible_after_control_dispatch() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let database = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
         let (started, ready) = oneshot::channel();
@@ -840,7 +840,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_joins_running_mutation_and_responds_to_every_cancelled_queue_entry() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::with_limits(outbound, 2, 1, 3, 2);
         let (started, ready) = oneshot::channel();
         let (release, wait) = sync_mpsc::channel();
@@ -879,7 +879,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_failure_keeps_original_id_and_releases_ordering_fences() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         rpc.try_submit(RpcDispatchClass::Write, id(1), None, || {
             panic!("injected handler failure")
@@ -897,7 +897,7 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn waiting_owner_control_does_not_block_another_owner_or_lose_write_fences() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let (started, ready) = oneshot::channel();
         let (release, wait) = sync_mpsc::channel();
@@ -956,7 +956,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn control_capacity_counts_waiting_and_running_requests() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::with_limits(outbound, 1, 1, 1, 2);
         let (started, ready) = oneshot::channel();
         let (release, wait) = sync_mpsc::channel();
@@ -1132,7 +1132,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_to_conversation_alias_preserves_submission_before_cancel_without_blocking_other_runs(
     ) {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let (started, ready) = oneshot::channel();
         let (release, wait) = sync_mpsc::channel();
@@ -1186,7 +1186,7 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_drains_started_owner_resolution_and_skips_waiting_resolvers_and_handlers() {
-        let (outbound, mut responses) = mpsc::unbounded_channel();
+        let (outbound, mut responses) = crate::transport::outbound_channel();
         let rpc = RpcRequestDispatcher::new(outbound);
         let (write_started, write_ready) = oneshot::channel();
         let (write_release, write_wait) = sync_mpsc::channel();
@@ -1269,7 +1269,7 @@ mod tests {
                 pool_wait.recv().unwrap();
             });
             pool_ready.await.unwrap();
-            let (outbound, mut responses) = mpsc::unbounded_channel();
+            let (outbound, mut responses) = crate::transport::outbound_channel();
             let rpc = RpcRequestDispatcher::new(outbound);
             rpc.try_submit(RpcDispatchClass::Write, id(1), None, || {
                 panic!("queued blocking handler must not start after shutdown")

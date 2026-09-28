@@ -25,8 +25,8 @@ struct FileTransactionHost {
     run_id: String,
     requests: UnboundedReceiver<Value>,
     replies: UnboundedSender<Value>,
-    notifications: UnboundedSender<Value>,
-    events: UnboundedReceiver<Value>,
+    notifications: crate::transport::OutboundSender,
+    events: crate::transport::OutboundReceiver,
     provider: tokio::task::JoinHandle<()>,
 }
 
@@ -94,7 +94,7 @@ impl FileTransactionHost {
         storage.save_agent_prompt_preferences(preferences).unwrap();
         set_collaboration_enabled(&storage, collaboration_enabled);
         let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
-        let (notifications, events) = unbounded_channel();
+        let (notifications, events) = crate::transport::outbound_channel();
         let turn = agent
             .start_conversation_turn(
                 AgentConversationTurnInput {

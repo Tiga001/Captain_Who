@@ -53,7 +53,7 @@ async fn frozen_inline_reference(shared_db: bool) -> Sample {
 }
 
 async fn bounded_dispatch_sample(shared_db: bool) -> Sample {
-    let (outbound, mut responses) = mpsc::unbounded_channel();
+    let (outbound, mut responses) = crate::transport::outbound_channel();
     let rpc = RpcRequestDispatcher::new(outbound);
     let database = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
     let reader_database = Arc::clone(&database);

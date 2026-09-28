@@ -583,3 +583,127 @@ fn workflow_execution_monitor_keeps_cancelled_run_distinct_from_completed_delive
     assert_eq!(history.messages[0].run_status.as_deref(), Some("cancelled"));
     assert_eq!(history.messages[0].message.content, "review body");
 }
+
+fn insert_synthetic_input(c: &Connection, input: &Input) {
+    c.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,1,1)",params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,json(input).unwrap(),status_name(&input.status)]).unwrap();
+}
+
+#[test]
+fn workflow_exact_injection_escapes_global_128_but_preserves_run_identity_and_fifo() {
+    let mut c = fixture(true, false);
+    let r = request(&c, "1", &[("left", "one"), ("right", "two")]);
+    let receipt = send(&mut c, &r).unwrap();
+    let input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
+    c.execute(
+        "DELETE FROM workflow_execution_inputs WHERE input_id=?1",
+        [&input.id],
+    )
+    .unwrap();
+    for index in 0..1000 {
+        let mut other = input.clone();
+        other.id = format!("blocked-{index}");
+        other.conversation_id = Some(format!("other-{index}"));
+        insert_synthetic_input(&c, &other);
+    }
+    insert_synthetic_input(&c, &input);
+    let target = conversation(&c, "b");
+    bind_run(&mut c, &target, "receiver").unwrap();
+    assert!(
+        pending_inputs(&c).unwrap().is_empty(),
+        "old global page masks this recipient"
+    );
+    assert_eq!(
+        pending_injection(&c, &target, "receiver")
+            .unwrap()
+            .unwrap()
+            .id,
+        input.id
+    );
+    assert!(pending_injection(&c, &target, "unbound-run")
+        .unwrap()
+        .is_none());
+    pause_conversation(&mut c, &target).unwrap();
+    assert!(pending_injection(&c, &target, "receiver")
+        .unwrap()
+        .is_none());
+    resume_conversation(&mut c, &target).unwrap();
+    assert!(bind_input(&mut c, &input.id, "receiver", "delivery").unwrap());
+    assert!(bind_input(&mut c, &input.id, "receiver", "delivery").unwrap());
+    let mut later = input.clone();
+    later.id = "later".into();
+    insert_synthetic_input(&c, &later);
+    assert!(
+        pending_injection(&c, &target, "receiver")
+            .unwrap()
+            .is_none(),
+        "claimed FIFO head blocks later injection"
+    );
+    c.execute(
+        "UPDATE workflow_instances SET enabled=0 WHERE instance_id='instance'",
+        [],
+    )
+    .unwrap();
+    assert!(pending_injection(&c, &target, "receiver")
+        .unwrap()
+        .is_none());
+    assert!(!bind_input(&mut c, &later.id, "receiver", "later-delivery").unwrap());
+}
+
+#[test]
+fn workflow_candidate_pages_advance_across_ineligible_heads_without_decoding_history() {
+    let mut c = fixture(false, false);
+    let r = request(&c, "1", &[("direct", "ready after old failures")]);
+    let receipt = send(&mut c, &r).unwrap();
+    let input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
+    c.execute(
+        "DELETE FROM workflow_execution_inputs WHERE input_id=?1",
+        [&input.id],
+    )
+    .unwrap();
+    for index in 0..1000 {
+        let mut other = input.clone();
+        other.id = format!("old-{index}");
+        other.conversation_id = Some(format!("old-owner-{index}"));
+        insert_synthetic_input(&c, &other);
+    }
+    insert_synthetic_input(&c, &input);
+    let mut cursor = 0;
+    let mut ids = Vec::new();
+    let mut pages = 0;
+    loop {
+        let page = pending_candidates(&c, cursor, 128).unwrap();
+        pages += 1;
+        assert!(page.len() <= 128);
+        if let Some(last) = page.last() {
+            cursor = last.sequence;
+        }
+        ids.extend(page.iter().map(|p| p.id.clone()));
+        if page.len() < 128 {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 1001);
+    assert_eq!(ids.last(), Some(&input.id));
+    assert_eq!(pages, 8);
+    assert!(eligible_pending_input(&c, &ids[0]).unwrap().is_none());
+    assert!(eligible_pending_input(&c, &input.id).unwrap().is_some());
+    let mut plan = c
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            delivery::PENDING_CANDIDATES_SQL
+        ))
+        .unwrap();
+    let rows = plan
+        .query_map(params![0, 128], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    println!("workflow candidate EXPLAIN: {}", rows.join(" | "));
+    assert!(rows.iter().any(
+        |r| r.contains("workflow_execution_input_pending_sequence") && r.contains("sequence>?")
+    ));
+    assert!(rows
+        .iter()
+        .any(|r| r.contains("COVERING INDEX workflow_execution_input_queue")));
+    assert!(!rows.iter().any(|r| r.contains("TEMP B-TREE")));
+}

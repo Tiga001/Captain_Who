@@ -1375,6 +1375,19 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn load_composer_draft(
+        &self,
+        scope_id: &str,
+    ) -> Result<Option<ComposerDraftRecord>, String> {
+        composer_draft_repository::get_composer_draft(&*self.state.connection()?, scope_id)
+            .map_err(storage_error)?
+            .map(|draft| {
+                draft.validate_current_payloads()?;
+                Ok(draft.normalize_permission_mode())
+            })
+            .transpose()
+    }
+
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
         let connection = self.state.connection()?;
         composer_draft_repository::list_composer_drafts(&connection)

@@ -244,7 +244,7 @@ fn successor_approval_is_blocked_until_its_durable_predecessor_settles() {
         pending.insert(successor.storage_id.clone(), successor.clone());
     }
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .queue_action_continuation(
             &successor.snapshot.run_id,
@@ -305,7 +305,7 @@ fn restart_loaded_pending_map_still_blocks_a_proven_successor() {
     assert!(loaded.contains_key(&successor.storage_id));
     drop(loaded);
 
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = reloaded
         .queue_action_continuation(
             &successor.snapshot.run_id,

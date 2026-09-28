@@ -875,7 +875,7 @@ mod tests {
         assert!(events.iter().any(|event| event.event_kind == "run_updated"));
         assert!(events.iter().any(|event| event.event_kind == "deleted"));
 
-        let (outbound, mut notifications) = tokio::sync::mpsc::unbounded_channel();
+        let (outbound, mut notifications) = crate::transport::outbound_channel();
         let notifier = tokio::spawn(run_automation_event_notifier(
             Arc::clone(&storage),
             outbound,

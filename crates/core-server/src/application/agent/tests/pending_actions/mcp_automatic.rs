@@ -178,7 +178,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
         unreachable!();
     };
     let frozen_approval = approval.clone();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let context = AutoApprovedActionContext::new(
         auto_mcp_agent_input(&storage, run_id, &action_id),
         run_id.to_string(),

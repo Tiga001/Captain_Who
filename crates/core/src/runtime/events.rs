@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct AgentEventStream {
     events: Vec<AgentEvent>,
     emitter: Option<AgentEventEmitter>,
+    transient_message_deltas: bool,
 }
 
 impl AgentEventStream {
@@ -10,11 +11,25 @@ impl AgentEventStream {
         Self {
             events: Vec::new(),
             emitter,
+            transient_message_deltas: false,
         }
+    }
+
+    pub(super) fn with_transient_message_deltas(mut self, enabled: bool) -> Self {
+        self.transient_message_deltas = enabled;
+        self
     }
 
     pub(super) fn emit(&mut self, event: AgentEvent) {
         if let Some(emitter) = &self.emitter {
+            // A live Host already consumes these deltas. Move them to that consumer instead of
+            // cloning every token and retaining another complete stream until the Run ends.
+            // Without an emitter the returned event log remains the only consumer, even when
+            // the Host requests this policy. Every non-delta event remains replayable.
+            if self.transient_message_deltas && matches!(event, AgentEvent::MessageDelta { .. }) {
+                emitter(event);
+                return;
+            }
             emitter(event.clone());
         }
         self.events.push(event);
@@ -30,6 +45,10 @@ impl AgentEventStream {
         self.events
     }
 }
+
+#[cfg(test)]
+#[path = "events_tests.rs"]
+mod tests;
 
 pub(super) fn emit_tool_input_preview(
     event_stream: &mut AgentEventStream,

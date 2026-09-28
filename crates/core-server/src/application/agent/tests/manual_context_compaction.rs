@@ -78,7 +78,7 @@ async fn manual_compaction_is_idempotent_preserves_history_and_owns_usage() {
     });
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(generator);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let start = || AgentManualContextCompactionStartInput {
         conversation_id: id.into(),
         request_id: "request-one".into(),
@@ -166,7 +166,7 @@ async fn manual_cancel_before_response_prevents_commit_and_keeps_paid_usage() {
     });
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(generator);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let running = service
         .start_manual_context_compaction(
             AgentManualContextCompactionStartInput {
@@ -247,7 +247,7 @@ async fn manual_failure_keeps_old_context_and_allows_retry_with_new_request() {
         Arc::new(|_, _| Box::pin(async { Err(AgentError::new("provider failed")) }));
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(generator);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let running = service
         .start_manual_context_compaction(
             AgentManualContextCompactionStartInput {
@@ -307,7 +307,7 @@ async fn manual_compaction_latest_fork_sends_next_turn_with_summary_without_copy
     );
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("model-1"));
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let operation = service
         .start_manual_context_compaction(
             AgentManualContextCompactionStartInput {
@@ -459,7 +459,7 @@ async fn exercise_manual_fork_after_later_turn(explicit_boundary: bool) {
     });
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(generator);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let operation = service
         .start_manual_context_compaction(
             AgentManualContextCompactionStartInput {
@@ -691,7 +691,7 @@ async fn model_configuration_change_rejects_manual_commit_but_retains_response_u
     });
     let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(generator);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let operation = service
         .start_manual_context_compaction(
             AgentManualContextCompactionStartInput {
@@ -725,7 +725,7 @@ fn manual_status_bounds_public_history_without_losing_old_operation_lookup() {
     conversation.messages.clear();
     storage.save_conversation(conversation).unwrap();
     let service = AgentService::new_authorized_for_test(storage.clone());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     for index in 0..52 {
         assert_eq!(
             service

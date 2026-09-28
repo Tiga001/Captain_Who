@@ -316,7 +316,7 @@ async fn staged_approval_response_lost_retry_replays_receipt_without_recommittin
             input,
         )
         .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let first = service
         .approve_action_with_scope(
@@ -466,7 +466,7 @@ async fn remaining_run_approval_from_staged_commit_authorizes_later_direct_chang
             run_id,
             call_id,
             mycopilot_protocol_rs::AgentApprovalScopeDto::RemainingApplyPatchInRun,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .expect("the staged commit must settle and activate its remaining-Run grant");
     assert_eq!(approved.status, "applied");
@@ -603,7 +603,7 @@ async fn staged_audit_failure_projects_the_same_outcome_unknown_receipt_and_stat
     inject_manual_action_audit_failure(&storage_id, "completed");
     inject_manual_action_audit_failure(&storage_id, "completed");
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let output = service
         .approve_action(run_id, call_id, notifications)
         .expect("Staged audit fallback settles as typed outcome_unknown");

@@ -33,6 +33,7 @@ impl AgentService {
                 self.cancel_exact_run_execution(run_id, Some(conversation_id));
                 return Err(error.into());
             }
+            self.workflow_readiness_changed(Some(conversation_id));
         }
         // `agent.cancelRun` is the explicit user stop boundary. Capture the authoritative
         // conversation binding before cancelling the worker, because worker teardown removes the

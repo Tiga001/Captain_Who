@@ -1633,7 +1633,7 @@ fn rejected_office_action_publishes_exactly_one_paired_tool_result_event() {
         result: Some(json!({ "status": "rejected" })),
         error: None,
     };
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     assert!(
         super::super::approval::publish_inline_file_change_tool_result(

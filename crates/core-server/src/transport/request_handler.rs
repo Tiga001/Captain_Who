@@ -418,6 +418,7 @@ pub(crate) fn handle_request(
             let result = storage.save_model_settings_request(settings);
             if result.is_ok() {
                 agent_service.invalidate_all_conversation_context_states();
+                agent_service.workflow_readiness_changed(None);
                 let _ = notification_tx.send(serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": mycopilot_protocol_rs::AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
@@ -482,7 +483,11 @@ pub(crate) fn handle_request(
                 Ok(project) => project,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(request.id, storage.save_project(project))
+            let result = storage.save_project(project);
+            if result.is_ok() {
+                agent_service.workflow_readiness_changed(None);
+            }
+            storage_response(request.id, result)
         }
         STORAGE_DELETE_PROJECT_METHOD => {
             let input = match parse_params::<ProjectIdRequest>(request.params) {
@@ -823,7 +828,44 @@ pub(crate) fn handle_request(
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
             match agent_service.authorize_user_conversation_write(&input.draft.scope_id) {
-                Ok(()) => storage_response(request.id, storage.save_composer_draft(input.draft)),
+                Ok(()) => {
+                    // This read is only an invalidation hint: a malformed old draft must not
+                    // prevent the user from replacing it with a valid configuration.
+                    let previous = storage
+                        .load_composer_draft(&input.draft.scope_id)
+                        .ok()
+                        .flatten();
+                    let result = storage.save_composer_draft(input.draft);
+                    if let Ok(saved) = &result {
+                        if previous.as_ref().is_none_or(|previous| {
+                            previous.model_id != saved.model_id
+                                || previous.project_id != saved.project_id
+                                || previous.permission_mode != saved.permission_mode
+                                || previous.permission_mode_version != saved.permission_mode_version
+                        }) {
+                            // A timestamp/model fence may have ignored this late save. Compare
+                            // committed configuration before clearing the scheduler's cooldown.
+                            let changed = storage
+                                .load_composer_draft(&saved.scope_id)
+                                .map(|current| match (previous.as_ref(), current.as_ref()) {
+                                    (Some(previous), Some(current)) => {
+                                        previous.model_id != current.model_id
+                                            || previous.project_id != current.project_id
+                                            || previous.permission_mode != current.permission_mode
+                                            || previous.permission_mode_version
+                                                != current.permission_mode_version
+                                    }
+                                    (None, None) => false,
+                                    _ => true,
+                                })
+                                .unwrap_or(true);
+                            if changed {
+                                agent_service.workflow_readiness_changed(Some(&saved.scope_id));
+                            }
+                        }
+                    }
+                    storage_response(request.id, result)
+                }
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
@@ -852,7 +894,18 @@ pub(crate) fn handle_request(
                 Ok(preferences) => preferences,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(request.id, storage.save_ui_preferences(preferences))
+            let previous = storage.load_ui_preferences().ok();
+            let result = storage.save_ui_preferences(preferences);
+            if let Ok(saved) = &result {
+                if previous.as_ref().is_none_or(|previous| {
+                    previous.full_permission_enabled != saved.full_permission_enabled
+                        || previous.custom_permission_enabled != saved.custom_permission_enabled
+                        || previous.custom_permissions != saved.custom_permissions
+                }) {
+                    agent_service.workflow_readiness_changed(None);
+                }
+            }
+            storage_response(request.id, result)
         }
         _ => response_error(Some(request.id), -32601, "Method not found"),
     }

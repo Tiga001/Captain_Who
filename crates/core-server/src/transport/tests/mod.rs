@@ -24,6 +24,7 @@ mod provider_profiles;
 mod request_loop;
 mod skills_catalog;
 mod source_resolution;
+mod workflow_readiness;
 
 struct StaticGitHubSourceResolver;
 

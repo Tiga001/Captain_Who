@@ -108,7 +108,7 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
     )
     .unwrap();
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(
             AgentConversationTurnInput {

@@ -471,7 +471,20 @@ impl AgentService {
             None => self
                 .turn_concurrency_gate()
                 .try_acquire()
-                .map_err(AgentServiceError::from)?,
+                .map_err(|error| {
+                    if workflow.is_some() {
+                        AgentServiceError::structured(
+                            error,
+                            serde_json::json!({
+                                "domain": "agent_turn",
+                                "code": "workflow_capacity_exhausted",
+                                "retryable": true
+                            }),
+                        )
+                    } else {
+                        AgentServiceError::from(error)
+                    }
+                })?,
         };
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
         self.register_turn_concurrency_permit(&run_id, global_permit)?;
@@ -579,6 +592,7 @@ impl AgentService {
                 // Workflow deliveries and pre-existing asynchronous answers never lift it.
                 self.storage
                     .workflow_execution_resume_conversation(&conversation_id)?;
+                self.workflow_readiness_changed(Some(&conversation_id));
             }
             Ok(outcome)
         });

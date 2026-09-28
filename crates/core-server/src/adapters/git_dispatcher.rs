@@ -74,7 +74,7 @@ pub(crate) struct GitDispatcher {
 }
 
 impl GitDispatcher {
-    pub(crate) fn new(outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(crate) fn new(outbound: crate::transport::OutboundSender) -> Self {
         Self::with_capacity_reservations(
             outbound,
             DEFAULT_GIT_WORKER_COUNT,
@@ -86,7 +86,7 @@ impl GitDispatcher {
 
     #[cfg(test)]
     fn with_limits(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         worker_count: usize,
         max_in_flight: usize,
     ) -> Self {
@@ -94,7 +94,7 @@ impl GitDispatcher {
     }
 
     fn with_capacity_reservations(
-        outbound: mpsc::UnboundedSender<Value>,
+        outbound: crate::transport::OutboundSender,
         worker_count: usize,
         max_in_flight: usize,
         high_priority_reserve: usize,
@@ -259,7 +259,7 @@ impl PriorityQueues {
 
 async fn run_dispatcher(
     mut receiver: mpsc::Receiver<QueuedGitJob>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     worker_count: usize,
     shutdown_requested: Arc<AtomicBool>,
 ) {
@@ -353,7 +353,7 @@ fn drain_admission_channel(
 fn launch_job(
     job: QueuedGitJob,
     exclusive: bool,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: crate::transport::OutboundSender,
     completion: mpsc::UnboundedSender<bool>,
 ) {
     tokio::spawn(async move {
@@ -429,7 +429,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prioritizes_queued_work_without_starving_lower_priorities() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx, 1, 8);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -474,7 +474,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounds_running_and_queued_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx, 1, 2);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -503,7 +503,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reserves_admission_capacity_for_medium_and_high_priority_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_capacity_reservations(outbound_tx, 1, 4, 1, 1);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -546,7 +546,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn permits_out_of_order_completion_while_preserving_response_ids() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx, 2, 4);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -575,7 +575,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn outbound_notifications_are_not_starved_by_blocking_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx.clone(), 1, 2);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
@@ -599,7 +599,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn converts_worker_panics_into_an_error_with_the_original_id() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx, 1, 2);
 
         dispatcher
@@ -614,7 +614,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_cancels_queued_jobs_and_waits_for_running_work() {
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
         let dispatcher = GitDispatcher::with_limits(outbound_tx, 1, 3);
         let (started_tx, started_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();

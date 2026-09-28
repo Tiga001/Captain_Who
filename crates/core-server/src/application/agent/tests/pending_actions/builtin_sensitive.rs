@@ -116,7 +116,7 @@ async fn approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_r
         assistant_message_id,
         "builtin-sensitive-expiry-decision-call",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     let output = service
         .queue_action_continuation(
@@ -169,7 +169,7 @@ async fn approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_r
             &action_id,
             AgentApprovalDecisionStatus::Approved,
             None,
-            tokio::sync::mpsc::unbounded_channel().0,
+            crate::transport::outbound_channel().0,
         )
         .is_err());
 }
@@ -273,7 +273,7 @@ async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_on
         "builtin-sensitive-reject-race-call",
     );
     let storage_id = pending_action_storage_id(run_id, &action_id);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let approve_entered = Arc::new(std::sync::Barrier::new(2));
     let approve_release = Arc::new(std::sync::Barrier::new(2));
     crate::application::agent::approval::install_approval_decision_barrier_hook(
@@ -373,7 +373,7 @@ async fn builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once() {
         "builtin-sensitive-approve-race-call",
     );
     let storage_id = pending_action_storage_id(run_id, &action_id);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let reject_entered = Arc::new(std::sync::Barrier::new(2));
     let reject_release = Arc::new(std::sync::Barrier::new(2));
     crate::application::agent::approval::install_approval_decision_barrier_hook(

@@ -28,6 +28,7 @@ impl AgentRuntime {
         host_services: Option<AgentRuntimeHostServices>,
     ) -> AgentResult<AgentChatOutput> {
         let AgentRuntimeHostServices {
+            transient_message_deltas,
             conversation_world_state,
             web_search_policy,
             host_executor,
@@ -293,7 +294,8 @@ impl AgentRuntime {
         let initial_run_world_state =
             (!resumed_world_state_epoch).then(|| run_world_state.snapshot().clone());
         let mut tool_definitions = effective_tool_set.all_definitions();
-        let mut event_stream = AgentEventStream::new(emitter);
+        let mut event_stream =
+            AgentEventStream::new(emitter).with_transient_message_deltas(transient_message_deltas);
         event_stream.emit(AgentEvent::Started {
             run_id: run_id.clone(),
             tool_definitions: tool_registry.renderer_event_definitions(&tool_definitions),
@@ -322,15 +324,21 @@ impl AgentRuntime {
         let current_image_start = context_image_attachments.len();
         context_image_attachments.extend(attachments::normalize_attachment_context_images(
             &input.attachments,
-            input.context.as_ref().and_then(|context| context.attachment_library.as_ref()),
+            input
+                .context
+                .as_ref()
+                .and_then(|context| context.attachment_library.as_ref()),
         )?);
         let current_image_end = context_image_attachments.len();
         // Only this turn's uploads may own newly journaled InputAttachment material. Historical
         // payloads remain available for hydration but identical bytes must not steal a new ID.
         let current_image_range = current_image_start..current_image_end;
         let mut memory_conversation_world_state = MemoryConversationWorldState::new(&input)?;
-        let workflow_only_bootstrap = interactive_root && workflow_inbox.is_some() && input.messages.is_empty()
-            && input.world_state_records.is_empty() && input.context_compaction_summary.is_none()
+        let workflow_only_bootstrap = interactive_root
+            && workflow_inbox.is_some()
+            && input.messages.is_empty()
+            && input.world_state_records.is_empty()
+            && input.context_compaction_summary.is_none()
             && restored_checkpoint.is_none();
         if workflow_only_bootstrap {
             // A workflow may wake a brand-new conversation without fabricating a human message.
@@ -339,9 +347,13 @@ impl AgentRuntime {
             input.world_state_records = memory_conversation_world_state.prepare(
                 &crate::WorldStateRequestBoundary {
                     run_id: run_id.clone(),
-                    assistant_message_id: trace_assistant_message_id.clone().ok_or_else(|| AgentError::new("Workflow delivery requires an assistant message identity."))?,
-                    request_index: 1, after_trace_sequence: None,
-                }, runtime_extensions.conversation_world_state_sections()?,
+                    assistant_message_id: trace_assistant_message_id.clone().ok_or_else(|| {
+                        AgentError::new("Workflow delivery requires an assistant message identity.")
+                    })?,
+                    request_index: 1,
+                    after_trace_sequence: None,
+                },
+                runtime_extensions.conversation_world_state_sections()?,
             )?;
         }
 

@@ -331,7 +331,7 @@ impl AgentService {
         }
         self.storage.workflow_execution_discard_failed(input_id)?;
         self.publish_workflow_runtime(instance_id, notifications);
-        self.wake_workflow_deliveries();
+        self.workflow_readiness_changed(input.conversation_id.as_deref());
         self.storage.workflow_execution_runtime(instance_id)
     }
     pub(super) fn publish_workflow_runtime(
@@ -359,10 +359,10 @@ impl AgentService {
                 ..
             } = item
             {
-                if self
+                if let Some(input) = self
                     .storage
                     .workflow_execution_load_input(input_id)?
-                    .is_some_and(|input| {
+                    .filter(|input| {
                         matches!(
                             input.status,
                             mycopilot_core::workflow_execution::InputStatus::Claimed
@@ -371,12 +371,10 @@ impl AgentService {
                     })
                 {
                     self.storage.workflow_execution_mark_applied(input_id)?;
+                    self.workflow_readiness_changed(input.conversation_id.as_deref());
                     changed.insert(instance_id.clone());
                 }
             }
-        }
-        if !changed.is_empty() {
-            self.wake_workflow_deliveries();
         }
         for id in changed {
             self.publish_workflow_runtime(&id, notifications);
@@ -384,24 +382,15 @@ impl AgentService {
         Ok(())
     }
     fn claim_workflow_injections(&self, conversation_id: &str, run_id: &str) -> Result<(), String> {
-        let Some(identity) = self
+        if let Some(input) = self
             .storage
-            .workflow_execution_snapshot_for_run(conversation_id, run_id)?
-        else {
-            return Ok(());
-        };
-        for input in self.storage.workflow_execution_pending_inputs()? {
-            if input.execution_version == identity.execution_version
-                && input.node_id == identity.node_id
-                && input.conversation_id.as_deref() == Some(conversation_id)
-                && input.busy_policy == mycopilot_core::workflow::BusyPolicy::Inject
-            {
-                self.storage.workflow_execution_bind_input(
-                    &input.id,
-                    run_id,
-                    &format!("workflow-message-{}", input.id),
-                )?;
-            }
+            .workflow_execution_pending_injection(conversation_id, run_id)?
+        {
+            self.storage.workflow_execution_bind_input(
+                &input.id,
+                run_id,
+                &format!("workflow-message-{}", input.id),
+            )?;
         }
         Ok(())
     }
@@ -414,69 +403,172 @@ impl AgentService {
         if self.workflow_dispatch_stopped.load(Ordering::Acquire) {
             return;
         }
-        let inputs = match self.storage.workflow_execution_pending_inputs() {
+        use super::workflow_retry::RetryReason;
+        let (cursor, generation) = {
+            let mut state = self
+                .workflow_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.scanning = true;
+            (state.cursor, state.generation)
+        };
+        let candidates = match self
+            .storage
+            .workflow_execution_pending_candidates(cursor, 128)
+        {
             Ok(inputs) => inputs,
             Err(error) => {
                 eprintln!("workflow scan failed: {error}");
+                self.workflow_retry
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .scan_failed(Instant::now());
                 return;
             }
         };
-        for input in inputs {
+        self.workflow_retry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .scan_succeeded();
+        for candidate in &candidates {
             if self.workflow_dispatch_stopped.load(Ordering::Acquire) {
                 break;
             }
-            let Some(conversation_id) = input.conversation_id.as_deref() else {
+            if !self
+                .workflow_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_due(candidate, Instant::now())
+            {
                 continue;
-            };
-            let occupied = match self.has_conversation_turn_occupancy(conversation_id) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            if occupied {
-                continue;
-            } // active inputs are claimed by their own safe-boundary inbox
-            if let Err(error) = self.start_workflow_input(&input, notifications.clone()) {
-                // Readiness, account access, or model transition can recover; the unclaimed input
-                // stays durable. Once claimed, start_root_turn marks a failure without replay.
-                if self
-                    .storage
-                    .workflow_execution_load_input(&input.id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|current| current.status != input.status)
-                {
-                    eprintln!("workflow delivery deferred: {error}");
-                    self.publish_workflow_runtime(&input.instance_id, &notifications);
-                }
             }
+            let attempt = || -> Result<Option<RetryReason>, AgentServiceError> {
+                let Some(conversation_id) = candidate.conversation_id.as_deref() else {
+                    return Ok(Some(RetryReason::Unavailable));
+                };
+                if self.has_conversation_turn_occupancy(conversation_id)? {
+                    return Ok(Some(RetryReason::Busy));
+                }
+                if self.check_automation_execution_access().is_err() {
+                    return Ok(Some(RetryReason::Access));
+                }
+                let Some(input) = self
+                    .storage
+                    .workflow_execution_eligible_pending_input(&candidate.id)?
+                else {
+                    return Ok(Some(RetryReason::Unavailable));
+                };
+                // Version and bindings may have changed since the lightweight page was read.
+                if input.execution_version != candidate.execution_version {
+                    return Ok(None);
+                }
+                match self.start_workflow_input(&input, notifications.clone()) {
+                    Ok(result) => Ok(result),
+                    Err(error) => {
+                        if error
+                            .data()
+                            .is_some_and(|data| data["code"] == "workflow_capacity_exhausted")
+                        {
+                            return Ok(Some(RetryReason::Capacity));
+                        }
+                        if self
+                            .storage
+                            .workflow_execution_load_input(&input.id)?
+                            .is_some_and(|current| current.status != input.status)
+                        {
+                            eprintln!("workflow delivery deferred: {error}");
+                            self.publish_workflow_runtime(&input.instance_id, &notifications);
+                            Ok(None)
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            };
+            let reason = match attempt() {
+                Ok(reason) => reason,
+                Err(error) => {
+                    eprintln!(
+                        "workflow input {} deferred (transient): {error}",
+                        candidate.id
+                    );
+                    Some(RetryReason::Transient)
+                }
+            };
+            let mut state = self
+                .workflow_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(reason) = reason {
+                state.defer(candidate, reason, generation, Instant::now());
+            } else {
+                state.forget(&candidate.id);
+            }
+        }
+        let continue_scan = {
+            let mut state = self
+                .workflow_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.scanning = false;
+            if candidates.len() == 128 {
+                state.cursor = candidates.last().unwrap().sequence;
+                true
+            } else {
+                state.cursor = 0;
+                state.complete_cycle();
+                std::mem::take(&mut state.restart_requested)
+            }
+        };
+        // Yield between bounded pages, but finish the complete population promptly. Advancing
+        // despite disabled/busy heads prevents the first 128 failures from hiding other owners.
+        if continue_scan {
+            self.wake_workflow_deliveries();
         }
     }
     fn start_workflow_input(
         &self,
         workflow: &Input,
         notifications: CoreServerNotificationSender,
-    ) -> Result<(), AgentServiceError> {
+    ) -> Result<Option<super::workflow_retry::RetryReason>, AgentServiceError> {
+        use super::workflow_retry::RetryReason;
         let conversation_id = workflow
             .conversation_id
             .as_deref()
             .ok_or_else(|| "Workflow recipient is not a conversation.".to_string())?;
         let conversation = self
             .storage
-            .load_conversation(conversation_id)?
+            .load_conversation_meta(conversation_id)?
             .ok_or_else(|| "Workflow recipient was removed.".to_string())?;
         if conversation.archived_at.is_some() {
             return Err("Workflow recipient is archived.".to_string().into());
         }
-        let draft = self
+        let Some(draft) = self.storage.load_composer_draft(conversation_id)? else {
+            return Ok(Some(RetryReason::Configuration));
+        };
+        let Some(model_id) = draft.model_id.or(conversation.model_id) else {
+            return Ok(Some(RetryReason::Configuration));
+        };
+        // Missing model configuration is a common recoverable wait. Avoid history preflight
+        // until the authoritative settings snapshot actually exists; admission rechecks it.
+        let settings = match self
             .storage
-            .load_composer_drafts()?
-            .into_iter()
-            .find(|draft| draft.scope_id == conversation_id)
-            .ok_or_else(|| "Workflow recipient has no composer configuration.".to_string())?;
-        let model_id = draft
-            .model_id
-            .or(conversation.model_id)
-            .ok_or_else(|| "Workflow recipient has no selected model.".to_string())?;
+            .load_model_settings_snapshot_for_model(&model_id, false)
+        {
+            Ok(Some(settings)) => settings,
+            Ok(None) | Err(_) => return Ok(Some(RetryReason::Configuration)),
+        };
+        let Some(model) = settings
+            .settings
+            .models
+            .iter()
+            .find(|model| model.id == model_id && model.enabled)
+        else {
+            return Ok(Some(RetryReason::Configuration));
+        };
+        if settings.settings.effective_connection_for(model).is_err() {
+            return Ok(Some(RetryReason::Configuration));
+        }
         let mode = match draft.permission_mode.as_str() {
             "full" => mycopilot_protocol_rs::AutomationPermissionModeDto::Full,
             "custom" => mycopilot_protocol_rs::AutomationPermissionModeDto::Custom,
@@ -506,10 +598,10 @@ impl AgentService {
                 },
                 notifications,
             )?;
-            return Ok(());
+            return Ok(Some(RetryReason::Transition));
         }
         if transition.decision == AgentProviderTransitionDecision::Blocked {
-            return Ok(());
+            return Ok(Some(RetryReason::Transition));
         }
         self.start_root_turn_with_workflow(
             AgentConversationTurnInput {
@@ -536,7 +628,7 @@ impl AgentService {
             notifications.clone(),
         )?;
         self.publish_workflow_runtime(&workflow.instance_id, &notifications);
-        Ok(())
+        Ok(None)
     }
 }
 

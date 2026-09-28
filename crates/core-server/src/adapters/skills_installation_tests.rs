@@ -52,7 +52,7 @@ fn call_skill_rpc(
 }
 
 async fn receive_rpc_response(
-    receiver: &mut mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
     expected_id: i64,
     notifications: &mut Vec<Value>,
 ) -> Value {
@@ -433,7 +433,7 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     );
     let installations = Arc::new(SkillInstallationService::new(&store_root).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
     let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
         mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
@@ -543,7 +543,7 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
         SkillInstallationService::new(&store_root).unwrap(),
     ));
     let agent_service = AgentService::new(Arc::clone(&storage));
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
     let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
         mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());

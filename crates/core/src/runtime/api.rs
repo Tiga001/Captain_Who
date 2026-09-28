@@ -425,6 +425,7 @@ impl std::fmt::Debug for AgentResolvedSkillActivation {
 /// positional parameter for every durable-state or orchestration capability.
 #[derive(Clone, Default)]
 pub struct AgentRuntimeHostServices {
+    pub(super) transient_message_deltas: bool,
     pub(super) conversation_world_state: Option<Arc<dyn AgentConversationWorldStateHost>>,
     pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) host_executor: Option<AgentHostActionExecutor>,
@@ -552,6 +553,17 @@ pub trait HumanInteractionPolicySource: Send + Sync {
 impl AgentRuntimeHostServices {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Delivers message deltas only to the live emitter, without retaining them in
+    /// `AgentChatOutput.events`. All other events, including stream boundaries and terminal
+    /// usage, remain retained. With no emitter, the complete event log is still returned.
+    ///
+    /// Opt in only when the Host consumes the live stream and never replays the returned
+    /// deltas. The default remains a complete event log for standalone Runtime callers.
+    pub fn with_transient_message_deltas(mut self) -> Self {
+        self.transient_message_deltas = true;
+        self
     }
 
     pub fn with_conversation_world_state(

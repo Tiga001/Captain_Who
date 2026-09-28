@@ -114,7 +114,7 @@ async fn assert_child_command_rejection(feedback: Option<&str>) {
         1,
     )
     .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .start_collaboration_dispatcher(notifications.clone())
         .unwrap();

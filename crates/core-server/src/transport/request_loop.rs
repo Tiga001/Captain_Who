@@ -96,7 +96,7 @@ pub(crate) struct RequestDispatchers<'a> {
 }
 
 pub(crate) struct RequestOutbounds<'a> {
-    pub(crate) normal: &'a mpsc::UnboundedSender<Value>,
+    pub(crate) normal: &'a crate::transport::OutboundSender,
     pub(crate) image_artifact: &'a mpsc::Sender<ImageArtifactOutbound>,
 }
 
@@ -193,7 +193,19 @@ where
     let outbound = outbounds.normal;
     let image_artifact_outbound = outbounds.image_artifact;
     let mut lines = input.lines();
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = outbound.failed() => {
+                forks.begin_shutdown();
+                rpc.begin_shutdown();
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "outbound transport failed"));
+            }
+            line = lines.next_line() => line?,
+        };
+        let Some(line) = next else {
+            break;
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -856,75 +868,8 @@ mod mcp_management_task_tests {
     }
 }
 
-pub(crate) async fn run_outbound_writer<W>(
-    mut writer: W,
-    mut outbound: mpsc::UnboundedReceiver<Value>,
-    mut image_artifact_outbound: mpsc::Receiver<ImageArtifactOutbound>,
-    mut finish: oneshot::Receiver<()>,
-) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut outbound_open = true;
-    let mut image_artifact_outbound_open = true;
-    loop {
-        tokio::select! {
-            _ = &mut finish => {
-                // Closing preserves already queued messages but prevents lingering agent tasks
-                // from keeping shutdown open or appending notifications after the final response.
-                outbound.close();
-                image_artifact_outbound.close();
-                // Release the largest retained Values first. The dedicated lane is capped at two,
-                // so this cannot starve the normal queue during shutdown.
-                while let Some(message) = image_artifact_outbound.recv().await {
-                    write_outbound_message(&mut writer, message.message).await?;
-                }
-                while let Some(message) = outbound.recv().await {
-                    write_outbound_message(&mut writer, message).await?;
-                }
-                return Ok(());
-            }
-            message = image_artifact_outbound.recv(), if image_artifact_outbound_open => {
-                match message {
-                    Some(message) => {
-                        write_outbound_message(&mut writer, message.message).await?;
-                    }
-                    None => {
-                        image_artifact_outbound_open = false;
-                        if !outbound_open {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            message = outbound.recv(), if outbound_open => {
-                match message {
-                    Some(message) => {
-                        write_outbound_message(&mut writer, message).await?;
-                    }
-                    None => {
-                        outbound_open = false;
-                        if !image_artifact_outbound_open {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub(crate) async fn write_outbound_message<W>(writer: &mut W, message: Value) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    writer.write_all(message.to_string().as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await
-}
-
 pub(crate) fn enqueue_outbound(
-    outbound: &mpsc::UnboundedSender<Value>,
+    outbound: &crate::transport::OutboundSender,
     message: Value,
 ) -> io::Result<()> {
     outbound

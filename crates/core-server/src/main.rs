@@ -215,7 +215,9 @@ use mycopilot_protocol_rs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use transport::*;

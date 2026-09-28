@@ -90,7 +90,7 @@ async fn assert_completed_done_admits_next_turn(require_approval: bool) {
         },
     };
     let service = AgentService::new_authorized_for_test(storage);
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let first = service
         .start_conversation_turn(input("first"), notifications.clone())
         .unwrap();
@@ -465,7 +465,7 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
         call_id,
         "printf 'stdout-live\\n'; printf 'stderr-live\\n' >&2",
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
 
     let result = service
         .execute_auto_approved_action(
@@ -2376,7 +2376,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         call,
         result: successful_tool_result.clone(),
     });
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
 
     inject_manual_action_audit_failure(&record.storage_id, "completed");
     let pre_commit_error = service

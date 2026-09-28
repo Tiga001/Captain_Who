@@ -189,7 +189,7 @@ fn automation_provider_system_context(request: &Value) -> &str {
     matching[0]["content"].as_str().unwrap()
 }
 
-async fn wait_for_done(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) {
+async fn wait_for_done(receiver: &mut crate::transport::OutboundReceiver) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = receiver.recv().await.expect("Agent event channel closed");
@@ -263,7 +263,7 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
     let task = seed_automation(&storage, "automation-humanroot-new-chat");
 
     let run_one = enqueue_and_claim(&database_path, &storage, &task, "manual-one");
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn_one = service
         .start_automation_human_root_turn(
             automation_start(
@@ -346,7 +346,7 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
 
     let task = storage.get_automation(&task.id).unwrap().unwrap();
     let run_two = enqueue_and_claim(&database_path, &storage, &task, "manual-two");
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn_two = service
         .start_automation_human_root_turn(
             automation_start(
@@ -381,7 +381,7 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
         &existing_task,
         "manual-existing-chat",
     );
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let existing_turn = service
         .start_automation_human_root_turn(
             automation_start(
@@ -486,7 +486,7 @@ async fn stale_automation_admission_rolls_back_conversation_messages_and_trace()
         },
     );
     start.admission_token = "automation-admission:stale-token".to_string();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_automation_human_root_turn(start, notifications)
         .unwrap_err();
@@ -664,7 +664,7 @@ async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroo
         .unwrap();
     let service =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service.grant_execution_access_for_test();
     let error = service
         .start_automation_human_root_turn(
@@ -794,7 +794,7 @@ async fn archived_existing_chat_is_a_repairable_target_error_without_admission()
     let task = seed_automation(&storage, "automation-humanroot-archived-existing");
     service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-archived-existing");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_automation_human_root_turn(
             automation_start(
@@ -842,7 +842,7 @@ async fn new_chat_with_unresolvable_model_credential_is_blocked_as_model_unavail
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-model-unavailable");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_automation_human_root_turn(
             automation_start(
@@ -880,7 +880,7 @@ async fn automation_model_validation_keeps_missing_and_disabled_codes() {
     service.grant_execution_access_for_test();
 
     let missing_run = enqueue_and_claim(&database_path, &storage, &task, "manual-model-missing");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let missing = service
         .start_automation_human_root_turn(
             automation_start(
@@ -914,7 +914,7 @@ async fn automation_model_validation_keeps_missing_and_disabled_codes() {
         &disabled_task,
         "manual-model-disabled",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let disabled = service
         .start_automation_human_root_turn(
             automation_start(
@@ -952,7 +952,7 @@ async fn exhausted_shared_agent_gate_is_retryable_without_admission() {
 
     let task = seed_automation(&storage, "automation-humanroot-global-capacity");
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-global-capacity");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_automation_human_root_turn(
             automation_start(
@@ -1042,7 +1042,7 @@ async fn existing_chat_with_active_human_root_turn_is_retryable_without_admissio
     let task = seed_automation(&storage, "automation-humanroot-busy-existing");
     service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-busy-existing");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .start_automation_human_root_turn(
             automation_start(
@@ -1145,7 +1145,7 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
         &conversation_task,
         "delete-live-conversation",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     service
         .start_automation_human_root_turn(
             automation_start(
@@ -1208,7 +1208,7 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
         &project_task,
         "delete-live-project",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let project_turn = service
         .start_automation_human_root_turn(
             automation_start(
@@ -1286,7 +1286,7 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
         &message_task,
         "delete-live-messages",
     );
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let message_turn = service
         .start_automation_human_root_turn(
             automation_start(

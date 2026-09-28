@@ -39,7 +39,7 @@ fn request(
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     handle_request(
         storage,
         service,

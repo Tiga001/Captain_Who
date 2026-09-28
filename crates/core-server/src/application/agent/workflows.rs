@@ -20,7 +20,7 @@ impl AgentService {
         );
         let result = self.workflow_request_inner(request);
         if result.is_ok() && changes_readiness {
-            self.wake_workflow_deliveries();
+            self.workflow_readiness_changed(None);
         }
         result
     }

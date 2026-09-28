@@ -61,7 +61,7 @@ pub(super) async fn write_provider_stream(
 }
 
 pub(super) async fn collect_until_done(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    receiver: &mut crate::transport::OutboundReceiver,
 ) -> Vec<Value> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut events = Vec::new();
@@ -624,7 +624,7 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some("conversation-root-characterization".to_string());
     input.user_message_id = Some("user-root-characterization".to_string());
@@ -739,7 +739,7 @@ async fn ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message() {
         .unwrap();
     let source_attachment = storage.finish_attachment_import(&import_id).unwrap();
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut original = turn_input("model-1");
     original.conversation_id = Some("conversation-rebind-integration".to_string());
     original.user_message_id = Some("rebind-original-user".to_string());
@@ -754,7 +754,7 @@ async fn ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message() {
         "completed"
     );
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut retry = turn_input("model-1");
     retry.conversation_id = Some(original_turn.conversation_id.clone());
     retry.user_message_id = Some("rebind-retry-user".to_string());
@@ -852,7 +852,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
         )
         .unwrap();
     let source_attachment = storage.finish_attachment_import(&import_id).unwrap();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let mut initial = turn_input("model-1");
     initial.conversation_id = Some("conversation-rewrite-provider".to_string());
     initial.project_id = Some("rewrite-project".to_string());
@@ -869,7 +869,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
         "completed"
     );
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let replacement_content = "Replacement prompt is authoritative";
     let mut replacement = turn_input("model-1");
     replacement.conversation_id = Some(source.conversation_id.clone());
@@ -1026,7 +1026,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     );
 
     let replay = service
-        .rewrite_conversation_turn(rewrite, tokio::sync::mpsc::unbounded_channel().0)
+        .rewrite_conversation_turn(rewrite, crate::transport::outbound_channel().0)
         .unwrap();
     assert_eq!(replay.run_id, replacement.run_id);
     assert_eq!(replay.assistant_message.status.as_deref(), Some("sent"));
@@ -1505,8 +1505,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             preflight.decision,
             AgentProviderTransitionDecision::RequiresCompaction
         );
-        let (transition_notifications, _transition_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (transition_notifications, _transition_receiver) = crate::transport::outbound_channel();
         let transition = transition_service
             .start_provider_transition(
                 AgentProviderTransitionStartInput {
@@ -1610,7 +1609,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
         ("assistant", &assistant_fork_id, "model-1"),
         ("divider", &divider_fork_id, "model-2"),
     ] {
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         let mut input = turn_input(model_id);
         input.conversation_id = Some(conversation_id.clone());
         input.content = format!("Continue from the {suffix} forked snapshot");
@@ -1769,7 +1768,7 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     )
     .unwrap()
     .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
         .unwrap();
@@ -1938,7 +1937,7 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
         )
         .unwrap()
         .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         let turn = service
             .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
             .unwrap();
@@ -2212,7 +2211,7 @@ async fn dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the
     )
     .unwrap();
     let gate = service.turn_concurrency_gate();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> = Arc::new(
         crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(&storage)),
     );
@@ -2512,7 +2511,7 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
     .unwrap();
     let gate = service.turn_concurrency_gate();
     assert_eq!(gate.active(), 1);
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> = Arc::new(
         crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(&storage)),
     );
@@ -2644,7 +2643,7 @@ fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
     )
     .unwrap()
     .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let error = service
         .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
         .unwrap_err();
@@ -2705,8 +2704,8 @@ async fn independent_hosts_admit_only_one_turn_without_loser_message_side_effect
     let service_a = AgentService::new_authorized_for_test(Arc::clone(&storage_a));
     let service_b = AgentService::new_authorized_for_test(Arc::clone(&storage_b));
     let barrier = Arc::new(std::sync::Barrier::new(2));
-    let (notifications_a, mut receiver_a) = tokio::sync::mpsc::unbounded_channel();
-    let (notifications_b, mut receiver_b) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications_a, mut receiver_a) = crate::transport::outbound_channel();
+    let (notifications_b, mut receiver_b) = crate::transport::outbound_channel();
     let input = |suffix: &str| {
         let mut input = turn_input("model-1");
         input.conversation_id = Some("conversation-cross-host-admission".to_string());
@@ -2807,7 +2806,7 @@ fn public_human_turn_rejects_a_child_conversation_before_any_turn_write() {
         .unwrap()
         .unwrap();
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some(spawn.agent.conversation_id.clone());
     input.user_message_id = Some("forged-human-child-user".to_string());
@@ -2881,7 +2880,7 @@ fn public_human_turn_rejects_an_inactive_root_before_any_turn_write() {
         .unwrap()
         .unwrap();
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, _receiver) = crate::transport::outbound_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some("conversation-inactive-root".to_string());
     input.user_message_id = Some("forged-inactive-root-user".to_string());
@@ -2944,7 +2943,7 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
             AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
                 .unwrap();
         service.grant_execution_access_for_test();
-        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (notifications, mut receiver) = crate::transport::outbound_channel();
         service
             .start_conversation_turn(turn_input("model-1"), notifications)
             .unwrap();
@@ -3016,7 +3015,7 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
     service.grant_execution_access_for_test();
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let turn = service
         .start_conversation_turn(turn_input("model-1"), notifications)
         .unwrap();
