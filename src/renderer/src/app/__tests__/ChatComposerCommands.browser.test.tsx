@@ -206,6 +206,9 @@ function TestComposer({
   portalMenus = false,
   showWorkspaceCommands = false,
   workspaceChecking = false,
+  canResume = false,
+  resuming = false,
+  onResumeGenerating,
   initialDraft,
   onSubmitMessage = submit
 }: {
@@ -217,6 +220,9 @@ function TestComposer({
   portalMenus?: boolean
   showWorkspaceCommands?: boolean
   workspaceChecking?: boolean
+  canResume?: boolean
+  resuming?: boolean
+  onResumeGenerating?: ComponentProps<typeof ChatComposer>['onResumeGenerating']
   initialDraft?: ComponentProps<typeof ChatComposer>['draft']
   onSubmitMessage?: ComponentProps<typeof ChatComposer>['onSubmitMessage']
 }) {
@@ -263,6 +269,9 @@ function TestComposer({
         onDraftMessageChange={update}
         onSubmitMessage={onSubmitMessage}
         onStopGenerating={stop}
+        canResume={canResume}
+        isResumeStarting={resuming}
+        onResumeGenerating={onResumeGenerating}
         portalMenus={portalMenus}
         isGenerating={running}
         isManualCompactionRunning={maintenance}
@@ -1252,4 +1261,47 @@ it('does not treat capability-search IME confirmation or cancellation as a comma
   await expect.element(view.getByRole('region', { name: 'capability menu' })).toBeVisible()
   expect(submit).not.toHaveBeenCalled()
   expect(stop).not.toHaveBeenCalled()
+})
+
+it('offers resume only for an empty stopped-task composer and sends typed content normally', async () => {
+  const resume = vi.fn()
+  const view = await render(<TestComposer canResume onResumeGenerating={resume} />)
+  await view.getByRole('button', { name: 'chat.resume', exact: true }).click()
+  expect(resume).toHaveBeenCalledTimes(1)
+  expect(submit).not.toHaveBeenCalled()
+  await view.getByRole('textbox').fill('new instruction')
+  await expect.element(view.getByRole('button', { name: 'chat.send', exact: true })).toBeEnabled()
+  expect(view.container.querySelector('[data-state="resume"]')).toBeNull()
+  await view.getByRole('textbox').fill('')
+  await expect.element(view.getByRole('button', { name: 'chat.resume', exact: true })).toBeEnabled()
+})
+
+it('shows a disabled spinner while resume is being admitted', async () => {
+  const view = await render(<TestComposer canResume resuming />)
+  await expect
+    .element(view.getByRole('button', { name: 'chat.resuming', exact: true }))
+    .toBeDisabled()
+  expect(view.container.querySelector('.composer-resume-spinner')).not.toBeNull()
+})
+
+it('keeps folder payloads on the normal send action after a stop', async () => {
+  const view = await render(
+    <TestComposer
+      canResume
+      initialDraft={createComposerDraft({
+        modelId: 'model-1',
+        folderReferences: [
+          {
+            schemaVersion: 1,
+            id: 'folder',
+            name: 'Folder',
+            rootPath: '/tmp/folder',
+            status: 'available'
+          }
+        ]
+      })}
+    />
+  )
+  await expect.element(view.getByRole('button', { name: 'chat.send', exact: true })).toBeEnabled()
+  expect(view.container.querySelector('[data-state="resume"]')).toBeNull()
 })

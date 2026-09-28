@@ -2076,6 +2076,7 @@ mod tests {
         .unwrap();
 
         let input = AgentChatInput {
+            initial_conversation_trace: None,
             context_image_attachments: Vec::new(),
             folder_references: Vec::new(),
             api_url: format!("http://{address}/v1/chat/completions"),

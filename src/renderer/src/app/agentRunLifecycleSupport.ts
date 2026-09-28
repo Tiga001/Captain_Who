@@ -283,6 +283,20 @@ export interface UseAgentRunLifecycleOptions {
   uiPreferences: Pick<UiPreferencesSnapshot, 'customPermissions'>
 }
 
+/** Only the Host can certify that a continuation failed before its assistant was committed. */
+export function isContinuationAdmissionRejected(error: unknown): boolean {
+  let current = error
+  for (let depth = 0; depth < 5 && current && typeof current === 'object'; depth += 1) {
+    const record = current as {
+      data?: { continuationAdmissionRejected?: unknown }
+      cause?: unknown
+    }
+    if (record.data?.continuationAdmissionRejected === true) return true
+    current = record.cause
+  }
+  return false
+}
+
 export interface RewriteConversationTurnStart {
   requestId: string
   sourceAssistantMessageId: string

@@ -97,7 +97,11 @@ pub(super) fn conversation_trace_checkpoint_prefix_from_input(
     input: &AgentChatInput,
 ) -> ConversationTraceRecorder {
     let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
-        return ConversationTraceRecorder::default();
+        return input
+            .initial_conversation_trace
+            .clone()
+            .map(ConversationTraceRecorder::from_durable_snapshot)
+            .unwrap_or_default();
     };
     ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items.clone(),
@@ -113,7 +117,11 @@ pub(super) fn conversation_trace_from_input_checkpoint(
     archive_metadata: &ConversationHistoryArchiveTraceMetadata,
 ) -> AgentResult<ConversationTraceRecorder> {
     let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
-        return Ok(ConversationTraceRecorder::default());
+        return Ok(input
+            .initial_conversation_trace
+            .clone()
+            .map(ConversationTraceRecorder::from_durable_snapshot)
+            .unwrap_or_default());
     };
     let snapshot = match input.tool_continuation.as_ref() {
         Some(continuation) => {

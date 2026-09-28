@@ -178,6 +178,12 @@ export function registerAgentIpc(
       return coreServer.startConversationTurn(input)
     })
   )
+  ipcMain.handle(HOST_CHANNELS.agent.continueConversationTurn, (_event, input) =>
+    captureHostInvocation(async () => {
+      await assertCanStartTurn()
+      return coreServer.continueConversationTurn(input)
+    })
+  )
   ipcMain.handle(HOST_CHANNELS.agent.rewriteConversationTurn, (_event, input) =>
     captureHostInvocation(async () => {
       await assertCanStartTurn()

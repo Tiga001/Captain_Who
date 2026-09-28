@@ -649,3 +649,57 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
         catalog_report.usage.request_input_tokens() > plain_report.usage.request_input_tokens()
     );
 }
+
+#[test]
+fn admitted_continuation_event_seeds_model_context_and_trace_exactly_once() {
+    let mut input = conversation_context_input(vec![message("user", "Finish the task")]);
+    input.assistant_message_id = Some("continued-assistant".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    });
+    let content = serde_json::json!({"type":"user_turn_continued","message":"The user requests continuing the stopped task."}).to_string();
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder
+        .record_backend_state(
+            0,
+            "continue-request",
+            &content,
+            10,
+            crate::ConversationBackendStatePlacement::Timeline,
+        )
+        .unwrap();
+    input.initial_conversation_trace = Some(recorder.snapshot());
+    let world = WorldStateSnapshot::new(
+        "seed-run",
+        0,
+        vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::EffectiveTools,
+            WorldStateLifetime::Run,
+            json!({"stableTools":[],"dynamicTools":[]}),
+            json!({"stableTools":[],"dynamicTools":[]}),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let prepared =
+            build_llm_request(input.clone(), &[], None, None, Some(world.clone())).unwrap();
+        prepared.context.validate_cache_layout().unwrap();
+        let matching = prepared
+            .context
+            .to_messages()
+            .iter()
+            .filter(|message| message.content() == content)
+            .count();
+        assert_eq!(matching, 1);
+        let trace = prepared.conversation_trace.snapshot();
+        assert_eq!(trace.items.len(), 1);
+        assert_eq!(trace.model_context_items[0].content, content);
+        assert_eq!(trace.next_sequence, 1);
+    }
+}

@@ -88,8 +88,12 @@ import {
 import type { PendingMessageDelta } from './AppShellSupport'
 import { useAgentActionDecisionHandlers } from '../features/agentRun/useAgentActionDecisionHandlers'
 import { useContextWindowSnapshots } from '../features/agentRun/useContextWindowSnapshots'
-import { useAppShellMessageSubmission } from './useAppShellMessageSubmission'
+import {
+  useAppShellMessageSubmission,
+  type PendingProviderTransitionSubmission
+} from './useAppShellMessageSubmission'
 import { useAppShellRuntime } from './useAppShellRuntime'
+import { getContinuableAssistantMessage } from '../features/chat/assistantGeneration'
 import { useAppShellRunControls } from './useAppShellRunControls'
 import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
 import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
@@ -320,16 +324,7 @@ export function AppShell() {
   const editRewriteInFlightRef = useRef<Set<string>>(new Set())
   const editRewriteAttemptsRef = useRef<Map<string, EditRewriteAttempt>>(new Map())
   const pendingProviderTransitionSubmissionsRef = useRef<
-    Map<
-      string,
-      | {
-          kind: 'composer'
-          message: string
-          options: ChatSubmitOptions
-          draftSnapshot?: ChatComposerDraft
-        }
-      | { kind: 'queued_message' }
-    >
+    Map<string, PendingProviderTransitionSubmission>
   >(new Map())
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
@@ -697,6 +692,8 @@ export function AppShell() {
     queueAutoSendConversationIds,
     retryProviderTransition,
     submitEditedLastUserMessage,
+    resumeStoppedTask,
+    resumeStartingConversationIds,
     submitMessage,
     toggleQueueAutoSend
   } = useAppShellMessageSubmission({
@@ -1756,6 +1753,9 @@ export function AppShell() {
                 onRejectAgentAction={handleRejectAgentAction}
                 onReviewLastTurn={openLastTurnReview}
                 onScrollPositionChange={rememberConversationScrollPosition}
+                canResume={Boolean(getContinuableAssistantMessage(activeConversation))}
+                isResumeStarting={resumeStartingConversationIds.has(activeConversation.id)}
+                onResumeGenerating={resumeStoppedTask}
                 onStopGenerating={stopActiveGeneration}
                 onSubmitMessage={submitMessage}
               />

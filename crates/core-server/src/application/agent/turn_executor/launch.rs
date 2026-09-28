@@ -464,6 +464,7 @@ impl AgentService {
                             &worker_assistant_message_id,
                             AgentEvent::Done {
                                 run_id: worker_run_id.clone(),
+                                user_interrupted: None,
                                 success: false,
                                 status: Some(AgentRunStatus::Failed),
                                 content: model_request_interruption.is_none().then_some(message),

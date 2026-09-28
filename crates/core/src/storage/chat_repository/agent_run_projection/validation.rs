@@ -43,6 +43,7 @@ const CURRENT_AGENT_RUN_KEYS: &[&str] = &[
     "timeline",
     "state",
     "interruption",
+    "userInterrupted",
     "error",
     "usage",
     "finishReason",
@@ -438,6 +439,9 @@ fn current_agent_run_projection_is_safe_with_trace_policy(
         || !run.get("firstResponseAt").is_none_or(safe_integer)
         || !run.get("lastResponseAt").is_none_or(safe_integer)
         || !run.get("completedAt").is_none_or(safe_integer)
+        || !run
+            .get("userInterrupted")
+            .is_none_or(serde_json::Value::is_boolean)
     {
         return false;
     }

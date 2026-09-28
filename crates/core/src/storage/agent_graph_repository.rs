@@ -50,12 +50,15 @@ pub(crate) use permissions::{
 pub use settlement::{
     finish_agent_turn_with_result, finish_agent_wake_with_result, settle_tree_stopped_active_wake,
 };
-pub(crate) use tree_cancellation::ensure_agent_tree_origin_run_can_schedule_in_transaction;
 pub use tree_cancellation::{
     begin_agent_tree_run_stop_by_root_agent, begin_agent_tree_run_stop_by_root_conversation,
     cancel_agent_tree_wakes_by_root_agent, cancel_agent_tree_wakes_by_root_conversation,
     get_agent_tree_run_stop, reinforce_agent_tree_run_stop, ActiveAgentTreeWake,
     AgentTreeRunStopCancellation, AgentTreeRunStopRecord, AgentTreeWakeCancellationBatch,
+};
+pub(crate) use tree_cancellation::{
+    ensure_agent_tree_origin_run_can_schedule_in_transaction,
+    query_agent_tree_run_stop_in_connection,
 };
 pub(crate) use wake_projection::project_agent_wake_source_in_transaction;
 pub(crate) use wake_resolution::{

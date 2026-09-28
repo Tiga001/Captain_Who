@@ -864,6 +864,7 @@ mod tests {
         )
         .unwrap();
         AgentChatInput {
+            initial_conversation_trace: None,
             context_image_attachments: Vec::new(),
             api_url,
             api_token: "secret-token".to_string(),

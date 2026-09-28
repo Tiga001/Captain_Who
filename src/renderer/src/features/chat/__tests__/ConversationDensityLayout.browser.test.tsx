@@ -4,7 +4,7 @@ import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import type { TranslationKey } from '../../../config/languageRegistry'
-import type { ChatConversation } from '../chatTypes'
+import type { ChatConversation, ChatMessage } from '../chatTypes'
 import '../../../styles/global.css'
 import '../../agentCollaboration/AgentCenterPanel.css'
 
@@ -77,7 +77,8 @@ function Workspace({
   halfHeight = false,
   turns = 4,
   longText = false,
-  observer = false
+  observer = false,
+  initialConversation
 }: {
   middleWidth?: number
   shellHeight?: number
@@ -85,10 +86,11 @@ function Workspace({
   turns?: number
   longText?: boolean
   observer?: boolean
+  initialConversation?: ChatConversation
 }) {
   const [bottomOpen, setBottomOpen] = useState(halfHeight)
   const [draft, setDraft] = useState(() => createComposerDraft({ modelId: 'model-1' }))
-  const [chat] = useState(() => conversation(turns, longText))
+  const [chat] = useState(() => initialConversation ?? conversation(turns, longText))
   const common = { conversation: chat, initialScrollTop: 0, showTokenUsageDetails: false }
   return (
     <div
@@ -144,6 +146,37 @@ function element(selector: string): HTMLElement {
   return found
 }
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+
+function stoppedMessage(id: string, durationSeconds: number): ChatMessage {
+  return {
+    id,
+    role: 'assistant',
+    content: '',
+    createdAt: 1000,
+    status: 'sent',
+    agentRun: {
+      runId: `run-${id}`,
+      status: 'cancelled',
+      userInterrupted: true,
+      startedAt: 1000,
+      completedAt: 1000 + durationSeconds * 1000,
+      toolDefinitions: [],
+      toolCalls: [],
+      toolResults: [],
+      approvals: [],
+      fileChangeProposals: [],
+      timeline: []
+    }
+  }
+}
+
+function messageGap(before: string, after: string) {
+  return (
+    element(`[data-message-id="${after}"]`).getBoundingClientRect().top -
+    element(`[data-message-id="${before}"]`).getBoundingClientRect().bottom
+  )
+}
+
 async function scrollToEnd() {
   // Let ConversationSurface restore the initial scroll position before scrolling explicitly.
   await frame()
@@ -168,6 +201,89 @@ afterEach(async () => {
 })
 
 describe('Conversation density and adaptive message layout', () => {
+  it.each([480, 720])(
+    'keeps consecutive stopped and resumed status rows compact at %s px',
+    async (middleWidth) => {
+      const chat = conversation(1)
+      const resumed: ChatMessage = {
+        ...stoppedMessage('resumed', 12),
+        status: 'pending',
+        agentRun: {
+          ...stoppedMessage('resumed', 12).agentRun!,
+          status: 'running',
+          userInterrupted: undefined,
+          completedAt: undefined,
+          firstResponseAt: 1001
+        }
+      }
+      chat.messages = [
+        chat.messages[0],
+        stoppedMessage('stopped-0', 0),
+        stoppedMessage('stopped-1', 2),
+        stoppedMessage('stopped-2', 2),
+        resumed
+      ]
+      await render(<Workspace middleWidth={middleWidth} initialConversation={chat} />)
+
+      expect(document.querySelectorAll('.agent-run__elapsed')).toHaveLength(4)
+      for (const [before, after] of [
+        ['stopped-0', 'stopped-1'],
+        ['stopped-1', 'stopped-2'],
+        ['stopped-2', 'resumed']
+      ]) {
+        expect(messageGap(before, after)).toBe(12)
+        const previousHeader = element(`[data-message-id="${before}"] .agent-run__elapsed`)
+        const nextHeader = element(`[data-message-id="${after}"] .agent-run__elapsed`)
+        expect(
+          nextHeader.getBoundingClientRect().top - previousHeader.getBoundingClientRect().bottom
+        ).toBeLessThanOrEqual(20)
+        const nextBox = nextHeader.getBoundingClientRect()
+        expect(
+          document
+            .elementFromPoint(nextBox.left + 8, nextBox.top + 8)
+            ?.closest('[data-message-id]')
+            ?.getAttribute('data-message-id')
+        ).toBe(after)
+      }
+      expect(messageGap('user-0', 'stopped-0')).toBe(40)
+    }
+  )
+
+  it('restores ordinary separation when a stopped timeline expands or a user message intervenes', async () => {
+    const chat = conversation(2)
+    const stopped = stoppedMessage('stopped', 16)
+    stopped.agentRun!.toolCalls = [
+      {
+        id: 'read-call',
+        tool: 'read_file',
+        args: { path: 'notes.md' },
+        approvalStatus: 'not_required',
+        reason: null
+      }
+    ]
+    stopped.agentRun!.toolResults = [
+      { callId: 'read-call', tool: 'read_file', ok: true, result: { path: 'notes.md' } }
+    ]
+    stopped.agentRun!.timeline = [{ id: 'read-timeline', type: 'tool_call', callId: 'read-call' }]
+    chat.messages = [
+      chat.messages[0],
+      stopped,
+      chat.messages[1],
+      stoppedMessage('stopped-next', 2),
+      chat.messages[2]
+    ]
+    await render(<Workspace observer initialConversation={chat} />)
+
+    expect(messageGap('stopped', 'assistant-0')).toBe(12)
+    expect(messageGap('assistant-0', 'stopped-next')).toBe(40)
+    expect(messageGap('stopped-next', 'user-1')).toBe(40)
+    const header = page.elementLocator(element('[data-message-id="stopped"] .agent-run__elapsed'))
+    await header.click()
+    await expect.poll(() => messageGap('stopped', 'assistant-0')).toBe(40)
+    await header.click()
+    await expect.poll(() => messageGap('stopped', 'assistant-0')).toBe(12)
+  })
+
   it.each([
     { width: 480, padding: 24, rail: false },
     { width: 720, padding: 32, rail: true },

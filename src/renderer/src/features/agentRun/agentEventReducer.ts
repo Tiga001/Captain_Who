@@ -1004,6 +1004,7 @@ export function applyAgentEventToChatMessage(
     {
       ...currentRun,
       status: nextStatus,
+      userInterrupted: agentEvent.userInterrupted ?? currentRun.userInterrupted,
       llmRetry: undefined,
       firstResponseAt: finalResponseAt,
       lastResponseAt:

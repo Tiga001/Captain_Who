@@ -28,6 +28,7 @@ import type {
   AgentConversationLocator,
   AgentConversationLocatorRequest,
   AgentConversationTurnInput,
+  AgentConversationTurnContinueInput,
   AgentConversationTurnOutput,
   AgentConversationTurnRewriteInput,
   AgentContextWindowSnapshotInput,
@@ -141,6 +142,7 @@ import {
   AGENT_READ_FILE_CHANGE_METHOD,
   AGENT_REJECT_ACTION_METHOD,
   AGENT_START_CONVERSATION_TURN_METHOD,
+  AGENT_CONTINUE_CONVERSATION_TURN_METHOD,
   AGENT_START_PROVIDER_TRANSITION_METHOD,
   AGENT_STEER_RUN_METHOD,
   parseAgentActionExecutionOutputForHost,
@@ -499,6 +501,15 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
     return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnInput>(
       AGENT_START_CONVERSATION_TURN_METHOD,
+      input
+    )
+  }
+
+  continueConversationTurn(
+    input: AgentConversationTurnContinueInput
+  ): Promise<AgentConversationTurnOutput> {
+    return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnContinueInput>(
+      AGENT_CONTINUE_CONVERSATION_TURN_METHOD,
       input
     )
   }

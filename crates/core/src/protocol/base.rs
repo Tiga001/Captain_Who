@@ -135,6 +135,10 @@ pub struct AgentChatInput {
     /// model journals and checkpoints persist references, never this collection.
     #[serde(skip)]
     pub context_image_attachments: Vec<AgentInputAttachment>,
+    /// Host-admitted immutable events at the start of a new Turn (for example explicit
+    /// continuation authorization). They seed both the recorder and model frame exactly once.
+    #[serde(skip)]
+    pub initial_conversation_trace: Option<crate::ConversationTraceSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<AgentRunCheckpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]

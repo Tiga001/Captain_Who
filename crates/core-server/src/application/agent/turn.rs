@@ -15,6 +15,99 @@ impl AgentService {
         )
     }
 
+    pub fn continue_conversation_turn(
+        &self,
+        input: AgentConversationTurnContinueInput,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        let assistant_message_id = input.assistant_message_id.clone();
+        self.continue_conversation_turn_inner(input, notifications)
+            .map_err(|error| {
+                if !matches!(
+                    self.storage
+                        .get_conversation_turn_trace(&assistant_message_id),
+                    Ok(None)
+                ) {
+                    return error;
+                }
+                let mut data = error
+                    .data()
+                    .cloned()
+                    .or_else(|| {
+                        error
+                            .skill_activation()
+                            .and_then(|data| serde_json::to_value(data).ok())
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(data) = data.as_object_mut() {
+                    data.insert("continuationAdmissionRejected".into(), Value::Bool(true));
+                    data.entry("code")
+                        .or_insert_with(|| Value::String("TURN_CONTINUATION_REJECTED".into()));
+                }
+                AgentServiceError::structured(error.to_string(), data)
+            })
+    }
+
+    fn continue_conversation_turn_inner(
+        &self,
+        input: AgentConversationTurnContinueInput,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        for (value, field) in [
+            (&input.request_id, "requestId"),
+            (&input.conversation_id, "conversationId"),
+            (
+                &input.source_assistant_message_id,
+                "sourceAssistantMessageId",
+            ),
+            (&input.assistant_message_id, "assistantMessageId"),
+        ] {
+            if value.trim().is_empty()
+                || value.trim() != value
+                || value.len() > 256
+                || value.chars().any(char::is_control)
+            {
+                return Err(format!("继续任务的 {field} 无效。").into());
+            }
+        }
+        if input.source_assistant_message_id == input.assistant_message_id {
+            return Err("继续任务必须创建新的回复消息。".to_string().into());
+        }
+        let fingerprint =
+            serde_json::to_vec(&input).map_err(|error| format!("无法验证继续任务请求：{error}"))?;
+        let continuation = HumanConversationTurnContinuation {
+            request_id: input.request_id,
+            request_fingerprint: format!("{:x}", Sha256::digest(fingerprint)),
+            source_assistant_message_id: input.source_assistant_message_id,
+        };
+        self.start_root_turn_with_continuation(
+            AgentConversationTurnInput {
+                conversation_id: Some(input.conversation_id),
+                project_id: None,
+                model_id: input.model_id,
+                context_window_indicator_enabled: input.context_window_indicator_enabled,
+                // Host-only preparation placeholder. This never becomes a user message or model input.
+                content: "Continue the interrupted task.".into(),
+                attachments: Vec::new(),
+                folder_references: Vec::new(),
+                skills: input.skills,
+                title: None,
+                user_message_id: None,
+                assistant_message_id: Some(input.assistant_message_id),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: input.permissions,
+            },
+            None,
+            None,
+            None,
+            None,
+            Some(continuation),
+            notifications,
+        )
+    }
+
     pub(super) fn start_human_root_turn(
         &self,
         input: AgentConversationTurnInput,
@@ -149,11 +242,33 @@ impl AgentService {
 
     pub(super) fn start_root_turn_with_workflow(
         &self,
+        input: AgentConversationTurnInput,
+        rewrite: Option<HumanConversationTurnRewrite>,
+        automation: Option<AutomationHumanRootAdmission>,
+        response: Option<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>,
+        workflow: Option<mycopilot_core::workflow_execution::Input>,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        self.start_root_turn_with_continuation(
+            input,
+            rewrite,
+            automation,
+            response,
+            workflow,
+            None,
+            notifications,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_root_turn_with_continuation(
+        &self,
         mut input: AgentConversationTurnInput,
         rewrite: Option<HumanConversationTurnRewrite>,
         mut automation: Option<AutomationHumanRootAdmission>,
         response: Option<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>,
         workflow: Option<mycopilot_core::workflow_execution::Input>,
+        continuation: Option<HumanConversationTurnContinuation>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         let automation_execution_context = automation
@@ -173,7 +288,7 @@ impl AgentService {
         // visible to the same one-Turn reservation used by an existing Conversation.
         let conversation_id = normalized_optional(input.conversation_id.as_deref())
             .unwrap_or_else(|| create_id("conversation"));
-        let user_message_id = normalized_optional(input.user_message_id.as_deref())
+        let mut user_message_id = normalized_optional(input.user_message_id.as_deref())
             .unwrap_or_else(|| create_id("message"));
         let assistant_message_id = normalized_optional(input.assistant_message_id.as_deref())
             .unwrap_or_else(|| create_id("message"));
@@ -213,6 +328,16 @@ impl AgentService {
                 }
                 return active_rewrite_turn_output(&self.storage, &existing)
                     .map_err(AgentServiceError::from);
+            }
+        }
+        if let Some(continuation) = &continuation {
+            if let Some(output) = replay_continued_turn(
+                &self.storage,
+                &conversation_id,
+                &assistant_message_id,
+                continuation,
+            )? {
+                return Ok(output);
             }
         }
         // Every genuinely new root Turn needs a current Host lease, including answers to old
@@ -267,6 +392,39 @@ impl AgentService {
         self.ensure_no_manual_context_compaction(&conversation_id)?;
         let (previous_conversation, expected_revision) =
             self.storage.load_conversation_for_turn(&conversation_id)?;
+        if let Some(continuation) = &continuation {
+            let conversation = previous_conversation
+                .as_ref()
+                .ok_or_else(|| "继续任务的会话不存在。".to_string())?;
+            let source = conversation
+                .messages
+                .last()
+                .filter(|message| {
+                    message.role == "assistant"
+                        && message.id == continuation.source_assistant_message_id
+                })
+                .ok_or_else(|| "只能继续当前对话最新一次由你停止的任务。".to_string())?;
+            let trace = self
+                .storage
+                .get_conversation_turn_trace(&source.id)?
+                .ok_or_else(|| "停止的任务缺少执行记录，无法继续。".to_string())?;
+            if trace.terminal_status
+                != mycopilot_core::ConversationTurnTraceTerminalStatus::Cancelled
+                || !trace.user_interrupted()
+            {
+                return Err("只能继续由你主动停止且已完成停止的任务。"
+                    .to_string()
+                    .into());
+            }
+            user_message_id = conversation
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "user")
+                .map(|message| message.id.clone())
+                .ok_or_else(|| "停止的任务没有原始用户消息。".to_string())?;
+            input.user_message_id = Some(user_message_id.clone());
+        }
         if rewrite.is_some()
             && previous_conversation
                 .as_ref()
@@ -289,7 +447,7 @@ impl AgentService {
         }
         if previous_conversation.as_ref().is_some_and(|conversation| {
             conversation.messages.iter().any(|message| {
-                (message.id == user_message_id && response.is_none())
+                (message.id == user_message_id && response.is_none() && continuation.is_none())
                     || message.id == assistant_message_id
             })
         }) {
@@ -338,7 +496,18 @@ impl AgentService {
                 .check()
                 .map_err(ExecutionAccessDenied::agent_error)
         };
-        let prepared_outcome = if let Some(workflow) = workflow.clone() {
+        let prepared_outcome = if let Some(continuation) = continuation.clone() {
+            prepare_reserved_continuation_turn(
+                &self.storage,
+                &self.skills,
+                input,
+                &run_id,
+                previous_conversation.clone(),
+                expected_revision,
+                continuation,
+                &execution_access_check,
+            )
+        } else if let Some(workflow) = workflow.clone() {
             let claim =
                 self.storage
                     .workflow_execution_bind_input(&workflow.id, &run_id, &user_message_id);
@@ -516,6 +685,22 @@ impl AgentService {
                 self.release_turn_concurrency_permit(&run_id);
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                if continuation.is_some() {
+                    return Err(
+                        match self.settle_prepared_continuation_failure(
+                            &conversation_id,
+                            &assistant_message_id,
+                            Some(&run_id),
+                            &error.to_string(),
+                        ) {
+                            Ok(()) => error,
+                            Err(settlement_error) => format!(
+                                "{error}；同时无法终态化已接受的继续任务：{settlement_error}"
+                            )
+                            .into(),
+                        },
+                    );
+                }
                 let rollback = PreparedTurnRollback::Human {
                     user_message_id: user_message_id.clone(),
                     previous: previous_conversation.clone(),
@@ -531,7 +716,9 @@ impl AgentService {
             }
         };
 
-        let rollback = if response.is_some() {
+        let rollback = if continuation.is_some() {
+            PreparedTurnRollback::Continuation
+        } else if response.is_some() {
             PreparedTurnRollback::HumanResponse
         } else if let Some(rewrite) = &rewrite {
             PreparedTurnRollback::Rewrite {

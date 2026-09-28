@@ -80,6 +80,7 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
 
     let done = agent_event_notification(AgentEvent::Done {
         run_id: "run-owned".to_string(),
+        user_interrupted: None,
         success: true,
         status: Some(AgentRunStatus::WaitingForApproval),
         content: Some("External MCP approval is required.".to_string()),
@@ -254,6 +255,7 @@ fn renderer_command_projection_excludes_host_runtime_authority_and_private_input
 
     let renderer_event = agent_event_notification(AgentEvent::Done {
         run_id: "run-pdf".to_string(),
+        user_interrupted: None,
         success: false,
         status: Some(AgentRunStatus::WaitingForApproval),
         content: None,

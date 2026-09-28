@@ -295,7 +295,7 @@ fn begin_agent_tree_run_stop_in_transaction(
         .ok_or_else(|| corrupt("created Agent-tree stop root fact disappeared"))
 }
 
-pub(super) fn query_agent_tree_run_stop_in_connection(
+pub(crate) fn query_agent_tree_run_stop_in_connection(
     connection: &Connection,
     run_id: &str,
 ) -> Result<Option<AgentTreeRunStopRecord>, AgentGraphError> {

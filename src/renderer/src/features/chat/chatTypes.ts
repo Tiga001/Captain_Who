@@ -225,6 +225,8 @@ export interface ChatAgentInterruptionView {
 }
 
 export interface ChatAgentRunView {
+  /** Host-persisted fact that the user explicitly interrupted this turn. */
+  userInterrupted?: boolean
   runId: string | null
   status: AgentRunStatus | 'starting'
   startedAt?: number

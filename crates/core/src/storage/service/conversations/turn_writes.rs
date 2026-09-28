@@ -549,6 +549,21 @@ impl StorageService {
             trace_updated_at,
         )
         .map_err(storage_error)?;
+        // A continuation's first Host event is its durable request receipt as well as the
+        // exact model input. Persist both journals with the assistant, before any worker can run.
+        if let [crate::ConversationTurnTraceItem::BackendState { sequence, event_id, content, .. }] = trace.items.as_slice() {
+            if event_id.starts_with("user-continuation:") {
+                conversation_model_context_repository::commit_items_in_connection(
+                    &transaction,
+                    &conversation.id,
+                    &trace.assistant_message_id,
+                    &[crate::ConversationModelContextItem {
+                        sequence: *sequence, ordinal: 0, role: "user".into(), content: content.clone(),
+                        images: Vec::new(), tool_call_id: None, tool_calls: Vec::new(), is_error: false,
+                    }],
+                ).map_err(storage_error)?;
+            }
+        }
         crate::storage::agent_collaboration_run_policy_repository::freeze_run(
             &transaction,
             &trace.run_id,

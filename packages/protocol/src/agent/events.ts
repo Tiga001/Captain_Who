@@ -230,6 +230,8 @@ export type AgentEvent =
       type: 'done'
       runId: string
       success: boolean
+      /** Present only when the committed terminal records an explicit user interruption. */
+      userInterrupted?: boolean
       status?: AgentRunStatus
       content?: string
       usage?: AgentUsage

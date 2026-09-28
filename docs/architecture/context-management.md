@@ -2,12 +2,16 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # 上下文管理
 
 本文定义主模型上下文的事实来源、组装、计量和压缩。Trace、Exact Archive、历史检索与分叉见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)；Provider wire 协议见[Agent Runtime 与模型 Provider](./agent-runtime-and-providers.md)；FileChange 的 Observation/投影边界见[FileChange 子系统](../subsystems/file-change.md)。
+
+用户主动停止和明确继续也是上下文中的持久事实：停止在终态事务中追加，继续在新轮准入事务中追加，
+均写入 Trace 与模型上下文日志，不靠每次请求临时插入提示。后续采样和重载复用相同的已提交前缀，
+正常压缩后由摘要承接。交互与准入规则见[对话输入](../subsystems/conversation-inputs.md#用户停止与继续任务)。
 
 ## 职责边界
 

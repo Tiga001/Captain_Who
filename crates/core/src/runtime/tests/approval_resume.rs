@@ -197,6 +197,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     });
 
     let mut base_input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
@@ -727,6 +728,7 @@ async fn assert_skill_resource_approval_round_trip(
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),

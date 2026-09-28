@@ -8,12 +8,13 @@ use crate::application::agent_collaboration::{
 use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
-    AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
-    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentFileChangeHistoryDiffPage,
-    AgentProviderTransitionGetStatusInput, AgentProviderTransitionGetStatusOutput,
-    AgentProviderTransitionOperation, AgentProviderTransitionPreflightInput,
-    AgentProviderTransitionPreflightOutput, AgentProviderTransitionStartInput, AgentServiceError,
-    PendingActionStatus, PendingAgentActionSnapshot,
+    AgentConversationTurnContinueInput, AgentConversationTurnInput, AgentConversationTurnOutput,
+    AgentConversationTurnRewriteInput, AgentFileChangeContentPage, AgentFileChangeDiffPage,
+    AgentFileChangeHistoryDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
+    AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
+    AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
+    PendingAgentActionSnapshot,
 };
 use crate::application::mcp::approval_payload_store::{
     McpApprovalStartupInspector, McpApprovalStartupPayloadState,

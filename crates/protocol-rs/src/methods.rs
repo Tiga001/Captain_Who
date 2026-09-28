@@ -58,6 +58,7 @@ pub const IMAGE_GENERATION_GET_STATUS_METHOD: &str = "imageGeneration.getStatus"
 pub const IMAGE_GENERATION_READ_ARTIFACT_METHOD: &str = "imageGeneration.readArtifact";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
 pub const AGENT_STEER_RUN_METHOD: &str = "agent.steerRun";
+pub const AGENT_CONTINUE_CONVERSATION_TURN_METHOD: &str = "agent.continueConversationTurn";
 pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
 pub const AGENT_REWRITE_CONVERSATION_TURN_METHOD: &str = "agent.rewriteConversationTurn";
 pub const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD: &str = "agent.getContextWindowSnapshot";

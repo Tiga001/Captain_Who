@@ -265,6 +265,7 @@ impl AgentService {
         }));
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
+            user_interrupted: None,
             success: false,
             status: Some(AgentRunStatus::Failed),
             content: Some(FAILURE_MESSAGE.to_string()),

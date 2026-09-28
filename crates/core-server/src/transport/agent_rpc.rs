@@ -30,6 +30,22 @@ pub(crate) fn handle_agent_start_conversation_turn(
     }
 }
 
+pub(crate) fn handle_agent_continue_conversation_turn(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentConversationTurnContinueInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    match agent_service.continue_conversation_turn(input, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(error) => agent_service_error_response(id, error),
+    }
+}
+
 pub(crate) fn handle_agent_rewrite_conversation_turn(
     agent_service: &AgentService,
     notification_tx: agent::CoreServerNotificationSender,

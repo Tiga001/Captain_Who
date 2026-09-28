@@ -133,6 +133,9 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
     message?: string
   ) => ApprovalSubmissionResult
   onReviewLastTurn?: (filePath?: string) => void
+  onResumeGenerating?: () => void | Promise<void>
+  canResume?: boolean
+  isResumeStarting?: boolean
   onStopGenerating?: () => void
   onSubmitMessage: (
     message: string,
@@ -996,6 +999,9 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               onOpenWorkspaceReference={interactive.onOpenWorkspaceReference}
               queueAutoSendEnabled={interactive.queueAutoSendEnabled}
               onToggleQueueAutoSend={interactive.onToggleQueueAutoSend}
+              onResumeGenerating={interactive.onResumeGenerating}
+              canResume={interactive.canResume}
+              isResumeStarting={interactive.isResumeStarting}
               onStopGenerating={interactive.onStopGenerating}
               onSubmitMessage={interactive.onSubmitMessage}
               permissionModeAvailability={interactive.permissionModeAvailability}

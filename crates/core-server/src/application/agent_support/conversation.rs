@@ -73,8 +73,110 @@ pub(crate) struct HumanConversationTurnRewrite {
     pub(crate) source_assistant_message_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct HumanConversationTurnContinuation {
+    pub(crate) request_id: String,
+    pub(crate) request_fingerprint: String,
+    pub(crate) source_assistant_message_id: String,
+}
+
+impl HumanConversationTurnContinuation {
+    pub(crate) fn event_prefix(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "user-continuation:{:x}:",
+            Sha256::digest(self.request_id.as_bytes())
+        )
+    }
+
+    pub(crate) fn event_id(&self) -> String {
+        format!("{}{}", self.event_prefix(), self.request_fingerprint)
+    }
+
+    fn initial_trace(&self, timestamp: i64) -> mycopilot_core::ConversationTraceSnapshot {
+        let content = serde_json::json!({
+            "type": "user_turn_continued",
+            "instruction": "The user requests continuation of the interrupted task. Continue from the preserved progress. Do not repeat confirmed completed actions. Check the actual state of interrupted operations with uncertain outcomes before deciding what to do next."
+        }).to_string();
+        mycopilot_core::ConversationTraceSnapshot {
+            items: vec![mycopilot_core::ConversationTurnTraceItem::BackendState {
+                sequence: 0,
+                event_id: self.event_id(),
+                content: content.clone(),
+                created_at: timestamp,
+                placement: mycopilot_core::ConversationBackendStatePlacement::Timeline,
+            }],
+            model_context_items: vec![mycopilot_core::ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "user".into(),
+                content,
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }],
+            next_sequence: 1,
+            truncated: false,
+        }
+    }
+}
+
+/// A receipt is the initial, append-only trace item committed together with the new assistant.
+/// The event identity contains only hashes; the model sees the continuation instruction alone.
+pub(crate) fn replay_continued_turn(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    continuation: &HumanConversationTurnContinuation,
+) -> Result<Option<AgentConversationTurnOutput>, String> {
+    let prefix = continuation.event_prefix();
+    let traces = storage.list_conversation_turn_traces(conversation_id)?;
+    let Some(trace) = traces.iter().find(|trace| {
+        trace.items.first().is_some_and(|item| {
+            matches!(item, mycopilot_core::ConversationTurnTraceItem::BackendState { event_id, .. }
+            if event_id.starts_with(&prefix))
+        })
+    }) else {
+        return Ok(None);
+    };
+    if trace.assistant_message_id != assistant_message_id
+        || !matches!(trace.items.first(),
+        Some(mycopilot_core::ConversationTurnTraceItem::BackendState { event_id, .. })
+        if event_id == &continuation.event_id())
+    {
+        return Err("continue_turn_request_conflict: requestId 已用于其他继续任务请求。".into());
+    }
+    let conversation = storage
+        .load_conversation(conversation_id)?
+        .ok_or_else(|| "继续任务的会话已不存在。".to_string())?;
+    let assistant_index = conversation
+        .messages
+        .iter()
+        .position(|message| message.id == assistant_message_id)
+        .ok_or_else(|| "继续任务的回复已不存在。".to_string())?;
+    let user_message = conversation.messages[..assistant_index]
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .cloned()
+        .ok_or_else(|| "继续任务的原始消息已不存在。".to_string())?;
+    Ok(Some(AgentConversationTurnOutput {
+        run_id: trace.run_id.clone(),
+        event_name: AGENT_EVENT_NAME.to_string(),
+        conversation_id: conversation_id.to_string(),
+        user_message_id: user_message.id.clone(),
+        assistant_message_id: assistant_message_id.to_string(),
+        user_message,
+        assistant_message: conversation.messages[assistant_index].clone(),
+        activated_skills: Vec::new(),
+        skill_activation_revision: None,
+    }))
+}
+
 enum ConversationTurnInputSource {
     Human,
+    HumanContinuation(HumanConversationTurnContinuation),
     Workflow(Box<mycopilot_core::workflow_execution::Input>),
     HumanResponse(Box<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>),
     ExistingAgentProjection {
@@ -251,6 +353,33 @@ pub(crate) fn prepare_reserved_human_rewrite_turn(
         existing,
         expected_revision,
         Some(rewrite),
+        None,
+        None,
+        Some(check_execution_access),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_reserved_continuation_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    continuation: HumanConversationTurnContinuation,
+    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
+    prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::HumanContinuation(continuation),
+        TurnReservationMode::CommitDurableLease,
+        existing,
+        expected_revision,
+        None,
         None,
         None,
         Some(check_execution_access),
@@ -602,7 +731,9 @@ fn prepare_conversation_turn_from_source(
             .into_iter()
             .filter_map(|input| input.delivery_id),
     );
-    history_excluded_message_ids.push(user_message_id.clone());
+    if !matches!(&source, ConversationTurnInputSource::HumanContinuation(_)) {
+        history_excluded_message_ids.push(user_message_id.clone());
+    }
     history_excluded_message_ids.push(assistant_message_id.clone());
     if let Some(rewrite) = &rewrite {
         history_excluded_message_ids.push(rewrite.source_user_message_id.clone());
@@ -621,6 +752,12 @@ fn prepare_conversation_turn_from_source(
     )?;
 
     let user_message = match &source {
+        ConversationTurnInputSource::HumanContinuation(_) => conversation
+            .messages
+            .iter()
+            .find(|message| message.id == user_message_id && message.role == "user")
+            .cloned()
+            .ok_or_else(|| "继续任务的原始消息不存在。".to_string())?,
         ConversationTurnInputSource::Human
         | ConversationTurnInputSource::HumanResponse(_)
         | ConversationTurnInputSource::Workflow(_) => {
@@ -681,7 +818,20 @@ fn prepare_conversation_turn_from_source(
     } else {
         user_message
     };
-    let assistant_created_at = timestamp.max(user_message.created_at.saturating_add(1));
+    let assistant_created_at = timestamp
+        .max(user_message.created_at.saturating_add(1))
+        .max(
+            conversation
+                .messages
+                .last()
+                .map_or(0, |message| message.created_at.saturating_add(1)),
+        );
+    let initial_conversation_trace = match &source {
+        ConversationTurnInputSource::HumanContinuation(continuation) => {
+            Some(continuation.initial_trace(assistant_created_at))
+        }
+        _ => None,
+    };
     let assistant_message = ChatMessageRecord {
         human_interaction_response: None,
         id: assistant_message_id.clone(),
@@ -757,12 +907,15 @@ fn prepare_conversation_turn_from_source(
             };
             let checked_admission =
                 check_execution_access.map(|_| &check_access as &dyn Fn() -> Result<(), String>);
-            let initial_trace = mycopilot_core::ConversationTraceSnapshot::default()
+            let initial_trace = initial_conversation_trace
+                .clone()
+                .unwrap_or_default()
                 .in_progress_trace(run_id, &conversation_id, &assistant_message_id);
             let trusted_wake = match &source {
                 ConversationTurnInputSource::Human
                 | ConversationTurnInputSource::HumanResponse(_)
-                | ConversationTurnInputSource::Workflow(_) => None,
+                | ConversationTurnInputSource::Workflow(_)
+                | ConversationTurnInputSource::HumanContinuation(_) => None,
                 ConversationTurnInputSource::ExistingAgentProjection { wake_admission, .. } => {
                     Some(wake_admission.as_ref())
                 }
@@ -770,7 +923,8 @@ fn prepare_conversation_turn_from_source(
             let permission_source = match &source {
                 ConversationTurnInputSource::Human
                 | ConversationTurnInputSource::HumanResponse(_)
-                | ConversationTurnInputSource::Workflow(_) => {
+                | ConversationTurnInputSource::Workflow(_)
+                | ConversationTurnInputSource::HumanContinuation(_) => {
                     mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
                         input.permissions,
                     )
@@ -963,7 +1117,8 @@ fn prepare_conversation_turn_from_source(
         collaboration_identity: match &source {
             ConversationTurnInputSource::Human
             | ConversationTurnInputSource::HumanResponse(_)
-            | ConversationTurnInputSource::Workflow(_) => None,
+            | ConversationTurnInputSource::Workflow(_)
+            | ConversationTurnInputSource::HumanContinuation(_) => None,
             ConversationTurnInputSource::ExistingAgentProjection {
                 collaboration_identity,
                 ..
@@ -975,7 +1130,11 @@ fn prepare_conversation_turn_from_source(
     let world_state_records = load_conversation_world_state(storage, &conversation_id)?;
 
     let mut agent_messages = history_messages;
-    if !matches!(&source, ConversationTurnInputSource::Workflow(_)) {
+    if !matches!(
+        &source,
+        ConversationTurnInputSource::Workflow(_)
+            | ConversationTurnInputSource::HumanContinuation(_)
+    ) {
         agent_messages.push(AgentChatMessage {
             conversation_completion_covered: false,
             message_id: Some(user_message_id.clone()),
@@ -1019,6 +1178,7 @@ fn prepare_conversation_turn_from_source(
         tool_continuation: None,
         attachments: input.attachments,
         folder_references: input.folder_references,
+        initial_conversation_trace,
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,

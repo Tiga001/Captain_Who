@@ -195,6 +195,7 @@ impl AgentService {
         self.unregister_cancellation_if_current(run_id, cancellation_token);
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
+            user_interrupted: output_user_interrupted(&output),
             success: false,
             status: Some(AgentRunStatus::Cancelled),
             content: None,
@@ -410,6 +411,7 @@ impl AgentService {
         }));
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
+            user_interrupted: None,
             success: false,
             status: Some(AgentRunStatus::Failed),
             content: Some(terminal_message),

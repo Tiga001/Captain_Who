@@ -200,6 +200,7 @@ fn discoverable_skill(description: &str) -> crate::skills::AgentSkillDiscoverySn
 
 fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput {
     AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: String::new(),

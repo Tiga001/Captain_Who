@@ -827,6 +827,10 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
         ("cancelRun", AGENT_CANCEL_RUN_METHOD),
         ("steerRun", AGENT_STEER_RUN_METHOD),
         (
+            "continueConversationTurn",
+            AGENT_CONTINUE_CONVERSATION_TURN_METHOD,
+        ),
+        (
             "startConversationTurn",
             AGENT_START_CONVERSATION_TURN_METHOD,
         ),

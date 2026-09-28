@@ -2628,6 +2628,60 @@ fn terminal_event_gate_defers_settled_state_and_done_until_commit() {
 }
 
 #[test]
+fn terminal_event_gate_publishes_only_the_committed_user_stop_fact() {
+    let mut output = completed_output_for_terminal_gate();
+    output.status = AgentRunStatus::Cancelled;
+    assert!(matches!(
+        terminal_done_event(&output),
+        AgentEvent::Done {
+            user_interrupted: None,
+            ..
+        }
+    ));
+    let gate = AgentTerminalEventGate::default();
+    assert!(gate.route(terminal_done_event(&output)).is_none());
+
+    let mut trace = cancelled_conversation_trace_without_items(
+        &output.run_id,
+        "conversation-terminal-gate",
+        "assistant-terminal-gate",
+    );
+    trace.items.push(ConversationTurnTraceItem::BackendState {
+        sequence: 0,
+        event_id: "user-stop".into(),
+        content: serde_json::json!({
+            "type": "user_turn_interrupted", "reason": "user_requested"
+        })
+        .to_string(),
+        created_at: 1,
+        placement: mycopilot_core::ConversationBackendStatePlacement::AfterMessage,
+    });
+    output.conversation_turn_trace = Some(trace);
+    assert!(matches!(
+        gate.take_after_persistence(&output).as_slice(),
+        [AgentEvent::Done {
+            user_interrupted: Some(true),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        terminal_done_event(&output),
+        AgentEvent::Done {
+            user_interrupted: Some(true),
+            ..
+        }
+    ));
+    output.status = AgentRunStatus::Completed;
+    assert!(matches!(
+        terminal_done_event(&output),
+        AgentEvent::Done {
+            user_interrupted: None,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn terminal_event_gate_replaces_deferred_segment_usage_with_run_total() {
     let gate = AgentTerminalEventGate::default();
     let mut output = completed_output_for_terminal_gate();
@@ -2643,6 +2697,7 @@ fn terminal_event_gate_replaces_deferred_segment_usage_with_run_total() {
     assert!(gate
         .route(AgentEvent::Done {
             run_id: output.run_id.clone(),
+            user_interrupted: None,
             success: true,
             status: Some(AgentRunStatus::Completed),
             content: Some(output.content.clone()),
@@ -2815,6 +2870,7 @@ fn terminal_event_gate_does_not_delay_approval_waiting_done() {
     let gate = AgentTerminalEventGate::default();
     let routed = gate.route(AgentEvent::Done {
         run_id: "run-terminal-gate".to_string(),
+        user_interrupted: None,
         success: false,
         status: Some(AgentRunStatus::WaitingForApproval),
         content: None,

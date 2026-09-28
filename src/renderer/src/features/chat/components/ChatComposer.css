@@ -1270,3 +1270,19 @@
   max-width: 100%;
   padding: 0 8px;
 }
+
+.composer-resume-spinner {
+  animation: composer-resume-spin 0.9s linear infinite;
+}
+
+@keyframes composer-resume-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-resume-spinner {
+    animation: none;
+  }
+}

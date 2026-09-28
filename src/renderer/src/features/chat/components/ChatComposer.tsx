@@ -11,7 +11,17 @@ import {
   type KeyboardEvent
 } from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
-import { ArrowUp, Check, ChevronDown, Folder, Plus, Search, X } from 'lucide-react'
+import {
+  ArrowUp,
+  Check,
+  ChevronDown,
+  Folder,
+  LoaderCircle,
+  Play,
+  Plus,
+  Search,
+  X
+} from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
 import { useLicense } from '../../license/LicenseContext'
@@ -111,6 +121,9 @@ interface ChatComposerProps {
     message: string,
     options: ChatSubmitOptions
   ) => boolean | void | Promise<boolean | void>
+  onResumeGenerating?: () => void | Promise<void>
+  canResume?: boolean
+  isResumeStarting?: boolean
   onStopGenerating?: () => void
   permissionModeAvailability?: {
     custom: boolean
@@ -145,6 +158,9 @@ export function ChatComposer({
   onToggleQueueAutoSend,
   onSubmitMessage,
   onStopGenerating,
+  onResumeGenerating,
+  canResume = false,
+  isResumeStarting = false,
   permissionModeAvailability = { custom: true, full: true },
   portalMenus = false,
   resetKey,
@@ -378,15 +394,23 @@ export function ChatComposer({
       ? selectedCommand?.disabledReason
         ? 'disabled'
         : 'ready'
-      : isModelTransitionRunning || isManualCompactionRunning
-        ? 'disabled'
-        : isGenerating
-          ? canSend
-            ? 'ready'
-            : 'stop'
-          : canSend
-            ? 'ready'
-            : 'disabled'
+      : isResumeStarting
+        ? 'resuming'
+        : isModelTransitionRunning || isManualCompactionRunning
+          ? 'disabled'
+          : isGenerating
+            ? canSend
+              ? 'ready'
+              : 'stop'
+            : canSend
+              ? 'ready'
+              : canResume &&
+                  !hasSendableContent &&
+                  !attachmentImports.hasPending &&
+                  Boolean(selectedModel) &&
+                  !hasInvalidSkillSelection
+                ? 'resume'
+                : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
     const keyCode = 'keyCode' in nativeEvent ? nativeEvent.keyCode : 0
@@ -1694,27 +1718,36 @@ export function ChatComposer({
           />
 
           <button
-            type={submitButtonState === 'stop' ? 'button' : 'submit'}
+            type={['stop', 'resume', 'resuming'].includes(submitButtonState) ? 'button' : 'submit'}
             className="composer-submit-button"
             data-state={submitButtonState}
-            disabled={submitButtonState === 'disabled'}
+            disabled={submitButtonState === 'disabled' || submitButtonState === 'resuming'}
+            title={submitButtonState === 'resume' ? t('chat.resume') : undefined}
             aria-label={
-              hasCommandSelection
-                ? selectedCommand?.label
-                : isGenerating
-                  ? canSend
-                    ? t('chat.queueMessage')
-                    : t('chat.stop')
-                  : t('chat.send')
+              submitButtonState === 'resume' || submitButtonState === 'resuming'
+                ? t(submitButtonState === 'resume' ? 'chat.resume' : 'chat.resuming')
+                : hasCommandSelection
+                  ? selectedCommand?.label
+                  : isGenerating
+                    ? canSend
+                      ? t('chat.queueMessage')
+                      : t('chat.stop')
+                    : t('chat.send')
             }
             onClick={() => {
               if (submitButtonState === 'stop') {
                 onStopGenerating?.()
+              } else if (submitButtonState === 'resume') {
+                void onResumeGenerating?.()
               }
             }}
           >
             {submitButtonState === 'stop' ? (
               <span className="composer-stop-square" aria-hidden="true" />
+            ) : submitButtonState === 'resume' ? (
+              <Play aria-hidden="true" fill="currentColor" />
+            ) : submitButtonState === 'resuming' ? (
+              <LoaderCircle className="composer-resume-spinner" aria-hidden="true" />
             ) : (
               <ArrowUp aria-hidden="true" />
             )}

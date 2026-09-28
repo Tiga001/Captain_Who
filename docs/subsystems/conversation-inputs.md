@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # 对话输入、附件与引用
@@ -124,6 +124,22 @@ Markdown：
 运行中引导可包含纯附件或文件夹引用。应用事件将文字、附件和引用定位到本轮 Trace；排队显示、恢复输入及
 历史卡片必须保持同一内容身份。具体幂等结算与恢复见
 [Core Server](../architecture/core-server.md)及[Trace 与历史归档](../architecture/conversation-trace-and-archive.md)。
+
+## 用户停止与继续任务
+
+当最新根 Agent 轮次确实由用户主动停止，且输入框没有文字、附件、文件夹或提及时，Composer 显示继续按钮。
+有新输入时仍走普通发送；正常完成、服务失败或进程退出造成的取消不冒充用户主动停止。停止事实由 Host
+在终态事务中认证并持久化，历史重载后按同一事实恢复按钮；Renderer 的临时停止意图不是授权依据。
+
+`agent.continueConversationTurn` 以 `requestId`、源 assistant 身份和新的 assistant 身份准入。Host 校验
+源轮仍是该对话最新的可继续轮次、对话空闲、模型兼容和权限；相同请求幂等返回已创建的轮次，不能重复开跑。
+继续创建新的 Run 和 assistant 段，保留原用户消息及原停止段，不新增“继续”的可见用户气泡，不消费输入框
+草稿或自动启动排队消息。账号准入与模型切换复用普通发送的检查。
+
+停止时的 `user_turn_interrupted` 与继续时的 `user_turn_continued` 作为 BackendState 按时序写入 Trace
+及模型上下文日志。前者只描述用户停止及操作可能部分执行的事实，后者记录本次明确继续意图；后续请求直接
+复用已保存的内容，不每轮重造提示或修改旧前缀。两者随正常上下文压缩处理。恢复沿用已经完成的历史和工具
+结果，但不是复活被终止的进程；模型必须核对中断操作的实际状态，不能把未确认完成的副作用当作可安全重放。
 
 ## 代码与测试真源
 

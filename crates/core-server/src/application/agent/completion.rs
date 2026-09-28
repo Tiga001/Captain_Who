@@ -60,8 +60,14 @@ impl AgentTerminalEventGate {
                 .unwrap_or_else(|error| error.into_inner()),
         );
         for event in &mut events {
-            if let AgentEvent::Done { usage, .. } = event {
+            if let AgentEvent::Done {
+                usage,
+                user_interrupted,
+                ..
+            } = event
+            {
                 *usage = output.usage.clone();
+                *user_interrupted = output_user_interrupted(output);
             }
         }
         if !events
@@ -124,9 +130,19 @@ pub(super) fn pending_terminal_commit_is_publishable(
     assistant_persisted && pending_transitioned && terminal
 }
 
+pub(super) fn output_user_interrupted(output: &AgentChatOutput) -> Option<bool> {
+    (output.status == AgentRunStatus::Cancelled
+        && output
+            .conversation_turn_trace
+            .as_ref()
+            .is_some_and(ConversationTurnTrace::user_interrupted))
+    .then_some(true)
+}
+
 pub(super) fn terminal_done_event(output: &AgentChatOutput) -> AgentEvent {
     AgentEvent::Done {
         run_id: output.run_id.clone(),
+        user_interrupted: output_user_interrupted(output),
         success: output.status == AgentRunStatus::Completed,
         status: Some(output.status),
         content: (!output.content.is_empty()).then(|| output.content.clone()),

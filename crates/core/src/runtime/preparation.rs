@@ -424,6 +424,34 @@ pub(super) fn build_llm_request(
             )
         }
         None => {
+            let seed = input.initial_conversation_trace.clone();
+            let seed_trace = seed
+                .as_ref()
+                .map(|seed| {
+                    let trace = seed.in_progress_audit_trace(
+                        "initial-turn",
+                        input
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.conversation_id.as_deref())
+                            .ok_or_else(|| {
+                                AgentError::new("Initial Turn events need a conversation identity.")
+                            })?,
+                        input.assistant_message_id.as_deref().ok_or_else(|| {
+                            AgentError::new("Initial Turn events need an assistant identity.")
+                        })?,
+                    );
+                    trace.validate().map_err(AgentError::new)?;
+                    trace
+                        .validate_complete_model_context(&seed.model_context_items)
+                        .map_err(AgentError::new)?;
+                    Ok::<_, AgentError>(trace)
+                })
+                .transpose()?;
+            let conversation_trace = seed
+                .clone()
+                .map(ConversationTraceRecorder::from_durable_snapshot)
+                .unwrap_or_default();
             let attachment_context = build_attachment_context(
                 &input.attachments,
                 input
@@ -437,6 +465,22 @@ pub(super) fn build_llm_request(
             let mut context = match shared_context_baseline {
                 Some(baseline) => {
                     let mut context = baseline.into_frame();
+                    if let (Some(trace), Some(seed)) = (&seed_trace, &seed) {
+                        // The setup observer normally already adopted this durable seed. Only
+                        // add it to an older baseline, and always before transient Run overlays.
+                        if !context
+                            .contains_trace_for_assistant_message(&trace.assistant_message_id)
+                        {
+                            let rendered = crate::context::ConversationTraceRenderer::render_with_model_context(trace, &seed.model_context_items)?;
+                            for item in rendered
+                                .activity_items
+                                .into_iter()
+                                .chain(rendered.postlude_items)
+                            {
+                                context.push(item);
+                            }
+                        }
+                    }
                     ContextAssembler::append_initial_run_world_state(
                         &mut context,
                         initial_run_world_state.as_ref(),
@@ -449,22 +493,36 @@ pub(super) fn build_llm_request(
                     )?;
                     context
                 }
-                None => assemble_initial_context_with_skill_overlays(
-                    DurableConversationTimeline {
-                        compaction_summary: input.context_compaction_summary,
-                        world_state_records,
-                        messages: input.messages,
-                    },
-                    initial_run_world_state,
-                    InitialSkillOverlays {
-                        discovery: skill_discovery,
-                        activation: skill_activation,
-                    },
-                    attachment_context,
-                    input.context.as_ref(),
-                    input.prompt_preferences.as_ref(),
-                    tool_definitions,
-                )?,
+                None => {
+                    let mut messages = input.messages;
+                    if let (Some(trace), Some(seed)) = (seed_trace, seed) {
+                        messages.push(AgentChatMessage {
+                            message_id: Some(trace.assistant_message_id.clone()),
+                            role: "assistant".to_string(),
+                            content: String::new(),
+                            created_at: None,
+                            conversation_turn_trace: Some(trace),
+                            conversation_model_context_items: seed.model_context_items,
+                            conversation_completion_covered: false,
+                        });
+                    }
+                    assemble_initial_context_with_skill_overlays(
+                        DurableConversationTimeline {
+                            compaction_summary: input.context_compaction_summary,
+                            world_state_records,
+                            messages,
+                        },
+                        initial_run_world_state,
+                        InitialSkillOverlays {
+                            discovery: skill_discovery,
+                            activation: skill_activation,
+                        },
+                        attachment_context,
+                        input.context.as_ref(),
+                        input.prompt_preferences.as_ref(),
+                        tool_definitions,
+                    )?
+                }
             };
             context.mark_initial_run_input();
             append_automation_execution_context(
@@ -475,7 +533,7 @@ pub(super) fn build_llm_request(
                 context,
                 0,
                 ToolCallBatch::default(),
-                ConversationTraceRecorder::default(),
+                conversation_trace,
                 None,
             )
         }

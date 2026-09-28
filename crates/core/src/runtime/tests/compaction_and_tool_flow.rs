@@ -208,6 +208,7 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
         conversation_model_context_items: Vec::new(),
     };
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
@@ -782,6 +783,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
         conversation_model_context_items: Vec::new(),
     };
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: "http://127.0.0.1:0/v1/chat/completions".to_string(),
         api_token: "test-token".to_string(),
@@ -1072,6 +1074,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
@@ -1242,6 +1245,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         .await;
     });
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
@@ -1631,6 +1635,7 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
         captured_for_emitter.lock().unwrap().push(event);
     });
     let mut input = AgentChatInput {
+        initial_conversation_trace: None,
         context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),

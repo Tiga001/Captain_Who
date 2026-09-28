@@ -51,6 +51,14 @@ describe('persisted Agent run Rust-to-Renderer projection contract', () => {
       reason: 'admission_unconfirmed'
     })
   })
+  it('retains the explicit user-stop fact when history is reloaded', () => {
+    const projection = { ...fixture.expectedCanonical, status: 'cancelled', userInterrupted: true }
+    expect(parsePersistedAgentRunJson(JSON.stringify(projection))?.userInterrupted).toBe(true)
+    expect(() =>
+      parsePersistedAgentRunJson(JSON.stringify({ ...projection, userInterrupted: 'true' }))
+    ).toThrow(STORED_AGENT_RUN_CORRUPTION_ERROR)
+  })
+
   it('parses the exact canonical projection produced by Rust', () => {
     expect(fixture.schemaVersion).toBe(1)
 

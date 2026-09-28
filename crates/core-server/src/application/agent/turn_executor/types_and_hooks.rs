@@ -344,6 +344,7 @@ pub(super) struct RuntimeTurnSegmentOutcome {
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum PreparedTurnRollback {
+    Continuation,
     HumanResponse,
     Human {
         user_message_id: String,

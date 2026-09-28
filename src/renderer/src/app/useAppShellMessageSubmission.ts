@@ -33,9 +33,13 @@ import {
 } from '../features/skills/skillActivationRecovery'
 import { useTurnAccessIdentity } from '../features/license/useTurnAccessIdentity'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
-import { isAssistantReplySettled } from '../features/chat/assistantGeneration'
+import {
+  getContinuableAssistantMessage,
+  isAssistantReplySettled
+} from '../features/chat/assistantGeneration'
 import type { AutoSubmitQueuedMessage } from './appTypes'
 import { getEditableLastTurn } from './appShellConversationUtils'
+import { isContinuationAdmissionRejected } from './agentRunLifecycleSupport'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import { consumeSubmittedDraft, restoreRejectedDraft } from './composerSubmission'
 import { buildMessageContentWithAttachments } from './appShellConversationUtils'
@@ -62,13 +66,19 @@ interface EditRewriteAttempt {
   userMessage: ChatMessage
 }
 
-type PendingProviderTransitionSubmission =
+export type PendingProviderTransitionSubmission =
   | {
       kind: 'composer'
       message: string
       options: ChatSubmitOptions
       draftSnapshot?: ChatComposerDraft
       accessIdentity?: ReturnType<typeof useTurnAccessIdentity>['current']
+    }
+  | {
+      kind: 'continue'
+      sourceAssistantMessageId: string
+      options: ChatSubmitOptions
+      accessIdentity: ReturnType<typeof useTurnAccessIdentity>['current']
     }
   | { kind: 'queued_message' }
 
@@ -193,6 +203,10 @@ export function useAppShellMessageSubmission({
   const license = useLicense()
   const licenseRef = useRef(license)
   const accessIdentity = useTurnAccessIdentity()
+  const resumeInFlightRef = useRef(new Set<string>())
+  const [resumeStartingConversationIds, setResumeStartingConversationIds] = useState(
+    () => new Set<string>()
+  )
   const queueIdentity = `${accountAuth?.state.status ?? 'absent'}:${accountAuth?.state.profile?.userId ?? ''}`
   const queueIdentityRef = useRef(queueIdentity)
   useLayoutEffect(() => {
@@ -449,6 +463,86 @@ export function useAppShellMessageSubmission({
     ]
   )
 
+  const continueStoppedConversation = useCallback(
+    async (
+      conversationId: string,
+      sourceAssistantMessageId: string,
+      options: ChatSubmitOptions,
+      submissionIdentity: ReturnType<typeof useTurnAccessIdentity>['current']
+    ) => {
+      if (submissionIdentity !== accessIdentity.current) return
+      if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
+        accountAuthRef.current.requestLogin()
+        return
+      }
+      if (licenseRef.current && !licenseRef.current.canStartTurn()) {
+        licenseRef.current.requestAccess()
+        return
+      }
+      const conversation = conversationsRef.current.find((item) => item.id === conversationId)
+      if (getContinuableAssistantMessage(conversation)?.id !== sourceAssistantMessageId) return
+      const userMessage = conversation?.messages.findLast((message) => message.role === 'user')
+      if (!conversation || !userMessage) return
+      pauseQueueAutoSend(conversationId)
+      resumeInFlightRef.current.add(conversationId)
+      setResumeStartingConversationIds(new Set(resumeInFlightRef.current))
+      const assistantMessage = createAssistantMessage('', 'pending')
+      setConversationsWithRef((current) =>
+        current.map((item) =>
+          item.id === conversationId
+            ? { ...item, messages: [...item.messages, assistantMessage], modelId: options.modelId }
+            : item
+        )
+      )
+      setConversationScrollToBottomSignal((signal) => signal + 1)
+      try {
+        const accepted = await requestAssistantResponse(
+          conversationId,
+          userMessage.id,
+          assistantMessage.id,
+          '',
+          options.modelId,
+          conversation.projectId,
+          options.permissionMode,
+          undefined,
+          undefined,
+          options.skills,
+          undefined,
+          undefined,
+          { requestId: createId('continue'), sourceAssistantMessageId }
+        )
+        if (!accepted) showToast(t('chat.resumeFailed'))
+      } catch (error) {
+        // Explicit admission refusals never created a turn. Preserve the stopped history and
+        // all drafts so the user can retry after resolving access or Skill configuration.
+        if (
+          getTurnAccessErrorCode(error) ||
+          isSkillActivationRefusal(error) ||
+          isContinuationAdmissionRejected(error)
+        ) {
+          setConversationsWithRef((current) =>
+            current.map((item) =>
+              item.id === conversationId
+                ? {
+                    ...item,
+                    messages: item.messages.filter((message) => message.id !== assistantMessage.id)
+                  }
+                : item
+            )
+          )
+          licenseRef.current?.handleDenied?.(error)
+          if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
+            accountAuthRef.current?.requestLogin()
+        }
+        showToast(t('chat.resumeFailed'))
+      } finally {
+        resumeInFlightRef.current.delete(conversationId)
+        setResumeStartingConversationIds(new Set(resumeInFlightRef.current))
+      }
+    },
+    [pauseQueueAutoSend, requestAssistantResponse, setConversationsWithRef, showToast, t]
+  )
+
   const showProviderTransitionBlocked = useCallback(
     (reason: AgentProviderTransitionReason) => {
       const key =
@@ -485,6 +579,7 @@ export function useAppShellMessageSubmission({
         currentDraft &&
         pendingSubmission?.kind !== 'queued_message' &&
         pendingSubmission?.kind !== 'composer' &&
+        pendingSubmission?.kind !== 'continue' &&
         currentDraft.modelId === operation.targetModelId &&
         currentDraft.modelId !== operation.modelId
       ) {
@@ -515,6 +610,15 @@ export function useAppShellMessageSubmission({
         return
       }
       if (pendingSubmission.options.modelId !== operation.targetModelId) return
+      if (pendingSubmission.kind === 'continue') {
+        void continueStoppedConversation(
+          operation.conversationId,
+          pendingSubmission.sourceAssistantMessageId,
+          { ...pendingSubmission.options, modelId: operation.modelId },
+          pendingSubmission.accessIdentity
+        )
+        return
+      }
       void submitMessageToConversation(
         operation.conversationId,
         pendingSubmission.message,
@@ -527,7 +631,7 @@ export function useAppShellMessageSubmission({
         }
       )
     },
-    [setConversationsWithRef, submitMessageToConversation, updateDraft]
+    [continueStoppedConversation, setConversationsWithRef, submitMessageToConversation, updateDraft]
   )
 
   const handleProviderTransitionFailed = useCallback(
@@ -538,7 +642,7 @@ export function useAppShellMessageSubmission({
       )
       // A composer submission is an intent tied to the failed attempt. Retrying the transition
       // switches models only; it must never replay stale text over a newer user-edited draft.
-      if (pendingSubmission?.kind === 'composer') {
+      if (pendingSubmission?.kind === 'composer' || pendingSubmission?.kind === 'continue') {
         pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
       }
       if (pendingSubmission?.kind === 'queued_message') {
@@ -626,6 +730,85 @@ export function useAppShellMessageSubmission({
     [activeDraft, requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )
 
+  const resumeStoppedTask = useCallback(async () => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId || resumeInFlightRef.current.has(conversationId)) return
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId)
+    const source = getContinuableAssistantMessage(conversation)
+    if (!source || pendingProviderTransitionSubmissionsRef.current.has(conversationId)) return
+    const draft = draftsRef.current[conversationId] ?? activeDraft
+    if (
+      draft.message.trim() ||
+      draft.attachments.length ||
+      draft.folderReferences?.length ||
+      draft.workspaceMentions?.length
+    )
+      return
+    const model = enabledModels.find((item) => item.id === draft.modelId) ?? enabledModels[0]
+    if (!model) return
+    if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
+      accountAuthRef.current.requestLogin()
+      return
+    }
+    if (licenseRef.current && !licenseRef.current.canStartTurn()) {
+      licenseRef.current.requestAccess()
+      return
+    }
+    const submissionIdentity = accessIdentity.current
+    const options: ChatSubmitOptions = {
+      modelId: model.id,
+      permissionMode: draft.permissionMode,
+      projectId: conversation!.projectId,
+      skills: [...draft.skills]
+    }
+    pauseQueueAutoSend(conversationId)
+    resumeInFlightRef.current.add(conversationId)
+    setResumeStartingConversationIds(new Set(resumeInFlightRef.current))
+    try {
+      await waitForRunSettlement(conversationId)
+      await waitForMessageStateSaves(conversationId)
+      await waitForConversationSaves(conversationId)
+      if (submissionIdentity !== accessIdentity.current) return
+      const outcome = await requestProviderTransition(conversationId, options.modelId, {
+        allowUnchangedModel: true
+      })
+      if (outcome.status === 'ready' || outcome.status === 'completed') {
+        await continueStoppedConversation(
+          conversationId,
+          source.id,
+          {
+            ...options,
+            modelId: outcome.status === 'ready' ? outcome.modelId : outcome.operation.modelId
+          },
+          submissionIdentity
+        )
+      } else if (outcome.status === 'confirmation_required' || outcome.status === 'running') {
+        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
+          kind: 'continue',
+          sourceAssistantMessageId: source.id,
+          options,
+          accessIdentity: submissionIdentity
+        })
+      }
+    } catch {
+      showToast(t('chat.resumeFailed'))
+    } finally {
+      resumeInFlightRef.current.delete(conversationId)
+      setResumeStartingConversationIds(new Set(resumeInFlightRef.current))
+    }
+  }, [
+    activeDraft,
+    enabledModels,
+    pauseQueueAutoSend,
+    requestProviderTransition,
+    continueStoppedConversation,
+    waitForRunSettlement,
+    waitForMessageStateSaves,
+    waitForConversationSaves,
+    showToast,
+    t
+  ])
+
   const readQueueWakeSnapshot = useCallback((conversationId: string) => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId)
     const latestAssistant = conversation?.messages.findLast(
@@ -642,7 +825,9 @@ export function useAppShellMessageSubmission({
       conversation.pendingArchivedAt === undefined &&
       !queueProviderWaitsRef.current.has(conversationId) &&
       !editRewriteInFlightRef.current.has(conversationId) &&
-      pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind !== 'composer' &&
+      !['composer', 'continue'].includes(
+        pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind ?? ''
+      ) &&
       conversation.messages.every(
         (message) => message.role !== 'assistant' || isAssistantReplySettled(message)
       ) &&
@@ -1095,6 +1280,8 @@ export function useAppShellMessageSubmission({
     queueAutoSendConversationIds,
     retryProviderTransition,
     submitEditedLastUserMessage,
+    resumeStoppedTask,
+    resumeStartingConversationIds,
     submitMessage,
     toggleQueueAutoSend
   }

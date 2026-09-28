@@ -211,6 +211,23 @@ pub struct AgentConversationTurnInput {
     pub permissions: AgentPermissions,
 }
 
+/// Explicit user authorization to continue one stopped root Turn without a new user bubble.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentConversationTurnContinueInput {
+    pub request_id: String,
+    pub conversation_id: String,
+    pub source_assistant_message_id: String,
+    pub assistant_message_id: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub permissions: AgentPermissions,
+    #[serde(default = "context_window_indicator_enabled_by_default")]
+    pub context_window_indicator_enabled: bool,
+    #[serde(default)]
+    pub skills: Vec<SkillSelectionDto>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConversationTurnRewriteInput {

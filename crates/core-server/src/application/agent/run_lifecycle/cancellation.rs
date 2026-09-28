@@ -21,9 +21,15 @@ impl AgentService {
         {
             return Ok(false);
         }
-        let _admission = self.conversation_admission.lock().unwrap_or_else(|e| e.into_inner());
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(conversation_id) = conversation_id.as_deref() {
-            if let Err(error) = self.storage.workflow_execution_pause_conversation(conversation_id) {
+            if let Err(error) = self
+                .storage
+                .workflow_execution_pause_conversation(conversation_id)
+            {
                 self.cancel_exact_run_execution(run_id, Some(conversation_id));
                 return Err(error.into());
             }
@@ -95,7 +101,22 @@ impl AgentService {
             .get_agent_node_by_conversation(root_conversation_id)
         {
             Ok(Some(root)) if root.parent_agent_id.is_none() => root,
-            Ok(_) => return Ok(None),
+            Ok(Some(_)) => return Ok(None),
+            // A fast Stop can beat the first Runtime preparation, which normally materializes
+            // this root. Preserve the user's durable stop even before any model request starts.
+            Ok(None) => self
+                .storage
+                .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+                    agent_id: mycopilot_core::root_agent_id_for_conversation(root_conversation_id),
+                    conversation_id: root_conversation_id.to_string(),
+                    creation_request_id: mycopilot_core::root_agent_creation_request_id(
+                        root_conversation_id,
+                    ),
+                    task_name: mycopilot_core::ROOT_AGENT_TASK_NAME.to_string(),
+                })
+                .map_err(|error| AgentServiceError::from(error.to_string()))?
+                .record()
+                .clone(),
             Err(error) => return Err(AgentServiceError::from(error.to_string())),
         };
         self.storage

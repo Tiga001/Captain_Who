@@ -723,11 +723,15 @@ impl AgentService {
                             })
                             .unwrap_or((None, "", None));
                         (|| {
-                            entry.state.append_user_message(
-                                current_user.0,
-                                current_user.1,
-                                current_user.2,
-                            )?;
+                            // A continuation adds a Host-admitted event, not another copy of
+                            // the previous user request already present in the durable prefix.
+                            if agent_input.initial_conversation_trace.is_none() {
+                                entry.state.append_user_message(
+                                    current_user.0,
+                                    current_user.1,
+                                    current_user.2,
+                                )?;
+                            }
                             entry.active_run_id = Some(run_id.to_string());
                             entry.active_assistant_message_id =
                                 Some(assistant_message_id.to_string());

@@ -380,6 +380,7 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
           'type',
           'runId',
           'success',
+          'userInterrupted',
           'status',
           'content',
           'usage',
@@ -393,6 +394,11 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
         type,
         runId,
         success: expectBoolean(record.success, `${context}.success`),
+        ...(record.userInterrupted === undefined
+          ? {}
+          : {
+              userInterrupted: expectBoolean(record.userInterrupted, `${context}.userInterrupted`)
+            }),
         ...(record.status === undefined
           ? {}
           : {

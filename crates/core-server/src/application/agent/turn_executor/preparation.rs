@@ -120,6 +120,9 @@ impl AgentService {
     ) -> AgentServiceError {
         let cause = cause.to_string();
         let result = match rollback {
+            PreparedTurnRollback::Continuation => self.settle_prepared_continuation_failure(
+                conversation_id, assistant_message_id, provisional_run_id, &cause,
+            ),
             PreparedTurnRollback::Human {
                 user_message_id,
                 previous,
@@ -355,6 +358,37 @@ impl AgentService {
             trace,
             created_at,
             completed_at,
+        )
+    }
+
+    /// Preserve the accepted continuation receipt and source history on startup failure.
+    pub(super) fn settle_prepared_continuation_failure(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        run_id: Option<&str>,
+        cause: &str,
+    ) -> Result<(), String> {
+        let Some(mut trace) = self.storage.get_conversation_turn_trace(assistant_message_id)? else {
+            return Ok(());
+        };
+        if trace.conversation_id != conversation_id || Some(trace.run_id.as_str()) != run_id {
+            return Err("继续任务失败处理的身份不一致。".into());
+        }
+        if trace.terminal_status.is_terminal() { return Ok(()); }
+        if trace.items.len() != 1 || !matches!(trace.items.first(),
+            Some(mycopilot_core::ConversationTurnTraceItem::BackendState { event_id, .. })
+            if event_id.starts_with("user-continuation:")) {
+            return Err("继续任务已开始执行，不能按准备失败处理。".into());
+        }
+        let created_at = self.storage.get_assistant_message_created_at(conversation_id, assistant_message_id)?
+            .ok_or_else(|| "继续任务的回复已不存在。".to_string())?;
+        trace.terminal_status = mycopilot_core::ConversationTurnTraceTerminalStatus::Failed;
+        trace.terminal_error = Some(cause.to_string());
+        self.finalize_turn_with_human_root_notification(
+            &trace.run_id, conversation_id, assistant_message_id, AgentRunStatus::Failed,
+            cause, Some("error"), "failed", &trace, None,
+            created_at, now_ms().max(created_at), None, None,
         )
     }
 

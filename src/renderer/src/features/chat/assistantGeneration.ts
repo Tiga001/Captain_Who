@@ -1,5 +1,5 @@
 import { isCompletedAgentRunStatus } from '../agentRun/agentEventReducerShared'
-import type { ChatMessage } from './chatTypes'
+import type { ChatConversation, ChatMessage } from './chatTypes'
 
 export function isAssistantReplyComplete(message: ChatMessage | undefined): boolean {
   return message?.status === 'sent' && isAssistantReplySettled(message)
@@ -19,4 +19,25 @@ export function isAssistantMessageGenerating(message: ChatMessage): boolean {
   )
     return false
   return !isCompletedAgentRunStatus(message.agentRun?.status)
+}
+
+/** Only the latest durable user-interrupted turn can be explicitly continued. */
+export function getContinuableAssistantMessage(
+  conversation: ChatConversation | null | undefined
+): ChatMessage | undefined {
+  if (
+    !conversation ||
+    conversation.messagesLoaded === false ||
+    conversation.archivedAt ||
+    conversation.pendingArchivedAt !== undefined
+  )
+    return undefined
+  const latest = conversation.messages.at(-1)
+  return latest?.role === 'assistant' &&
+    latest.status === 'sent' &&
+    latest.agentRun?.status === 'cancelled' &&
+    latest.agentRun.userInterrupted &&
+    latest.agentRun.runId
+    ? latest
+    : undefined
 }

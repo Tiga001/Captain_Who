@@ -1,5 +1,24 @@
 impl AgentService {
-    pub(in crate::application::agent) async fn run_action_continuation(
+    pub(in crate::application::agent) fn run_action_continuation(
+        &self,
+        record: PendingActionRecord,
+        agent_input: AgentChatInput,
+        notifications: CoreServerNotificationSender,
+        final_pending_status: PendingActionStatus,
+        existing_cancellation_token: Option<AgentCancellationToken>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + Send + '_>> {
+        // Approval execution awaits another model turn. Allocate its large future before
+        // polling so execution and continuation stack frames do not both retain its state.
+        Box::pin(self.run_action_continuation_inner(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            existing_cancellation_token,
+        ))
+    }
+
+    async fn run_action_continuation_inner(
         &self,
         record: PendingActionRecord,
         agent_input: AgentChatInput,
@@ -637,6 +656,7 @@ impl AgentService {
                     let _ = notifications.send(agent_event_notification(terminal_error_event));
                     let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                         run_id: run_id.clone(),
+                        user_interrupted: None,
                         success: false,
                         status: Some(AgentRunStatus::Failed),
                         content: model_request_interruption.is_none().then_some(message),

@@ -3539,6 +3539,7 @@ fn send_fixture_agent_done(
             "method": FIXTURE_AGENT_EVENT_METHOD,
             "params": AgentEvent::Done {
                 run_id: run_id.to_string(),
+                user_interrupted: None,
                 success,
                 status: Some(status),
                 content: None,

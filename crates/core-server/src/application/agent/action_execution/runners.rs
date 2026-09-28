@@ -3,6 +3,9 @@ use super::*;
 #[cfg(test)]
 mod mcp_lifecycle_tests;
 
+#[cfg(test)]
+mod stack_budget_tests;
+
 include!("runners/support.rs");
 include!("runners/dispatch.rs");
 include!("runners/builtin_execution.rs");

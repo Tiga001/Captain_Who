@@ -265,3 +265,90 @@ fn failed_and_cancelled_turns_preserve_partial_output_in_history_and_observer_vi
         }
     }
 }
+
+#[test]
+fn user_stop_appends_one_stable_model_fact_and_survives_reloads_and_terminal_retries() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let trace = seed_stream_turn(&service);
+    bind_agent_root(&service, "stream-stop-root", CONVERSATION_ID);
+    service
+        .begin_agent_tree_run_stop_by_root_agent("stream-stop-root", RUN_ID)
+        .unwrap()
+        .unwrap();
+    finalize(&service, trace.clone(), "cancelled");
+    let committed = service
+        .get_conversation_turn_trace(ASSISTANT_ID)
+        .unwrap()
+        .unwrap();
+    assert!(committed.user_interrupted());
+    assert_eq!(committed.items.len(), trace.items.len() + 1);
+    assert_eq!(
+        &committed.items[..trace.items.len()],
+        trace.items.as_slice()
+    );
+    let log = service
+        .get_conversation_model_context_log(ASSISTANT_ID)
+        .unwrap()
+        .unwrap();
+    committed
+        .validate_complete_model_context(&log.items)
+        .unwrap();
+    let model_fact = log.items.last().unwrap();
+    assert_eq!(model_fact.role, "user");
+    assert!(model_fact.content.contains("user_turn_interrupted"));
+    let expected_trace = serde_json::to_string(&committed).unwrap();
+    let expected_log = serde_json::to_string(&log.items).unwrap();
+    // A repeated terminal notification can contain the original snapshot without the Host suffix.
+    finalize(&service, trace, "cancelled");
+    drop(service);
+    let service = fixture.service();
+    assert_eq!(
+        serde_json::to_string(
+            &service
+                .get_conversation_turn_trace(ASSISTANT_ID)
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        expected_trace
+    );
+    assert_eq!(
+        serde_json::to_string(
+            &service
+                .get_conversation_model_context_log(ASSISTANT_ID)
+                .unwrap()
+                .unwrap()
+                .items
+        )
+        .unwrap(),
+        expected_log
+    );
+    let history = service.load_conversation(CONVERSATION_ID).unwrap().unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(history.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["userInterrupted"], true);
+}
+
+#[test]
+fn internal_cancellation_and_completed_stop_race_do_not_claim_a_user_interruption() {
+    for (status, stop) in [("cancelled", false), ("completed", true)] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let trace = seed_stream_turn(&service);
+        if stop {
+            bind_agent_root(&service, "stream-stop-root", CONVERSATION_ID);
+            service
+                .begin_agent_tree_run_stop_by_root_agent("stream-stop-root", RUN_ID)
+                .unwrap()
+                .unwrap();
+        }
+        finalize(&service, trace, status);
+        let committed = service
+            .get_conversation_turn_trace(ASSISTANT_ID)
+            .unwrap()
+            .unwrap();
+        assert!(!committed.user_interrupted());
+        assert_eq!(committed.items.len(), 2);
+    }
+}

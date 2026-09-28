@@ -363,6 +363,7 @@ impl PersistedAgentResumeInput {
             provider_credential_required: self.provider_credential_required,
             agent_input: AgentChatInput {
                 folder_references: Vec::new(),
+                initial_conversation_trace: None,
                 context_image_attachments: Vec::new(),
                 api_url: String::new(),
                 api_token: String::new(),

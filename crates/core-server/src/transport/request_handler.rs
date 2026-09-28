@@ -71,6 +71,12 @@ pub(crate) fn handle_request(
             request.id,
             request.params,
         ),
+        AGENT_CONTINUE_CONVERSATION_TURN_METHOD => handle_agent_continue_conversation_turn(
+            agent_service,
+            notification_tx,
+            request.id,
+            request.params,
+        ),
         AGENT_REWRITE_CONVERSATION_TURN_METHOD => handle_agent_rewrite_conversation_turn(
             agent_service,
             notification_tx,

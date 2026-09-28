@@ -4,6 +4,7 @@
     "cancelRun": "agent.cancelRun",
     "steerRun": "agent.steerRun",
     "startConversationTurn": "agent.startConversationTurn",
+    "continueConversationTurn": "agent.continueConversationTurn",
     "rewriteConversationTurn": "agent.rewriteConversationTurn",
     "preflightProviderTransition": "agent.preflightProviderTransition",
     "startProviderTransition": "agent.startProviderTransition",

@@ -77,6 +77,7 @@ const STORED_RUN_KEYS = [
   'timeline',
   'state',
   'interruption',
+  'userInterrupted',
   'error',
   'usage',
   'finishReason',
@@ -417,6 +418,8 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
   ) {
     return undefined
   }
+  if (hasOwn(value, 'userInterrupted') && typeof value.userInterrupted !== 'boolean')
+    return undefined
   if (hasOwn(value, 'state') && !isState(value.state)) return undefined
   if (hasOwn(value, 'interruption') && !isAgentInterruption(value.interruption)) return undefined
   if (hasOwn(value, 'usage') && !isUsage(value.usage)) return undefined

@@ -1,5 +1,17 @@
 impl AgentService {
-    pub(in crate::application::agent) async fn run_command_execution(
+    pub(in crate::application::agent) fn run_command_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + Send + '_>> {
+        // Keep the execution future out of the spawning task's poll frame. In debug builds,
+        // moving this future inline retained hundreds of KiB of stack throughout TLS polling.
+        Box::pin(self.run_command_execution_inner(record, call, guard, notifications))
+    }
+
+    async fn run_command_execution_inner(
         &self,
         record: PendingActionRecord,
         call: AgentToolCall,
@@ -769,6 +781,7 @@ impl AgentService {
             self.unregister_cancellation(&run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                 run_id,
+                user_interrupted: output_user_interrupted(&output),
                 success: false,
                 status: Some(AgentRunStatus::Cancelled),
                 content: None,

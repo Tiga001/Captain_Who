@@ -36,6 +36,7 @@ mod context_history;
 mod context_rebuild_compaction;
 mod context_runtime;
 mod context_window_consistency;
+mod continuation;
 mod conversation_world_state;
 mod deletion;
 mod file_change_permissions;

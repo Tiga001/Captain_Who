@@ -1507,6 +1507,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
     };
     let projected = service.project_cumulative_usage_onto_event(AgentEvent::Done {
         run_id: "run-cumulative".to_string(),
+        user_interrupted: None,
         success: true,
         status: Some(AgentRunStatus::Completed),
         content: Some("done".to_string()),

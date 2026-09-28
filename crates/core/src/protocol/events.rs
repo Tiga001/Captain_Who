@@ -398,6 +398,9 @@ pub enum AgentEvent {
     },
     Done {
         run_id: String,
+        /// Set only after durable terminalization of an explicit user stop.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_interrupted: Option<bool>,
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<AgentRunStatus>,

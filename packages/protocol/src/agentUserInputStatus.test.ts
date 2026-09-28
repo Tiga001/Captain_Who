@@ -40,3 +40,19 @@ describe('waiting_for_user_input transport status', () => {
     ).toThrow()
   })
 })
+
+describe('explicit user interruption transport', () => {
+  it('preserves the committed interruption marker and rejects malformed values', () => {
+    const done = {
+      type: 'done',
+      runId: 'run-user-stopped',
+      status: 'cancelled',
+      success: false,
+      userInterrupted: true
+    }
+    expect(parseAgentEventForHost(done)).toEqual(done)
+    expect(() => parseAgentEventForHost({ ...done, userInterrupted: 'true' })).toThrow()
+    const ordinaryCancellation = { ...done, userInterrupted: undefined }
+    expect(parseAgentEventForHost(ordinaryCancellation)).toEqual(ordinaryCancellation)
+  })
+})

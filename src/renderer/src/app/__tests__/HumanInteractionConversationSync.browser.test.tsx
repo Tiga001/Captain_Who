@@ -19,6 +19,7 @@ const client = vi.hoisted(() => ({
   submit: vi.fn(),
   ignore: vi.fn(),
   save: vi.fn(),
+  toast: vi.fn(),
   pendingActions: vi.fn(),
   requestListeners: new Set<(request: HumanInteractionRequestSnapshot) => void>(),
   resyncListeners: new Set<() => void>(),
@@ -176,7 +177,7 @@ function Lifecycle({
 }) {
   const activeConversationIdRef = useRef<string | null>('chat'),
     draftsRef = useRef({})
-  useAgentRunLifecycle({
+  const lifecycle = useAgentRunLifecycle({
     contextWindowIndicatorEnabled: false,
     conversationState: {
       activeConversationId: 'chat',
@@ -197,7 +198,7 @@ function Lifecycle({
     reconcileFailedSkillActivation: vi.fn(),
     requestSkillCatalogRefresh: vi.fn(),
     sealAndFlushChatMessageStateSaves: async () => {},
-    showToast: vi.fn(),
+    showToast: client.toast,
     t: (key) => key,
     uiPreferences: {
       customPermissions: {
@@ -210,7 +211,19 @@ function Lifecycle({
       }
     }
   })
-  return null
+  return (
+    <button
+      onClick={() => {
+        const runId = 'host-run'
+        const binding = refs.activeRunBindings.current.get(runId)
+        if (!binding) return
+        refs.stopRequestedRunIds.current.add(runId)
+        lifecycle.scheduleStoppedRunReconciliation(runId, binding)
+      }}
+    >
+      Reconcile stopped run
+    </button>
+  )
 }
 function notify(id = 'chat') {
   for (const listener of client.requestListeners) listener(question('request', 1, id))
@@ -221,6 +234,7 @@ beforeEach(() => {
   client.submit.mockReset()
   client.ignore.mockReset()
   client.save.mockReset()
+  client.toast.mockReset()
   client.pendingActions.mockReset().mockResolvedValue([])
   client.requestListeners.clear()
   client.resyncListeners.clear()
@@ -391,6 +405,53 @@ it('retries a reconnect read failure, but discards late responses after unmount'
   await Promise.resolve()
   expect(view.conversations[0].messages).toEqual([])
   expect(client.start).not.toHaveBeenCalled()
+})
+
+it('keeps an authoritative reconnect terminal when outstanding stop reconciliation reads fail', async () => {
+  const running = conversation('chat', [assistant('running', 'Work before Core restarted')])
+  const terminal = {
+    ...assistant('running', 'Durable partial response'),
+    status: 'error' as const,
+    agentRun: {
+      ...ensureAgentRun(undefined, 'host-run', 'failed'),
+      error: 'Core process restarted.'
+    }
+  }
+  let view!: HarnessView
+  const screen = await render(
+    <Harness
+      initial={[running]}
+      lifecycle
+      onRender={(next) => {
+        view = next
+      }}
+    />
+  )
+  await expect.poll(() => client.load).toHaveBeenCalledTimes(1)
+  await expect.poll(() => view.refs.activeRunBindings.current.has('host-run')).toBe(true)
+
+  vi.useFakeTimers()
+  try {
+    await screen.getByRole('button', { name: 'Reconcile stopped run' }).click()
+    client.load.mockResolvedValueOnce(conversation('chat', [terminal]))
+    for (const listener of client.resyncListeners) listener()
+    await vi.waitFor(() => {
+      expect(view.conversations[0].messages[0].agentRun?.status).toBe('failed')
+    })
+
+    client.load.mockRejectedValue(new Error('Storage temporarily unavailable'))
+    await vi.advanceTimersByTimeAsync(20_000)
+  } finally {
+    vi.useRealTimers()
+  }
+
+  expect(view.conversations[0].messages[0].agentRun?.error).toBe('Core process restarted.')
+  expect(client.toast).not.toHaveBeenCalled()
+  expect(view.refs.activeRunBindings.current.has('host-run')).toBe(false)
+  expect(view.refs.stopRequestedRunIds.current.has('host-run')).toBe(false)
+  expect(view.refs.autoSubmitQueuedMessage.current).not.toHaveBeenCalledWith('chat')
+  expect(client.start).not.toHaveBeenCalled()
+  await screen.unmount()
 })
 
 it('does not resurrect an earlier approval when its pending-list reply arrives after the Run has reached sync input', async () => {

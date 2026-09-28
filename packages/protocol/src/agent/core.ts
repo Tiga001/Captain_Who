@@ -19,6 +19,8 @@ export const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
 
 export const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
 
+export const AGENT_CONTINUE_CONVERSATION_TURN_METHOD = 'agent.continueConversationTurn'
+
 export const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 
 export const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'

@@ -19,6 +19,7 @@
 }
 
 .chat-conversation-page__messages {
+  --chat-message-gap: 40px;
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -29,7 +30,7 @@
   /* The bottom inset also holds the last message's actions and their focus outline. */
   padding: 40px;
   margin: 0 auto;
-  gap: 40px;
+  gap: var(--chat-message-gap);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -203,7 +204,7 @@
 }
 
 .chat-message--user::after,
-.chat-message--assistant::after {
+.chat-message--assistant:has(> .chat-message__actions)::after {
   position: absolute;
   z-index: 1;
   top: 100%;
@@ -452,6 +453,16 @@ button.chat-message-attachment:focus-visible {
   max-width: 100%;
   padding: 4px 0;
   color: var(--mc-color-text-primary);
+}
+
+/* A stopped or collapsed status-only segment belongs with the next assistant segment.
+ * Measure the rendered content so expanding activity restores normal message spacing. */
+.chat-conversation-page__messages
+  > .chat-message--assistant:not(:has(> .chat-message__actions)):has(
+    > .chat-message__body > .agent-run > .agent-run__elapsed:only-child
+  )
+  + .chat-message--assistant {
+  margin-top: calc(12px - var(--chat-message-gap));
 }
 
 .chat-message--assistant .chat-message__body {

@@ -227,6 +227,7 @@ fn agent_events_match_the_cross_language_golden_contract() {
     };
     let done = AgentEvent::Done {
         run_id: "run-contract-v1".to_string(),
+        user_interrupted: None,
         success: true,
         status: Some(AgentRunStatus::Completed),
         content: Some("done".to_string()),

@@ -286,6 +286,7 @@ fn project_guidance_timeline(
     if let Some(trace) = trace {
         let mut emitted_terminal_error = false;
         run.insert("runId".to_string(), trace.run_id.clone().into());
+        run.insert("userInterrupted".to_string(), trace.user_interrupted().into());
         match trace.terminal_status {
             crate::ConversationTurnTraceTerminalStatus::InProgress => {}
             crate::ConversationTurnTraceTerminalStatus::Completed => {

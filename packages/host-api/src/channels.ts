@@ -90,6 +90,7 @@ export const HOST_CHANNELS = {
 
     startProviderTransition: 'host:agent.startProviderTransition',
     startConversationTurn: 'host:agent.startConversationTurn',
+    continueConversationTurn: 'host:agent.continueConversationTurn',
     rewriteConversationTurn: 'host:agent.rewriteConversationTurn',
     steerRun: 'host:agent.steerRun'
   },

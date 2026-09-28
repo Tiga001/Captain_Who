@@ -4,12 +4,13 @@ vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 import { registerAgentIpc } from '../ipc/agentIpc'
 
 describe('account gate only protects new conversation turns', () => {
-  it('awaits a refreshed Core grant before starting or rewriting', async () => {
+  it('awaits a refreshed Core grant before starting, continuing or rewriting', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const core = {
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(),
       startConversationTurn: vi.fn().mockResolvedValue({ runId: 'new' }),
+      continueConversationTurn: vi.fn().mockResolvedValue({ runId: 'continued' }),
       rewriteConversationTurn: vi.fn().mockResolvedValue({ runId: 'rewrite' })
     }
     let release!: () => void
@@ -26,12 +27,15 @@ describe('account gate only protects new conversation turns', () => {
       () => gate
     )
     const start = handlers.get(HOST_CHANNELS.agent.startConversationTurn)!({}, {})
+    const continued = handlers.get(HOST_CHANNELS.agent.continueConversationTurn)!({}, {})
     const rewrite = handlers.get(HOST_CHANNELS.agent.rewriteConversationTurn)!({}, {})
     expect(core.startConversationTurn).not.toHaveBeenCalled()
+    expect(core.continueConversationTurn).not.toHaveBeenCalled()
     expect(core.rewriteConversationTurn).not.toHaveBeenCalled()
     release()
-    await Promise.all([start, rewrite])
+    await Promise.all([start, continued, rewrite])
     expect(core.startConversationTurn).toHaveBeenCalledOnce()
+    expect(core.continueConversationTurn).toHaveBeenCalledOnce()
     expect(core.rewriteConversationTurn).toHaveBeenCalledOnce()
   })
   it('blocks new/rewrite turns after logout but leaves steering, approval, cancellation and events intact', async () => {
@@ -45,6 +49,7 @@ describe('account gate only protects new conversation turns', () => {
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(),
       startConversationTurn: vi.fn().mockResolvedValue({ runId: 'run-1' }),
+      continueConversationTurn: vi.fn().mockResolvedValue({ runId: 'continued' }),
       rewriteConversationTurn: vi.fn().mockResolvedValue({ runId: 'run-2' }),
       steerRun: vi.fn().mockResolvedValue({ accepted: true }),
       cancelRun: vi.fn().mockResolvedValue(undefined),
@@ -68,6 +73,11 @@ describe('account gate only protects new conversation turns', () => {
       ok: false
     })
     expect(core.startConversationTurn).toHaveBeenCalledTimes(1)
+    await expect(invoke(HOST_CHANNELS.agent.continueConversationTurn)).resolves.toMatchObject({
+      ok: false,
+      error: { message: 'ACCOUNT_LOGIN_REQUIRED' }
+    })
+    expect(core.continueConversationTurn).not.toHaveBeenCalled()
     expect(core.rewriteConversationTurn).not.toHaveBeenCalled()
     expect(core.cancelRun).not.toHaveBeenCalled()
     expect(core.shutdown).not.toHaveBeenCalled()

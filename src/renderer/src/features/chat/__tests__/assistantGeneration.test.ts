@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
-import { isAssistantMessageGenerating } from '../assistantGeneration'
+import type { ChatAgentRunView, ChatConversation, ChatMessage } from '../chatTypes'
+import {
+  getContinuableAssistantMessage,
+  isAssistantMessageGenerating
+} from '../assistantGeneration'
 
 function assistant(
   status: ChatMessage['status'],
@@ -47,5 +50,32 @@ describe('isAssistantMessageGenerating', () => {
 
   it('does not treat a sent cancelled assistant as generating', () => {
     expect(isAssistantMessageGenerating(assistant('sent', 'cancelled'))).toBe(false)
+  })
+})
+
+describe('getContinuableAssistantMessage', () => {
+  const conversation = (messages: ChatMessage[]) =>
+    ({
+      id: 'conversation',
+      messages,
+      messagesLoaded: true
+    }) as ChatConversation
+  it('requires a durable explicit user stop on the latest message', () => {
+    const stopped = assistant('sent', 'cancelled')
+    const userStopped = { ...stopped, agentRun: { ...stopped.agentRun!, userInterrupted: true } }
+    expect(getContinuableAssistantMessage(conversation([stopped]))).toBeUndefined()
+    expect(getContinuableAssistantMessage(conversation([userStopped]))).toBe(userStopped)
+    expect(
+      getContinuableAssistantMessage(conversation([userStopped, assistant('sent', 'completed')]))
+    ).toBeUndefined()
+    expect(
+      getContinuableAssistantMessage(conversation([userStopped, assistant('pending', 'running')]))
+    ).toBeUndefined()
+    expect(
+      getContinuableAssistantMessage({ ...conversation([userStopped]), archivedAt: 1 })
+    ).toBeUndefined()
+    expect(
+      getContinuableAssistantMessage({ ...conversation([userStopped]), messagesLoaded: false })
+    ).toBeUndefined()
   })
 })

@@ -471,6 +471,7 @@ pub(super) fn done_event(
 ) -> AgentEvent {
     AgentEvent::Done {
         run_id: run_id.to_string(),
+        user_interrupted: None,
         success,
         status: Some(status),
         content,

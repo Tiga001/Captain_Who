@@ -2,6 +2,7 @@ import type { AgentConversationTurnOutput, AgentEvent, SkillSelection } from '@m
 import { useCallback, type MutableRefObject } from 'react'
 import {
   cancelAgentRun,
+  continueConversationTurn,
   rewriteConversationTurn,
   startConversationTurn
 } from '../features/agent/agentClient'
@@ -27,6 +28,7 @@ import { mergeConversationMessageFromBackend } from './chatMessageFactory'
 import {
   REWRITE_CONVERSATION_LOAD_ATTEMPTS,
   isSettledRewriteAssistant,
+  isContinuationAdmissionRejected,
   loadConversationForRewrite,
   rewriteAssistantFromTurnOutput,
   type RewriteConversationTurnStart,
@@ -102,7 +104,8 @@ export function useRequestAssistantResponse({
       folderReferences: ChatSubmitOptions['folderReferences'],
       skills: readonly SkillSelection[],
       title?: string,
-      rewrite?: RewriteConversationTurnStart
+      rewrite?: RewriteConversationTurnStart,
+      continuation?: { requestId: string; sourceAssistantMessageId: string }
     ): Promise<boolean> => {
       if (!rewrite) {
         updateAssistantMessage(
@@ -143,8 +146,26 @@ export function useRequestAssistantResponse({
               sourceUserMessageId: rewrite.sourceUserMessageId,
               turn: turnInput
             })
-          : await startConversationTurn(turnInput).catch(async (error: unknown) => {
-              if (getTurnAccessErrorCode(error) || isSkillActivationRefusal(error)) throw error
+          : await (
+              continuation
+                ? continueConversationTurn({
+                    requestId: continuation.requestId,
+                    sourceAssistantMessageId: continuation.sourceAssistantMessageId,
+                    assistantMessageId,
+                    conversationId,
+                    contextWindowIndicatorEnabled,
+                    modelId,
+                    permissions: turnInput.permissions,
+                    skills: turnInput.skills
+                  })
+                : startConversationTurn(turnInput)
+            ).catch(async (error: unknown) => {
+              if (
+                getTurnAccessErrorCode(error) ||
+                isSkillActivationRefusal(error) ||
+                (continuation && isContinuationAdmissionRejected(error))
+              )
+                throw error
               // A rejected transport promise says nothing about admission. Read back the
               // exact submitted pair; never issue another start request to find out.
               for (let attempt = 0; attempt < REWRITE_CONVERSATION_LOAD_ATTEMPTS; attempt += 1) {
@@ -179,7 +200,10 @@ export function useRequestAssistantResponse({
             })
 
         let rewrittenConversation: ChatConversation | null = recoveredConversation
-        if (rewrite) {
+        if (
+          rewrite ||
+          (continuation && ['sent', 'error'].includes(startOutput.assistantMessage.status ?? ''))
+        ) {
           for (let attempt = 0; attempt < REWRITE_CONVERSATION_LOAD_ATTEMPTS; attempt += 1) {
             try {
               const loadedConversation = await loadConversationForRewrite(
@@ -219,7 +243,7 @@ export function useRequestAssistantResponse({
         const resolvedAssistantMessageId = startOutput.assistantMessageId
         let resolvedAssistantMessage: ChatMessage | null = null
         const authoritativeRewriteAssistant =
-          rewrite || recoveredConversation
+          rewrite || continuation || recoveredConversation
             ? (rewrittenConversation?.messages.find(
                 (message) =>
                   message.id === startOutput.assistantMessageId && message.role === 'assistant'
@@ -231,7 +255,7 @@ export function useRequestAssistantResponse({
           (candidate) => candidate.id === conversationId
         )
         if (!currentConversation) {
-          if (rewrite) {
+          if (rewrite || continuation) {
             cancelBackendAgentRun(startOutput.runId)
             bufferedAgentEventMap.delete(startOutput.runId)
           }
@@ -396,7 +420,11 @@ export function useRequestAssistantResponse({
       } catch (error) {
         // A trusted admission refusal proves no turn was accepted. Let the caller preserve
         // its draft/queue and guide the explicit action without creating a failed chat turn.
-        if (getTurnAccessErrorCode(error)) throw error
+        if (
+          getTurnAccessErrorCode(error) ||
+          (continuation && isContinuationAdmissionRejected(error))
+        )
+          throw error
         if (!rewrite && isSkillActivationRefusal(error)) {
           if (planSkillActivationRecovery(error, skills).refreshCatalog) {
             requestSkillCatalogRefresh(conversationId)

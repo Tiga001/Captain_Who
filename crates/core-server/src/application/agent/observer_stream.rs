@@ -292,6 +292,7 @@ mod tests {
             "assistant",
             AgentEvent::Done {
                 run_id: "run".into(),
+                user_interrupted: None,
                 success: true,
                 status: Some(AgentRunStatus::Completed),
                 content: Some("prefix final".into()),

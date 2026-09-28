@@ -170,6 +170,18 @@ impl AgentService {
                 usage_record.as_ref(),
                 collaboration_final_response_boundary,
             )?;
+            // Storage may append an authenticated user-stop event in the same terminal
+            // transaction. Publish the committed fact, never infer it from token cancellation.
+            if output.status == AgentRunStatus::Cancelled {
+                if let Ok(Some(committed_trace)) = self
+                    .storage
+                    .get_conversation_turn_trace(assistant_message_id)
+                {
+                    if committed_trace.run_id == output.run_id {
+                        output.conversation_turn_trace = Some(committed_trace);
+                    }
+                }
+            }
             replace_output_usage(output, cumulative_usage);
             self.finish_persisted_run_usage(&output.run_id, output.status);
             self.retire_builtin_capability_run(&output.run_id);

@@ -432,6 +432,39 @@ impl StorageService {
                 }
             }
         }
+        // The root stop fence is committed only by the explicit user-stop entry point. Read it
+        // under this same terminal write transaction: cancellation caused by shutdown, deletion,
+        // or a tool failure must never acquire a user-stop fact or become resumable.
+        if effective_trace.terminal_status == crate::ConversationTurnTraceTerminalStatus::Cancelled
+        {
+            if let Some(stop) = agent_graph_repository::query_agent_tree_run_stop_in_connection(
+                &transaction,
+                &effective_trace.run_id,
+            )
+            .map_err(|error| error.to_string())?
+            .filter(|stop| {
+                stop.root_run_id == effective_trace.run_id
+                    && stop.root_conversation_id == conversation_id
+            }) {
+                if effective_model_items.is_none() {
+                    effective_model_items = Some(
+                        conversation_model_context_repository::get_log_for_message(
+                            &transaction,
+                            message_id,
+                        )
+                        .map_err(storage_error)?
+                        .map(|log| log.items)
+                        .unwrap_or_default(),
+                    );
+                }
+                effective_trace.append_user_interruption(
+                    effective_model_items
+                        .as_mut()
+                        .expect("user-stop model context is loaded"),
+                    stop.stopped_at,
+                )?;
+            }
+        }
         let trace = &effective_trace;
         let model_context_items = effective_model_items.as_deref();
         chat_repository::update_message_status_and_content(

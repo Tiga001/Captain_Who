@@ -1059,6 +1059,20 @@ export function useAgentRunLifecycle({
     (runId: string, binding: ActiveRunBinding) => {
       if (!isSameRunBinding(activeRunBindingMap.get(runId), binding)) return
 
+      // A reconnect/focus refresh can install the durable terminal without replaying Done.
+      // Failed reconciliation reads must not overwrite that confirmed result with a guess.
+      const currentMessage = conversationsRef.current
+        .find((conversation) => conversation.id === binding.conversationId)
+        ?.messages.find((message) => message.id === binding.pendingMessageId)
+      if (
+        !locallyUnconfirmedStoppedRunIdSet.has(runId) &&
+        isTerminalRunMessage(currentMessage, runId)
+      ) {
+        stopRequestedRunIdSet.delete(runId)
+        cleanupRunBinding(runId)
+        return
+      }
+
       autoSubmitQueuedMessage.current(binding.conversationId, 'pause')
 
       const settledAt = Date.now()
@@ -1105,6 +1119,7 @@ export function useAgentRunLifecycle({
       activeRunBindingMap,
       autoSubmitQueuedMessage,
       cleanupRunBinding,
+      conversationsRef,
       locallyUnconfirmedStoppedRunIdSet,
       showToast,
       stopRequestedRunIdSet,

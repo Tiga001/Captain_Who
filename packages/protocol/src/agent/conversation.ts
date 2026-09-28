@@ -284,6 +284,18 @@ export interface AgentConversationTurnInput {
   skills?: SkillSelection[]
 }
 
+/** Starts a new run after an explicit user stop without adding a visible user message. */
+export interface AgentConversationTurnContinueInput {
+  requestId: string
+  conversationId: string
+  sourceAssistantMessageId: string
+  assistantMessageId: string
+  modelId: string
+  permissions?: AgentPermissions
+  contextWindowIndicatorEnabled?: boolean
+  skills?: SkillSelection[]
+}
+
 /**
  * Replaces only the latest settled human Turn inside the same Conversation.
  * The source Turn remains an immutable audit/Usage fact and is removed only from active views.
