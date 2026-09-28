@@ -1,3 +1,4 @@
+import type { ConversationScrollPosition } from '../features/chat/useConversationSegments'
 import { ConfirmationDialog } from '../components/dialog/ConfirmationDialog'
 import { formatTranslation } from '../config/translationFormat'
 import { TextInputDialog } from '../components/dialog/TextInputDialog'
@@ -265,9 +266,8 @@ export function AppShell() {
   const scheduledExternalNavigationRequestKeyRef = useRef(0)
   const conversationOpenRequestKeyRef = useRef(0)
   const { unreadCount: scheduledAttentionCount } = useAutomationAttention()
-  const [activeConversationInitialScrollTop, setActiveConversationInitialScrollTop] = useState<
-    number | null
-  >(null)
+  const [activeConversationInitialScrollTop, setActiveConversationInitialScrollTop] =
+    useState<ConversationScrollPosition | null>(null)
   const [conversationScrollToBottomSignal, setConversationScrollToBottomSignal] = useState(0)
   const [scrollTargetMessageId, setScrollTargetMessageId] = useState<string | null>(null)
   const activeConversationIdRef = useRef<string | null>(null)
@@ -277,7 +277,7 @@ export function AppShell() {
   const conversationDetailEpochRef = useRef<Map<string, number>>(new Map())
   const automationConversationMetaRefreshEpochRef = useRef(0)
   const [conversationLoadErrors, setConversationLoadErrors] = useState<Record<string, string>>({})
-  const conversationScrollPositionsRef = useRef<Map<string, number>>(new Map())
+  const conversationScrollPositionsRef = useRef<Map<string, ConversationScrollPosition>>(new Map())
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const retiredAgentRunIdsRef = useRef<Set<string>>(new Set())

@@ -14,6 +14,11 @@ import {
   saveConversationMeta
 } from '../features/storage/storageClient'
 import { createComposerDraft, createForkComposerDraft, createId } from './chatMessageFactory'
+import { blurConversationHistorySearch } from '../features/chat/conversationHistoryFocus'
+import type {
+  ConversationScrollAnchor,
+  ConversationScrollPosition
+} from '../features/chat/useConversationSegments'
 
 type MutableRef<T> = { current: T }
 const ARCHIVE_CONVERSATION_MAX_ATTEMPTS = 3
@@ -41,7 +46,7 @@ interface ConversationNavigationMessages {
 
 interface UseConversationNavigationOptions {
   activeConversationIdRef: MutableRef<string | null>
-  conversationScrollPositionsRef: MutableRef<Map<string, number>>
+  conversationScrollPositionsRef: MutableRef<Map<string, ConversationScrollPosition>>
   conversationsRef: MutableRef<ChatConversation[]>
   drafts: Record<string, ChatComposerDraft>
   hydrateConversation: (conversationId: string) => Promise<ChatConversation | null>
@@ -50,7 +55,7 @@ interface UseConversationNavigationOptions {
   onActiveConversationArchived: (conversation: ChatConversation) => void
   persistDraftNow: (scopeId: string, draft: ChatComposerDraft) => Promise<void>
   setActiveConversationId: Dispatch<SetStateAction<string | null>>
-  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<number | null>>
+  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<ConversationScrollPosition | null>>
   setConversationScrollToBottomSignal: Dispatch<SetStateAction<number>>
   setConversationsWithRef: Dispatch<SetStateAction<ChatConversation[]>>
   setDraftsWithRef: Dispatch<SetStateAction<Record<string, ChatComposerDraft>>>
@@ -88,6 +93,7 @@ export function useConversationNavigation({
   const forkRequestIdentitiesRef = useRef(new Map<string, { point: string; requestId: string }>())
   const selectConversation = useCallback(
     (conversationId: string, messageId?: string | null, loadedConversation?: ChatConversation) => {
+      blurConversationHistorySearch()
       activeConversationIdRef.current = conversationId
       const selectedConversation =
         loadedConversation ??
@@ -265,8 +271,11 @@ export function useConversationNavigation({
   )
 
   const rememberConversationScrollPosition = useCallback(
-    (conversationId: string, scrollTop: number) => {
-      conversationScrollPositionsRef.current.set(conversationId, scrollTop)
+    (conversationId: string, scrollTop: number, anchor?: ConversationScrollAnchor) => {
+      const positions = conversationScrollPositionsRef.current
+      positions.delete(conversationId)
+      positions.set(conversationId, anchor ?? scrollTop)
+      while (positions.size > 100) positions.delete(positions.keys().next().value!)
     },
     [conversationScrollPositionsRef]
   )

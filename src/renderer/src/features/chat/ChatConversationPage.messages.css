@@ -36,6 +36,87 @@
   overscroll-behavior: contain;
   scrollbar-color: var(--mc-color-border-default) transparent;
   scrollbar-width: thin;
+  overflow-anchor: none;
+}
+
+.chat-conversation-page__content,
+.conversation-message-segment {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--chat-message-gap);
+}
+
+.conversation-message-segment[data-segment-placeholder='true'] {
+  justify-content: center;
+  align-items: center;
+}
+
+.conversation-message-segment[data-segment-placeholder='true'] > button {
+  border: 0;
+  border-radius: 8px;
+  background: var(--mc-color-surface-secondary);
+  color: var(--mc-color-text-secondary);
+  padding: 8px 14px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.conversation-history-tools {
+  position: absolute;
+  z-index: 4;
+  inset: 8px 20px auto auto;
+  display: grid;
+  max-width: min(600px, calc(100% - 50px));
+  gap: 6px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--main-panel);
+  color: var(--mc-color-text-secondary);
+  font-size: 12px;
+}
+
+.conversation-history-tools__actions,
+.conversation-history-tools__search {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.conversation-history-tools button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.conversation-history-tools button:hover {
+  background: var(--mc-color-surface-secondary);
+}
+
+.conversation-history-tools button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.conversation-history-tools svg {
+  width: 16px;
+  height: 16px;
+}
+.conversation-history-tools input {
+  min-width: 80px;
+  width: 220px;
+  font: inherit;
+}
+.conversation-history-tools [role='status'] {
+  max-width: 400px;
 }
 
 .chat-conversation-page__messages::-webkit-scrollbar {
@@ -457,11 +538,25 @@ button.chat-message-attachment:focus-visible {
 
 /* A stopped or collapsed status-only segment belongs with the next assistant segment.
  * Measure the rendered content so expanding activity restores normal message spacing. */
-.chat-conversation-page__messages
+:is(
+    .chat-conversation-page__messages,
+    .chat-conversation-page__content,
+    .conversation-message-segment
+  )
   > .chat-message--assistant:not(:has(> .chat-message__actions)):has(
     > .chat-message__body > .agent-run > .agent-run__elapsed:only-child
   )
   + .chat-message--assistant {
+  margin-top: calc(12px - var(--chat-message-gap));
+}
+
+.conversation-message-segment:has(
+    > .chat-message--assistant:last-child:not(:has(> .chat-message__actions)):has(
+        > .chat-message__body > .agent-run > .agent-run__elapsed:only-child
+      )
+  )
+  + .conversation-message-segment
+  > .chat-message--assistant:first-child {
   margin-top: calc(12px - var(--chat-message-gap));
 }
 

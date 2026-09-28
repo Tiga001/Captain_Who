@@ -1,5 +1,18 @@
 // Traditional Chinese UI translation strings.
 export const zhTWTranslations = {
+  'chat.history.loadSection': '載入這段歷史',
+  'chat.history.expandAll': '展開全部歷史',
+  'chat.history.find': '尋找對話',
+  'chat.history.searchPlaceholder': '搜尋對話內容',
+  'chat.history.expanding': '正在展開歷史…',
+  'chat.history.cancel': '停止展開',
+  'chat.history.allExpanded': '已展開全部歷史',
+  'chat.history.copyNeedsHistory': '選取範圍包含未展開的歷史，展開後可完整選取和複製。',
+  'chat.history.previous': '上一個符合項目',
+  'chat.history.next': '下一個符合項目',
+  'chat.history.close': '關閉搜尋',
+  'chat.history.noMatches': '沒有符合項目',
+  'chat.history.selectAgain': '重新選取以複製完整歷史',
   'settings.page.workflows': '工作流程',
   'workflows.editorTitle': '編輯工作流程',
   'workflows.name': '名稱',

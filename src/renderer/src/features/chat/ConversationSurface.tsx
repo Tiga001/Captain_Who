@@ -52,11 +52,17 @@ import { createConversationTurnNavigationSelector } from './conversationTurnNavi
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useConversationBottomFollow } from './useConversationBottomFollow'
+import { useConversationHistoryTools } from './ConversationHistoryTools'
+import {
+  useConversationSegments,
+  type ConversationSegmentsController,
+  type ConversationScrollAnchor,
+  type ConversationScrollPosition
+} from './useConversationSegments'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus, getAgentActionId } from '../agentRun/agentActionUtils'
 import {
   CollaborationTimelineActivityList,
-  copyCollaborationTimelineSelection,
   type CollaborationTimelineActivity
 } from '../agentCollaboration/CollaborationTimelineActivity'
 import { projectCollaborationTimelineActivities } from '../agentCollaboration/collaborationTimelineModel'
@@ -79,8 +85,12 @@ interface ConversationSurfaceCommonProps {
   /** Authoritative direct children; an empty list hides stale or inherited collaboration rows. */
   collaborationTreeAgentIds?: readonly string[]
   conversation: ChatConversation
-  initialScrollTop?: number | null
-  onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
+  initialScrollTop?: ConversationScrollPosition | null
+  onScrollPositionChange?: (
+    conversationId: string,
+    scrollTop: number,
+    anchor?: ConversationScrollAnchor
+  ) => void
   scrollTargetMessageId?: string | null
   scrollToBottomSignal?: number
   showTokenUsageDetails: boolean
@@ -235,6 +245,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 }
 
 interface ChatMessageListProps {
+  segments?: ConversationSegmentsController
   collaborationTreeAgentIds?: readonly string[]
   humanInteraction?: HumanInteractionControllerView
   forkDisabledReason?: string
@@ -274,6 +285,7 @@ interface ChatMessageListProps {
 }
 
 export const ChatMessageList = memo(function ChatMessageList({
+  segments,
   humanInteraction,
   forkDisabledReason,
   agentLabelsById,
@@ -303,6 +315,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   showTokenUsageDetails,
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
+  const { t } = useFrontendConfig()
   const selectPresentedConversation = useMemo(
     () => createHumanInteractionConversationSelector(),
     []
@@ -310,6 +323,22 @@ export const ChatMessageList = memo(function ChatMessageList({
   const presentedConversation = useMemo(
     () => selectPresentedConversation(conversation, humanInteraction?.requests ?? []),
     [conversation, humanInteraction?.requests, selectPresentedConversation]
+  )
+  const interactionRequests = humanInteraction?.requests
+  const canInteract = humanInteraction?.canInteract
+  const openInteraction = humanInteraction?.open
+  // The controller also carries composer drafts and loading state. Message cards consume
+  // only these three fields; keep that projection stable while other sections mount.
+  const timelineInteraction = useMemo(
+    () =>
+      interactionRequests && openInteraction
+        ? {
+            openRequests: interactionRequests.filter((request) => request.status === 'open'),
+            canInteract: Boolean(canInteract),
+            open: openInteraction
+          }
+        : undefined,
+    [interactionRequests, canInteract, openInteraction]
   )
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = onOpenCollaborationAgent
@@ -382,146 +411,161 @@ export const ChatMessageList = memo(function ChatMessageList({
     setObserverTimelineCollapsed({})
   }, [conversation.id])
 
-  return (
-    <>
-      {presentedConversation.messages.map((message) => (
-        <Fragment key={message.id}>
-          {collaborationAgentNavigation && (
-            <CollaborationTimelineActivityList
-              activities={
-                collaborationTimeline.beforeMessage.get(message.id) ??
-                EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
-              }
-              onOpenAgent={openCollaborationAgent}
-            />
-          )}
-          <ChatMessageItem
-            humanInteraction={mode === 'interactive' ? humanInteraction : undefined}
-            agentLabelsById={agentLabelsById}
-            collaborationTimelineActivities={
-              collaborationAgentNavigation
-                ? (collaborationTimeline.anchoredMessage.get(message.id) ??
-                  EMPTY_COLLABORATION_TIMELINE_ACTIVITIES)
-                : EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
-            }
-            conversationId={conversation.id}
-            collaborationTreeAgentIds={collaborationTreeAgentIds}
-            isLastAssistantMessage={message.id === lastAssistantMessageId}
-            message={message}
-            mode={mode}
-            onApprove={
-              mode === 'interactive' && onApproveAgentAction ? approveAgentAction : undefined
-            }
-            onCancel={mode === 'interactive' && onCancelAgentAction ? cancelAgentAction : undefined}
-            editSelectedModelAvailable={editSelectedModelAvailable}
-            editSelectedModelSupportsImage={editSelectedModelSupportsImage}
-            onEditSubmit={
-              mode === 'interactive' &&
-              message.id === editableLastUserMessageId &&
-              onEditLastUserMessage
-                ? editLastUserMessage
-                : undefined
-            }
-            onContinueInNewTask={
-              mode === 'interactive' &&
-              !forkDisabledReason &&
-              isAssistantReplyComplete(message) &&
-              onContinueInNewTask
-                ? handleContinueAssistantReply
-                : undefined
-            }
-            onOpenCollaborationAgent={
-              collaborationAgentNavigation ? openCollaborationAgent : undefined
-            }
-            onOpenWorkspaceReference={onOpenWorkspaceReference}
-            onReject={mode === 'interactive' && onRejectAgentAction ? rejectAgentAction : undefined}
-            onReviewLastTurn={
-              mode === 'interactive' && onReviewLastTurn ? reviewLastTurn : undefined
-            }
-            onTimelineCollapsedChange={
-              mode === 'observer' ? handleObserverTimelineCollapsedChange : undefined
-            }
-            onUiStateChange={
-              mode === 'interactive' && onMessageUiStateChange ? messageUiStateChange : undefined
-            }
-            parentAgentId={parentAgentId}
-            observerRootConversationId={observerRootConversationId}
-            projectId={conversation.projectId}
-            showTokenUsageDetails={showTokenUsageDetails}
-            timelineCollapsedOverride={
-              mode === 'observer' ? observerTimelineCollapsed[message.id] : undefined
-            }
-            turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
-          />
-          {collaborationAgentNavigation && (
-            <CollaborationTimelineActivityList
-              activities={
-                collaborationTimeline.afterMessage.get(message.id) ??
-                EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
-              }
-              onOpenAgent={openCollaborationAgent}
-            />
-          )}
-          {continuationOrigin?.boundaryMessageId === message.id && (
-            <ConversationContinuationDivider
-              onOpen={
-                mode === 'interactive' && onOpenContinuationOrigin
-                  ? () => onOpenContinuationOrigin(continuationOrigin)
+  const renderMessage = (message: ChatMessage) => (
+    <Fragment key={message.id}>
+      {collaborationAgentNavigation && (
+        <CollaborationTimelineActivityList
+          activities={
+            collaborationTimeline.beforeMessage.get(message.id) ??
+            EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
+          }
+          onOpenAgent={openCollaborationAgent}
+        />
+      )}
+      <ChatMessageItem
+        humanInteraction={mode === 'interactive' ? timelineInteraction : undefined}
+        agentLabelsById={agentLabelsById}
+        collaborationTimelineActivities={
+          collaborationAgentNavigation
+            ? (collaborationTimeline.anchoredMessage.get(message.id) ??
+              EMPTY_COLLABORATION_TIMELINE_ACTIVITIES)
+            : EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
+        }
+        conversationId={conversation.id}
+        collaborationTreeAgentIds={collaborationTreeAgentIds}
+        isLastAssistantMessage={message.id === lastAssistantMessageId}
+        message={message}
+        mode={mode}
+        onApprove={mode === 'interactive' && onApproveAgentAction ? approveAgentAction : undefined}
+        onCancel={mode === 'interactive' && onCancelAgentAction ? cancelAgentAction : undefined}
+        editSelectedModelAvailable={editSelectedModelAvailable}
+        editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+        onEditSubmit={
+          mode === 'interactive' &&
+          message.id === editableLastUserMessageId &&
+          onEditLastUserMessage
+            ? editLastUserMessage
+            : undefined
+        }
+        onContinueInNewTask={
+          mode === 'interactive' &&
+          !forkDisabledReason &&
+          isAssistantReplyComplete(message) &&
+          onContinueInNewTask
+            ? handleContinueAssistantReply
+            : undefined
+        }
+        onOpenCollaborationAgent={collaborationAgentNavigation ? openCollaborationAgent : undefined}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
+        onReject={mode === 'interactive' && onRejectAgentAction ? rejectAgentAction : undefined}
+        onReviewLastTurn={mode === 'interactive' && onReviewLastTurn ? reviewLastTurn : undefined}
+        onTimelineCollapsedChange={
+          mode === 'observer' ? handleObserverTimelineCollapsedChange : undefined
+        }
+        onUiStateChange={
+          mode === 'interactive' && onMessageUiStateChange ? messageUiStateChange : undefined
+        }
+        parentAgentId={parentAgentId}
+        observerRootConversationId={observerRootConversationId}
+        projectId={conversation.projectId}
+        showTokenUsageDetails={showTokenUsageDetails}
+        timelineCollapsedOverride={
+          mode === 'observer' ? observerTimelineCollapsed[message.id] : undefined
+        }
+        turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
+      />
+      {collaborationAgentNavigation && (
+        <CollaborationTimelineActivityList
+          activities={
+            collaborationTimeline.afterMessage.get(message.id) ??
+            EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
+          }
+          onOpenAgent={openCollaborationAgent}
+        />
+      )}
+      {continuationOrigin?.boundaryMessageId === message.id && (
+        <ConversationContinuationDivider
+          onOpen={
+            mode === 'interactive' && onOpenContinuationOrigin
+              ? () => onOpenContinuationOrigin(continuationOrigin)
+              : undefined
+          }
+        />
+      )}
+      {[
+        ...manualCompactionOperations
+          .filter((operation) => operation.coveredThroughMessageId === message.id)
+          .map((operation) => ({
+            at: operation.startedAt,
+            id: operation.operationId,
+            element: (
+              <ConversationManualCompactionDivider
+                operation={operation}
+                forkDisabledReason={forkDisabledReason}
+                onContinueInNewTask={
+                  mode === 'interactive' && onContinueInNewTask
+                    ? () =>
+                        continueInNewTask({
+                          kind: 'manual_compaction_boundary',
+                          operationId: operation.operationId
+                        })
+                    : undefined
+                }
+              />
+            )
+          })),
+        ...(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => ({
+          at: operation.startedAt,
+          id: operation.operationId,
+          element: (
+            <ConversationModelTransitionDivider
+              forkDisabledReason={forkDisabledReason}
+              operation={operation}
+              onContinueInNewTask={
+                mode === 'interactive' &&
+                operation.status === 'completed' &&
+                operation.summaryId &&
+                onContinueInNewTask
+                  ? () =>
+                      continueInNewTask({
+                        kind: 'provider_transition_boundary',
+                        operationId: operation.operationId
+                      })
                   : undefined
               }
             />
-          )}
-          {[
-            ...manualCompactionOperations
-              .filter((operation) => operation.coveredThroughMessageId === message.id)
-              .map((operation) => ({
-                at: operation.startedAt,
-                id: operation.operationId,
-                element: (
-                  <ConversationManualCompactionDivider
-                    operation={operation}
-                    forkDisabledReason={forkDisabledReason}
-                    onContinueInNewTask={
-                      mode === 'interactive' && onContinueInNewTask
-                        ? () =>
-                            continueInNewTask({
-                              kind: 'manual_compaction_boundary',
-                              operationId: operation.operationId
-                            })
-                        : undefined
-                    }
-                  />
-                )
-              })),
-            ...(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => ({
-              at: operation.startedAt,
-              id: operation.operationId,
-              element: (
-                <ConversationModelTransitionDivider
-                  forkDisabledReason={forkDisabledReason}
-                  operation={operation}
-                  onContinueInNewTask={
-                    mode === 'interactive' &&
-                    operation.status === 'completed' &&
-                    operation.summaryId &&
-                    onContinueInNewTask
-                      ? () =>
-                          continueInNewTask({
-                            kind: 'provider_transition_boundary',
-                            operationId: operation.operationId
-                          })
-                      : undefined
-                  }
-                />
-              )
-            }))
-          ]
-            .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
-            .map(({ id, element }) => (
-              <Fragment key={id}>{element}</Fragment>
-            ))}
-        </Fragment>
-      ))}
+          )
+        }))
+      ]
+        .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+        .map(({ id, element }) => (
+          <Fragment key={id}>{element}</Fragment>
+        ))}
+    </Fragment>
+  )
+
+  return (
+    <>
+      {segments
+        ? segments.segments.map((segment) => (
+            <div
+              className="conversation-message-segment"
+              data-message-segment={segment.index}
+              data-segment-placeholder={!segment.mounted ? 'true' : undefined}
+              key={`${conversation.id}:${segment.key}`}
+              ref={(element) => segments.registerSegment(segment.index, element)}
+              style={!segment.mounted ? { height: segment.estimatedHeight } : undefined}
+            >
+              {segment.mounted ? (
+                presentedConversation.messages.slice(segment.start, segment.end).map(renderMessage)
+              ) : (
+                <button type="button" onClick={() => segments.revealMessage(segment.key)}>
+                  {t('chat.history.loadSection')}
+                </button>
+              )}
+            </div>
+          ))
+        : presentedConversation.messages.map(renderMessage)}
       {mode === 'interactive' &&
         humanInteraction &&
         getUnanchoredHumanInteractionRequests(conversation, humanInteraction.openRequests).map(
@@ -634,6 +678,16 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   } = props
   const interactive = props.mode === 'interactive' ? props : null
   const messagesRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const readLayoutChangeRef = useRef<(() => void) | null>(null)
+  const handleReadLayoutChange = useCallback(() => readLayoutChangeRef.current?.(), [])
+  const { isAtBottom, scrollToBottom, setPosition, followsBottom } = useConversationBottomFollow(
+    messagesRef,
+    conversation.id,
+    true,
+    contentRef,
+    handleReadLayoutChange
+  )
   const handledScrollTargetRef = useRef<string | null>(null)
   const pendingApprovalTarget = useMemo(
     () => (interactive ? getPendingApprovalTarget(conversation) : null),
@@ -761,36 +815,60 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const editableLastUserMessageId =
     interactive && !hasPendingApproval ? getEditableLastUserMessageId(conversation) : null
 
+  const pinnedMessageIds = useMemo(() => {
+    const ids = new Set<string>()
+    const requestRunIds = new Set(humanInteraction.openRequests.map((request) => request.runId))
+    for (const request of humanInteraction.openRequests) {
+      if (request.assistantMessageId) ids.add(request.assistantMessageId)
+    }
+    if (editableLastUserMessageId) ids.add(editableLastUserMessageId)
+    for (const message of conversation.messages) {
+      if (
+        isAssistantMessageGenerating(message) ||
+        message.agentRun?.status === 'waiting_for_approval' ||
+        (message.agentRun?.runId && requestRunIds.has(message.agentRun.runId))
+      )
+        ids.add(message.id)
+    }
+    return ids
+  }, [conversation.messages, editableLastUserMessageId, humanInteraction.openRequests])
+  const segments = useConversationSegments({
+    conversationId: conversation.id,
+    messages: conversation.messages,
+    containerRef: messagesRef,
+    initialPosition: initialScrollTop,
+    targetMessageId: scrollTargetMessageId,
+    pinnedMessageIds,
+    setPosition,
+    followsBottom
+  })
+  const { captureAnchor, revealMessage, onReadLayoutChange } = segments
+  useLayoutEffect(() => {
+    readLayoutChangeRef.current = onReadLayoutChange
+    return () => {
+      readLayoutChangeRef.current = null
+    }
+  }, [onReadLayoutChange])
+  const historyTools = useConversationHistoryTools(
+    conversation.id,
+    segments,
+    messagesRef,
+    contentRef
+  )
+
   const rememberCurrentScrollPosition = useCallback(() => {
     const messagesElement = messagesRef.current
     if (!messagesElement) return
-    onScrollPositionChange?.(conversation.id, messagesElement.scrollTop)
-  }, [conversation.id, onScrollPositionChange])
-
-  useLayoutEffect(() => {
-    if (scrollTargetMessageId) return undefined
-    const messagesElement = messagesRef.current
-    if (!messagesElement) return undefined
-
-    const animationFrameId = window.requestAnimationFrame(() => {
-      if (initialScrollTop === null || initialScrollTop === undefined) {
-        messagesElement.scrollTop = messagesElement.scrollHeight
-        return
-      }
-
-      const maxScrollTop = Math.max(0, messagesElement.scrollHeight - messagesElement.clientHeight)
-      messagesElement.scrollTop = Math.min(initialScrollTop, maxScrollTop)
-    })
-
-    return () => window.cancelAnimationFrame(animationFrameId)
-  }, [conversation.id, initialScrollTop, scrollTargetMessageId])
+    const anchor = captureAnchor() ?? undefined
+    onScrollPositionChange?.(conversation.id, messagesElement.scrollTop, anchor)
+  }, [conversation.id, onScrollPositionChange, captureAnchor])
 
   useLayoutEffect(() => {
     if (!scrollToBottomSignal || scrollTargetMessageId) return
     const messagesElement = messagesRef.current
     if (!messagesElement) return
-    messagesElement.scrollTop = messagesElement.scrollHeight
-  }, [scrollTargetMessageId, scrollToBottomSignal])
+    setPosition(messagesElement.scrollHeight, true)
+  }, [scrollTargetMessageId, scrollToBottomSignal, setPosition])
 
   useLayoutEffect(() => {
     if (!scrollTargetMessageId) {
@@ -803,28 +881,16 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     if (handledScrollTargetRef.current === targetKey) return
 
     const animationFrameId = window.requestAnimationFrame(() => {
-      const target = Array.from(
-        messagesElement.querySelectorAll<HTMLElement>('[data-message-id]')
-      ).find((element) => element.dataset.messageId === scrollTargetMessageId)
-
-      if (!target) return
+      if (!conversation.messages.some((message) => message.id === scrollTargetMessageId)) return
       handledScrollTargetRef.current = targetKey
-      target.scrollIntoView({
-        block: 'center',
-        behavior: 'smooth'
-      })
+      revealMessage(scrollTargetMessageId, 'center')
     })
 
     return () => window.cancelAnimationFrame(animationFrameId)
-  }, [conversation.id, conversation.messages, scrollTargetMessageId])
+  }, [conversation.id, conversation.messages, scrollTargetMessageId, revealMessage])
 
-  const { isAtBottom, scrollToBottom } = useConversationBottomFollow(
-    messagesRef,
-    conversation.id,
-    interactive !== null
-  )
-
-  useEffect(() => rememberCurrentScrollPosition, [rememberCurrentScrollPosition])
+  // Scroll events publish each position while its conversation still owns the DOM. An
+  // unmount effect must not read refs after another conversation has replaced that DOM.
 
   return (
     <section
@@ -838,68 +904,75 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       <div className="chat-conversation-page__messages-region">
         <div
           className="chat-conversation-page__messages"
-          onCopy={copyCollaborationTimelineSelection}
+          onCopy={historyTools.onCopy}
           onScroll={rememberCurrentScrollPosition}
           ref={messagesRef}
         >
-          <ChatMessageList
-            humanInteraction={interactive ? humanInteraction : undefined}
-            collaborationTreeAgentIds={props.collaborationTreeAgentIds}
-            agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
-            collaborationTimelineActivities={
-              interactive?.collaborationTimelineActivities ??
-              (props.mode === 'observer' ? props.collaborationTimelineActivities : undefined)
-            }
-            conversation={conversation}
-            editSelectedModelAvailable={interactive?.editSelectedModelAvailable ?? false}
-            editSelectedModelSupportsImage={interactive?.editSelectedModelSupportsImage ?? false}
-            editableLastUserMessageId={editableLastUserMessageId}
-            lastAssistantMessageId={lastAssistantMessageId}
-            mode={props.mode}
-            manualCompactionOperations={interactive?.manualCompactionOperations}
-            modelTransitionOperations={interactive?.modelTransitionOperations}
-            onApproveAgentAction={interactive?.onApproveAgentAction}
-            onCancelAgentAction={interactive?.onCancelAgentAction}
-            onContinueInNewTask={interactive?.onContinueInNewTask}
-            forkDisabledReason={
-              interactive?.forkDisabledReason ??
-              (interactive?.isManualCompactionRunning
-                ? t('chat.commands.compacting')
-                : isGenerating ||
-                    hasPendingApproval ||
-                    interactive?.modelTransitionConfirmation ||
-                    interactive?.modelTransitionOperations?.some(
-                      (operation) => operation.status === 'running'
-                    )
-                  ? t('chat.commands.idleOnly')
-                  : undefined)
-            }
-            onEditLastUserMessage={
-              interactive?.isManualCompactionRunning
-                ? undefined
-                : interactive?.onEditLastUserMessage
-            }
-            onOpenContinuationOrigin={interactive?.onOpenContinuationOrigin}
-            onMessageUiStateChange={interactive?.onMessageUiStateChange}
-            onModelTransitionRetry={interactive?.onModelTransitionRetry}
-            onOpenCollaborationAgent={
-              interactive?.onOpenCollaborationAgent ??
-              (props.mode === 'observer' ? props.onOpenCollaborationAgent : undefined)
-            }
-            onOpenWorkspaceReference={interactive?.onOpenWorkspaceReference}
-            onRejectAgentAction={interactive?.onRejectAgentAction}
-            onReviewLastTurn={interactive?.onReviewLastTurn}
-            parentAgentId={props.mode === 'observer' ? props.parentAgentId : undefined}
-            observerRootConversationId={
-              props.mode === 'observer' ? props.rootConversationId : undefined
-            }
-            showTokenUsageDetails={showTokenUsageDetails}
-            turnDiffSummariesByMessageId={turnDiffSummariesByMessageId}
-          />
+          <div className="chat-conversation-page__content" ref={contentRef}>
+            <ChatMessageList
+              segments={segments}
+              humanInteraction={interactive ? humanInteraction : undefined}
+              collaborationTreeAgentIds={props.collaborationTreeAgentIds}
+              agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
+              collaborationTimelineActivities={
+                interactive?.collaborationTimelineActivities ??
+                (props.mode === 'observer' ? props.collaborationTimelineActivities : undefined)
+              }
+              conversation={conversation}
+              editSelectedModelAvailable={interactive?.editSelectedModelAvailable ?? false}
+              editSelectedModelSupportsImage={interactive?.editSelectedModelSupportsImage ?? false}
+              editableLastUserMessageId={editableLastUserMessageId}
+              lastAssistantMessageId={lastAssistantMessageId}
+              mode={props.mode}
+              manualCompactionOperations={interactive?.manualCompactionOperations}
+              modelTransitionOperations={interactive?.modelTransitionOperations}
+              onApproveAgentAction={interactive?.onApproveAgentAction}
+              onCancelAgentAction={interactive?.onCancelAgentAction}
+              onContinueInNewTask={interactive?.onContinueInNewTask}
+              forkDisabledReason={
+                interactive?.forkDisabledReason ??
+                (interactive?.isManualCompactionRunning
+                  ? t('chat.commands.compacting')
+                  : isGenerating ||
+                      hasPendingApproval ||
+                      interactive?.modelTransitionConfirmation ||
+                      interactive?.modelTransitionOperations?.some(
+                        (operation) => operation.status === 'running'
+                      )
+                    ? t('chat.commands.idleOnly')
+                    : undefined)
+              }
+              onEditLastUserMessage={
+                interactive?.isManualCompactionRunning
+                  ? undefined
+                  : interactive?.onEditLastUserMessage
+              }
+              onOpenContinuationOrigin={interactive?.onOpenContinuationOrigin}
+              onMessageUiStateChange={interactive?.onMessageUiStateChange}
+              onModelTransitionRetry={interactive?.onModelTransitionRetry}
+              onOpenCollaborationAgent={
+                interactive?.onOpenCollaborationAgent ??
+                (props.mode === 'observer' ? props.onOpenCollaborationAgent : undefined)
+              }
+              onOpenWorkspaceReference={interactive?.onOpenWorkspaceReference}
+              onRejectAgentAction={interactive?.onRejectAgentAction}
+              onReviewLastTurn={interactive?.onReviewLastTurn}
+              parentAgentId={props.mode === 'observer' ? props.parentAgentId : undefined}
+              observerRootConversationId={
+                props.mode === 'observer' ? props.rootConversationId : undefined
+              }
+              showTokenUsageDetails={showTokenUsageDetails}
+              turnDiffSummariesByMessageId={turnDiffSummariesByMessageId}
+            />
+          </div>
         </div>
+        {historyTools.controls}
         <ConversationTurnNavigationRail
           items={turnNavigationItems}
           scrollContainerRef={messagesRef}
+          onRevealMessage={segments.segmented ? segments.revealMessage : undefined}
+          visibleMessageIds={segments.segmented ? segments.visibleMessageIds : undefined}
+          messageTurnIds={segments.segmented ? conversation.messages : undefined}
         />
         {interactive && (
           <ConversationScrollToBottomButton

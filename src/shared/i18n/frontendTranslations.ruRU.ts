@@ -1,5 +1,19 @@
 // Russian UI translation strings.
 export const ruRUTranslations = {
+  'chat.history.loadSection': 'Загрузить эту часть истории',
+  'chat.history.expandAll': 'Развернуть всю историю',
+  'chat.history.find': 'Найти в беседе',
+  'chat.history.searchPlaceholder': 'Поиск по беседе',
+  'chat.history.expanding': 'Загрузка истории…',
+  'chat.history.cancel': 'Остановить',
+  'chat.history.allExpanded': 'Вся история показана',
+  'chat.history.copyNeedsHistory':
+    'В выделении есть незагруженная история. Разверните её, чтобы выделить и скопировать весь текст.',
+  'chat.history.previous': 'Предыдущее совпадение',
+  'chat.history.next': 'Следующее совпадение',
+  'chat.history.close': 'Закрыть поиск',
+  'chat.history.noMatches': 'Нет совпадений',
+  'chat.history.selectAgain': 'Выделите полный текст заново для копирования',
   'settings.page.workflows': 'Рабочие процессы',
   'workflows.editorTitle': 'Изменить рабочий процесс',
   'workflows.name': 'Название',

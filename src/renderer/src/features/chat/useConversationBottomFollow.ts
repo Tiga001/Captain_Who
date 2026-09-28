@@ -14,17 +14,25 @@ export interface ConversationBottomFollowState {
   isAtBottom: boolean
   /** Jumps to the newest content and resumes following it. */
   scrollToBottom: () => void
+  setPosition: (top: number, follow?: boolean) => void
+  followsBottom: () => boolean
 }
 
 export function useConversationBottomFollow(
   scrollContainerRef: RefObject<HTMLDivElement | null>,
   conversationId: string,
-  enabled: boolean
+  enabled: boolean,
+  contentRef?: RefObject<HTMLDivElement | null>,
+  onReadLayoutChange?: () => void
 ): ConversationBottomFollowState {
   const [isAtBottom, setIsAtBottom] = useState(true)
   /** Whether incoming content should keep the viewport glued to the bottom. */
   const followsBottomRef = useRef(true)
   const lastScrollTopRef = useRef(0)
+  const readLayoutChangeRef = useRef(onReadLayoutChange)
+  useLayoutEffect(() => {
+    readLayoutChangeRef.current = onReadLayoutChange
+  }, [onReadLayoutChange])
 
   const syncBottomState = useCallback(() => {
     const element = scrollContainerRef.current
@@ -61,6 +69,7 @@ export function useConversationBottomFollow(
       pinToBottom()
       return
     }
+    readLayoutChangeRef.current?.()
     syncBottomState()
   }, [pinToBottom, syncBottomState])
 
@@ -75,6 +84,19 @@ export function useConversationBottomFollow(
     }
     element.scrollTo({ behavior: 'smooth', top: element.scrollHeight })
   }, [scrollContainerRef])
+
+  const setPosition = useCallback(
+    (top: number, follow = false) => {
+      const element = scrollContainerRef.current
+      if (!element) return
+      followsBottomRef.current = follow
+      element.scrollTop = top
+      lastScrollTopRef.current = element.scrollTop
+      setIsAtBottom(getDistanceFromBottom(element) <= CONVERSATION_BOTTOM_THRESHOLD_PX)
+    },
+    [scrollContainerRef]
+  )
+  const followsBottom = useCallback(() => followsBottomRef.current, [])
 
   useLayoutEffect(() => {
     if (!enabled) return undefined
@@ -117,29 +139,15 @@ export function useConversationBottomFollow(
         pinToBottom()
       })
     }
-    // Markdown images and other async layout settle the height of a message block without any
-    // DOM mutation, so every message block is watched for size changes as well.
+    // A single content layer grows for Markdown images, expanded tools and newly mounted
+    // history segments. Observing it avoids rescanning/reobserving every historical message.
     const contentResizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(handleLayoutChange)
-    const observedContent = new Set<Element>()
-    const reconcileObservedContent = () => {
-      if (!contentResizeObserver) return
-      for (const child of element.children) {
-        if (observedContent.has(child)) continue
-        observedContent.add(child)
-        contentResizeObserver.observe(child)
-      }
-      for (const child of observedContent) {
-        if (element.contains(child)) continue
-        observedContent.delete(child)
-        contentResizeObserver.unobserve(child)
-      }
-    }
-    reconcileObservedContent()
+    const content = contentRef?.current ?? element.firstElementChild
+    if (content) contentResizeObserver?.observe(content)
     // Streaming text and appended timeline entries mutate the subtree; the bottom stays glued
     // only while the reader has not scrolled away.
-    const observer = new MutationObserver((records) => {
-      if (records.some((record) => record.type === 'childList')) reconcileObservedContent()
+    const observer = new MutationObserver(() => {
       followNewContent()
     })
     observer.observe(element, { characterData: true, childList: true, subtree: true })
@@ -148,7 +156,7 @@ export function useConversationBottomFollow(
       contentResizeObserver?.disconnect()
       if (animationFrameId !== null) window.cancelAnimationFrame(animationFrameId)
     }
-  }, [conversationId, enabled, handleLayoutChange, pinToBottom, scrollContainerRef])
+  }, [contentRef, conversationId, enabled, handleLayoutChange, pinToBottom, scrollContainerRef])
 
-  return { isAtBottom, scrollToBottom }
+  return { isAtBottom, scrollToBottom, setPosition, followsBottom }
 }

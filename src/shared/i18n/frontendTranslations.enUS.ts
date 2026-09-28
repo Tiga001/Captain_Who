@@ -1,5 +1,19 @@
 // English UI translation strings.
 export const enUSTranslations = {
+  'chat.history.loadSection': 'Load this history section',
+  'chat.history.expandAll': 'Expand all history',
+  'chat.history.find': 'Find in conversation',
+  'chat.history.searchPlaceholder': 'Search conversation',
+  'chat.history.expanding': 'Expanding history…',
+  'chat.history.cancel': 'Stop expanding',
+  'chat.history.allExpanded': 'All history expanded',
+  'chat.history.copyNeedsHistory':
+    'Your selection crosses unloaded history. Expand it to select and copy the complete text.',
+  'chat.history.previous': 'Previous match',
+  'chat.history.next': 'Next match',
+  'chat.history.close': 'Close search',
+  'chat.history.noMatches': 'No matches',
+  'chat.history.selectAgain': 'Select again to copy the complete history',
   'settings.page.workflows': 'Workflow templates',
   'workflows.editorTitle': 'Edit workflow template',
   'workflows.name': 'Name',

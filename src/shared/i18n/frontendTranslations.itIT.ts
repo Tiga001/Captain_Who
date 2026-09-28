@@ -1,5 +1,19 @@
 // Italian UI translation strings.
 export const itITTranslations = {
+  'chat.history.loadSection': 'Carica questa cronologia',
+  'chat.history.expandAll': 'Espandi tutta la cronologia',
+  'chat.history.find': 'Cerca nella conversazione',
+  'chat.history.searchPlaceholder': 'Cerca testo',
+  'chat.history.expanding': 'Espansione della cronologia…',
+  'chat.history.cancel': 'Interrompi',
+  'chat.history.allExpanded': 'Cronologia completamente espansa',
+  'chat.history.copyNeedsHistory':
+    'La selezione include cronologia non caricata. Espandila per selezionare e copiare il testo completo.',
+  'chat.history.previous': 'Risultato precedente',
+  'chat.history.next': 'Risultato successivo',
+  'chat.history.close': 'Chiudi ricerca',
+  'chat.history.noMatches': 'Nessun risultato',
+  'chat.history.selectAgain': 'Seleziona nuovamente il testo completo da copiare',
   'settings.page.workflows': 'Flussi di lavoro',
   'workflows.editorTitle': 'Modifica flusso di lavoro',
   'workflows.name': 'Nome',

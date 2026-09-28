@@ -1,5 +1,19 @@
 // Japanese UI translation strings.
 export const jaJPTranslations = {
+  'chat.history.loadSection': 'この履歴を読み込む',
+  'chat.history.expandAll': 'すべての履歴を展開',
+  'chat.history.find': '会話内を検索',
+  'chat.history.searchPlaceholder': '会話を検索',
+  'chat.history.expanding': '履歴を展開中…',
+  'chat.history.cancel': '展開を停止',
+  'chat.history.allExpanded': 'すべての履歴を展開しました',
+  'chat.history.copyNeedsHistory':
+    '選択範囲に未表示の履歴が含まれます。展開して全文を選択・コピーしてください。',
+  'chat.history.previous': '前の一致',
+  'chat.history.next': '次の一致',
+  'chat.history.close': '検索を閉じる',
+  'chat.history.noMatches': '一致なし',
+  'chat.history.selectAgain': '全文をコピーするには再選択してください',
   'settings.page.workflows': 'ワークフロー',
   'workflows.editorTitle': 'ワークフローを編集',
   'workflows.name': '名前',

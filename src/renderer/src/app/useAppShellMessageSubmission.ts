@@ -1,3 +1,4 @@
+import type { ConversationScrollPosition } from '../features/chat/useConversationSegments'
 /* eslint-disable react-hooks/exhaustive-deps -- extracted callbacks keep AppShell's original dependency arrays; omitted inputs are stable refs and React dispatchers. */
 import {
   useCallback,
@@ -153,7 +154,7 @@ interface UseAppShellMessageSubmissionOptions {
     fallback: Pick<ChatComposerDraft, 'modelId' | 'permissionMode' | 'projectId'>
   ) => void
   setActiveConversationId: Dispatch<SetStateAction<string | null>>
-  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<number | null>>
+  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<ConversationScrollPosition | null>>
   setConversationScrollToBottomSignal: Dispatch<SetStateAction<number>>
   setConversationsWithRef: (value: SetStateAction<ChatConversation[]>) => void
   setScrollTargetMessageId: Dispatch<SetStateAction<string | null>>

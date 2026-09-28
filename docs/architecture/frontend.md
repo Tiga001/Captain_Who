@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # 前端架构
@@ -79,7 +79,11 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 - 通用通知 settings/event/resync、原生点击导航和 Main locale mirror；不在前端实现第二份投递 outbox。
 - 左侧栏、中央会话页、Automation 的 Scheduled 主视图、全局 Workflow 管理/只读流程图、右侧栏 workspace/capability 和全屏设置页。
 
-会话滚动的当前契约：`useConversationBottomFollow` 把距底部 20 px 以内视为贴底并持续跟随；流式增量与容器/消息块高度变化（含异步 Markdown 图片等无 DOM 变更的块级增长）都保持最新内容在底部。只有读者主动上移才暂停跟随，底部侧增长与程序化滚动的竞态不会误停。离开底部时，interactive surface 在输入框上方显示浮动“回到底部”控件：普通状态为向下箭头，流式生成期间替换为打字省略号；点击平滑回到底部并恢复跟随（`prefers-reduced-motion` 时立即跳转），不中断生成。observer surface 不显示该控件。
+会话滚动的当前契约：`useConversationBottomFollow` 把距底部 20 px 以内视为贴底并持续跟随；流式增量与容器/内容层高度变化（含异步 Markdown 图片等无 DOM 变更的块级增长）都保持最新内容在底部。ResizeObserver 只观察滚动容器与统一内容层，不随历史增长逐一订阅消息块。只有读者主动上移才暂停跟随，底部侧增长与程序化滚动的竞态不会误停。离开底部时，interactive surface 在输入框上方显示浮动“回到底部”控件：普通状态为向下箭头，流式生成期间替换为打字省略号；点击平滑回到底部并恢复跟随（`prefers-reduced-motion` 时立即跳转），不中断生成。observer surface 不显示该控件。
+
+超过 64 条消息的对话使用 `useConversationSegments` 分段延迟挂载，每段 16 条。首次加载最近两段或目标消息附近的段，其余只保留估算高度占位；滚动进入预加载范围后分帧补齐。回合导航、外部消息链接及滚动恢复先挂载目标段，再按稳定 message ID 定位。仍需交互的消息所在段保持挂载；已经访问的段在本次会话停留期间也保留，避免展开状态、编辑草稿和交互控件因移出视口而重置。因此这不是持续卸载的完整窗口化，浏览全部历史后 DOM 和内存会增加。
+
+阅读位置保存 message ID、相对视口偏移、scrollTop 与贴底状态，兼容旧数字位置；图片迟到、侧栏宽度变化和历史段补齐时按消息锚点修正，不把阅读旧内容的用户强制送回底部。缓存由会话导航持有并限制数量，切换/卸载会话会清理测量引用、监听器和未完成展开任务。长对话提供完整历史展开、查找和跨段选择复制路径；这些操作必要时展开历史，不能把尚未挂载的正文当作不存在，也不能静默复制缺段内容。
 
 复杂流程应提取为 `app/use*.ts` 或相应 feature hook；AppShell 只保留跨领域组合与顶层回调。Feature 不得反向导入 AppShell。
 
@@ -93,7 +97,7 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 
 Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独立 `primaryView`，覆盖中央会话页和右侧栏，而不是注册成右侧栏页面；左侧栏仍保留，用于切回 Conversation。`AppShell` 只持有视图切换、外部导航请求和本次应用会话的 drawer 宽度偏好，Automation task、Automation Run 和 attention 的业务状态仍来自 Core Server。
 
-Workflow 同样使用独立主视图：左侧「工作流」管理跨项目的实例，设置中的 `workflows` 页面管理模板；实例绑定画布和只读流程图不属于 Agent Center，也不按项目创建副本。实例开启状态、模板版本和绑定由 Rust Core 持久化；前端的活动边框与节点提示只投影现有对话/子 Agent 状态。当前尚无工作流消息路由、逻辑门执行或专门的 Run，详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+Workflow 同样使用独立主视图：左侧「工作流」管理跨项目的实例，设置中的 `workflows` 页面管理模板；实例绑定画布和只读流程图不属于 Agent Center，也不按项目创建副本。实例开启状态、模板版本和绑定由 Rust Core 持久化；前端的活动边框与节点提示只投影现有对话/子 Agent 状态。工作流消息投递由 Core 的持久状态与调度器控制，不能从前端动画推断执行结果，详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
 
 Projects 的新建和编辑统一经过项目表单；目录选择使用 Main 的原生 picker，Main 在提交时校验文件夹存在性、重复和嵌套关系。项目含一个主文件夹和若干辅助文件夹，标题栏项目卡按存储顺序展示，并可逐个在 Finder 打开；从卡片进入编辑后的“移除本地项目”请求仍进入既有移除确认流程。首次安装的模型目录为空，`selectedModelId=''`，用户必须在 Configuration 中配置模型；UI 不得以历史内置模型列表作为后端默认值。
 

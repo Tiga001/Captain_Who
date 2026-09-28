@@ -1,5 +1,19 @@
 // Korean UI translation strings.
 export const koKRTranslations = {
+  'chat.history.loadSection': '이 기록 불러오기',
+  'chat.history.expandAll': '전체 기록 펼치기',
+  'chat.history.find': '대화에서 찾기',
+  'chat.history.searchPlaceholder': '대화 검색',
+  'chat.history.expanding': '기록 펼치는 중…',
+  'chat.history.cancel': '펼치기 중지',
+  'chat.history.allExpanded': '전체 기록을 펼쳤습니다',
+  'chat.history.copyNeedsHistory':
+    '선택 범위에 아직 표시되지 않은 기록이 있습니다. 전체 기록을 펼친 후 선택하여 복사하세요.',
+  'chat.history.previous': '이전 결과',
+  'chat.history.next': '다음 결과',
+  'chat.history.close': '검색 닫기',
+  'chat.history.noMatches': '결과 없음',
+  'chat.history.selectAgain': '전체 기록을 복사하려면 다시 선택하세요',
   'settings.page.workflows': '워크플로',
   'workflows.editorTitle': '워크플로 편집',
   'workflows.name': '이름',

@@ -1,5 +1,19 @@
 // French UI translation strings.
 export const frFRTranslations = {
+  'chat.history.loadSection': 'Charger cet historique',
+  'chat.history.expandAll': 'Afficher tout l’historique',
+  'chat.history.find': 'Rechercher dans la conversation',
+  'chat.history.searchPlaceholder': 'Rechercher du texte',
+  'chat.history.expanding': 'Chargement de l’historique…',
+  'chat.history.cancel': 'Arrêter',
+  'chat.history.allExpanded': 'Tout l’historique est affiché',
+  'chat.history.copyNeedsHistory':
+    'La sélection contient un historique non affiché. Affichez-le pour sélectionner et copier le texte intégral.',
+  'chat.history.previous': 'Résultat précédent',
+  'chat.history.next': 'Résultat suivant',
+  'chat.history.close': 'Fermer la recherche',
+  'chat.history.noMatches': 'Aucun résultat',
+  'chat.history.selectAgain': 'Sélectionnez à nouveau le texte intégral à copier',
   'settings.page.workflows': 'Flux de travail',
   'workflows.editorTitle': 'Modifier le flux de travail',
   'workflows.name': 'Nom',

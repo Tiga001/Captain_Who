@@ -82,6 +82,10 @@ function Harness({ memberships = {} }: { memberships?: Readonly<Record<string, u
   })
   return (
     <>
+      <div className="conversation-history-tools__search">
+        <input aria-label="搜索历史" />
+      </div>
+      <button onClick={() => navigation.selectConversation('chat-b')}>切换对话</button>
       <button
         onClick={async () => {
           await navigation.archiveConversation('chat-a')
@@ -130,6 +134,17 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('conversation workflow archive protection', () => {
+  it('releases a focused history search before programmatic conversation navigation', async () => {
+    await render(<Harness />)
+    const input = page.getByRole('textbox', { name: '搜索历史' }).element() as HTMLInputElement
+    input.focus()
+    const focusOut = vi.fn()
+    input.addEventListener('focusout', focusOut)
+    ;(page.getByRole('button', { name: '切换对话' }).element() as HTMLButtonElement).click()
+    await expect.poll(() => state().activeId).toBe('chat-b')
+    expect(focusOut).toHaveBeenCalledOnce()
+    expect(document.activeElement).not.toBe(input)
+  })
   it('blocks a single enabled workflow member before writing or changing navigation', async () => {
     await render(<Harness memberships={{ 'chat-a': { instanceId: 'enabled-workflow' } }} />)
     await page.getByRole('button', { name: '归档当前对话', exact: true }).click()

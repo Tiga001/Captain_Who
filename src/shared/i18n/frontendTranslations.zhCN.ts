@@ -1,5 +1,18 @@
 // Simplified Chinese UI translation strings.
 export const zhCNTranslations = {
+  'chat.history.loadSection': '加载这段历史',
+  'chat.history.expandAll': '展开全部历史',
+  'chat.history.find': '查找对话',
+  'chat.history.searchPlaceholder': '搜索对话内容',
+  'chat.history.expanding': '正在展开历史…',
+  'chat.history.cancel': '停止展开',
+  'chat.history.allExpanded': '已展开全部历史',
+  'chat.history.copyNeedsHistory': '选择范围包含未展开的历史，展开后可完整选择和复制。',
+  'chat.history.previous': '上一个匹配',
+  'chat.history.next': '下一个匹配',
+  'chat.history.close': '关闭查找',
+  'chat.history.noMatches': '无匹配',
+  'chat.history.selectAgain': '重新选择以复制完整历史',
   'settings.page.workflows': '工作流模板',
   'workflows.editorTitle': '编辑工作流模板',
   'workflows.name': '名称',

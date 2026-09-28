@@ -13,6 +13,7 @@ import {
 import { createPortal } from 'react-dom'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { ConversationTurnNavigationItem } from '../conversationTurnNavigation'
+import type { ChatMessage } from '../chatTypes'
 import './ConversationTurnNavigationRail.css'
 
 const MINIMUM_TURN_COUNT = 4
@@ -23,6 +24,9 @@ const SCRUB_ACTIVATION_DISTANCE_PX = 4
 interface ConversationTurnNavigationRailProps {
   items: ConversationTurnNavigationItem[]
   scrollContainerRef: RefObject<HTMLDivElement | null>
+  onRevealMessage?: (id: string, block?: ScrollLogicalPosition) => void
+  visibleMessageIds?: ReadonlySet<string>
+  messageTurnIds?: readonly Pick<ChatMessage, 'id' | 'role'>[]
 }
 
 interface TooltipPosition {
@@ -153,7 +157,10 @@ function sameStringSet(left: Set<string>, right: Set<string>) {
 
 export function ConversationTurnNavigationRail({
   items,
-  scrollContainerRef
+  scrollContainerRef,
+  onRevealMessage,
+  visibleMessageIds,
+  messageTurnIds
 }: ConversationTurnNavigationRailProps) {
   const { t } = useFrontendConfig()
   const tooltipId = useId()
@@ -182,6 +189,17 @@ export function ConversationTurnNavigationRail({
   useEffect(() => {
     if (items.length < MINIMUM_TURN_COUNT) {
       setVisibleTurnIds((current) => (current.size === 0 ? current : new Set()))
+      return
+    }
+
+    if (visibleMessageIds && messageTurnIds) {
+      const visible = new Set<string>()
+      let turn: string | null = null
+      for (const message of messageTurnIds) {
+        if (message.role === 'user') turn = itemIds.has(message.id) ? message.id : null
+        if (turn && visibleMessageIds.has(message.id)) visible.add(turn)
+      }
+      setVisibleTurnIds((current) => (sameStringSet(current, visible) ? current : visible))
       return
     }
 
@@ -231,7 +249,7 @@ export function ConversationTurnNavigationRail({
     }
 
     return () => observer.disconnect()
-  }, [itemIds, itemIdsKey, items.length, scrollContainerRef])
+  }, [itemIds, itemIdsKey, items.length, messageTurnIds, scrollContainerRef, visibleMessageIds])
 
   useEffect(() => {
     if (previewTurnId && itemIds.has(previewTurnId)) return
@@ -288,6 +306,10 @@ export function ConversationTurnNavigationRail({
     item: ConversationTurnNavigationItem,
     interaction: 'click' | 'scrub' = 'click'
   ) => {
+    if (onRevealMessage) {
+      onRevealMessage(item.userMessageId, 'start')
+      return
+    }
     const root = scrollContainerRef.current
     if (!root) return
     const target = findUserMessageElement(root, item.userMessageId)
@@ -343,7 +365,7 @@ export function ConversationTurnNavigationRail({
     if (isFirstScrubMove) {
       scrubState.hasMoved = true
       const root = scrollContainerRef.current
-      if (root) {
+      if (root && !onRevealMessage) {
         scrubState.stops = createPointerScrubStops(event.currentTarget, root, items)
       }
       try {
@@ -360,7 +382,10 @@ export function ConversationTurnNavigationRail({
     setScrubbedTurnId(nearestTarget.turnId)
     setTooltipAnchor(nearestTarget.anchor)
 
-    if (isFirstScrubMove) {
+    if (onRevealMessage) {
+      const item = items.find((candidate) => candidate.id === nearestTarget.turnId)
+      if (item) onRevealMessage(item.userMessageId, 'start')
+    } else if (isFirstScrubMove) {
       const initialItem = items.find((candidate) => candidate.id === scrubState.initialTurnId)
       if (initialItem) revealTurn(initialItem, 'scrub')
     } else {

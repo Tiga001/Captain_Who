@@ -1,4 +1,5 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react'
+import type { ConversationScrollPosition } from '../features/chat/useConversationSegments'
 import { cancelAgentAction, cancelAgentRun } from '../features/agent/agentClient'
 import {
   getAgentActionApprovalStatus,
@@ -23,7 +24,7 @@ interface UseProjectRemovalOptions {
   cancelledPendingMessageIdsRef: MutableRef<Set<string>>
   cancelledRunIdsRef: MutableRef<Set<string>>
   cleanupRunBinding(runId: string): void
-  conversationScrollPositionsRef: MutableRef<Map<string, number>>
+  conversationScrollPositionsRef: MutableRef<Map<string, ConversationScrollPosition>>
   conversationsRef: MutableRef<ChatConversation[]>
   deleteProject(projectId: string): Promise<void>
   discardDraft(scopeId: string): Promise<void>
@@ -37,7 +38,7 @@ interface UseProjectRemovalOptions {
   removeFailedMessage: string
   resumeDraft(scopeId: string): void
   setActiveConversationId: Dispatch<SetStateAction<string | null>>
-  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<number | null>>
+  setActiveConversationInitialScrollTop: Dispatch<SetStateAction<ConversationScrollPosition | null>>
   setConversationsWithRef: Dispatch<SetStateAction<ChatConversation[]>>
   setDraftsWithRef: Dispatch<SetStateAction<Record<string, ChatComposerDraft>>>
   setScrollTargetMessageId: Dispatch<SetStateAction<string | null>>
