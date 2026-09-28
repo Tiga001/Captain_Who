@@ -584,6 +584,16 @@ impl StorageService {
         Ok(traces)
     }
 
+    /// Reads only the authoritative active Turn identity, excluding superseded rewrites.
+    pub fn get_in_progress_conversation_turn_identity(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<conversation_trace_repository::ConversationTurnIdentity>, String> {
+        let connection = self.state.connection()?;
+        conversation_trace_repository::get_in_progress_turn_identity(&connection, conversation_id)
+            .map_err(storage_error)
+    }
+
     pub fn get_conversation_model_context_log(
         &self,
         assistant_message_id: &str,

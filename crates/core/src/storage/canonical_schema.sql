@@ -6955,3 +6955,45 @@ CREATE INDEX workflow_execution_origin_conversation ON workflow_execution_messag
 
 -- Default project for newly created workflow conversations, schema v59.
 ALTER TABLE workflow_instances ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+
+-- Indexed chronological history projection, schema v60.
+CREATE INDEX idx_messages_pending_assistant_summary
+    ON messages(conversation_id, id, input_origin_kind, snapshot_original_origin_kind)
+    WHERE role = 'assistant' AND status = 'pending';
+
+-- Only messages and trace items appear in a timeline. Archive identities continue to use FTS.
+CREATE TABLE conversation_history_timeline (
+    entry_rowid INTEGER PRIMARY KEY REFERENCES conversation_history_index_entries(rowid) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    within_message_order INTEGER NOT NULL
+);
+CREATE INDEX conversation_history_timeline_order
+    ON conversation_history_timeline(conversation_id, position, within_message_order);
+
+-- Identity insertion precedes FTS insertion. Read the same authoritative source fields as the
+-- existing FTS triggers instead of reading an FTS row which has not been written yet.
+CREATE TRIGGER conversation_history_timeline_message_insert
+AFTER INSERT ON conversation_history_index_entries
+WHEN NEW.ref_key = 'message:' || NEW.owner_message_id
+BEGIN
+    INSERT INTO conversation_history_timeline(entry_rowid, conversation_id, position, within_message_order)
+    SELECT NEW.rowid, message.conversation_id, message.position,
+           CASE WHEN message.role = 'assistant' THEN 9223372036854775807 ELSE 0 END
+    FROM messages AS message WHERE message.id = NEW.owner_message_id;
+END;
+
+CREATE TRIGGER conversation_history_timeline_trace_insert
+AFTER INSERT ON conversation_history_index_entries
+WHEN substr(NEW.ref_key, 1, 6) = 'trace:'
+BEGIN
+    INSERT INTO conversation_history_timeline(entry_rowid, conversation_id, position, within_message_order)
+    SELECT NEW.rowid, trace.conversation_id, message.position, item.sequence + 1
+    FROM conversation_turn_trace_items AS item
+    JOIN conversation_turn_traces AS trace ON trace.assistant_message_id = item.assistant_message_id
+    JOIN messages AS message ON message.id = item.assistant_message_id
+    WHERE item.assistant_message_id = NEW.owner_message_id
+      AND item.sequence = CAST(substr(NEW.ref_key, length(NEW.owner_message_id) + 8) AS INTEGER)
+      AND NEW.ref_key = 'trace:' || item.assistant_message_id || ':' || item.sequence
+      AND item.item_kind != 'agent_mailbox_delivery';
+END;

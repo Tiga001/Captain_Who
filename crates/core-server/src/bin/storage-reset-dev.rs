@@ -2228,6 +2228,39 @@ mod tests {
     }
 
     #[test]
+    fn removing_v60_fixture_objects_restores_exact_v59_catalog_and_seeded_data() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "v60-fixture-only-secret");
+        let connection = Connection::open(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let configuration = snapshot_exact_configuration_tables(&connection).unwrap();
+        remove_v60_fixture_objects(&connection);
+        let previous = Connection::open_in_memory().unwrap();
+        previous
+            .execute_batch(
+                include_str!("../../../core/src/storage/canonical_schema.sql")
+                    .split_once("-- Indexed chronological history projection, schema v60.")
+                    .expect("v60 history schema suffix")
+                    .0,
+            )
+            .unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            storage_catalog_fingerprint(&previous).unwrap()
+        );
+        assert_eq!(
+            snapshot_exact_configuration_tables(&connection).unwrap(),
+            configuration
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "messages").unwrap(),
+            2
+        );
+        assert!(pragma_rows(&connection, "PRAGMA foreign_key_check")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn removing_v53_fixture_objects_retains_exact_v52_catalog_and_seeded_data() {
         let fixture = tempfile::tempdir().unwrap();
         populated_storage(fixture.path(), "v53-fixture-only-secret");
@@ -3199,6 +3232,7 @@ mod tests {
     }
 
     fn restore_v47_search_fixture_schema(connection: &Connection) {
+        remove_v60_fixture_objects(connection);
         connection
             .execute_batch(
                 "DROP TRIGGER conversation_history_fts_message_insert;
@@ -3226,6 +3260,7 @@ mod tests {
     }
 
     fn remove_v53_fixture_objects(connection: &Connection) {
+        remove_v60_fixture_objects(connection);
         assert_eq!(
             count_rows_if_table_exists(connection, "agent_collaboration_event_activities").unwrap(),
             0
@@ -3240,6 +3275,20 @@ mod tests {
              DROP VIEW agent_collaboration_task_activity_sources;
              DROP VIEW agent_collaboration_owner_placements;
              DROP TABLE agent_collaboration_event_activities;",
+            )
+            .unwrap();
+    }
+
+    // Test-only downgrade: the indexed history projection did not exist in the old recovery
+    // catalogs. Some downgrade paths call this twice, before removing the FTS identity table
+    // and again before stripping workflow fixtures.
+    fn remove_v60_fixture_objects(connection: &Connection) {
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS conversation_history_timeline_message_insert;
+                 DROP TRIGGER IF EXISTS conversation_history_timeline_trace_insert;
+                 DROP TABLE IF EXISTS conversation_history_timeline;
+                 DROP INDEX IF EXISTS idx_messages_pending_assistant_summary;",
             )
             .unwrap();
     }

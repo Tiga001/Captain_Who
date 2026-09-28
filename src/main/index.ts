@@ -72,6 +72,7 @@ import {
 } from './dockRecentConversations'
 import {
   MenuBarRunningConversationsController,
+  agentEventChangesRunningConversations,
   type MenuBarRunningConversationLabels
 } from './menuBarRunningConversations'
 import boatMarkPath from '../../resources/brand-mark-dark.png?asset'
@@ -283,16 +284,21 @@ function installMenuBarRunningConversations(): void {
   const controller = new MenuBarRunningConversationsController({
     applyMenu: (template) => menuBarTray?.setContextMenu(Menu.buildFromTemplate(template)),
     labels: menuBarRunningConversationLabels(),
-    loadConversations: () => coreServer.loadConversations(),
+    loadRunningConversationSummaries: () => coreServer.loadRunningConversationSummaries(),
     openConversation: openDockConversation,
     quit: () => app.quit()
   })
   controller.start()
 
-  // The controller coalesces bursts from the root Agent's streaming events before reading storage.
-  const stopAgentEvents = coreServer.onAgentEvent(() => controller.refresh())
+  const stopAgentEvents = coreServer.onAgentEvent((event) => {
+    if (agentEventChangesRunningConversations(event)) controller.refresh()
+  })
+  const stopMutations = coreServer.onConversationSummariesInvalidated(() => controller.refresh())
+  const stopRestarts = coreServer.onStarted(() => controller.refresh())
   app.once('will-quit', () => {
     stopAgentEvents()
+    stopMutations()
+    stopRestarts()
     controller.dispose()
     menuBarTray?.destroy()
     menuBarTray = null

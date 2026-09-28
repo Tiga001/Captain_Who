@@ -515,6 +515,9 @@ pub(crate) fn handle_request(
         STORAGE_LOAD_CONVERSATION_METAS_METHOD => {
             storage_response(request.id, storage.load_conversation_metas())
         }
+        mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD => {
+            storage_response(request.id, storage.load_running_conversation_summaries())
+        }
         STORAGE_LOAD_CONVERSATION_METHOD => {
             let input = match parse_params::<ConversationIdRequest>(request.params) {
                 Ok(input) => input,

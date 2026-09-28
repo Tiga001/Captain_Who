@@ -48,7 +48,7 @@ import type {
 } from './chatTypes'
 import type { WorkspaceReferenceTarget } from './workspaceMentions'
 import type { ModelTransitionConfirmation } from './modelTransitionUiState'
-import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
+import { createConversationTurnNavigationSelector } from './conversationTurnNavigation'
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useConversationBottomFollow } from './useConversationBottomFollow'
@@ -731,9 +731,15 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const canGuideQueuedMessages = Boolean(
     activeAssistantRun?.runId && activeAssistantRun.status === 'running'
   )
+  const selectTurnNavigationItems = useMemo(
+    () => createConversationTurnNavigationSelector(),
+    // The ID owns the cache lifetime even though preview calculation does not read it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [conversation.id]
+  )
   const turnNavigationItems = useMemo(
-    () => getConversationTurnNavigationItems(conversation.messages),
-    [conversation.messages]
+    () => selectTurnNavigationItems(conversation.messages),
+    [conversation.messages, selectTurnNavigationItems]
   )
   const activeTodo = useMemo(
     () => (interactive ? getLatestAgentTodo(conversation) : null),

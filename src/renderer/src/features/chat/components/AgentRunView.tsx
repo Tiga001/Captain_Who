@@ -74,16 +74,25 @@ function interruptionTranslationKey(
 function AgentRunElapsedHeader({
   canToggle,
   collapsed,
+  createdAt,
   isThinking,
-  label,
-  onToggle
+  onToggle,
+  run
 }: {
   canToggle: boolean
   collapsed: boolean
+  createdAt: number
   isThinking: boolean
-  label: string
   onToggle: () => void
+  run: ChatAgentRunView
 }) {
+  const { t } = useFrontendConfig()
+  const now = useRunClock(run.runId, !isRunSettled(run))
+  const label = isThinking
+    ? t('agent.thinking')
+    : formatTranslation(t, run.status === 'cancelled' ? 'agent.stoppedAfter' : 'agent.processed', {
+        duration: formatElapsedDuration((run.completedAt ?? now) - (run.startedAt ?? createdAt))
+      })
   const content = (
     <>
       <span className={isThinking ? 'agent-running-text' : undefined}>{label}</span>
@@ -113,10 +122,47 @@ function AgentRunElapsedHeader({
   )
 }
 
-function AgentThinkingActivity({ label }: { label: string }) {
+// Only the two time-dependent leaves subscribe. A clock tick must not re-render timeline Markdown.
+function useRunClock(runId: ChatAgentRunView['runId'], active: boolean) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return undefined
+    const timerId = window.setInterval(() => setNow(Date.now()), 500)
+    return () => window.clearInterval(timerId)
+  }, [active, runId])
+  return now
+}
+
+function AgentThinkingActivity({
+  canShowThinking,
+  retryLabel,
+  run,
+  waitingForCommandCompletion
+}: {
+  canShowThinking: boolean
+  retryLabel: string | null
+  run: ChatAgentRunView
+  waitingForCommandCompletion: boolean
+}) {
+  const { t } = useFrontendConfig()
+  const now = useRunClock(run.runId, !isRunSettled(run))
+  const isStreamingAssistantText =
+    !isRunSettled(run) &&
+    Boolean(run.lastResponseAt) &&
+    now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
+  if (
+    !retryLabel &&
+    (!canShowThinking || isStreamingAssistantText || hasRecentFileChangeActivity(run, now))
+  ) {
+    return null
+  }
+
   return (
     <div className="agent-thinking">
-      <span className="agent-running-text">{label}</span>
+      <span className="agent-running-text">
+        {retryLabel ??
+          t(waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking')}
+      </span>
     </div>
   )
 }
@@ -377,7 +423,6 @@ export function AgentRunView({
     () => displayTimelineBlocks.flatMap((block) => (block.kind === 'timeline' ? block.items : [])),
     [displayTimelineBlocks]
   )
-  const runId = run?.runId
   const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
   const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
@@ -390,20 +435,6 @@ export function AgentRunView({
     isRunSettled(run) &&
     (hasCollapsibleTimelineContent(run, timeline) || hasCollapsibleCollaborationActivity)
   )
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (runIsSettled) return undefined
-
-    const timerId = window.setInterval(() => {
-      setNow(Date.now())
-    }, 500)
-
-    return () => {
-      window.clearInterval(timerId)
-    }
-  }, [runId, runIsSettled])
-
   const llmRetryLabel = useMemo(() => {
     const retry = run?.llmRetry
     if (!retry) return null
@@ -413,42 +444,14 @@ export function AgentRunView({
     })
   }, [run?.llmRetry, t])
 
-  const headerState = useMemo(() => {
-    const hasFirstResponse = Boolean(run?.firstResponseAt)
-    const hasVisibleToolStatus = Boolean(run && hasCollapsibleTimelineContent(run, timeline))
-
-    if (
-      run &&
-      !llmRetryLabel &&
-      !hasFirstResponse &&
-      !hasVisibleToolStatus &&
-      !waitingForCommandCompletion &&
-      !isRunSettled(run)
-    ) {
-      return {
-        isThinking: true,
-        label: t('agent.thinking')
-      }
-    }
-
-    const startedAt = run?.startedAt ?? message.createdAt
-    const endedAt = run?.completedAt ?? now
-    if (run?.status === 'cancelled') {
-      return {
-        isThinking: false,
-        label: formatTranslation(t, 'agent.stoppedAfter', {
-          duration: formatElapsedDuration(endedAt - startedAt)
-        })
-      }
-    }
-
-    return {
-      isThinking: false,
-      label: formatTranslation(t, 'agent.processed', {
-        duration: formatElapsedDuration(endedAt - startedAt)
-      })
-    }
-  }, [llmRetryLabel, message.createdAt, now, run, t, timeline, waitingForCommandCompletion])
+  const headerIsThinking = Boolean(
+    run &&
+    !llmRetryLabel &&
+    !run.firstResponseAt &&
+    !hasCollapsibleTimelineContent(run, timeline) &&
+    !waitingForCommandCompletion &&
+    !runIsSettled
+  )
   if (!run) {
     return (
       <>
@@ -481,18 +484,10 @@ export function AgentRunView({
     hasDisplayableContent(finalAnswerContent) &&
     (runIsSettled || !hasTimeline) &&
     !(showTimeline && finalAnswerRepresentedByTimeline)
-  const isStreamingAssistantText =
-    !isRunSettled(run) &&
-    Boolean(run.lastResponseAt) &&
-    now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
-  const isStreamingFileChange = hasRecentFileChangeActivity(run, now)
-  const showThinkingActivity =
-    Boolean(llmRetryLabel) ||
-    (!(canToggleTimeline && timelineCollapsed) &&
-      !headerState.isThinking &&
-      !isStreamingAssistantText &&
-      !isStreamingFileChange &&
-      (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline)))
+  const canShowThinkingActivity =
+    !(canToggleTimeline && timelineCollapsed) &&
+    !headerIsThinking &&
+    (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline))
   const interruptionReason =
     run.interruption?.reason ??
     (isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
@@ -505,8 +500,9 @@ export function AgentRunView({
       <AgentRunElapsedHeader
         canToggle={canToggleTimeline}
         collapsed={timelineCollapsed}
-        isThinking={headerState.isThinking}
-        label={headerState.label}
+        createdAt={message.createdAt}
+        isThinking={headerIsThinking}
+        run={run}
         onToggle={() => {
           if (onTimelineCollapsedChange) {
             onTimelineCollapsedChange(message.id, !timelineCollapsed)
@@ -627,14 +623,12 @@ export function AgentRunView({
           <span>{t(interruptionTranslationKey(interruptionReason))}</span>
         </div>
       )}
-      {showThinkingActivity && (
-        <AgentThinkingActivity
-          label={
-            llmRetryLabel ??
-            t(waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking')
-          }
-        />
-      )}
+      <AgentThinkingActivity
+        canShowThinking={canShowThinkingActivity}
+        retryLabel={llmRetryLabel}
+        run={run}
+        waitingForCommandCompletion={waitingForCommandCompletion}
+      />
       {showTimeline && run.error && !hasTimelineError && !interruptionReason && (
         <div className="agent-run__error">{run.error}</div>
       )}

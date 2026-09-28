@@ -33,9 +33,7 @@ impl AgentService {
         }
         if let Some(active) = self
             .storage
-            .list_conversation_turn_traces(conversation_id)?
-            .into_iter()
-            .find(|trace| trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress)
+            .get_in_progress_conversation_turn_identity(conversation_id)?
         {
             return Err(AgentServiceError::structured(
                 format!(
@@ -82,9 +80,8 @@ impl AgentService {
         }
         Ok(self
             .storage
-            .list_conversation_turn_traces(conversation_id)?
-            .iter()
-            .any(|trace| trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress))
+            .get_in_progress_conversation_turn_identity(conversation_id)?
+            .is_some())
     }
 
     /// Approval continuation resumes the existing logical Turn. It may rebuild the in-memory
@@ -112,7 +109,7 @@ impl AgentService {
         }
         let durable = self
             .storage
-            .get_conversation_turn_trace(assistant_message_id)?
+            .get_in_progress_conversation_turn_identity(conversation_id)?
             .ok_or_else(|| {
                 format!(
                     "active conversation turn trace is missing for assistant {assistant_message_id}"
@@ -120,7 +117,7 @@ impl AgentService {
             })?;
         if durable.conversation_id != conversation_id
             || durable.run_id != run_id
-            || durable.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+            || durable.assistant_message_id != assistant_message_id
         {
             return Err("approval continuation does not own the durable active turn".to_string());
         }
@@ -312,5 +309,211 @@ impl AgentService {
             self.release_conversation_turn_if_current(conversation_id, run_id);
             self.release_turn_concurrency_permit(run_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod occupancy_tests {
+    use super::*;
+    use mycopilot_core::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use std::sync::Barrier;
+
+    fn fixture() -> (tempfile::TempDir, Arc<StorageService>, AgentService) {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation".into(),
+                project_id: None,
+                model_id: None,
+                title: "Occupancy".into(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant".into(),
+                    role: "assistant".into(),
+                    content: String::new(),
+                    created_at: 1,
+                    status: Some("pending".into()),
+                    attachments: Vec::new(),
+                    folder_references_json: None,
+                    agent_run_json: None,
+                    ui_state_json: None,
+                    human_interaction_response: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+        (directory, storage, service)
+    }
+
+    #[test]
+    fn concurrent_admission_has_one_winner_and_failed_preparation_can_release_it() {
+        let (_directory, _storage, service) = fixture();
+        let barrier = Barrier::new(2);
+        let winners = std::thread::scope(|scope| {
+            let starts = ["run-a", "run-b"].map(|run_id| {
+                let service = &service;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .reserve_conversation_turn("conversation", run_id, "assistant")
+                        .is_ok()
+                        .then_some(run_id)
+                })
+            });
+            starts
+                .into_iter()
+                .filter_map(|start| start.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(winners.len(), 1);
+        assert!(service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        service.release_conversation_turn_if_current("conversation", "stale-run");
+        assert!(service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        service.release_conversation_turn_if_current("conversation", winners[0]);
+        assert!(!service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        service
+            .reserve_conversation_turn("conversation", "retry-run", "assistant")
+            .unwrap();
+    }
+
+    #[test]
+    fn durable_occupancy_survives_restart_without_a_resident_runtime_and_requires_exact_owner() {
+        let (directory, storage, service) = fixture();
+        let trace = ConversationTraceSnapshot::default().in_progress_trace(
+            "durable-run",
+            "conversation",
+            "assistant",
+        );
+        storage
+            .append_in_progress_conversation_turn_trace(&trace, 1, 1)
+            .unwrap();
+        drop(service);
+        drop(storage);
+        let storage =
+            Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
+        let service =
+            AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
+        service.active_conversation_turns.lock().unwrap().clear();
+
+        assert!(service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        assert!(service
+            .reserve_conversation_turn("conversation", "other-run", "other-message")
+            .is_err());
+        assert!(service
+            .ensure_conversation_turn_owner("conversation", "other-run", "assistant")
+            .is_err());
+        assert!(service
+            .ensure_conversation_turn_owner("conversation", "durable-run", "other-message")
+            .is_err());
+        assert!(service.active_conversation_turns.lock().unwrap().is_empty());
+        service
+            .ensure_conversation_turn_owner("conversation", "durable-run", "assistant")
+            .unwrap();
+        service.release_conversation_turn_if_current("conversation", "durable-run");
+        assert!(
+            service
+                .has_conversation_turn_occupancy("conversation")
+                .unwrap(),
+            "releasing the accelerator cannot release an uncommitted terminal Turn"
+        );
+    }
+
+    #[test]
+    fn terminal_turn_cannot_reacquire_approval_ownership() {
+        let mut trace = ConversationTraceSnapshot::default().in_progress_trace(
+            "durable-run",
+            "conversation",
+            "assistant",
+        );
+        for status in [
+            ConversationTurnTraceTerminalStatus::Completed,
+            ConversationTurnTraceTerminalStatus::Failed,
+            ConversationTurnTraceTerminalStatus::Cancelled,
+        ] {
+            // Each fixture has one terminal transition; terminal-to-terminal changes are not
+            // part of the production persistence contract.
+            let (_directory, storage, service) = fixture();
+            trace.terminal_status = status;
+            storage
+                .replace_conversation_turn_trace(&trace, 1, 2)
+                .unwrap();
+            assert!(!service
+                .has_conversation_turn_occupancy("conversation")
+                .unwrap());
+            assert!(service
+                .ensure_conversation_turn_owner("conversation", "durable-run", "assistant")
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn manual_compaction_keeps_occupancy_until_its_cancelled_worker_drains() {
+        use mycopilot_core::storage::models::ManualContextCompactionOperation;
+
+        let (_directory, storage, service) = fixture();
+        let mut operation = ManualContextCompactionOperation {
+            operation_id: "compaction".into(),
+            request_id: "compaction-request".into(),
+            conversation_id: "conversation".into(),
+            status: "running".into(),
+            phase: "preparing".into(),
+            assistant_message_id: None,
+            covered_through_message_id: None,
+            model_id: None,
+            summary_id: None,
+            source_input_tokens: None,
+            replacement_input_tokens: None,
+            error: None,
+            started_at: 1,
+            updated_at: 1,
+            completed_at: None,
+        };
+        storage.claim_manual_context_compaction(&operation).unwrap();
+        assert!(service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        assert!(service
+            .reserve_conversation_turn("conversation", "new-run", "assistant")
+            .is_err());
+        service
+            .manual_context_compaction_cancellations
+            .lock()
+            .unwrap()
+            .insert(
+                operation.operation_id.clone(),
+                AgentCancellationToken::new(),
+            );
+        operation.status = "cancelled".into();
+        operation.updated_at = 2;
+        operation.completed_at = Some(2);
+        storage
+            .update_manual_context_compaction(&operation)
+            .unwrap();
+        assert!(service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
+        service
+            .manual_context_compaction_cancellations
+            .lock()
+            .unwrap()
+            .clear();
+        assert!(!service
+            .has_conversation_turn_occupancy("conversation")
+            .unwrap());
     }
 }

@@ -31,6 +31,7 @@ pub use conversations::{
     ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ChatSearchMatchKind, ChatSearchResult,
     ConversationContinuationOriginRecord, ConversationForkPoint, ForkConversationRequest,
+    RunningConversationSummary,
 };
 pub use model_configuration::{
     normalize_model_display_name, CredentialMutation, CredentialStatus,

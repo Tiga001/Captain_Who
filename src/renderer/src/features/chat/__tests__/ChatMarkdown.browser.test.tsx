@@ -69,6 +69,26 @@ beforeEach(() => {
 })
 
 describe('ChatMarkdown URL boundaries', () => {
+  it('uses the latest workspace callback and project after a props update', async () => {
+    const firstOpen = vi.fn()
+    const nextOpen = vi.fn()
+    const content = '[adapter.ts](@workspace/app/src/adapter.ts)'
+    const screen = await render(
+      <ChatMarkdown content={content} onOpenWorkspaceReference={firstOpen} projectId="first" />
+    )
+    await screen.rerender(
+      <ChatMarkdown content={content} onOpenWorkspaceReference={nextOpen} projectId="next" />
+    )
+    await screen.getByRole('link', { name: 'adapter.ts' }).click()
+    expect(firstOpen).not.toHaveBeenCalled()
+    expect(nextOpen).toHaveBeenCalledWith({
+      alias: 'app',
+      kind: 'file',
+      path: 'src/adapter.ts',
+      projectId: 'next'
+    })
+  })
+
   it('renders workspace references with a file icon and routes clicks to the file panel', async () => {
     const onOpenWorkspaceReference = vi.fn()
     const screen = await render(
@@ -145,6 +165,17 @@ describe('ChatMarkdown URL boundaries', () => {
 })
 
 describe('ChatMarkdown math normalization', () => {
+  it('updates math rendering and classes without changing the content', async () => {
+    const content = '$x^2$'
+    const screen = await render(<ChatMarkdown content={content} enableMath={false} />)
+    expect(screen.container.querySelector('.katex')).toBeNull()
+    await screen.rerender(<ChatMarkdown content={content} enableMath className="updated" />)
+    expect(screen.container.querySelector('.katex')).not.toBeNull()
+    expect(screen.container.querySelector('.chat-markdown.updated')).not.toBeNull()
+    await screen.rerender(<ChatMarkdown content={content} enableMath={false} />)
+    expect(screen.container.querySelector('.katex')).toBeNull()
+  })
+
   it('renders multiline dollar math whose delimiters share the first and last formula lines', async () => {
     const content = String.raw`$$f(x)=\sum_{n=0}^{\infty}\frac{f^{(n)}(a)}{n!}(x-a)^n
 =f(a)+f'(a)(x-a)+\cdots$$

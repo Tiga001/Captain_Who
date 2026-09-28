@@ -1,4 +1,4 @@
-import { Children, isValidElement, useMemo, type ComponentProps, type ReactNode } from 'react'
+import { Children, isValidElement, memo, useMemo, type ComponentProps, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
@@ -522,7 +522,7 @@ function MarkdownImage({ alt, src, ...props }: ComponentProps<'img'>) {
   )
 }
 
-export function ChatMarkdown({
+export const ChatMarkdown = memo(function ChatMarkdown({
   className,
   content,
   enableMath = true,
@@ -530,7 +530,10 @@ export function ChatMarkdown({
   projectId
 }: ChatMarkdownProps) {
   const markdownClassName = ['chat-markdown', className].filter(Boolean).join(' ')
-  const normalizedContent = enableMath ? normalizeMarkdownMath(content) : content
+  const normalizedContent = useMemo(
+    () => (enableMath ? normalizeMarkdownMath(content) : content),
+    [content, enableMath]
+  )
   // Keep renderer identities stable while streaming Markdown grows. Recreating this map on every
   // delta remounts completed code blocks and makes their syntax highlighting visibly flash.
   const markdownComponents = useMemo<Components>(
@@ -559,4 +562,4 @@ export function ChatMarkdown({
       </ReactMarkdown>
     </div>
   )
-}
+})

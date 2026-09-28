@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 59;
+pub const STORAGE_SCHEMA_VERSION: i32 = 60;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -10,8 +10,10 @@ const V57_SCHEMA_FINGERPRINT: &str =
     "sha256:ada068a864855b8c42afa6de36f72791212dfd90938fd547f7236e9cf26ed289";
 const V58_SCHEMA_FINGERPRINT: &str =
     "sha256:682fa9fd22c87bccdd9d201ac97f200aee3d69718ca216ac46256854ffdbf623";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V59_SCHEMA_FINGERPRINT: &str =
     "sha256:b3e50620bff925cbc53da8c13146908b8aa3128ac406be9b28c73069b09fc3c4";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:41581217d0c9d997bafbe82c1c8ded1691c163b3b70c39601f570250fade8683";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -23,6 +25,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v57 adds instance activation and prevents archiving conversations of enabled workflows.
 /// v58 adds durable workflow execution receipts and delivery provenance.
 /// v59 adds a nullable default project for future auto-created workflow conversations.
+/// v60 indexes chronological history metadata without rewriting messages, traces or FTS content.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -68,6 +71,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 58 {
         upgrade_workflow_default_project_v58(connection)?;
+    }
+
+    if read_schema_version(connection)? == 59 {
+        upgrade_history_timeline_v59(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -311,7 +318,10 @@ fn workflow_default_project_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
         .find("-- Default project for newly created workflow conversations, schema v59.")
         .unwrap();
-    &CANONICAL_SCHEMA[start..]
+    let end = CANONICAL_SCHEMA
+        .find("-- Indexed chronological history projection, schema v60.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
 }
 
 fn upgrade_workflow_default_project_v58(connection: &Connection) -> rusqlite::Result<()> {
@@ -319,6 +329,31 @@ fn upgrade_workflow_default_project_v58(connection: &Connection) -> rusqlite::Re
     validate_schema_fingerprint(&transaction, V58_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_default_project_schema())?;
     transaction.pragma_update(None, "user_version", 59)?;
+    validate_schema_fingerprint(&transaction, V59_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+
+fn history_timeline_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Indexed chronological history projection, schema v60.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..]
+}
+
+fn upgrade_history_timeline_v59(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V59_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(history_timeline_schema())?;
+    // Preserve the existing journal's order exactly, including trace positions recorded before
+    // a later message reordering. Rebuilding from current message positions would change it.
+    transaction.execute_batch(
+        "INSERT INTO conversation_history_timeline(entry_rowid, conversation_id, position, within_message_order)
+         SELECT identity.rowid, history.conversation_id, history.position, history.within_message_order
+         FROM conversation_history_fts AS history
+         JOIN conversation_history_index_entries AS identity ON identity.rowid = history.rowid
+         WHERE history.record_type IN ('message', 'trace_item');",
+    )?;
+    transaction.pragma_update(None, "user_version", 60)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
 }
@@ -353,6 +388,7 @@ fn upgrade_workflow_execution_v57(connection: &Connection) -> rusqlite::Result<(
 
 fn canonical_schema_v57() -> String {
     CANONICAL_SCHEMA
+        .replace(history_timeline_schema(), "")
         .replace(workflow_default_project_schema(), "")
         .replace(workflow_execution_schema(), "")
         .replace(
@@ -522,7 +558,9 @@ mod tests {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                &super::CANONICAL_SCHEMA.replace(super::workflow_default_project_schema(), ""),
+                &super::CANONICAL_SCHEMA
+                    .replace(super::history_timeline_schema(), "")
+                    .replace(super::workflow_default_project_schema(), ""),
             )
             .unwrap();
         connection.pragma_update(None, "user_version", 58).unwrap();
@@ -3763,3 +3801,7 @@ CREATE TABLE model_provider_credential_cleanup (
 #[cfg(test)]
 #[path = "migrations_history_search_tests.rs"]
 mod history_search_tests;
+
+#[cfg(test)]
+#[path = "migrations_history_timeline_tests.rs"]
+mod history_timeline_tests;

@@ -66,6 +66,7 @@ import type {
   StorageAgentPromptPreferencesRecord,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
+  StorageRunningConversationSummary,
   StorageChatConversationRecord,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
@@ -127,6 +128,8 @@ import {
   parseSkillsSetEnabledOutput,
   parseStorageModelSettingsRecord,
   parseStorageModelSettingsUpdateRecord,
+  parseStorageRunningConversationSummaries,
+  STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD,
   SKILLS_INSTALL_LOCAL_METHOD,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
@@ -242,8 +245,27 @@ export type HostConfigurationDomain = 'modelSettings' | 'imageGeneration' | 'bui
 /** Request and invalidation facade. CoreServer owns the RPC process lifecycle. */
 export class CoreServerStorageApi {
   private readonly configurationHandlers = new Map<HostConfigurationDomain, Set<() => void>>()
+  private readonly conversationSummaryHandlers = new Set<() => void>()
 
   protected constructor(protected readonly rpc: CoreJsonRpcClient) {}
+
+  /** Host-owned mutations that change native task menus; contents are always requeried. */
+  onConversationSummariesInvalidated(handler: () => void): () => void {
+    this.conversationSummaryHandlers.add(handler)
+    return () => {
+      this.conversationSummaryHandlers.delete(handler)
+    }
+  }
+
+  private invalidateConversationSummaries(): void {
+    for (const handler of this.conversationSummaryHandlers) {
+      try {
+        handler()
+      } catch {
+        console.warn('Conversation summary invalidation listener failed')
+      }
+    }
+  }
 
   /** An invalidation is not a successful-write receipt. Consumers always requery Core. */
   onConfigurationInvalidated(domain: HostConfigurationDomain, handler: () => void): () => void {
@@ -538,13 +560,21 @@ export class CoreServerStorageApi {
   }
 
   deleteProject(projectId: string): Promise<void> {
-    return this.rpc.request<void, { projectId: string }>(STORAGE_DELETE_PROJECT_METHOD, {
-      projectId
-    })
+    return this.rpc
+      .request<void, { projectId: string }>(STORAGE_DELETE_PROJECT_METHOD, {
+        projectId
+      })
+      .finally(() => this.invalidateConversationSummaries())
   }
 
   loadConversations(): Promise<StorageChatConversationRecord[]> {
     return this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
+  }
+
+  loadRunningConversationSummaries(): Promise<StorageRunningConversationSummary[]> {
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD)
+      .then(parseStorageRunningConversationSummaries)
   }
 
   loadConversationMetas(): Promise<StorageChatConversationMetaRecord[]> {
@@ -561,32 +591,37 @@ export class CoreServerStorageApi {
   }
 
   forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord> {
-    return this.rpc.request<StorageChatConversationRecord, StorageForkConversationRequest>(
-      STORAGE_FORK_CONVERSATION_METHOD,
-      input
-    )
+    return this.rpc
+      .request<StorageChatConversationRecord, StorageForkConversationRequest>(
+        STORAGE_FORK_CONVERSATION_METHOD,
+        input
+      )
+      .finally(() => this.invalidateConversationSummaries())
   }
 
   saveConversationMeta(
     conversation: StorageChatConversationMetaRecord
   ): Promise<StorageChatConversationMetaRecord> {
-    return this.rpc.request<StorageChatConversationMetaRecord, StorageChatConversationMetaRecord>(
-      STORAGE_SAVE_CONVERSATION_META_METHOD,
-      conversation
-    )
+    return this.rpc
+      .request<StorageChatConversationMetaRecord, StorageChatConversationMetaRecord>(
+        STORAGE_SAVE_CONVERSATION_META_METHOD,
+        conversation
+      )
+      .finally(() => this.invalidateConversationSummaries())
   }
 
   deleteConversation(conversationId: string): Promise<void> {
-    return this.rpc.request<void, { conversationId: string }>(STORAGE_DELETE_CONVERSATION_METHOD, {
-      conversationId
-    })
+    return this.rpc
+      .request<void, { conversationId: string }>(STORAGE_DELETE_CONVERSATION_METHOD, {
+        conversationId
+      })
+      .finally(() => this.invalidateConversationSummaries())
   }
 
   deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void> {
-    return this.rpc.request<void, StorageDeleteChatMessagesRequest>(
-      STORAGE_DELETE_CHAT_MESSAGES_METHOD,
-      input
-    )
+    return this.rpc
+      .request<void, StorageDeleteChatMessagesRequest>(STORAGE_DELETE_CHAT_MESSAGES_METHOD, input)
+      .finally(() => this.invalidateConversationSummaries())
   }
 
   upsertChatMessages(input: {

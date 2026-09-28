@@ -395,6 +395,45 @@ pub struct ConversationTurnTraceRecord {
     pub completed_at: Option<i64>,
 }
 
+/// Durable Turn ownership without loading its append-only trace or model context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationTurnIdentity {
+    pub assistant_message_id: String,
+    pub conversation_id: String,
+    pub run_id: String,
+}
+
+const IN_PROGRESS_TURN_IDENTITY_SQL: &str = "
+    SELECT trace.assistant_message_id, trace.conversation_id, trace.run_id
+    FROM conversation_turn_traces AS trace
+    WHERE trace.conversation_id = ?1
+      AND trace.terminal_status = 'in_progress'
+      AND NOT EXISTS (
+          SELECT 1 FROM conversation_turn_rewrites AS rewrite
+          WHERE rewrite.source_assistant_message_id = trace.assistant_message_id
+            AND rewrite.conversation_id = trace.conversation_id
+      )
+    LIMIT 1
+";
+
+/// The partial unique active-Turn index keeps this lookup independent of completed history.
+/// Waiting for approval/interaction and cancellation still occupy the Conversation until the
+/// terminal Trace transaction commits; transient runtime/UI state must not release this lease.
+pub fn get_in_progress_turn_identity(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ConversationTurnIdentity>> {
+    connection
+        .query_row(IN_PROGRESS_TURN_IDENTITY_SQL, [conversation_id], |row| {
+            Ok(ConversationTurnIdentity {
+                assistant_message_id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                run_id: row.get(2)?,
+            })
+        })
+        .optional()
+}
+
 pub fn list_trace_records_for_conversation(
     connection: &Connection,
     conversation_id: &str,
@@ -827,6 +866,123 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn in_progress_identity_matches_full_trace_status_without_reading_history_bodies() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let mut connection = test_connection();
+        let cases = [
+            ("active", ConversationTurnTraceTerminalStatus::InProgress),
+            ("completed", ConversationTurnTraceTerminalStatus::Completed),
+            ("failed", ConversationTurnTraceTerminalStatus::Failed),
+            ("cancelled", ConversationTurnTraceTerminalStatus::Cancelled),
+        ];
+        for (id, status) in cases {
+            insert_conversation(&connection, id);
+            insert_message(&connection, id, id, 1);
+            let mut value = trace(id, id, id);
+            value.terminal_status = status;
+            replace_trace(&mut connection, &value, 1, 2).unwrap();
+            let expected = list_traces_for_conversation(&connection, id)
+                .unwrap()
+                .into_iter()
+                .find(|trace| {
+                    trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+                })
+                .map(|trace| ConversationTurnIdentity {
+                    assistant_message_id: trace.assistant_message_id,
+                    conversation_id: trace.conversation_id,
+                    run_id: trace.run_id,
+                });
+            assert_eq!(
+                get_in_progress_turn_identity(&connection, id).unwrap(),
+                expected
+            );
+        }
+        insert_conversation(&connection, "empty");
+
+        // This denies actual SQL reads, so fetching bodies and discarding them still fails.
+        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read { table_name, .. }
+                if !matches!(
+                    table_name,
+                    "conversation_turn_traces" | "conversation_turn_rewrites"
+                ) =>
+            {
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }));
+        assert!(get_in_progress_turn_identity(&connection, "active")
+            .unwrap()
+            .is_some());
+        for id in ["completed", "failed", "cancelled", "empty", "missing"] {
+            assert!(get_in_progress_turn_identity(&connection, id)
+                .unwrap()
+                .is_none());
+        }
+        assert!(list_traces_for_conversation(&connection, "active").is_err());
+    }
+
+    #[test]
+    fn in_progress_identity_uses_the_partial_active_turn_index() {
+        let connection = test_connection();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {IN_PROGRESS_TURN_IDENTITY_SQL}"
+            ))
+            .unwrap();
+        let details = statement
+            .query_map(["conversation-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            details.iter().any(|detail| detail
+                .contains("SEARCH trace USING INDEX conversation_turn_traces_one_active_turn")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH rewrite USING INDEX")
+                    && detail.contains("source_assistant_message_id")),
+            "{details:?}"
+        );
+        assert!(
+            !details.iter().any(|detail| detail.starts_with("SCAN ")),
+            "{details:?}"
+        );
+    }
+
+    #[test]
+    fn in_progress_identity_excludes_superseded_trace_headers() {
+        let connection = test_connection();
+        insert_conversation(&connection, "conversation-1");
+        insert_message(&connection, "conversation-1", "source", 1);
+        // Recovery may inspect old databases. Isolate projection semantics with a superseded
+        // header even though current rewrite admission only accepts terminal source Turns.
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+             DROP TRIGGER validate_conversation_turn_rewrite_insert;
+             INSERT INTO conversation_turn_traces (
+                 assistant_message_id, conversation_id, run_id, schema_version, terminal_status,
+                 truncated, created_at, updated_at
+             ) VALUES ('source', 'conversation-1', 'source-run', 1, 'in_progress', 0, 1, 1);
+             INSERT INTO conversation_turn_rewrites (
+                 request_id, request_fingerprint, conversation_id, source_user_message_id,
+                 source_assistant_message_id, replacement_user_message_id,
+                 replacement_assistant_message_id, run_id, response_json, created_at
+             ) VALUES ('rewrite', 'sha256:' || printf('%064d', 0), 'conversation-1', 'source-user',
+                       'source', 'replacement-user', 'replacement', 'replacement-run', '{}', 2);",
+            )
+            .unwrap();
+        assert!(get_in_progress_turn_identity(&connection, "conversation-1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn round_trips_trace_and_lists_by_message_position() {
         let mut connection = test_connection();
         insert_conversation(&connection, "conversation-1");
@@ -951,6 +1107,14 @@ mod tests {
         replacement.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
         replacement.terminal_error = Some("replacement should roll back".to_string());
         assert!(replace_trace(&mut connection, &replacement, 10, 30).is_err());
+        assert_eq!(
+            get_in_progress_turn_identity(&connection, "conversation-1")
+                .unwrap()
+                .unwrap()
+                .run_id,
+            "run-1",
+            "failed terminal persistence must retain durable occupancy"
+        );
         connection
             .execute_batch("DROP TRIGGER fail_conversation_trace_item_insert;")
             .unwrap();

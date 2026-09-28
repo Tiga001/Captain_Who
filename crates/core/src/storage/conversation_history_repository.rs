@@ -574,17 +574,13 @@ pub fn get_tool_exchange(
     Ok(Some(records))
 }
 
-fn reference_order(
-    connection: &Connection,
-    conversation_id: &str,
-    reference: &ConversationHistoryRecordRef,
-) -> rusqlite::Result<Option<(i64, i64)>> {
-    let ref_key = reference_key(reference);
-    connection
-        .query_row(
-            "SELECT position, within_message_order
+// FTS stores these identity columns as UNINDEXED. Resolve its rowid through the ordinary
+// unique index so a reference lookup does not visit unrelated conversations' history.
+const REFERENCE_ORDER_SQL: &str = "SELECT position, within_message_order
              FROM conversation_history_fts
-             WHERE conversation_id = ?1 AND ref_key = ?2
+             WHERE rowid = (
+                 SELECT rowid FROM conversation_history_index_entries WHERE ref_key = ?2
+             ) AND conversation_id = ?1
                AND NOT EXISTS (
                    SELECT 1 FROM conversation_turn_rewrites AS rewrite
                    WHERE rewrite.conversation_id = conversation_history_fts.conversation_id
@@ -593,11 +589,77 @@ fn reference_order(
                          OR rewrite.source_assistant_message_id = conversation_history_fts.message_id
                          OR rewrite.source_assistant_message_id = conversation_history_fts.assistant_message_id
                      )
-               )",
+               )";
+
+fn reference_order(
+    connection: &Connection,
+    conversation_id: &str,
+    reference: &ConversationHistoryRecordRef,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    let ref_key = reference_key(reference);
+    connection
+        .query_row(
+            REFERENCE_ORDER_SQL,
             params![conversation_id, ref_key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
+}
+
+fn timeline_query(
+    conversation_id: &str,
+    start: Option<(i64, i64)>,
+    end: Option<(i64, i64)>,
+    limit: usize,
+    backwards: bool,
+) -> (String, Vec<rusqlite::types::Value>) {
+    // Seek in the ordinary chronological index, then read only the selected FTS rows. Keeping
+    // this join order also avoids both an FTS scan and sorting all records in a long conversation.
+    let mut sql = String::from(
+        "SELECT
+            history.record_type, history.item_kind, history.message_id,
+            history.assistant_message_id, history.sequence, history.archive_ref,
+            history.tool, history.status, history.run_id, history.created_at,
+            substr(history.content, 1, 321), length(history.content)
+         FROM conversation_history_timeline AS timeline
+         CROSS JOIN conversation_history_fts AS history
+         WHERE timeline.conversation_id = ?
+           AND history.rowid = timeline.entry_rowid
+           AND history.conversation_id = timeline.conversation_id
+           AND history.record_type != 'archive'
+           AND NOT EXISTS (
+               SELECT 1 FROM conversation_turn_rewrites AS rewrite
+               WHERE rewrite.conversation_id = history.conversation_id
+                 AND (
+                     rewrite.source_user_message_id = history.message_id
+                     OR rewrite.source_assistant_message_id = history.message_id
+                     OR rewrite.source_assistant_message_id = history.assistant_message_id
+                 )
+           )",
+    );
+    let mut values = vec![rusqlite::types::Value::from(conversation_id.to_string())];
+    if let Some((position, within)) = start {
+        if backwards {
+            sql.push_str(" AND (timeline.position, timeline.within_message_order) < (?, ?)");
+        } else {
+            sql.push_str(" AND (timeline.position, timeline.within_message_order) >= (?, ?)");
+        }
+        values.extend([position.into(), within.into()]);
+    }
+    if let Some((position, within)) = end {
+        sql.push_str(" AND (timeline.position, timeline.within_message_order) <= (?, ?)");
+        values.extend([position.into(), within.into()]);
+    }
+    if backwards {
+        // FTS scan order breaks equal chronological keys by ascending rowid, even when the
+        // requested timeline runs backwards. Preserve that tie order for limited pages.
+        sql.push_str(" ORDER BY timeline.position DESC, timeline.within_message_order DESC, timeline.entry_rowid ASC");
+    } else {
+        sql.push_str(" ORDER BY timeline.position ASC, timeline.within_message_order ASC, timeline.entry_rowid ASC");
+    }
+    sql.push_str(" LIMIT ?");
+    values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
+    (sql, values)
 }
 
 fn query_timeline(
@@ -608,44 +670,7 @@ fn query_timeline(
     limit: usize,
     backwards: bool,
 ) -> rusqlite::Result<Vec<ConversationHistoryTimelineRecord>> {
-    let mut sql = String::from(
-        "SELECT
-            record_type, item_kind, message_id, assistant_message_id, sequence,
-            archive_ref, tool, status, run_id, created_at,
-            substr(content, 1, 321), length(content)
-         FROM conversation_history_fts
-         WHERE conversation_id = ? AND record_type != 'archive'
-           AND NOT EXISTS (
-               SELECT 1 FROM conversation_turn_rewrites AS rewrite
-               WHERE rewrite.conversation_id = conversation_history_fts.conversation_id
-                 AND (
-                     rewrite.source_user_message_id = conversation_history_fts.message_id
-                     OR rewrite.source_assistant_message_id = conversation_history_fts.message_id
-                     OR rewrite.source_assistant_message_id = conversation_history_fts.assistant_message_id
-                 )
-           )",
-    );
-    let mut values = vec![rusqlite::types::Value::from(conversation_id.to_string())];
-    if let Some((position, within)) = start {
-        if backwards {
-            sql.push_str(" AND (position < ? OR (position = ? AND within_message_order < ?))");
-        } else {
-            sql.push_str(" AND (position > ? OR (position = ? AND within_message_order >= ?))");
-        }
-        values.extend([position.into(), position.into(), within.into()]);
-    }
-    if let Some((position, within)) = end {
-        sql.push_str(" AND (position < ? OR (position = ? AND within_message_order <= ?))");
-        values.extend([position.into(), position.into(), within.into()]);
-    }
-    if backwards {
-        sql.push_str(" ORDER BY position DESC, within_message_order DESC");
-    } else {
-        sql.push_str(" ORDER BY position ASC, within_message_order ASC");
-    }
-    sql.push_str(" LIMIT ?");
-    values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
-
+    let (sql, values) = timeline_query(conversation_id, start, end, limit, backwards);
     let mut statement = connection.prepare(&sql)?;
     let records = statement
         .query_map(params_from_iter(values), |row| {
@@ -763,6 +788,10 @@ fn fts_phrase(query: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "conversation_history_repository_performance_tests.rs"]
+mod performance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{conversation_trace_repository, migrations};
@@ -772,7 +801,7 @@ mod tests {
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
 
-    fn setup() -> Connection {
+    pub(super) fn setup() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
         connection

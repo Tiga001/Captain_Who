@@ -347,6 +347,15 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
         active_traces[0].assistant_message_id,
         "replacement-assistant"
     );
+    let active_identity = service
+        .get_in_progress_conversation_turn_identity(conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        active_identity.assistant_message_id,
+        "replacement-assistant"
+    );
+    assert_eq!(active_identity.run_id, active_traces[0].run_id);
 
     let connection = service.state.connection().unwrap();
     let counts = connection

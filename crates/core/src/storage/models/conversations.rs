@@ -45,6 +45,15 @@ pub struct ChatConversationMetaRecord {
     pub unread_at: Option<i64>,
 }
 
+/// Active root membership, without messages, trace bodies or attachment previews.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentRecord {

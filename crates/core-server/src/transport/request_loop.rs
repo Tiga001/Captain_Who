@@ -157,6 +157,7 @@ fn is_blocking_read_method(method: &str) -> bool {
             | STORAGE_LOAD_PROJECTS_METHOD
             | STORAGE_LOAD_CONVERSATIONS_METHOD
             | STORAGE_LOAD_CONVERSATION_METAS_METHOD
+            | mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
             | STORAGE_LOAD_CONVERSATION_METHOD
             | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
             | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
@@ -1043,6 +1044,9 @@ mod tests {
             STORAGE_LOAD_CONVERSATION_METAS_METHOD
         ));
         assert!(is_blocking_read_method(STORAGE_LOAD_CONVERSATION_METHOD));
+        assert!(is_blocking_read_method(
+            mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
+        ));
         for method in [
             mycopilot_protocol_rs::STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD,
             mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD,

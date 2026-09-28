@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-09-28
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -123,6 +123,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 长程任务的分叉仍完整复制所选历史及可见子树，不截短历史、不省略 Archive，也不跳过身份、父子归属、终态和 Provider continuation 校验。准备阶段在同一数据库连接持锁期间复用一次解析的 Conversation、Trace、摘要链、guidance 和 FileChange；缓存只属于本次分叉，最终构建移动大块内容，避免多轮读取和深拷贝。Trace sequence 使用集合匹配，避免上下文与 Trace 两层逐项扫描。
 
 v48 的 `conversation_history_index_entries` 是派生身份索引，通过 `ref_key` / `archive_ref` 定位 FTS rowid。消息、Trace 和 Archive 的写入、更新、克隆与删除必须同时维护该索引；不能直接按 FTS 的 UNINDEXED 身份列逐条全表扫描。升级保留原始搜索全文，不用有界 Trace 重新生成 Exact Archive 的检索正文。可重建索引不作为分支历史或执行授权复制。
+
+v60 的 `conversation_history_timeline` 为 message / trace_item 增加普通顺序投影，以 `(conversation_id, position, within_message_order)` 索引定位有界分页，再按 entry rowid 读取 FTS 展示字段；archive 正文继续通过原身份与全文检索路径读取。exact v59 升级从既有 FTS position 和回合内顺序回填，不用当前消息位置重排已记录的 Trace，也不改写正文、Trace 或 FTS。正常写入随 identity 触发器同步生成投影，删除以外键级联清理，fork 在目标归属下重建。范围、around、重写隐藏与权限语义保持不变。
 
 Core Server 将 fork 交给单工作线程的有界队列（运行与排队合计最多 4 项），避免在 stdio 请求循环同步执行整个克隆。关闭时未开始的请求明确失败，已开始的事务等待完成；不能把超时当成回滚。Renderer 显示创建中状态并阻止重复点击；稳定边界的失败重试复用 requestId，latest 的源版本或消息边界变化后使用新 identity。所有历史和 SQL 写入仍在原有一致性锁与原子事务下完成，其他需要该连接的数据库操作可能短暂等待。
 

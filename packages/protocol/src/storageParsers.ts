@@ -3,6 +3,8 @@ export {
   parseStorageForkConversationErrorData
 } from './storageParsers/fork'
 
+export { parseStorageRunningConversationSummaries } from './storageParsers/runningConversations'
+
 export {
   parseCredentialStatus,
   parseCredentialMutation,

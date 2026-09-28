@@ -182,6 +182,13 @@ impl StorageService {
         chat_repository::list_root_conversation_metas(&connection).map_err(storage_error)
     }
 
+    pub fn load_running_conversation_summaries(
+        &self,
+    ) -> Result<Vec<crate::storage::models::RunningConversationSummary>, String> {
+        let connection = self.state.connection()?;
+        chat_repository::list_running_conversation_summaries(&connection).map_err(storage_error)
+    }
+
     pub fn load_conversation(
         &self,
         conversation_id: &str,

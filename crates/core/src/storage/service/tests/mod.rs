@@ -32,7 +32,10 @@ struct StorageFixture {
 impl StorageFixture {
     fn new() -> Self {
         let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("mycopilot-storage-attachment-test-{unique}"));
+        let root = std::env::temp_dir().join(format!(
+            "mycopilot-storage-attachment-test-{}-{unique}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         Self {

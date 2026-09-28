@@ -151,6 +151,8 @@ pub const STORAGE_SAVE_PROJECT_METHOD: &str = "storage.saveProject";
 pub const STORAGE_DELETE_PROJECT_METHOD: &str = "storage.deleteProject";
 pub const STORAGE_LOAD_CONVERSATIONS_METHOD: &str = "storage.loadConversations";
 pub const STORAGE_LOAD_CONVERSATION_METAS_METHOD: &str = "storage.loadConversationMetas";
+pub const STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD: &str =
+    "storage.loadRunningConversationSummaries";
 pub const STORAGE_LOAD_CONVERSATION_METHOD: &str = "storage.loadConversation";
 pub const STORAGE_SAVE_CONVERSATION_META_METHOD: &str = "storage.saveConversationMeta";
 pub const STORAGE_DELETE_CONVERSATION_METHOD: &str = "storage.deleteConversation";

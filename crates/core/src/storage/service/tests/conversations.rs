@@ -2,6 +2,7 @@ use super::*;
 use std::cell::RefCell;
 
 mod automation_parent_deletion;
+mod running_summaries;
 
 #[test]
 fn workflow_instances_are_disabled_when_agent_tree_or_project_teardown_disables_triggers() {
@@ -2142,6 +2143,18 @@ fn graph_bound_root_conversation_and_project_deletes_remove_owned_agent_trees() 
             .unwrap();
     }
 
+    {
+        let connection = service.state.connection().unwrap();
+        assert_eq!(
+            history_timeline_projection_count(&connection, "conversation-graph-conversation"),
+            1
+        );
+        assert_eq!(
+            history_timeline_projection_count(&connection, "conversation-graph-project"),
+            1
+        );
+    }
+
     service
         .delete_conversation("conversation-graph-conversation")
         .unwrap();
@@ -2180,6 +2193,14 @@ fn graph_bound_root_conversation_and_project_deletes_remove_owned_agent_trees() 
         .all(|draft| !draft.scope_id.starts_with("conversation-graph-")));
 
     let connection = service.state.connection().unwrap();
+    assert_eq!(
+        history_timeline_projection_count(&connection, "conversation-graph-conversation"),
+        0
+    );
+    assert_eq!(
+        history_timeline_projection_count(&connection, "conversation-graph-project"),
+        0
+    );
     let violations = connection
         .prepare("PRAGMA foreign_key_check")
         .unwrap()
@@ -2906,6 +2927,9 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             "command-session:cmd_000000000000000000000000000000a1".to_string(),
         ]
     );
+    for conversation_id in [&forked.id, &recursively_forked.id] {
+        assert!(history_timeline_projection_count(&connection, conversation_id) > 0);
+    }
 }
 
 #[test]
@@ -3422,6 +3446,7 @@ fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
         ("conversation_history_blobs", "conversation_id = ?1"),
         ("conversation_history_blob_chunks", "archive_ref IN (SELECT archive_ref FROM conversation_history_blobs WHERE conversation_id = ?1)"),
         ("conversation_history_fts", "conversation_id = ?1"),
+        ("conversation_history_timeline", "conversation_id = ?1"),
         ("conversation_forks", "target_conversation_id = ?1"),
     ] {
         let count = connection
@@ -4120,6 +4145,14 @@ fn deleting_messages_keeps_usage_totals_via_rollup() {
     second_usage.estimated_cost = Some(0.25);
     service.upsert_agent_usage(second_usage).unwrap();
 
+    assert_eq!(
+        history_timeline_projection_count(
+            &service.state.connection().unwrap(),
+            "conversation-usage-delete"
+        ),
+        2
+    );
+
     service
         .delete_chat_messages("conversation-usage-delete", &["message-1".to_string()])
         .unwrap();
@@ -4143,6 +4176,10 @@ fn deleting_messages_keeps_usage_totals_via_rollup() {
 
     let connection = service.state.connection().unwrap();
     assert_eq!(
+        history_timeline_projection_count(&connection, "conversation-usage-delete"),
+        1
+    );
+    assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM agent_usage_records", [], |row| {
                 row.get::<_, i64>(0)
@@ -4160,4 +4197,20 @@ fn deleting_messages_keeps_usage_totals_via_rollup() {
             .unwrap(),
         1
     );
+}
+
+fn history_timeline_projection_count(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+) -> usize {
+    let projected = connection.prepare(
+        "SELECT entry_rowid, position, within_message_order FROM conversation_history_timeline WHERE conversation_id=?1 ORDER BY entry_rowid"
+    ).unwrap().query_map([conversation_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let indexed = connection.prepare(
+        "SELECT rowid, position, within_message_order FROM conversation_history_fts WHERE conversation_id=?1 AND record_type IN ('message','trace_item') ORDER BY rowid"
+    ).unwrap().query_map([conversation_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(projected, indexed);
+    projected.len()
 }

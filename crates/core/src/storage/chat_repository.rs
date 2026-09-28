@@ -1,4 +1,7 @@
 mod agent_run_projection;
+mod running_conversations;
+
+pub(crate) use running_conversations::list_running_conversation_summaries;
 
 pub(crate) use agent_run_projection::{
     canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,

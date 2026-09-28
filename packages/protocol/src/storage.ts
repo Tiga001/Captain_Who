@@ -464,6 +464,16 @@ export interface StorageChatConversationMetaRecord {
   unreadAt?: number | null
 }
 
+export const STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD =
+  'storage.loadRunningConversationSummaries'
+
+/** Membership denotes an active root turn (including approval/input waits and admission). */
+export interface StorageRunningConversationSummary {
+  id: string
+  title: string
+  updatedAt: number
+}
+
 export interface StorageConversationContinuationOriginRecord {
   sourceConversationId: string
   sourceMessageId: string

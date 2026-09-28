@@ -49,6 +49,7 @@ const REINITIALIZE_TABLES: &[&str] = &[
     "conversation_context_compaction_heads",
     "conversation_history_fts",
     "conversation_history_index_entries",
+    "conversation_history_timeline",
     "conversation_world_state_epochs",
 ];
 

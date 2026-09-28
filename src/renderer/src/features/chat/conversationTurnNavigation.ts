@@ -48,8 +48,10 @@ export function normalizeTurnNavigationPreview(value: string) {
     .trim()
 }
 
-function getUserPreview(message: ChatMessage) {
-  const visibleContent = normalizeTurnNavigationPreview(getUserVisibleContent(message))
+type PreviewNormalizer = (message: ChatMessage, content: string) => string
+
+function getUserPreview(message: ChatMessage, normalize: PreviewNormalizer) {
+  const visibleContent = normalize(message, getUserVisibleContent(message))
   if (visibleContent) return visibleContent
 
   return (
@@ -62,6 +64,32 @@ function getUserPreview(message: ChatMessage) {
 
 export function getConversationTurnNavigationItems(
   messages: ChatMessage[]
+): ConversationTurnNavigationItem[] {
+  return deriveConversationTurnNavigationItems(messages, (_, content) =>
+    normalizeTurnNavigationPreview(content)
+  )
+}
+
+/** Keep one selector per conversation surface; removed/replaced messages are weakly held. */
+export function createConversationTurnNavigationSelector(
+  normalize = normalizeTurnNavigationPreview
+) {
+  const previews = new WeakMap<ChatMessage, { content: string; preview: string }>()
+
+  return (messages: ChatMessage[]) =>
+    deriveConversationTurnNavigationItems(messages, (message, content) => {
+      const cached = previews.get(message)
+      // Compare the actual display input too, so an in-place edit cannot leave stale text.
+      if (cached?.content === content) return cached.preview
+      const preview = normalize(content)
+      previews.set(message, { content, preview })
+      return preview
+    })
+}
+
+function deriveConversationTurnNavigationItems(
+  messages: ChatMessage[],
+  normalize: PreviewNormalizer
 ): ConversationTurnNavigationItem[] {
   const items: ConversationTurnNavigationItem[] = []
 
@@ -83,8 +111,8 @@ export function getConversationTurnNavigationItems(
       favorited: userMessage.uiState?.favorited === true,
       id: userMessage.id,
       userMessageId: userMessage.id,
-      userPreview: getUserPreview(userMessage),
-      assistantPreview: normalizeTurnNavigationPreview(getAssistantFinalContent(finalAssistant))
+      userPreview: getUserPreview(userMessage, normalize),
+      assistantPreview: normalize(finalAssistant, getAssistantFinalContent(finalAssistant))
     })
   }
 
