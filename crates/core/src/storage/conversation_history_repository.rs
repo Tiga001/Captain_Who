@@ -13,6 +13,11 @@ use std::io::{Error as IoError, ErrorKind};
 
 const MAX_TIMELINE_RECORDS: usize = 100;
 
+mod compacted;
+pub(crate) use compacted::{
+    read_compacted_snapshot, CompactedHistoryEntry, CompactedHistorySnapshot,
+};
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",

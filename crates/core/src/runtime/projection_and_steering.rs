@@ -287,21 +287,33 @@ fn apply_workflow_deliveries(
 ) -> AgentResult<()> {
     let mut recorded = Vec::new();
     {
-        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         for delivery in deliveries {
-            if recorder.record_workflow_delivery(delivery).map_err(AgentError::new)? {
+            if recorder
+                .record_workflow_delivery(delivery)
+                .map_err(AgentError::new)?
+            {
                 recorded.push(delivery);
             }
         }
     }
-    if recorded.is_empty() { return Ok(()); }
+    if recorded.is_empty() {
+        return Ok(());
+    }
     publish_trace_snapshot(conversation_trace, trace_observer)?;
     for delivery in recorded {
         active_context.push(ContextItem::new(
             LlmMessage::text(LlmMessageRole::User, delivery.content.clone()),
             with_trace_origin(
-                ContextMetadata::new(ContextSource::UserGuidance, ContextScope::Run, ContextRetention::Retained),
-                Some(assistant_message_id), Some(delivery.trace_sequence),
+                ContextMetadata::new(
+                    ContextSource::UserGuidance,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                Some(assistant_message_id),
+                Some(delivery.trace_sequence),
             ),
         ));
     }
@@ -625,23 +637,19 @@ pub(crate) fn finalize_model_tool_observation(
     model_result: &AgentToolResult,
     archive: &ConversationHistoryArchiveTraceMetadata,
 ) -> AgentResult<String> {
-    let recovery = model_tool_result_recovery(archive)?;
-    let requires_exact_recovery = archive.model_projection_truncated
+    let source = ModelToolResultSource {
+        truncated_at_source: Some(archive.truncated_at_source),
+    };
+    let has_bounded_preview = archive.model_projection_truncated
         && model_result
             .result
             .as_ref()
             .is_some_and(crate::exact_capture::value_has_recoverable_preview_truncation);
-    let output = if requires_exact_recovery {
-        gate.project_with_required_recovery(call_id, is_error, model_result, recovery.as_ref())
+    let output = if has_bounded_preview {
+        gate.project_with_preview_truncation(call_id, is_error, model_result, Some(&source))
     } else {
-        gate.project(call_id, is_error, model_result, recovery.as_ref())
+        gate.project(call_id, is_error, model_result, Some(&source))
     };
-    if output.truncated && !model_observation_has_recovery(&output.content) {
-        return Err(AgentError::new(format!(
-            "工具 `{}` 的模型结果超过 10K token，但没有可用的分页游标或 Exact History 恢复位置。",
-            model_result.tool
-        )));
-    }
     Ok(output.content)
 }
 
@@ -763,54 +771,6 @@ fn load_continuation_archive_metadata(
         history_projection_truncated: false,
         archive_projection_truncated: archive.archive_projection_truncated,
     })
-}
-
-fn model_tool_result_recovery(
-    archive: &ConversationHistoryArchiveTraceMetadata,
-) -> AgentResult<Option<ModelToolResultRecovery>> {
-    let mut recovery = ModelToolResultRecovery {
-        truncated_at_source: Some(archive.truncated_at_source),
-        ..Default::default()
-    };
-    if archive.archived_completely == Some(true) {
-        let archive_ref = archive.archive_ref.as_deref().ok_or_else(|| {
-            AgentError::new("完整的工具历史归档缺少 archive ref，无法生成模型续读位置。")
-        })?;
-        let open =
-            crate::storage::conversation_history_open::encode_archive_history_open(archive_ref, 0)
-                .map_err(AgentError::new)?;
-        recovery.history_open = Some(Value::String(open.clone()));
-        recovery.continue_with = Some(json!({
-            "tool": "conversation_history",
-            "args": {
-                "open": open
-            }
-        }));
-    }
-    Ok(Some(recovery))
-}
-
-fn model_observation_has_recovery(content: &str) -> bool {
-    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(content) else {
-        return false;
-    };
-    for field in [
-        "continueWith",
-        "historyOpen",
-        "cursor",
-        "nextCursor",
-        "nextStartByte",
-        "nextStartLine",
-        "nextAfterPath",
-    ] {
-        if object.get(field).is_some_and(|value| !value.is_null()) {
-            return true;
-        }
-    }
-    object
-        .get("navigation")
-        .and_then(Value::as_object)
-        .is_some_and(|navigation| navigation.values().any(|value| !value.is_null()))
 }
 
 fn projection_differs(left: &AgentToolResult, right: &AgentToolResult) -> bool {

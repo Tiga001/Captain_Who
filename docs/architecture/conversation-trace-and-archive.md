@@ -88,23 +88,26 @@ Run 首次组装的材料按实际请求顺序记录；后续材料留在发生�
 
 ## 历史读取与递归防护
 
-`conversation_history` 支持目录、范围、around 和 archive open。读取必须：
+`conversation_history` 仅用于找回当前有效压缩摘要覆盖的安全持久模型上下文片段。没有有效摘要时不提供该动态工具；有摘要时，目录、搜索、范围和 around 都限定在摘要覆盖边界内，不能读取仍在当前上下文的未压缩尾部。记录正文来自持久 `model_context`，按字符分页；Archive 与 ArchiveMatch 路由一律拒绝。它不是普通工具截断结果的续读入口，内部 Archive 的存在不构成模型打开完整工具输出的授权。读取必须：
 
 - 在 SQL 边界绑定当前 conversation；
+- 依据当前有效摘要的覆盖游标限制所有结果，拒绝越界的直接引用及分页；
 - 使用不透明引用和稳定分页，不能接受任意数据库 ID 作为授权；
 - 对字符或 UTF-8 字节边界安全分页；
-- 返回 hash、范围、完整性和导航信息；
+- 返回安全记录片段、范围、截断状态和导航信息；
 - 继续经过中央 Model Result Gate。
 
-历史 Tool 取回的 Archive 正文不再次写入新的 Exact Archive。其 Durable Trace 只记录 query/ref、页范围、hash、状态和返回量，避免“读取历史”无限复制同一正文。当前 Run 中读取到的页面仍可供模型使用，直到被正常 compaction 覆盖。
+历史 Tool 取回的记录片段不再次写入新的 Exact Archive。其 Durable Trace 只记录 query/ref、页范围、状态和返回量等元数据，避免“读取历史”无限复制同一正文。当前 Run 中读取到的页面仍可供模型使用，直到被正常 compaction 覆盖。压缩后的工具历史可以用于核实已持久化的模型上下文证据，不能借此恢复当时未交付的完整工具输出。
 
-SQLite FTS5 只是可重建检索索引，不是第二份权威日志。命中结果必须回到 conversation/message/trace/archive 归属检查后才能返回。
+SQLite FTS5 仍是内部可重建检索索引，不是第二份权威日志。模型历史工具的搜索与打开都使用同一份受压缩边界限制的安全模型上下文，不能借 FTS 命中扩大到原始 Archive 或未压缩尾部。
 
 ## Continuity Index
 
 Compaction 的语义摘要负责保留任务含义；`ContinuityIndexV2` 只提供有限的精确入口。它由后端确定性生成，可引用同一 conversation 的 Message、Trace Item 或 Archive Blob，按任务证据、未解决失败、审批、重要决定和最近记录使用固定配额，去重后最多 28 个引用。
 
 Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outcome。V1 可读取；后续成功压缩会生成 V2。提交和加载时验证引用归属与存在性。
+
+Index 的内部 Archive 引用不赋予 `conversation_history` 原始输出读取能力；模型历史工具只开放安全持久上下文记录。
 
 ## Rewrite、回退、分叉与删除
 

@@ -233,8 +233,8 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
             preferences.context_profile == crate::protocol::AgentContextProfile::Minimal
         })
     {
-        // Keep the nine base operations plus Skill/attachment discovery and all existing
-        // capability-owned tools. Their availability remains owned by the original extensions.
+        // Keep base operations, Skill/attachment discovery, and all capability-owned tools.
+        // History availability follows the adopted summary; other capabilities keep their owners.
         // Stable discovery entry points must not flicker with attachment counts or activation.
         permitted_tool_definitions.retain(|definition| definition.name != "todo_update");
         crate::tools::apply_minimal_tool_descriptions(&mut permitted_tool_definitions);
@@ -262,7 +262,13 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     }
     let initial_tool_set = tool_registry.effective_tool_set(
         permitted_tool_definitions.iter().cloned(),
-        &runtime_extensions.active_tool_capabilities()?,
+        &tool_capabilities_for_context(
+            &runtime_extensions,
+            input
+                .context_compaction_summary
+                .as_ref()
+                .map(|summary| summary.id.as_str()),
+        )?,
     )?;
 
     Ok(PreparedRuntimeCapabilities {
@@ -275,6 +281,22 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         command_workspace_root,
         patch_auto_approve,
     })
+}
+
+/// History recall follows the adopted context, not an extension or a model-supplied flag.
+pub(super) fn tool_capabilities_for_context(
+    extensions: &RuntimeExtensions,
+    summary_id: Option<&str>,
+) -> AgentResult<std::collections::BTreeSet<crate::tools::ToolCapabilityId>> {
+    let mut capabilities = extensions.active_tool_capabilities()?;
+    let history = crate::tools::ToolCapabilityId::application_owned(
+        crate::tools::COMPACTED_HISTORY_CAPABILITY,
+    );
+    capabilities.remove(&history);
+    if summary_id.is_some() {
+        capabilities.insert(history);
+    }
+    Ok(capabilities)
 }
 
 pub(super) fn assemble_context_preview(
@@ -989,6 +1011,55 @@ mod approval_identity_tests {
             "messages": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn compacted_history_is_unlocked_only_by_the_adopted_context() {
+        let prepared = prepare_runtime_capabilities_with_skills(
+            &minimal_input(),
+            "run-history",
+            &[],
+            services(false),
+        )
+        .unwrap();
+        assert!(!prepared.initial_tool_set.contains("conversation_history"));
+        assert!(matches!(
+            prepared
+                .initial_tool_set
+                .unavailability("conversation_history"),
+            Some(crate::tools::ToolUnavailability::RuntimeCapabilityUnavailable { .. })
+        ));
+        let capabilities = super::tool_capabilities_for_context(
+            &prepared.runtime_extensions,
+            Some("adopted-summary"),
+        )
+        .unwrap();
+        let compacted = prepared
+            .tool_registry
+            .effective_tool_set(prepared.tool_definitions.iter().cloned(), &capabilities)
+            .unwrap();
+        assert!(compacted.contains("conversation_history"));
+        assert_eq!(
+            prepared.initial_tool_set.stable_revision(),
+            compacted.stable_revision()
+        );
+        assert!(compacted
+            .restore_frozen_checkpoint(&compacted.checkpoint())
+            .is_ok());
+        assert!(prepared
+            .initial_tool_set
+            .restore_frozen_checkpoint(&compacted.checkpoint())
+            .is_err());
+
+        let reverted = prepared
+            .tool_registry
+            .effective_tool_set(
+                prepared.tool_definitions.iter().cloned(),
+                &super::tool_capabilities_for_context(&prepared.runtime_extensions, None).unwrap(),
+            )
+            .unwrap();
+        assert!(!reverted.contains("conversation_history"));
+        assert_eq!(prepared.initial_tool_set.revision(), reverted.revision());
     }
 
     fn services(agent_collaboration_enabled: bool) -> RuntimeCapabilityServices {

@@ -676,6 +676,10 @@ fn model_projection_keeps_the_complete_running_session_receipt() {
             "startedAt": 1_725_000_000_000_i64,
             "latestSequence": 3,
             "outputTruncated": false,
+            "continueWith": {
+                "tool": "command_session",
+                "args": { "sessionId": "cmd_0123456789abcdef0123456789abcdef", "action": "wait" }
+            },
             "hostPrivateField": "must not reach the model",
         })),
         error: None,
@@ -690,11 +694,13 @@ fn model_projection_keeps_the_complete_running_session_receipt() {
     assert_eq!(result["startedAt"], 1_725_000_000_000_i64);
     assert_eq!(result["latestSequence"], 3);
     assert_eq!(result["outputTruncated"], false);
+    assert_eq!(result["continueWith"]["tool"], "command_session");
+    assert_eq!(result["continueWith"]["args"]["action"], "wait");
     assert!(result.get("hostPrivateField").is_none());
 }
 
 #[test]
-fn model_projection_preserves_authoritative_exact_history_route() {
+fn model_projection_does_not_expose_internal_history_route() {
     let history_open = "hist_v1_authoritative_command_page";
     let raw = AgentToolResult {
         exact_archive_file: None,
@@ -718,14 +724,13 @@ fn model_projection_preserves_authoritative_exact_history_route() {
     let projected = run_command_model_projection(&raw);
     let result = projected.result.unwrap();
 
-    assert_eq!(result["historyOpen"], history_open);
-    assert_eq!(result["continueWith"]["tool"], "conversation_history");
-    assert_eq!(result["continueWith"]["args"]["open"], history_open);
+    assert!(result.get("historyOpen").is_none());
+    assert!(result.get("continueWith").is_none());
     assert!(result.get("hostPrivateField").is_none());
 }
 
 #[test]
-fn model_projection_retains_routes_while_other_consumers_keep_audit_fields() {
+fn model_projection_omits_routes_while_other_consumers_keep_audit_fields() {
     let history_open = "hist_v1_authoritative_command_page";
     let read_path = format!("artifact://sha256/{}", "a".repeat(64));
     let raw = AgentToolResult {
@@ -776,8 +781,8 @@ fn model_projection_retains_routes_while_other_consumers_keep_audit_fields() {
     let checkpoint = tool.checkpoint_projection(&raw);
 
     let model_result = live.result.as_ref().unwrap();
-    assert_eq!(model_result["historyOpen"], history_open);
-    assert_eq!(model_result["continueWith"]["args"]["open"], history_open);
+    assert!(model_result.get("historyOpen").is_none());
+    assert!(model_result.get("continueWith").is_none());
     assert_eq!(model_result["outputs"][0]["readPath"], read_path);
     assert!(model_result.get("runtime").is_none());
     assert!(model_result.get("inputFiles").is_none());

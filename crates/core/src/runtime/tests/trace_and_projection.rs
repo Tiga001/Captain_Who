@@ -1005,11 +1005,8 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
         assert_eq!(projection["truncated"], true);
         assert_eq!(projection["truncatedAtSource"], true);
         assert!(projection["originalBytes"].as_u64().unwrap() > 0);
-        assert_eq!(projection["continueWith"]["tool"], "conversation_history");
-        assert!(projection["historyOpen"]
-            .as_str()
-            .unwrap()
-            .starts_with("hist_v1_"));
+        assert!(projection.get("continueWith").is_none());
+        assert!(projection.get("historyOpen").is_none());
     }
     assert_eq!(
         checkpoint_projected, projected,
@@ -1062,7 +1059,7 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
 }
 
 #[test]
-fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
+fn process_spool_is_archived_exactly_and_preview_truncation_stays_explicit() {
     use crate::command::{
         join_process_output_capture, materialize_process_tool_result_archive,
         process_output_spool_substitutions, spawn_process_output_capture,
@@ -1176,7 +1173,8 @@ fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
             .unwrap();
     let projected: Value = serde_json::from_str(&observation).unwrap();
     assert_eq!(projected["truncated"], true);
-    assert_eq!(projected["continueWith"]["tool"], "conversation_history");
+    assert!(projected.get("continueWith").is_none());
+    assert!(projected.get("historyOpen").is_none());
 
     let page = storage
         .read_conversation_history_archive_page(
@@ -1451,11 +1449,15 @@ fn command_session_archive_route_is_reused_without_preview_rearchive() {
     let observation =
         finalize_model_tool_observation(&gate, call_id, false, &model_result, &metadata).unwrap();
     let projected: Value = serde_json::from_str(&observation).unwrap();
-    let model_open = projected["historyOpen"].as_str().unwrap();
+    assert!(projected.get("historyOpen").is_none());
+    assert!(projected.get("continueWith").is_none());
+    let internal_open = raw.result.as_ref().unwrap()["historyOpen"]
+        .as_str()
+        .unwrap();
     let exact = storage
         .read_conversation_history_archive_page_from_open(
             "conversation-command-authoritative",
-            model_open,
+            internal_open,
             u64::MAX,
         )
         .unwrap()

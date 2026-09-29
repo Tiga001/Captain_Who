@@ -148,11 +148,13 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
             "missing unknown-session outcome contract: {invariant}"
         );
     }
-    let history = native_tool("conversation_history");
-    let open = history["parameters"]["properties"]["open"]["description"]
-        .as_str()
-        .unwrap();
-    assert!(open.contains("opaque hist_v1_") && open.contains("never modify or invent"));
+    assert!(payload["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["function"]["name"] != "conversation_history"));
+    assert!(system.contains("仅需找回压缩摘要替代的原始片段"));
+    assert!(system.contains("不用历史检索续读工具结果"));
 }
 
 #[test]

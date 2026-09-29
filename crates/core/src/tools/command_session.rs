@@ -281,22 +281,6 @@ fn model_result(output: AgentCommandSessionExecutionOutput) -> Value {
                 .insert("artifactObservation".to_string(), projected);
         }
     }
-    if let Some(history_open) = output.history_open {
-        let object = result
-            .as_object_mut()
-            .expect("command_session model result is an object");
-        object.insert(
-            "historyOpen".to_string(),
-            Value::String(history_open.clone()),
-        );
-        object.insert(
-            "continueWith".to_string(),
-            json!({
-                "tool": "conversation_history",
-                "args": { "open": history_open }
-            }),
-        );
-    }
     result
 }
 
@@ -313,8 +297,6 @@ fn trace_result(value: &Value) -> Value {
         "outputTruncated",
         "read",
         "artifactObservation",
-        "historyOpen",
-        "continueWith",
     ] {
         if let Some(value) = source.get(field) {
             projected.insert(field.to_string(), value.clone());
@@ -522,14 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn terminal_history_route_is_model_visible_and_running_route_is_rejected() {
+    fn terminal_history_route_is_internal_and_running_route_is_rejected() {
         let history_open = format!("hist_v1_{}", "a".repeat(64));
         let mut terminal = output(AgentCommandSessionStatus::Exited, "bounded preview");
         terminal.history_open = Some(history_open.clone());
         let value = model_result(terminal.clone());
-        assert_eq!(value["historyOpen"], history_open);
-        assert_eq!(value["continueWith"]["tool"], "conversation_history");
-        assert_eq!(value["continueWith"]["args"]["open"], value["historyOpen"]);
+        assert!(value.get("historyOpen").is_none());
+        assert!(value.get("continueWith").is_none());
 
         terminal.status = AgentCommandSessionStatus::Running;
         assert!(validate_host_output(&session_id(), &terminal).is_err());

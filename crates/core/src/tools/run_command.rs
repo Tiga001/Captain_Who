@@ -269,14 +269,14 @@ fn project_command_execution(value: &Value) -> Option<Value> {
         "stdout",
         "stderr",
         "error",
-        // A Host-owned command Session may already have committed the full stdout/stderr body
-        // before the ordinary ToolResult is assembled. Preserve its opaque recovery route so the
-        // central 10K gate reuses that authoritative archive instead of inventing a second,
-        // bounded-preview archive.
-        "historyOpen",
-        "continueWith",
     ] {
         super::model_projection::insert_field(&mut output, value, field);
+    }
+    // Running commands retain their native Session wait. Archive routes are internal evidence.
+    if let Some(continuation) = value.get("continueWith").filter(|continuation| {
+        continuation.get("tool").and_then(Value::as_str) == Some("command_session")
+    }) {
+        output.insert("continueWith".to_string(), continuation.clone());
     }
     for field in [
         "timedOut",

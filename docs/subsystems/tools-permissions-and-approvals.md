@@ -37,7 +37,7 @@ last_verified: 2026-09-26
 - 写入与执行：唯一专用结构化文本文件修改 Tool `apply_patch`，以及可能产生独立副作用的 `run_command`、`command_session`；
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
-- 历史与协作：`conversation_history`、spawn/send/followup/wait/list/interrupt；
+- 历史与协作：仅在有效压缩边界内可用的 `conversation_history`、spawn/send/followup/wait/list/interrupt；
 - 人机交互：仅活动的用户根 Agent 可按当前动态能力快照使用 `request_user_input` 或 `request_user_input_async`；阻塞与非阻塞的暂停、投递和恢复契约见[人机交互 Tool](human-interaction.md)；
 - Scheduled Automation：仅在已原子 admission 的 Automation HumanRoot Run 中追加 `automation_report`；
 - 内置能力：`activate_capability` 和激活后的 Managed Playwright Browser Tool；

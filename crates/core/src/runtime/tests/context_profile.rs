@@ -34,7 +34,6 @@ fn minimal_profile_keeps_core_and_extension_entry_points_without_todo() {
             "attachments_list",
             "attachments_list_project",
             "command_session",
-            "conversation_history",
             "read_file",
             "read_image",
             "run_command",

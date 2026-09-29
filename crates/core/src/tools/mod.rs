@@ -111,7 +111,9 @@ pub(crate) use tool_set::{
     SKILL_RESOURCES_MATERIALIZE_CAPABILITY, SKILL_RESOURCES_READ_CAPABILITY,
     SKILL_SCRIPTS_CAPABILITY,
 };
-pub(crate) use tool_set::{AGENT_COLLABORATION_CAPABILITY, WEB_SEARCH_CAPABILITY};
+pub(crate) use tool_set::{
+    AGENT_COLLABORATION_CAPABILITY, COMPACTED_HISTORY_CAPABILITY, WEB_SEARCH_CAPABILITY,
+};
 pub(crate) use web_fetch::WebFetchTool;
 pub(crate) use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;

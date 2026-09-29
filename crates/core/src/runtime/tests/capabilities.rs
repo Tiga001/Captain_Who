@@ -541,7 +541,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
 }
 
 #[test]
-fn conversation_identity_does_not_change_the_stable_history_tool() {
+fn conversation_identity_alone_does_not_unlock_compacted_history() {
     let input_with_conversation = |conversation_id: Option<&str>| {
         let mut input = conversation_context_input(vec![message("user", "find earlier evidence")]);
         input.context = Some(AgentRunContext {
@@ -575,8 +575,8 @@ fn conversation_identity_does_not_change_the_stable_history_tool() {
         prepare_runtime_capabilities(&with_input, "stable-with-conversation", &[], true, None)
             .unwrap();
 
-    assert!(without.initial_tool_set.contains("conversation_history"));
-    assert!(with.initial_tool_set.contains("conversation_history"));
+    assert!(!without.initial_tool_set.contains("conversation_history"));
+    assert!(!with.initial_tool_set.contains("conversation_history"));
     assert_eq!(
         serde_json::to_vec(without.initial_tool_set.stable_definitions()).unwrap(),
         serde_json::to_vec(with.initial_tool_set.stable_definitions()).unwrap()
@@ -591,13 +591,13 @@ fn conversation_identity_does_not_change_the_stable_history_tool() {
         &AgentToolCall {
             id: "history-without-conversation".to_string(),
             tool: "conversation_history".to_string(),
-            args: json!({ "action": "search", "query": "evidence" }),
+            args: json!({ "query": "evidence" }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         },
     );
     assert!(!result.ok);
-    assert!(result.error.is_some());
+    assert!(result.error.unwrap().contains("未采用压缩摘要"));
 }
 
 #[test]

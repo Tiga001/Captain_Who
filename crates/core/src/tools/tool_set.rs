@@ -14,6 +14,7 @@ pub(crate) const OFFICE_SPREADSHEETS_CAPABILITY: &str = "office.spreadsheets";
 pub(crate) const OFFICE_PRESENTATIONS_CAPABILITY: &str = "office.presentations";
 pub(crate) const IMAGE_GENERATION_CAPABILITY: &str = "image.generation";
 pub(crate) const WEB_SEARCH_CAPABILITY: &str = "web.search";
+pub(crate) const COMPACTED_HISTORY_CAPABILITY: &str = "context.compacted_history";
 pub(crate) const AGENT_COLLABORATION_CAPABILITY: &str = "agent.collaboration";
 pub(crate) const SKILL_RESOURCES_READ_CAPABILITY: &str = "skill.resources.read";
 pub(crate) const SKILL_RESOURCES_MATERIALIZE_CAPABILITY: &str = "skill.resources.materialize";
@@ -281,6 +282,7 @@ impl EffectiveToolSet {
         if let Some(required_capability) = expected_capability {
             if !self.active_capabilities.contains(&required_capability) {
                 if required_capability.as_str() == WEB_SEARCH_CAPABILITY
+                    || required_capability.as_str() == COMPACTED_HISTORY_CAPABILITY
                     || required_capability.as_str() == AGENT_COLLABORATION_CAPABILITY
                     || required_capability.as_str() == super::BUILTIN_ACTIVATION_CAPABILITY
                 {
@@ -451,6 +453,7 @@ fn tool_set_checkpoint_mismatch(
 /// unactivated Skill after that Skill is already active.
 fn application_owned_dynamic_capability(tool_name: &str) -> Option<ToolCapabilityId> {
     let capability = match tool_name {
+        "conversation_history" => COMPACTED_HISTORY_CAPABILITY,
         "read_word" | "office_document" => OFFICE_DOCUMENTS_CAPABILITY,
         "read_spreadsheet" | "office_spreadsheet" => OFFICE_SPREADSHEETS_CAPABILITY,
         "read_presentation" | "office_presentation" => OFFICE_PRESENTATIONS_CAPABILITY,

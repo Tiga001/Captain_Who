@@ -177,8 +177,12 @@ impl StorageService {
             .collect()
     }
 
-    pub fn load_conversation_meta(&self, conversation_id: &str) -> Result<Option<ChatConversationMetaRecord>, String> {
-        chat_repository::get_conversation_meta(&*self.state.connection()?, conversation_id).map_err(storage_error)
+    pub fn load_conversation_meta(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ChatConversationMetaRecord>, String> {
+        chat_repository::get_conversation_meta(&*self.state.connection()?, conversation_id)
+            .map_err(storage_error)
     }
 
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
@@ -638,6 +642,19 @@ impl StorageService {
         Ok(())
     }
 
+    pub(crate) fn read_compacted_conversation_history(
+        &self,
+        conversation_id: &str,
+        summary_id: &str,
+    ) -> Result<conversation_history_repository::CompactedHistorySnapshot, String> {
+        let connection = self.state.connection()?;
+        conversation_history_repository::read_compacted_snapshot(
+            &connection,
+            conversation_id,
+            summary_id,
+        )
+    }
+
     pub fn search_conversation_history(
         &self,
         conversation_id: &str,
@@ -931,10 +948,9 @@ impl StorageService {
         .map_err(storage_error)
     }
 
-    /// Follows the same opaque Archive route accepted by `conversation_history` while preserving
-    /// the caller's conversation boundary. This narrow storage entry point is useful to Host
-    /// integrations that must verify a ToolResult recovery route without exposing archive ids or
-    /// the route codec itself.
+    /// Reads a Host-internal Archive audit route within the caller's conversation boundary.
+    /// This storage helper remains available for verification; the model-facing history tool
+    /// does not accept Archive routes or continue truncated tool output.
     pub fn read_conversation_history_archive_page_from_open(
         &self,
         conversation_id: &str,
@@ -960,10 +976,10 @@ impl StorageService {
         )
     }
 
-    /// Creates the opaque Archive route accepted by `conversation_history` after verifying that
-    /// the immutable Archive belongs to the caller's conversation.
+    /// Creates a Host-internal Archive audit route after verifying that the immutable Archive
+    /// belongs to the caller's conversation. This is not a model-facing history capability.
     ///
-    /// Host integrations use this narrow method to project a recovery capability without exposing
+    /// Host integrations use this narrow method to verify an archived result without exposing
     /// the raw Archive reference or the route codec across the Core boundary.
     pub fn conversation_history_archive_open(
         &self,

@@ -354,6 +354,14 @@ impl ContextFrame {
         })
     }
 
+    pub(crate) fn compaction_summary_id(&self) -> Option<&str> {
+        self.iter_items().find_map(|item| {
+            item.metadata.origin().and_then(|origin| {
+                (origin.kind() == ContextOriginKind::CompactionSummary).then(|| origin.id())
+            })
+        })
+    }
+
     pub(crate) fn contains_trace_for_assistant_message(&self, assistant_message_id: &str) -> bool {
         self.iter_items().any(|item| {
             item.metadata

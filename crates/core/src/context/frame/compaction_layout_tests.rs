@@ -2,6 +2,30 @@ use super::*;
 use crate::context::ContextCapacityDetector;
 use crate::protocol::AgentApiStyle;
 
+#[test]
+fn adopted_compaction_identity_survives_checkpoint_and_replacement() {
+    let summary_item = |id| {
+        text(
+            "summary",
+            ContextSource::ConversationSummary,
+            ContextScope::Conversation,
+        )
+        .with_origin(ContextOrigin::compaction_summary(id))
+    };
+    let frame = ContextFrame::new(vec![input("user", true)]);
+    assert_eq!(frame.compaction_summary_id(), None);
+    let frame = ContextFrame::new(vec![summary_item("summary-one"), input("user", true)]);
+    assert_eq!(frame.compaction_summary_id(), Some("summary-one"));
+    let restored = ContextFrame::from_checkpoint_items(frame.checkpoint_items().unwrap()).unwrap();
+    assert_eq!(restored.compaction_summary_id(), Some("summary-one"));
+    let mut next = ContextFrame::new(vec![summary_item("summary-two"), input("user", false)]);
+    ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[])
+        .prepare_frame(&mut next);
+    let replaced = restored
+        .replace_compacted_model_history(next.share_measured_persistent_baseline().unwrap());
+    assert_eq!(replaced.compaction_summary_id(), Some("summary-two"));
+}
+
 fn text(content: &str, source: ContextSource, scope: ContextScope) -> ContextItem {
     ContextItem::text(
         LlmMessageRole::User,

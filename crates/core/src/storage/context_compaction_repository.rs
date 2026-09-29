@@ -1191,6 +1191,46 @@ fn list_journal_entries(
     Ok(entries)
 }
 
+/// Read the exact canonical prefix represented by the summary adopted by the caller's model
+/// request. This does not invalidate or rewrite summaries while servicing a read-only tool.
+pub(crate) fn read_adopted_summary_prefix(
+    connection: &Connection,
+    conversation_id: &str,
+    summary_id: &str,
+) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
+    let active_id = connection
+        .query_row(
+            "SELECT summary_id FROM conversation_context_compaction_heads WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if active_id.as_deref() != Some(summary_id) {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "当前请求采用的压缩摘要已失效，请刷新上下文后再回顾历史。".into(),
+        ));
+    }
+    let summary = load_summary(connection, summary_id)?;
+    if summary.conversation_id != conversation_id {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "历史压缩摘要不属于当前会话。".into(),
+        ));
+    }
+    let mut entries = list_journal_entries(connection, conversation_id)?;
+    let boundary = cursor_index(&entries, &summary.covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Stale("历史压缩边界已经不存在。".into())
+    })?;
+    entries.truncate(boundary + 1);
+    if source_revision(conversation_id, &summary.covered_through, &entries)?
+        != summary.source_revision
+    {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "压缩前缀已变化，无法回顾该摘要对应的历史。".into(),
+        ));
+    }
+    Ok(entries)
+}
+
 fn cursor_index(
     entries: &[ContextCompactionSourceItem],
     cursor: &ContextJournalCursor,

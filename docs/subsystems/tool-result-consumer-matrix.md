@@ -67,7 +67,7 @@ Raw Tool/Core Server/Main result
 | `skills_prepare_install`                                         | inspected metadata、候选、warnings、opaque installRef               | E 可展示来源与预览                                               | T/C 保存安全 inspection identity                                        | 只读，不安装；第三方内容不可信                                                               |
 | `skills_commit_install`                                          | installed/updated/conflict/recovery                                 | E 显示审批与结果                                                 | T/C 保存 frozen install ref/provenance/CAS；必要内容由 Skill store 管理 | 总是显式审批                                                                                 |
 | `skills_activate`                                                | status、Skill name、资源/能力摘要                                   | E/R 产生 `SkillActivated` 与 Toolset change                      | T/C 保存 activation 与 revision                                         | 同一 Turn 激活后更新 dynamic Toolset                                                         |
-| `conversation_history`                                           | view、目录/正文页、open/navigation、完整性                          | E 可展示查询状态                                                 | T/C 只记 query/ref/range/hash；**不再次 A**                             | 防递归归档                                                                                   |
+| `conversation_history`                                           | 有效摘要覆盖边界内的目录/正文页、open/navigation、完整性            | E 可展示查询状态                                                 | T/C 只记 query/ref/range/hash；**不再次 A**                             | 无压缩时不提供；不承担普通工具结果续读；防递归归档                                           |
 | `automation_report`                                              | `recorded`、kind、用户可见 summary 的一次性确认                     | E 可展示小型 Tool receipt；无配置编辑能力                        | T/A/C 保存安全 receipt；另由 run-scoped sink 原子写 `automation_runs`   | 仅 Automation HumanRoot；每 Run 最多首次成功一次；无需审批                                   |
 | `activate_capability`                                            | capability/status/恢复建议                                          | E/R 展示批准并触发 toolset change                                | T/C 绑定 activation/manifest/policy                                     | 激活本身不授予未列出的工具                                                                   |
 | Managed Playwright/Capability Tool                               | 安全操作结果、截图 readPath、Browser Artifact refs、分类错误        | E 展示 Main/Core Server-owned 活动                               | T/C 使用 value-free 安全投影；**不进普通 A**                            | 敏感 Tool 绑定 surface/origin 与风险审批                                                     |
@@ -76,6 +76,8 @@ Raw Tool/Core Server/Main result
 | 其他 Runtime Extension（如 Todo）                                | 下一步所需确认、revision 和计数                                     | R/E 接收完整扩展状态                                             | T/C 按扩展契约；A 仅显式 opt-in                                         | 动态定义仍走 10K Gate                                                                        |
 
 ## 关键字段边界
+
+原始工具结果的截断只保留该工具实际提供的范围、分页或产物读取指引。内部 A 的存在不生成模型可见的历史恢复入口；不存在原生续读契约时明确标记遗漏，不虚构 cursor，也不重放副作用。`conversation_history` 仅读取已被压缩替代的安全持久模型上下文片段，拒绝原始 Archive 路由。
 
 ### Agent 协作
 

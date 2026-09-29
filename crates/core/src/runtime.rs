@@ -36,7 +36,7 @@ use crate::context::{
     ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanStatus,
     ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
     ContextOrigin, ContextRetention, ContextScope, ContextSource, ModelToolResultGate,
-    ModelToolResultRecovery, MODEL_TOOL_RESULT_MAX_TOKENS,
+    ModelToolResultSource, MODEL_TOOL_RESULT_MAX_TOKENS,
 };
 use crate::conversation_trace::{
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,

@@ -898,13 +898,6 @@ fn project_command_session_result(value: &Value) -> (Value, bool) {
             truncated = true;
         }
     }
-    for (key, limit) in [
-        ("historyOpen", DurableTraceProjectionLimits::PATH_CHARS),
-        ("continueWith", DurableTraceProjectionLimits::PATH_CHARS),
-    ] {
-        copy_bounded_field(input, &mut output, key, limit, &mut truncated);
-    }
-
     // Poll output is delivered to the current model turn, while terminal settlement archives the
     // Session transcript exactly once. Durable conversation Trace intentionally retains only the
     // delivery receipt above so repeated polls cannot duplicate the body linearly.
@@ -1703,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn command_session_projection_keeps_only_the_opaque_terminal_recovery_route() {
+    fn command_session_projection_omits_internal_terminal_archive_routes() {
         let open = format!("hist_v1_{}", "a".repeat(64));
         let result = json!({
             "sessionId": "cmd_0123456789abcdef0123456789abcdef",
@@ -1730,9 +1723,8 @@ mod tests {
 
         assert!(truncated, "the transcript body is intentionally omitted");
         assert!(projected.get("output").is_none());
-        assert_eq!(projected["historyOpen"], open);
-        assert_eq!(projected["continueWith"]["tool"], "conversation_history");
-        assert_eq!(projected["continueWith"]["args"]["open"], open);
+        assert!(projected.get("historyOpen").is_none());
+        assert!(projected.get("continueWith").is_none());
     }
 
     #[test]

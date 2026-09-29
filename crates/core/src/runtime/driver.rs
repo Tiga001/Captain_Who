@@ -245,6 +245,17 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        let initial_tool_set = if let Some(restored) = restored_checkpoint.as_ref() {
+            tool_registry.effective_tool_set(
+                permitted_tool_definitions.iter().cloned(),
+                &tool_capabilities_for_context(
+                    &runtime_extensions,
+                    restored.context.compaction_summary_id(),
+                )?,
+            )?
+        } else {
+            initial_tool_set
+        };
         let restored_batch_tool_set = if let Some(restored) = restored_checkpoint.as_ref() {
             validate_resumed_tool_provenance(&setup_conversation_trace, &tool_registry).map_err(
                 |error| {
@@ -463,6 +474,9 @@ impl AgentRuntime {
         let tool_output_budget = capacity_detector.text_budget(MODEL_TOOL_RESULT_MAX_TOKENS);
         let exact_history_storage = storage.clone();
         let mut tool_context = ToolExecutionContext::from_run_context(run_context.as_ref())
+            .with_compacted_history_summary_id(
+                active_context.compaction_summary_id().map(str::to_string),
+            )
             .with_cancellation(cancellation_token.clone())
             .with_model_capabilities(model_capabilities)
             .with_runtime_services(run_id.clone(), storage)
@@ -706,19 +720,6 @@ impl AgentRuntime {
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
                     runtime_extensions.prepare_model_request()?;
-                    effective_tool_set = tool_registry.effective_tool_set(
-                        permitted_tool_definitions.iter().cloned(),
-                        &runtime_extensions.active_tool_capabilities()?,
-                    )?;
-                    tool_context.replace_file_change_tool_set_revision(
-                        effective_tool_set.revision().to_string(),
-                    );
-                    if effective_tool_set.stable_revision() != stable_tool_revision {
-                        return Err(AgentError::new(
-                            "运行期间稳定工具前缀发生变化；为防止缓存和执行契约漂移，当前运行已停止。",
-                        ));
-                    }
-                    tool_definitions = effective_tool_set.all_definitions();
                     let world_state_boundary = crate::WorldStateRequestBoundary {
                         run_id: run_id.clone(),
                         assistant_message_id: trace_assistant_message_id.clone()
@@ -741,30 +742,6 @@ impl AgentRuntime {
                         None => memory_conversation_world_state.prepare(&world_state_boundary, conversation_sections)?,
                     };
                     active_context.sync_conversation_world_state_records(&conversation_records, true)?;
-                    if let Some(world_state_diff) = run_world_state.reconcile(
-                        &effective_tool_set,
-                        runtime_extensions.world_state_sections()?,
-                        run_context.as_ref(),
-                    )? {
-                        active_context.push(world_state_diff);
-                    }
-                    persist_run_context_materials(
-                        &mut active_context, &conversation_trace, trace_observer.as_ref(),
-                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments[current_image_range.clone()],
-                    )?;
-                    if effective_tool_set.revision() != emitted_tool_set_revision {
-                        event_stream.emit(AgentEvent::ToolSetChanged {
-                            run_id: run_id.clone(),
-                            stable_revision: effective_tool_set.stable_revision().to_string(),
-                            dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
-                            effective_revision: effective_tool_set.revision().to_string(),
-                            tool_definitions: tool_registry
-                                .renderer_event_definitions(&tool_definitions),
-                        });
-                        emitted_tool_set_revision = effective_tool_set.revision().to_string();
-                    }
-                    let context_compaction_planner =
-                        ContextCompactionPlanner::for_tools(&tool_definitions);
                     let file_transactions = FileTransactionState::load(
                         transaction_storage.as_deref(),
                         &run_id,
@@ -776,6 +753,50 @@ impl AgentRuntime {
                     let user_text_blocked = file_transactions.blocks_user_text();
                     let mut compaction_attempts = 0_usize;
                     let (request_context, request_estimate) = loop {
+                        // Compaction can replace the adopted summary inside this request loop.
+                        // Bind both the schema and execution scope to the final context before
+                        // measuring or sending it, including the first request after compaction.
+                        effective_tool_set = tool_registry.effective_tool_set(
+                            permitted_tool_definitions.iter().cloned(),
+                            &tool_capabilities_for_context(
+                                &runtime_extensions,
+                                active_context.compaction_summary_id(),
+                            )?,
+                        )?;
+                        tool_context.replace_compacted_history_summary_id(
+                            active_context.compaction_summary_id().map(str::to_string),
+                        );
+                        tool_context.replace_file_change_tool_set_revision(
+                            effective_tool_set.revision().to_string(),
+                        );
+                        if effective_tool_set.stable_revision() != stable_tool_revision {
+                            return Err(AgentError::new(
+                                "运行期间稳定工具前缀发生变化；为防止缓存和执行契约漂移，当前运行已停止。",
+                            ));
+                        }
+                        tool_definitions = effective_tool_set.all_definitions();
+                        if let Some(world_state_diff) = run_world_state.reconcile(
+                            &effective_tool_set,
+                            runtime_extensions.world_state_sections()?,
+                            run_context.as_ref(),
+                        )? {
+                            active_context.push(world_state_diff);
+                        }
+                        persist_run_context_materials(
+                            &mut active_context, &conversation_trace, trace_observer.as_ref(),
+                            &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments[current_image_range.clone()],
+                        )?;
+                        if effective_tool_set.revision() != emitted_tool_set_revision {
+                            event_stream.emit(AgentEvent::ToolSetChanged {
+                                run_id: run_id.clone(),
+                                stable_revision: effective_tool_set.stable_revision().to_string(),
+                                dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
+                                effective_revision: effective_tool_set.revision().to_string(),
+                                tool_definitions: tool_registry.renderer_event_definitions(&tool_definitions),
+                            });
+                            emitted_tool_set_revision = effective_tool_set.revision().to_string();
+                        }
+                        let context_compaction_planner = ContextCompactionPlanner::for_tools(&tool_definitions);
                         let mut request_context = active_context.clone();
                         let mut request_estimate = None;
                         runtime_extensions.contribute_request_context(

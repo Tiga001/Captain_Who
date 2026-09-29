@@ -183,7 +183,7 @@ fn command_terminal_result_value(
         // authority first. A deserialized action-audit receipt deliberately has only the opaque
         // route; accept it only when it decodes to the exact archive-start shape emitted below.
         // This keeps live and durable canonical ToolResults identical without letting a malformed
-        // persisted string smuggle another conversation_history operation into the model result.
+        // persisted string smuggle another history operation into durable execution evidence.
         let history_open = command_result
             .authoritative_archive_ref
             .as_deref()
@@ -201,17 +201,7 @@ fn command_terminal_result_value(
             })
             .or_else(|| validated_persisted_command_history_open(command_result));
         if let Some(open) = history_open {
-            object.insert(
-                "historyOpen".to_string(),
-                serde_json::Value::String(open.clone()),
-            );
-            object.insert(
-                "continueWith".to_string(),
-                serde_json::json!({
-                    "tool": "conversation_history",
-                    "args": { "open": open }
-                }),
-            );
+            object.insert("historyOpen".to_string(), serde_json::Value::String(open));
         } else if history_route_claimed {
             object.insert(
                 "historyOpenInvalid".to_string(),

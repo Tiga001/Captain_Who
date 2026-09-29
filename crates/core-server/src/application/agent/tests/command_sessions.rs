@@ -1904,7 +1904,7 @@ fn short_large_output_is_archived_before_terminal_visibility_without_a_second_ex
         .as_str()
         .expect("terminal result carries the authoritative history route");
     assert!(history_open.starts_with("hist_v1_"));
-    assert_eq!(ordinary_body["continueWith"]["args"]["open"], history_open);
+    assert!(ordinary_body.get("continueWith").is_none());
     let routed_page = fixture
         .storage
         .read_conversation_history_archive_page_from_open(
@@ -1913,7 +1913,7 @@ fn short_large_output_is_archived_before_terminal_visibility_without_a_second_ex
             u64::MAX,
         )
         .unwrap()
-        .expect("conversation_history-compatible route resolves");
+        .expect("internal archive route resolves");
     assert!(routed_page.content.contains("archive-line-19999"));
     assert_eq!(routed_page.descriptor.archive_ref, archive_ref);
     let connection = Connection::open(&fixture.database_path).unwrap();
@@ -2036,7 +2036,7 @@ fn fast_four_megabyte_output_hands_off_until_the_host_queue_reaches_terminal() {
             u64::MAX,
         )
         .unwrap()
-        .expect("the exact output remains readable through conversation_history");
+        .expect("the exact output remains readable through Host archive storage");
     assert!(tail
         .content
         .contains("pdftotext-page-099999-abcdefghijklmnopqrstuvwxyz"));
@@ -3767,7 +3767,7 @@ async fn real_registry_command_wait_and_agent_wait_are_isolated_without_shell() 
 }
 
 #[test]
-fn background_terminal_model_read_exposes_deterministic_full_history_route() {
+fn background_terminal_host_read_retains_deterministic_internal_archive_route() {
     let fixture = RunningFixture::new("terminal-model-history-route");
     let command = r#"sleep 0.08; awk 'BEGIN { for (i = 0; i < 20000; i++) printf "background-line-%05d\n", i }'"#;
     let (snapshot, initial_result) = fixture.start(command, None);
@@ -3801,7 +3801,7 @@ fn background_terminal_model_read_exposes_deterministic_full_history_route() {
     let history_open = terminal
         .history_open
         .as_deref()
-        .expect("terminal command_session result exposes opaque full-history route");
+        .expect("terminal Host result retains its internal archive route");
     assert!(history_open.starts_with("hist_v1_"));
     let full = fixture
         .storage
@@ -3811,7 +3811,7 @@ fn background_terminal_model_read_exposes_deterministic_full_history_route() {
             u64::MAX,
         )
         .unwrap()
-        .expect("conversation_history route resolves after background completion");
+        .expect("internal archive route resolves after background completion");
     assert!(full.content.contains("background-line-19999"));
 
     let restarted = AgentCommandSessionRegistry::with_manager(

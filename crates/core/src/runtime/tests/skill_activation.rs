@@ -1321,7 +1321,7 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
 }
 
 #[test]
-fn conversation_history_tool_is_stable_even_without_a_persisted_conversation() {
+fn uncompacted_conversation_does_not_expose_history_tool() {
     let mut input = conversation_context_input(vec![message("user", "Current question")]);
     input.context = Some(AgentRunContext {
         collaboration_identity: None,
@@ -1333,16 +1333,24 @@ fn conversation_history_tool_is_stable_even_without_a_persisted_conversation() {
     });
     let capabilities =
         prepare_runtime_capabilities(&input, "history-capability", &[], true, None).unwrap();
-    assert!(capabilities
-        .tool_definitions
+    assert!(!capabilities
+        .initial_tool_set
+        .contains("conversation_history"));
+    assert!(!capabilities
+        .initial_tool_set
+        .stable_definitions()
         .iter()
         .any(|definition| definition.name == "conversation_history"));
 
     input.context = None;
     let capabilities =
         prepare_runtime_capabilities(&input, "no-history-capability", &[], true, None).unwrap();
-    assert!(capabilities
-        .tool_definitions
+    assert!(!capabilities
+        .initial_tool_set
+        .contains("conversation_history"));
+    assert!(!capabilities
+        .initial_tool_set
+        .stable_definitions()
         .iter()
         .any(|definition| definition.name == "conversation_history"));
 }

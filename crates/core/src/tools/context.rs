@@ -84,6 +84,7 @@ pub struct ToolExecutionContext {
     file_change_provider_wire_revision: String,
     permissions: AgentPermissions,
     conversation_id: Option<String>,
+    compacted_history_summary_id: Option<String>,
     project_id: Option<String>,
     run_id: Option<String>,
     tool_call_id: Option<String>,
@@ -345,6 +346,7 @@ impl ToolExecutionContext {
             file_change_provider_wire_revision: "provider-wire-unbound".to_string(),
             permissions,
             conversation_id,
+            compacted_history_summary_id: None,
             project_id,
             run_id: None,
             tool_call_id: None,
@@ -363,6 +365,20 @@ impl ToolExecutionContext {
     pub fn with_cancellation(mut self, cancellation_token: AgentCancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
+    }
+
+    /// The summary actually present in the model's context, supplied only by the Host.
+    pub(crate) fn with_compacted_history_summary_id(mut self, id: Option<String>) -> Self {
+        self.compacted_history_summary_id = id;
+        self
+    }
+
+    pub(crate) fn replace_compacted_history_summary_id(&mut self, id: Option<String>) {
+        self.compacted_history_summary_id = id;
+    }
+
+    pub(crate) fn compacted_history_summary_id(&self) -> Option<&str> {
+        self.compacted_history_summary_id.as_deref()
     }
 
     pub(crate) fn with_model_capabilities(mut self, capabilities: ModelCapabilities) -> Self {

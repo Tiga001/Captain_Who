@@ -11,9 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const APPROVED_COMMAND_WITH_MIXED_LINE_ENDINGS: &str =
-    "\r\n  printf 'approval-first\\n'\r\nprintf 'approval-second\\n'\r  printf 'single-authoritative-command-archive\\n'\r\n";
+    "\r\n  printf 'approval-first\\n'\r\nprintf 'approval-second\\n'\rawk 'BEGIN { for (i = 0; i < 8000; i++) printf \"receipt-%05d\\n\", i }'\r  printf 'single-authoritative-command-archive\\n'\r\n";
 const APPROVED_COMMAND_CANONICAL: &str =
-    "\n  printf 'approval-first\\n'\nprintf 'approval-second\\n'\n  printf 'single-authoritative-command-archive\\n'\n";
+    "\n  printf 'approval-first\\n'\nprintf 'approval-second\\n'\nawk 'BEGIN { for (i = 0; i < 8000; i++) printf \"receipt-%05d\\n\", i }'\n  printf 'single-authoritative-command-archive\\n'\n";
 const BACKGROUND_COMMAND_WITH_MIXED_LINE_ENDINGS: &str =
     "printf 'ready\\n'\r\nsleep 0.25\rprintf 'progress\\n'\r\nsleep 0.35\r\nexit 7";
 const BACKGROUND_COMMAND_CANONICAL: &str =
@@ -401,6 +401,7 @@ async fn guidance_releases_a_running_command_wait_and_background_exit_never_wake
             .and_then(|content| serde_json::from_str::<Value>(content).ok())
             .expect("the second request contains the run_command handoff receipt");
         assert_eq!(running_receipt["status"], "running");
+        assert_eq!(running_receipt["continueWith"]["tool"], "command_session");
         let session_id = running_receipt["sessionId"].as_str().unwrap().to_string();
         write_tool_call_stream(
             &mut second,
@@ -635,11 +636,8 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         assert_eq!(poll_result["status"], "exited");
         assert_eq!(poll_result["exitCode"], 7);
         assert!(poll_result["output"].as_str().unwrap().contains("progress"));
-        assert!(poll_result["historyOpen"].as_str().is_some());
-        assert_eq!(
-            poll_result["continueWith"]["args"]["open"],
-            poll_result["historyOpen"]
-        );
+        assert!(poll_result.get("historyOpen").is_none());
+        assert!(poll_result.get("continueWith").is_none());
         write_text_stream(&mut third, "The build exited with status 7.").await;
         drop(third);
 
@@ -744,13 +742,19 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
     assert_eq!(record.snapshot.exit_code, Some(7));
     assert_eq!(record.snapshot.command, BACKGROUND_COMMAND_CANONICAL);
-    let background_history_open = poll_result["historyOpen"]
-        .as_str()
-        .expect("terminal background Session returns an exact-history route");
+    assert!(poll_result.get("historyOpen").is_none());
+    assert!(poll_result.get("continueWith").is_none());
+    let background_history_open = storage
+        .conversation_history_archive_open(
+            &turn.conversation_id,
+            record.snapshot.archive_ref.as_deref().unwrap(),
+        )
+        .unwrap()
+        .expect("terminal background Session retains its internal archive");
     let background_page = storage
         .read_conversation_history_archive_page_from_open(
             &turn.conversation_id,
-            background_history_open,
+            &background_history_open,
             u64::MAX,
         )
         .unwrap()
@@ -780,7 +784,6 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         "command polling and terminal events stay inside the original assistant turn"
     );
 
-    let background_history_open = background_history_open.to_string();
     drop(service);
     drop(storage);
     let restarted_storage = StorageService::open(&database_path).unwrap();
@@ -978,9 +981,14 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
         StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
             .unwrap(),
     );
-    let restarted =
+    let mut restarted =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
             .unwrap();
+    restarted.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&restarted_storage),
+        CommandSessionManager::default(),
+        Duration::from_secs(2),
+    );
     let restarted_pending = restarted.list_pending_actions();
     assert_eq!(restarted_pending.len(), 1);
     let AgentProposedAction::Command { command } = &restarted_pending[0].action else {
@@ -1031,11 +1039,9 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
         .and_then(|message| message["content"].as_str())
         .and_then(|content| serde_json::from_str::<Value>(content).ok())
         .expect("approval continuation request contains the terminal run_command result");
-    let history_open = model_result["historyOpen"]
-        .as_str()
-        .expect("terminal run_command result keeps its authoritative history route")
-        .to_string();
-    assert_eq!(model_result["continueWith"]["args"]["open"], history_open);
+    assert_eq!(model_result["truncated"], true);
+    assert!(model_result.get("historyOpen").is_none());
+    assert!(model_result.get("continueWith").is_none());
 
     // Runtime publishes its setup snapshot before issuing the continuation model request. Holding
     // the response lets this test inspect that first publication before any new narration exists.
@@ -1122,6 +1128,10 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
         } if item_call_id == &call_id
             && operation["command"] == APPROVED_COMMAND_CANONICAL
     )));
+    let history_open = restarted_storage
+        .conversation_history_archive_open(&turn.conversation_id, &archive_ref)
+        .unwrap()
+        .expect("terminal Session archive retains its internal route");
     let routed_page = restarted_storage
         .read_conversation_history_archive_page_from_open(
             &turn.conversation_id,
@@ -1129,7 +1139,7 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
             u64::MAX,
         )
         .unwrap()
-        .expect("model historyOpen resolves inside the current conversation");
+        .expect("internal archive route resolves inside the current conversation");
     assert_eq!(routed_page.descriptor.archive_ref, archive_ref);
     assert!(routed_page
         .content
@@ -1210,7 +1220,8 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
         .find(|item| item.tool_call_id.as_deref() == Some(call_id.as_str()))
         .and_then(|item| serde_json::from_str::<Value>(&item.content).ok())
         .expect("restarted model log keeps the run_command result");
-    assert_eq!(restarted_model_result["historyOpen"], history_open);
+    assert!(restarted_model_result.get("historyOpen").is_none());
+    assert!(restarted_model_result.get("continueWith").is_none());
     let archive_count_after_restart: u64 = Connection::open(&database_path)
         .unwrap()
         .query_row(

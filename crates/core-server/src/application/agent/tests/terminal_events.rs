@@ -651,7 +651,7 @@ fn automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_ex
     let tail = storage
         .read_conversation_history_archive_page_from_open(conversation_id, history_open, u64::MAX)
         .unwrap()
-        .expect("conversation_history opens the automatic command archive");
+        .expect("Host storage opens the automatic command archive");
     assert!(tail
         .content
         .contains("pdftotext-page-099999-abcdefghijklmnopqrstuvwxyz"));
@@ -2547,11 +2547,8 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     assert_eq!(persisted_model_observation, expected_model_observation);
     let bounded: Value = serde_json::from_str(&persisted_model_observation).unwrap();
     assert_eq!(bounded["truncated"], true);
-    assert_eq!(bounded["continueWith"]["tool"], "conversation_history");
-    assert_eq!(
-        bounded["historyOpen"].as_str(),
-        bounded["continueWith"]["args"]["open"].as_str()
-    );
+    assert!(bounded.get("continueWith").is_none());
+    assert!(bounded.get("historyOpen").is_none());
 
     // The archive and its Trace pointer survive a process boundary and remain directly readable.
     drop(service);

@@ -16,7 +16,6 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
             "attachments_list",
             "attachments_list_project",
             "command_session",
-            "conversation_history",
             "read_file",
             "read_image",
             "run_command",
@@ -26,7 +25,7 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
             "todo_update",
             "workspace_map",
         ],
-        "wording compaction must not reduce or replace the base tool set"
+        "uncompacted conversations retain all stable tools without history recall"
     );
     let mut request = build_llm_request(input.clone(), tools, None, None, None).unwrap();
     let detector = ContextCapacityDetector::for_model(
@@ -47,7 +46,7 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
         preview.cost_breakdown.tool_schema_tokens,
         costs.tool_schema_tokens
     );
-    // September 2026's thirteen-tool, no-custom-instructions baseline, raised by the
+    // September 2026's stable-tool, no-custom-instructions baseline, raised by the
     // workspace.instructions convention semantics (2026-09-16). This is the local estimator, not
     // provider billing: preserve the bound without freezing exact wording.
     assert!(costs.system_tokens < 16_100, "{costs:?}");

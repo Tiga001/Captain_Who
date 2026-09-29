@@ -1368,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_exact_body_reaches_the_central_gate_and_keeps_history_recovery() {
+    fn oversized_exact_body_reaches_the_central_gate_without_history_recovery() {
         let raw = AgentToolResult {
             call_id: "call-large-web-fetch".to_string(),
             tool: "web_fetch".to_string(),
@@ -1415,14 +1415,7 @@ mod tests {
             &[],
         );
         let gate = detector.model_tool_result_gate();
-        let history_open = "hist_v1_web_fetch_archive".to_string();
-        let recovery = crate::context::ModelToolResultRecovery {
-            continue_with: Some(json!({
-                "tool": "conversation_history",
-                "args": { "open": history_open }
-            })),
-            history_open: Some(Value::String(history_open.clone())),
-            recovery: None,
+        let recovery = crate::context::ModelToolResultSource {
             truncated_at_source: Some(false),
         };
         let output = gate.project(&raw.call_id, false, &model, Some(&recovery));
@@ -1434,10 +1427,7 @@ mod tests {
                 <= crate::context::model_tool_result_gate::MODEL_TOOL_RESULT_MAX_TOKENS
         );
         assert_eq!(payload["truncatedAtSource"], false);
-        assert_eq!(payload["historyOpen"], history_open);
-        assert_eq!(
-            payload["continueWith"]["tool"], "conversation_history",
-            "the only recovery Tool remains conversation_history"
-        );
+        assert!(payload.get("historyOpen").is_none());
+        assert!(payload.get("continueWith").is_none());
     }
 }

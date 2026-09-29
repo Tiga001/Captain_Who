@@ -310,7 +310,7 @@ fn unsupported_managed_program_error(program: &str) -> String {
     let executable_set = "`pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, `rg`";
     if COMMON_FILTERS.contains(&program) {
         return format!(
-            "Managed PDF Shell 不提供常见过滤器 `{program}`；完整可执行集合只有 {executable_set}。读取特定 PDF 页请使用 `pdftotext -f FIRST -l LAST`，限制搜索命中请使用 `rg --max-count N PATTERN`，只取前 N 行请使用 `rg --max-count N '^'`。如果已有超限结果，请通过其 `historyOpen` 调用 `conversation_history`，不要重新执行全文提取。"
+            "Managed PDF Shell 不提供常见过滤器 `{program}`；完整可执行集合只有 {executable_set}。读取特定 PDF 页请使用 `pdftotext -f FIRST -l LAST`，限制搜索命中请使用 `rg --max-count N PATTERN`，只取前 N 行请使用 `rg --max-count N '^'`。如果文本结果超限，请限定页码或匹配范围后再执行只读提取；不要重复请求完整全文。"
         );
     }
     format!(
@@ -1337,8 +1337,7 @@ mod tests {
                 "`pdftotext -f FIRST -l LAST`",
                 "`rg --max-count N PATTERN`",
                 "`rg --max-count N '^'`",
-                "`historyOpen`",
-                "`conversation_history`",
+                "限定页码或匹配范围",
             ] {
                 assert!(
                     error.contains(expected),

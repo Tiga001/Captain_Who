@@ -74,15 +74,11 @@ const OPAQUE_RECOVERY_FIELDS: &[&str] = &[
     "recovery",
 ];
 
-/// Pre-encoded recovery routes supplied by the runtime after exact-history archival.
+/// Source-completeness evidence supplied by the runtime after archival.
 ///
-/// Values stay provider-neutral so live execution, approval recovery, and restart rebuilding can
-/// share this gate without importing a private `conversation_history` route type.
+/// The budget gate preserves tool-owned navigation, but never manufactures a history route.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ModelToolResultRecovery {
-    pub(crate) continue_with: Option<Value>,
-    pub(crate) history_open: Option<Value>,
-    pub(crate) recovery: Option<Value>,
+pub(crate) struct ModelToolResultSource {
     /// Observed source-truncation state from the Archive/Tool boundary.
     ///
     /// `Some(true)` is authoritative. `Some(false)` means no truncation was observed by the
@@ -122,28 +118,25 @@ impl ModelToolResultGate {
 
     /// Encodes and, when necessary, structurally compacts a semantic model projection.
     ///
-    /// Recovery metadata is added only when compaction occurs. A Tool-owned `continueWith` route
-    /// remains authoritative; generic exact-history recovery fills that field only when the Tool
-    /// did not already provide a more specific continuation.
+    /// Tool-owned continuation fields remain authoritative; truncation never adds a new route.
     pub(crate) fn project(
         &self,
         call_id: &str,
         is_error: bool,
         model_result: &AgentToolResult,
-        recovery: Option<&ModelToolResultRecovery>,
+        recovery: Option<&ModelToolResultSource>,
     ) -> ModelToolResultGateOutput {
         self.project_internal(call_id, is_error, model_result, recovery, false)
     }
 
-    /// Marks a bounded consumer preview as recoverably truncated even when it happens to fit under
-    /// 10K. Exact process capture may contain a longer suffix than the 128KiB Event preview; that
-    /// suffix must remain discoverable without relying on estimator behavior.
-    pub(crate) fn project_with_required_recovery(
+    /// Marks a bounded consumer preview as truncated even when it fits under 10K. A source
+    /// capture can be complete while the model sees only a preview; keep those facts separate.
+    pub(crate) fn project_with_preview_truncation(
         &self,
         call_id: &str,
         is_error: bool,
         model_result: &AgentToolResult,
-        recovery: Option<&ModelToolResultRecovery>,
+        recovery: Option<&ModelToolResultSource>,
     ) -> ModelToolResultGateOutput {
         self.project_internal(call_id, is_error, model_result, recovery, true)
     }
@@ -153,8 +146,8 @@ impl ModelToolResultGate {
         call_id: &str,
         is_error: bool,
         model_result: &AgentToolResult,
-        recovery: Option<&ModelToolResultRecovery>,
-        require_recovery_marker: bool,
+        recovery: Option<&ModelToolResultSource>,
+        require_truncation_marker: bool,
     ) -> ModelToolResultGateOutput {
         let mut payload = semantic_payload(model_result, is_error);
         let truncated_at_source = source_truncation_state(&payload, recovery);
@@ -166,7 +159,7 @@ impl ModelToolResultGate {
 
         if Self::preserves_full_result(&model_result.tool)
             || (original_estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS
-                && !require_recovery_marker)
+                && !require_truncation_marker)
         {
             return ModelToolResultGateOutput {
                 content: original_content,
@@ -181,7 +174,6 @@ impl ModelToolResultGate {
             original_bytes,
             original_estimated_tokens,
             truncated_at_source,
-            recovery,
         );
 
         let mut factor = MODEL_TOOL_RESULT_MAX_TOKENS
@@ -397,7 +389,6 @@ fn marked_truncated_payload(
     original_bytes: u64,
     original_estimated_tokens: u64,
     truncated_at_source: Option<bool>,
-    recovery: Option<&ModelToolResultRecovery>,
 ) -> Value {
     let mut object = match payload {
         Value::Object(object) => object,
@@ -408,10 +399,9 @@ fn marked_truncated_payload(
         }
     };
     object.insert("truncated".to_string(), Value::Bool(true));
-    object.insert(
-        "originalBytes".to_string(),
-        Value::Number(original_bytes.into()),
-    );
+    object
+        .entry("originalBytes".to_string())
+        .or_insert_with(|| Value::Number(original_bytes.into()));
     object.insert(
         "estimatedOriginalTokens".to_string(),
         Value::Number(original_estimated_tokens.into()),
@@ -422,19 +412,6 @@ fn marked_truncated_payload(
             Value::Bool(truncated_at_source),
         );
     }
-    if let Some(recovery) = recovery {
-        if let Some(value) = &recovery.continue_with {
-            object
-                .entry("continueWith".to_string())
-                .or_insert_with(|| value.clone());
-        }
-        if let Some(value) = &recovery.history_open {
-            object.insert("historyOpen".to_string(), value.clone());
-        }
-        if let Some(value) = &recovery.recovery {
-            object.insert("recovery".to_string(), value.clone());
-        }
-    }
     Value::Object(object)
 }
 
@@ -444,7 +421,7 @@ fn source_was_truncated(value: &Value) -> bool {
 
 fn source_truncation_state(
     payload: &Value,
-    recovery: Option<&ModelToolResultRecovery>,
+    recovery: Option<&ModelToolResultSource>,
 ) -> Option<bool> {
     let recovery_state = recovery.and_then(|recovery| recovery.truncated_at_source);
     if recovery_state == Some(true) || contains_explicit_source_truncation(payload) {
@@ -877,11 +854,10 @@ mod tests {
             "content": "provider result ".repeat(20_000),
             "cursor": "provider-next"
         }));
-        let recovery = ModelToolResultRecovery {
+        let recovery = ModelToolResultSource {
             // Legacy Archive metadata records only observed source truncation. Its false value
             // must not override the richer Provider-level unknown state in the canonical result.
             truncated_at_source: Some(false),
-            ..Default::default()
         };
 
         let output = gate.project("provider-unknown", false, &result, Some(&recovery));
@@ -902,9 +878,8 @@ mod tests {
             "partialReason": "model_result_count_limit",
             "content": "bounded semantic projection"
         }));
-        let recovery = ModelToolResultRecovery {
+        let recovery = ModelToolResultSource {
             truncated_at_source: Some(false),
-            ..Default::default()
         };
 
         let output = gate.project("model-only-limit", false, &result, Some(&recovery));
@@ -916,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_preview_cut_gets_history_route_even_when_projection_fits() {
+    fn preview_cut_stays_explicit_without_manufacturing_a_history_route() {
         let gate = gate();
         let result = successful_result(json!({
             "stdout": "short preview",
@@ -926,26 +901,23 @@ mod tests {
             "omittedBytes": 0,
             "truncatedAtSource": false
         }));
-        let recovery = ModelToolResultRecovery {
-            continue_with: Some(json!({
-                "tool": "conversation_history",
-                "open": "hist-v1-process-page"
-            })),
-            history_open: Some(json!("hist-v1-process-page")),
-            recovery: Some(json!({ "kind": "exact_history" })),
+        let recovery = ModelToolResultSource {
             truncated_at_source: Some(false),
         };
 
         let output =
-            gate.project_with_required_recovery("process-call", false, &result, Some(&recovery));
+            gate.project_with_preview_truncation("process-call", false, &result, Some(&recovery));
         let payload: Value = serde_json::from_str(&output.content).unwrap();
 
         assert!(output.truncated);
         assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
         assert_eq!(payload["truncated"], true);
         assert_eq!(payload["truncatedAtSource"], false);
-        assert_eq!(payload["historyOpen"], "hist-v1-process-page");
-        assert_eq!(payload["continueWith"]["tool"], "conversation_history");
+        assert_eq!(payload["originalBytes"], 200_000);
+        assert_eq!(payload["capturedBytes"], 200_000);
+        assert_eq!(payload["omittedBytes"], 0);
+        assert!(payload.get("historyOpen").is_none());
+        assert!(payload.get("continueWith").is_none());
     }
 
     #[test]
@@ -989,25 +961,14 @@ mod tests {
             "next": "cursor-2",
             "navigation": { "older": "older-1", "newer": "newer-1" },
             "continueWith": { "tool": "tool_specific", "cursor": "old" },
-            "historyOpen": "hist-old",
             "capturedBytes": 67_108_864,
             "omittedBytes": 12_345,
             "sourceStopReason": "exact_text_capture_safety_limit",
             "body": "x".repeat(100_000),
         }));
-        let recovery = ModelToolResultRecovery {
-            continue_with: Some(json!({
-                "tool": "conversation_history",
-                "open": "hist-v1-page-2",
-            })),
-            history_open: Some(json!(format!(
-                "hist-v1-exact-{}-tail",
-                "opaque".repeat(100)
-            ))),
-            recovery: Some(json!({ "kind": "exact_history" })),
+        let recovery = ModelToolResultSource {
             truncated_at_source: Some(false),
         };
-        let expected_history_open = recovery.history_open.clone().unwrap();
 
         let output = gate.project("protected-call", false, &result, Some(&recovery));
         let payload: Value = serde_json::from_str(&output.content).unwrap();
@@ -1026,8 +987,8 @@ mod tests {
         assert_eq!(payload["navigation"]["older"], "older-1");
         assert_eq!(payload["continueWith"]["tool"], "tool_specific");
         assert_eq!(payload["continueWith"]["cursor"], "old");
-        assert_eq!(payload["historyOpen"], expected_history_open);
-        assert_eq!(payload["recovery"]["kind"], "exact_history");
+        assert!(payload.get("historyOpen").is_none());
+        assert!(payload.get("recovery").is_none());
         assert_eq!(payload["truncatedAtSource"], false);
     }
 
@@ -1152,9 +1113,8 @@ mod tests {
             "truncated": true,
             "body": "small source-side fragment",
         }));
-        let recovery = ModelToolResultRecovery {
+        let recovery = ModelToolResultSource {
             truncated_at_source: Some(true),
-            ..Default::default()
         };
 
         let output = gate.project("small-source-call", false, &result, Some(&recovery));
@@ -1269,24 +1229,21 @@ mod tests {
     #[test]
     fn an_oversized_opaque_recovery_token_is_never_rewritten() {
         let gate = gate();
+        let opaque = format!("native-{}-tail", "opaque".repeat(20_000));
         let result = successful_result(json!({
             "status": "completed",
             "body": "x".repeat(100_000),
+            "nextCursor": opaque.clone(),
         }));
-        let opaque = format!("hist-v1-{}-tail", "opaque".repeat(20_000));
-        let recovery = ModelToolResultRecovery {
-            history_open: Some(json!(opaque.clone())),
-            ..Default::default()
-        };
 
-        let output = gate.project("oversized-route", false, &result, Some(&recovery));
+        let output = gate.project("oversized-route", false, &result, None);
         let payload: Value = serde_json::from_str(&output.content).unwrap();
 
         assert!(output.truncated);
         assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
         assert!(
-            payload.get("historyOpen").is_none()
-                || payload["historyOpen"].as_str() == Some(opaque.as_str())
+            payload.get("nextCursor").is_none()
+                || payload["nextCursor"].as_str() == Some(opaque.as_str())
         );
         assert_eq!(payload["status"], "result_omitted");
         assert!(payload["error"].as_str().unwrap().contains("omitted"));

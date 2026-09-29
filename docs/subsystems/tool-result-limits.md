@@ -30,14 +30,16 @@ Tool / Provider / OS process
 
 完整通信正文指显式发送的任务、消息和成果。子 Agent 的最终回复只保留在自身会话；自动 `Result` 是 Host 生成的结束通知，包含身份、终态、必要错误和产物引用，不复制或截取最终回复。详细成果由子 Agent 使用 `send_message` 汇报给直接父级，沿用上述全文交付规则。
 
+职责上，用户提问答案与协作消息属于通信交付，完整性应由各自消息协议和整轮上下文预算处理，不应转交 `conversation_history` 补读。本轮没有为用户答案新增单结果 Gate 豁免，也没有添加通用结果分页协议；答案的现有交付与容量行为保持不变。
+
 ## 四种限制语义
 
-| 类型                        | 含义                                            | 恢复方式                                    |
-| --------------------------- | ----------------------------------------------- | ------------------------------------------- |
-| Source truncation           | Tool/Provider 在 canonical/Archive 前已丢失内容 | 无法恢复遗漏部分；必须报告原因与已知数量    |
-| Semantic pagination         | 完整集合由稳定游标分页                          | `nextCursor`/`continueWith`，继续时重新授权 |
-| Consumer projection limit   | E/T/C 只需要有界视图                            | 不影响 canonical 或 A                       |
-| Model projection truncation | M 投影超过共享 10K                              | cursor、`continueWith` 或 `historyOpen`     |
+| 类型                        | 含义                                            | 恢复方式                                                            |
+| --------------------------- | ----------------------------------------------- | ------------------------------------------------------------------- |
+| Source truncation           | Tool/Provider 在 canonical/Archive 前已丢失内容 | 无法恢复遗漏部分；必须报告原因与已知数量                            |
+| Semantic pagination         | 完整集合由稳定游标分页                          | `nextCursor`/`continueWith`，继续时重新授权                         |
+| Consumer projection limit   | E/T/C 只需要有界视图                            | 不影响 canonical 或 A                                               |
+| Model projection truncation | M 投影超过共享 10K                              | 仅原工具已有的范围、cursor、`continueWith` 或产物读取；可能无法恢复 |
 
 `truncated=true` 可能只是当前页未完，不能单独解释为来源丢失。权威来源字段是 `truncatedAtSource`、捕获/遗漏量、`stopReason` 和恢复标记。
 
@@ -47,30 +49,30 @@ Tool / Provider / OS process
 
 | Tool/类别                    | 来源或安全硬限                                                                                               | 模型交付                                 | 溢出恢复                                                 |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------- | -------------------------------------------------------- |
-| 共享 Exact Text Capture      | 单次 64 MiB                                                                                                  | 独立于 M                                 | Archive 分块；超过部分是来源截断                         |
+| 共享 Exact Text Capture      | 单次 64 MiB                                                                                                  | 独立于 M                                 | 内部 Archive 分块；不是普通工具的公共续读入口            |
 | `search_code`                | walk 20,000；单文件 512 KiB；单匹配行有界                                                                    | 预算感知页 + 10K                         | opaque cursor；超长行用 `read_file`                      |
 | `search_files`               | walk 20,000；每页最多 200                                                                                    | 预算感知页 + 10K                         | opaque cursor                                            |
 | `attachments_list*`          | 请求页最多 500                                                                                               | 预算感知页 + 10K                         | opaque cursor                                            |
 | `workspace_map`              | depth 8、tree 1,000、walk 20,000                                                                             | summary/treeText/coverage                | 缩小 `focusPath` 重查                                    |
-| 文档文本读取                 | 文件 25 MiB；OOXML 单 entry 16 MiB、总 XML 64 MiB                                                            | canonical text + 10K                     | `historyOpen`                                            |
+| 文档文本读取                 | 文件 25 MiB；OOXML 单 entry 16 MiB、总 XML 64 MiB                                                            | canonical text + 10K                     | 仅已有读取范围；无相应能力时明确无法补取                 |
 | 文件输入 mount               | 最多 16 项；普通文件流式校验/复制，无统一单项 64 MiB 或合计 128 MiB 旧上限；视觉输入单项 8 MiB               | 不直接等于 Tool Result                   | 来源/解析器仍有独立边界，按结构化错误处理                |
-| `web_search`                 | 请求/模型最多 8 条；Provider 另有限制                                                                        | 搜索产品页 + 10K                         | Provider cursor 或 `web_fetch`                           |
-| `web_fetch`                  | Provider/传输安全限；Exact Capture 64 MiB                                                                    | M 统一 10K；E/C 可有兼容字符限           | `historyOpen`                                            |
+| `web_search`                 | 请求/模型最多 8 条；Provider 另有限制                                                                        | 搜索产品页 + 10K                         | 用 `web_fetch` 读取来源；不承诺搜索结果有可调用的 cursor |
+| `web_fetch`                  | Provider/传输安全限；Exact Capture 64 MiB                                                                    | M 统一 10K；E/C 可有兼容字符限           | 当前无通用正文分页；明确标记截断                         |
 | `apply_patch` Direct         | complete content 32 KiB；1–128 edits；edit 后目标 240,000 UTF-8 bytes                                        | receipt/successor + 10K                  | 超 Direct 边界改用 Staged；冲突后重新 `read_file`        |
 | `apply_patch` Staged         | append chunk 1 MiB；每次 edit 1–128 项；transaction 4 MiB；draft TTL 7 天                                    | progress/receipt + 10K                   | `status`/继续 mutation/`commit`/`abort`                  |
 | FileChange Observation/Diff  | Observation claim 10 分钟、每 Run 1,024；内容/Diff/历史页默认 50,000 chars，夹在 1,000–100,000               | successor 仅 M/私有 C                    | `nextOffset`；无 successor 时重新 `read_file`            |
-| Command/Office/Skill Script  | stdout/stderr 共享 64 MiB；每 stream 128 KiB 预览                                                            | 预览 + 10K                               | terminal archive 的 `historyOpen`                        |
-| `run_command`                | command 16,000 字符；timeout 最多 600 秒                                                                     | terminal 或 running session receipt      | `command_session`；终态 archive                          |
+| Command/Office/Skill Script  | stdout/stderr 共享 64 MiB；每 stream 128 KiB 预览                                                            | 预览 + 10K                               | 已有 session 增量或可读产物；不重跑操作来补输出          |
+| `run_command`                | command 16,000 字符；timeout 最多 600 秒                                                                     | terminal 或 running session receipt      | `command_session` 观察原会话；无通用终态日志分页         |
 | `command_session`            | 持久 transcript 256 KiB/最多 2,048 chunks；单次模型增量最多 4 KiB                                            | 安全增量 + 10K                           | 后续 wait；不递归 Archive                                |
 | `read_file` / Skill Resource | 文件/资源自己的读取限                                                                                        | 在预算内构造稳定页，再经防御性 gate      | byte/line cursor 或 `continueWith`                       |
-| Skill Script                 | 128 个 argv、总 64 KiB；requirements 最多 128 项；默认 120 秒、最多 600 秒                                   | preflight/执行结果 + 10K                 | 修正参数；stdout/stderr 用 Archive                       |
-| Office                       | 默认 120 秒、最多 600 秒；文档最多 512 MiB；页/尺寸另有格式限                                                | 语义 outputs + 进程预览                  | Archive 或缩小页范围                                     |
+| Skill Script                 | 128 个 argv、总 64 KiB；requirements 最多 128 项；默认 120 秒、最多 600 秒                                   | preflight/执行结果 + 10K                 | 已有可读产物；内部 Archive 不提供普通结果续读            |
+| Office                       | 默认 120 秒、最多 600 秒；文档最多 512 MiB；页/尺寸另有格式限                                                | 语义 outputs + 进程预览                  | 已有产物或只读范围；进程日志不承诺可补取                 |
 | 图像生成 Artifact            | 默认下载最大 32 MiB；尺寸/像素和 HTTP 均有限制                                                               | 只传 Artifact identity/URI               | 无文本分页；重新生成不是恢复                             |
 | Browser Artifact projection  | 最多 16 个临时引用；单个 128 MiB；最长 24 小时引用期                                                         | 安全 ref/元数据；截图可有 image readPath | Renderer 经 Main broker 预览/导出；截图可用 `read_image` |
 | Browser Download reference   | schema v2；每次最多 16 个无路径引用；单项最大 2 GiB；Rust Core 持久记录                                      | `browser-download:<uuid>` + 安全元数据   | 后续文件输入重新校验 Conversation/tree/Project scope     |
-| 外部 MCP Server              | raw result 4 MiB；128 blocks；文本 16 KiB、结构 JSON 8 KiB；结构深度 32/节点 4,096；encoded media 合计 2 MiB | 安全投影 + 10K                           | 通常重新调用且重新审批；unknown 禁止自动重放             |
+| 外部 MCP Server              | raw result 4 MiB；128 blocks；文本 16 KiB、结构 JSON 8 KiB；结构深度 32/节点 4,096；encoded media 合计 2 MiB | 安全投影 + 10K                           | 仅服务原生读取/分页/产物契约；不臆造参数或重放副作用     |
 | 内置 Capability Tool         | 参数 64 KiB、raw result 4 MiB、model projection 64 KiB，并有 JSON 深度/节点限                                | Core Server/Main 安全投影 + 10K          | 按 Tool/Artifact 契约；unknown 禁止自动重放              |
-| `conversation_history`       | Archive chunk/page 限                                                                                        | 预算感知历史页 + 10K                     | `open`/navigation；不再归档                              |
+| `conversation_history`       | 仅当前有效摘要覆盖的安全持久模型上下文；按字符分页                                                           | 预算感知历史页 + 10K                     | 边界内 `open`/navigation；拒绝原始 Archive 路由          |
 | `automation_report`          | summary 2 KiB；Run result preview 8 KiB；error message 4 KiB                                                 | 小型确认 receipt + 10K                   | 无分页；首次报告持久化，终态 fallback 按 UTF-8 安全裁剪  |
 | 协作 Tool                    | 保留 Mailbox 总积压背压与单批条数限制；正文无固定业务字数上限                                                | 完整消息；使用整轮上下文预算             | 超整轮容量明确失败并保留原文；不进 Exact Archive         |
 
@@ -84,11 +86,11 @@ Gate 使用当前模型/API style 的 `ContextTextBudget` 估算完整 Tool mess
 
 协作消息按原文交付，完整计量；其余工具采用下列规则：
 
-1. 如果结果在 10K 内且不缺恢复标记，原样交付模型投影。
+1. 如果结果在 10K 内且无需补充截断标记，原样交付模型投影。
 2. 若 Tool 提供语义分页，优先让 Tool 在预算内重新构造一页，保证 cursor 从模型实际看到的最后一项继续。
-3. 若 Exact Archive 已建立，产生 `historyOpen` 恢复入口。
-4. 仅做文本裁剪时保留结构化错误、完整性、遗漏量与恢复动作。
-5. 超限且没有安全恢复入口时 fail closed，不能把无标记的半截 JSON 交给模型。
+3. 只保留 Tool 自己提供的有效续读信息，不因建立 Exact Archive 而生成 `historyOpen` 或引导调用 `conversation_history`。
+4. 仅做文本裁剪时保留结构化错误、完整性、已知遗漏量及原工具的读取指引；没有入口就明确标记截断，不虚构可恢复性。
+5. 输出始终是有效 JSON；极小预算下返回有界的截断诊断，不能把无标记的半截 JSON 交给模型。
 
 中央 Gate 只改变 M，不得回写 canonical/E/T/A/C，也不得把 projection truncation 标成 source truncation。
 
@@ -126,6 +128,8 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 
 安全 UTF-8 文本按 SHA-256 标识、zstd 分块写入 Archive。命令、Office、Git 和 Skill Script 使用临时 spool 捕获 stdout/stderr；预览被截断不等于 archive 被截断。
 
+Archive 保留内部审计证据，不为普通截断结果生成公共续读引用；压缩历史工具读取安全持久模型上下文，不开放原始 Archive。外部 MCP 和内置 Capability 并不统一存档所有正文；服务端或安全投影已省略的内容不能靠 Archive 恢复。只按当前 Schema 中实际存在的范围、分页、session 或产物读取能力取回内容，不给未知工具添加 cursor 参数，也不重复副作用操作。
+
 `command_session` 和 `conversation_history` 不再次归档读回正文。图片、data URL、二进制 MCP Server blocks 和 Office 文件本体不进入文本 Archive，而由受管 Artifact/文件输入体系保存身份和授权。
 
 ## 不变量
@@ -136,6 +140,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 4. 可分页集合不得被通用字符裁剪后跳过条目。
 5. 不确定副作用不是“输出过长”的恢复场景，禁止以 retry 解决。
 6. 任何新 hard limit 都必须产生可诊断、可测试的 stop reason/omission metadata。
+7. `conversation_history` 只读取有效摘要覆盖的原始历史；普通工具截断不触发历史工具路由。
 
 ## 代码真源
 
@@ -175,7 +180,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - [ ] Archive 在普通预览裁剪前接收安全捕获内容。
 - [ ] 分页 cursor 绑定 query/scope/revision，覆盖篡改和跨会话测试。
 - [ ] FileChange 限额分别覆盖 Direct、Staged、Observation 与历史 Diff；禁止用截断或 opaque ID 代替重新授权。
-- [ ] 10K Gate 覆盖成功、错误、Unicode、结构 JSON 和无恢复入口失败；协作全文例外覆盖预提交、恢复与真实调用身份校验。
+- [ ] 10K Gate 覆盖成功、错误、Unicode、结构 JSON 和无恢复入口的诚实截断；协作全文例外覆盖预提交、恢复与真实调用身份校验。
 - [ ] 进程/网络取消不会因重试造成重复副作用。
 - [ ] Automation 报告覆盖 2048/8192/4096 的 ASCII、Unicode 和控制字符边界，并验证首次写入不可覆盖。
 - [ ] 同步消费者矩阵、常量测试和 Renderer 兼容字段。
@@ -187,4 +192,5 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - 某些外部 Provider 只提供 unknown completeness，系统不能证明其结果完整。
 - 文档/网页解析在进入 capture 前可能有格式库或 Provider 自身安全限。
 - 动态 MCP Server/Capability 可进一步收紧限制，但不得超过已审计的 Core Server/Main 最大值。
+- 本轮没有新增文档、网页、进程日志或动态 MCP 的通用续读 API；缺少原生能力的遗漏可能无法补取。
 - Automation 的终态 preview/error 裁剪当前没有独立分页或 Archive recovery ref；需要完整内容时应从仍存在的 Conversation/Trace 读取，而不是重放后台 Run。

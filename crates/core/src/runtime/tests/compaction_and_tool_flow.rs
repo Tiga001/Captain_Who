@@ -552,6 +552,14 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
     }
     for request_body in &request_bodies {
         let payload: Value = serde_json::from_str(request_body).unwrap();
+        assert!(
+            payload["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["function"]["name"] == "conversation_history" }),
+            "history recall must become available immediately after adopting compaction"
+        );
         assert_eq!(
             payload.get("max_tokens"),
             max_tokens.map(|value| json!(value)).as_ref()
@@ -561,6 +569,14 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
         assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
     }
     assert!(!request_bodies[0].contains("Preserve this constraint across compaction."));
+    assert!(
+        output.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Started { tool_definitions, .. }
+                if tool_definitions.iter().all(|tool| tool.name != "conversation_history")
+        )),
+        "an initially uncompressed run must not expose history recall"
+    );
     assert!(request_bodies[1].contains("Preserve this constraint across compaction."));
     assert!(request_bodies[1].contains("LARGE_GUIDANCE_ATTACHMENT_MARKER"));
     assert!(output.events.iter().any(|event| matches!(
