@@ -9,7 +9,7 @@ fn input(profile: AgentContextProfile) -> AgentChatInput {
 }
 
 #[test]
-fn minimal_profile_keeps_core_and_extension_entry_points_without_todo() {
+fn minimal_profile_uses_commands_for_search_and_keeps_file_and_extension_entry_points() {
     let full =
         prepare_runtime_capabilities(&input(AgentContextProfile::Full), "full", &[], true, None)
             .unwrap();
@@ -37,14 +37,24 @@ fn minimal_profile_keeps_core_and_extension_entry_points_without_todo() {
             "read_file",
             "read_image",
             "run_command",
-            "search_code",
-            "search_files",
             "skills_activate",
-            "workspace_map"
         ]
     );
-    assert!(full.initial_tool_set.contains("todo_update"));
-    assert!(!minimal.initial_tool_set.contains("todo_update"));
+    for name in [
+        "todo_update",
+        "workspace_map",
+        "search_files",
+        "search_code",
+    ] {
+        assert!(
+            full.initial_tool_set.contains(name),
+            "full mode lost {name}"
+        );
+        assert!(
+            !minimal.initial_tool_set.contains(name),
+            "minimal mode still exposes {name}"
+        );
+    }
     let full_again = prepare_runtime_capabilities(
         &input(AgentContextProfile::Full),
         "full-again",
@@ -157,13 +167,22 @@ fn minimal_profile_preserves_skill_catalog_and_read_only_routes() {
         prepare_runtime_capabilities(&input, "minimal-read-only", &[], true, None).unwrap();
     for tool in [
         "skills_activate",
-        "workspace_map",
-        "search_files",
-        "search_code",
+        "read_file",
         "read_image",
+        "attachments_list",
+        "attachments_list_project",
     ] {
         assert!(capabilities.initial_tool_set.contains(tool));
     }
+    for tool in ["workspace_map", "search_files", "search_code"] {
+        assert!(!capabilities.initial_tool_set.contains(tool));
+    }
+    // The reduced toolset does not turn directory/search commands into an approval bypass.
+    assert!(!capabilities.command_auto_approve);
+    assert_eq!(
+        capabilities.command_permissions.write,
+        crate::protocol::AgentWritePermission::Denied
+    );
     let request = build_llm_request(
         input.clone(),
         capabilities.initial_tool_set.stable_definitions(),

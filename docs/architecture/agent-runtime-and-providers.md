@@ -141,7 +141,9 @@ Office 与 PDF 的专用读取、Builder/Editor 调用、运行环境选择、�
 
 轻量文案按职责去重：系统提示词保留信任、权限、模式说明、Skill 作用域及跨工具工作流；参数、文件凭据与事务生命周期、命令会话状态等调用细节由对应原生工具说明提供。二者作为同一请求联合验证，规则移动不代表删去安全约束；完整模式文案、工具身份、返回格式、前端展示及存储协议不随轻量文字优化改变。描述更新仍会改变轻量 ToolSet revision，旧版暂停检查点的严格恢复校验不因此放宽。
 
-轻量模式保留 11 个静态基础入口：8 个核心工具 `read_file`、`read_image`、`apply_patch`、`run_command`、`command_session`、`workspace_map`、`search_files`、`search_code`，以及 `skills_activate`、`attachments_list`、`attachments_list_project`；不暴露 `todo_update`。`conversation_history` 仅在存在有效压缩边界时动态提供，用于找回摘要覆盖的原始片段。这不是总工具数上限：扩展仍按原有设置、目录和授权路径提供自己的工具与指南，基础入口也继续受当前权限校验。
+轻量模式保留 8 个静态基础入口：`read_file`、`read_image`、`apply_patch`、`run_command`、`command_session`、`skills_activate`、`attachments_list`、`attachments_list_project`；不暴露 `todo_update`、`workspace_map`、`search_files`、`search_code`。目录查看和搜索通过 `run_command` 使用可用的 `ls`、`find`、`rg` 等命令，沿用原命令权限和审批策略；所选文件夹的额外只读授权不会因此变为命令执行授权。普通文件内容可用命令查询，但修改已有文件需要的 `fileChangeTarget` 仍由 `read_file` 或成功编辑回执提供。完整模式继续提供原目录与搜索工具。
+
+`conversation_history` 仅在存在有效压缩边界时动态提供，用于找回摘要覆盖的原始片段。这不是总工具数上限：扩展仍按原有设置、目录和授权路径提供自己的工具与指南，基础入口也继续受当前权限校验。轻量优化只改变基础工具暴露及模型说明，不改工具参数约束、权限、审批、文件版本或事务执行规则。输入预算须测量完整模型请求中的系统说明、工具定义及环境状态；本地 tokenizer 估算不等于服务商实际计费。
 
 模式在根 Turn admission 时持久冻结，委派 Wake 继承来源 Run 的模式；已有 Run 和其任务树不随全局设置切换。实际生效模式通过 World State 的 `interaction.profile.contextProfile` 及简短说明投影，模型不能根据旧历史或工具数量猜测。模式选择、短提示词和工具投影同时用于真实请求及上下文预览；计量边界见[上下文管理](./context-management.md#容量判断)。
 

@@ -124,7 +124,8 @@ fn execute_read_file_with_hook(
     } else {
         display_path
     };
-    let mut opened = open_regular_text_file_with_hook(&file_path, &display_path, before_open)?;
+    let mut opened = open_regular_text_file_with_hook(&file_path, &display_path, before_open)
+        .map_err(|error| directory_recovery_for_profile(context, error))?;
     context.validate_folder_path(path)?;
     let initial_metadata = opened.initial_metadata().clone();
 
@@ -289,6 +290,24 @@ fn path_is_directory_error(path: &str) -> AgentError {
             }
         }),
     )
+}
+
+fn directory_recovery_for_profile(context: &ToolExecutionContext, error: AgentError) -> AgentError {
+    if context.context_profile() != crate::protocol::AgentContextProfile::Minimal
+        || error.code() != Some(PATH_IS_DIRECTORY_ERROR_CODE)
+    {
+        return error;
+    }
+    let mut details = error.details().cloned().unwrap_or_else(|| json!({}));
+    if let Some(details) = details.as_object_mut() {
+        // Never recommend an unavailable tool or synthesize a shell command from a path.
+        details.remove("continueWith");
+        details.insert(
+            "recovery".to_string(),
+            json!("这是目录，不能用 read_file 读取。请通过可用的 run_command 查看目录，并遵守其 cwd、读取权限和审批要求；附加文件夹的只读授权不授予命令执行权限。"),
+        );
+    }
+    AgentError::structured(PATH_IS_DIRECTORY_ERROR_CODE, error.to_string(), details)
 }
 
 fn fit_read_file_page_to_model_budget(
@@ -1237,6 +1256,38 @@ mod tests {
         assert_eq!(projected["code"], PATH_IS_DIRECTORY_CODE);
         assert_eq!(projected["path"], "crates/mcp-client/src");
         assert_eq!(projected["continueWith"], payload["continueWith"]);
+    }
+
+    #[test]
+    fn minimal_directory_error_keeps_authorization_without_recommending_removed_tool() {
+        let fixture = TestWorkspace::new();
+        fs::create_dir_all(fixture.root.join("source")).unwrap();
+        let context = fixture
+            .context()
+            .with_context_profile(crate::protocol::AgentContextProfile::Minimal);
+        let registry = ToolRegistry::defaults_with_search(None);
+        let raw = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "minimal-read-directory".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": "source" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(!raw.ok);
+        assert_eq!(raw.error.as_deref(), Some(PATH_IS_DIRECTORY_MESSAGE));
+        for result in [raw.clone(), registry.model_projection(&raw)] {
+            let details = result.result.unwrap();
+            assert_eq!(details["code"], PATH_IS_DIRECTORY_CODE);
+            assert_eq!(details["path"], "source");
+            assert!(details.get("continueWith").is_none());
+            let recovery = details["recovery"].as_str().unwrap();
+            assert!(recovery.contains("run_command"));
+            assert!(recovery.contains("读取权限和审批"));
+            assert!(recovery.contains("不授予命令执行权限"));
+        }
     }
 
     #[test]

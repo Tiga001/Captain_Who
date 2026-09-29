@@ -368,6 +368,11 @@ impl AgentRuntime {
             )?;
         }
 
+        let context_profile = input
+            .prompt_preferences
+            .as_ref()
+            .map(|preferences| preferences.context_profile)
+            .unwrap_or_default();
         let PreparedLlmRequest {
             template: llm_request,
             context: mut active_context,
@@ -474,6 +479,7 @@ impl AgentRuntime {
         let tool_output_budget = capacity_detector.text_budget(MODEL_TOOL_RESULT_MAX_TOKENS);
         let exact_history_storage = storage.clone();
         let mut tool_context = ToolExecutionContext::from_run_context(run_context.as_ref())
+            .with_context_profile(context_profile)
             .with_compacted_history_summary_id(
                 active_context.compaction_summary_id().map(str::to_string),
             )

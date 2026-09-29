@@ -233,10 +233,16 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
             preferences.context_profile == crate::protocol::AgentContextProfile::Minimal
         })
     {
-        // Keep base operations, Skill/attachment discovery, and all capability-owned tools.
+        // Keep file operations, command sessions, Skill/attachment discovery and capabilities.
+        // Directory inspection and search use run_command under the same command policy.
         // History availability follows the adopted summary; other capabilities keep their owners.
         // Stable discovery entry points must not flicker with attachment counts or activation.
-        permitted_tool_definitions.retain(|definition| definition.name != "todo_update");
+        permitted_tool_definitions.retain(|definition| {
+            !matches!(
+                definition.name.as_str(),
+                "todo_update" | "workspace_map" | "search_files" | "search_code"
+            )
+        });
         crate::tools::apply_minimal_tool_descriptions(&mut permitted_tool_definitions);
     }
     apply_permission_policy_to_tool_definitions(

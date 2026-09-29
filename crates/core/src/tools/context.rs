@@ -8,8 +8,9 @@ use crate::file_input::{
     AgentFileInputExecutionContext,
 };
 use crate::protocol::{
-    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
-    AgentReadPermission, AgentResult, AgentRunContext, AgentWritePermission, ModelCapabilities,
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentContextProfile, AgentError,
+    AgentPermissions, AgentReadPermission, AgentResult, AgentRunContext, AgentWritePermission,
+    ModelCapabilities,
 };
 use crate::resource_locator::ResourceLocator;
 use crate::storage::service::StorageService;
@@ -72,6 +73,7 @@ impl Drop for ModelImageDeliveryReservation {
 
 #[derive(Clone)]
 pub struct ToolExecutionContext {
+    context_profile: AgentContextProfile,
     workspace_context: Option<crate::AgentWorkspaceContext>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
     folder_authorities: Vec<crate::AgentFolderAuthority>,
@@ -333,6 +335,7 @@ impl ToolExecutionContext {
         let project_id = context.and_then(|context| context.project_id.clone());
 
         Self {
+            context_profile: AgentContextProfile::default(),
             workspace_context,
             attachment_library,
             folder_authorities,
@@ -365,6 +368,16 @@ impl ToolExecutionContext {
     pub fn with_cancellation(mut self, cancellation_token: AgentCancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
+    }
+
+    /// Frozen with the Run; used only for guidance about its available base tools.
+    pub(crate) fn with_context_profile(mut self, profile: AgentContextProfile) -> Self {
+        self.context_profile = profile;
+        self
+    }
+
+    pub(super) fn context_profile(&self) -> AgentContextProfile {
+        self.context_profile
     }
 
     /// The summary actually present in the model's context, supplied only by the Host.

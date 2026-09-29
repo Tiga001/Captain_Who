@@ -72,12 +72,14 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         "require_approval",
         "MCP",
         "Backend file transaction state",
-        "每个子 Agent 都有独立 Run",
-        "ref 原样填入 skills_activate.skillRef",
-        "完整 Skill 指令及新工具只从下一次模型请求生效",
-        "copy-first 工作流",
-        "取得 readPath 后使用实际可用的匹配读取工具",
-        "不猜尚未提供的工具",
+        "children have independent Runs",
+        "frozen catalog ref as skills_activate.skillRef",
+        "full instructions/new tools apply next model request only",
+        "Only explicit activated-Skill copy-first",
+        "Copy returned readPath into a matching reader",
+        "Use supplied native schemas",
+        "Respond naturally in the user's language",
+        "not command/write permission",
     ] {
         assert!(
             system.contains(invariant),
@@ -91,10 +93,10 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
     for invariant in [
         "fileChangeTarget",
         "next model response",
-        "never share that ID across writes in one batch",
-        "Failure/rejection/cancellation/conflict/outcome_unknown do not renew",
+        "never across writes in one batch",
+        "Failure/rejection/cancellation/conflict/outcome_unknown never renew",
         "allowedNextActions",
-        "waiting_approval/applying/outcome_unknown allow only status",
+        "waiting_approval/applying/outcome_unknown permit status only",
         "before user-visible narration",
     ] {
         assert!(
@@ -118,31 +120,27 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         );
     }
     assert!(cwd.contains("backend-recognized command"));
-    assert!(cwd.contains("activated Skill explicitly supplies a Host-owned private directory"));
+    assert!(cwd.contains("currently activated Skill's explicit Host-owned private directory"));
     let inputs = command["parameters"]["properties"]["inputs"]["description"]
         .as_str()
         .unwrap();
-    assert!(inputs.contains("path and optional mountPath, never source"));
+    assert!(inputs.contains("path plus optional mountPath, never source"));
     let runtime_profile = command["parameters"]["properties"]["runtimeProfile"]["description"]
         .as_str()
         .unwrap();
-    assert!(runtime_profile.contains("currently activated Skill explicitly instructs"));
+    assert!(runtime_profile.contains("currently activated Skill instructs"));
     assert!(runtime_profile.contains("else omit"));
-    assert!(runtime_profile.contains("Never guess profiles or supply package versions"));
+    assert!(runtime_profile.contains("No guessed profiles, package versions"));
     let image = native_tool("read_image")["description"]
         .as_str()
         .unwrap()
         .to_string();
-    assert!(image.contains("Pass only path") && image.contains("never invent source"));
+    assert!(image.contains("Only path") && image.contains("never invent source"));
     let session = native_tool("command_session")["description"]
         .as_str()
         .unwrap()
         .to_string();
-    for invariant in [
-        "outcome_unknown",
-        "stop polling",
-        "never replay the command",
-    ] {
+    for invariant in ["outcome_unknown", "stop polling", "never replay"] {
         assert!(
             session.contains(invariant),
             "missing unknown-session outcome contract: {invariant}"
@@ -153,8 +151,22 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         .unwrap()
         .iter()
         .all(|tool| tool["function"]["name"] != "conversation_history"));
-    assert!(system.contains("仅需找回压缩摘要替代的原始片段"));
-    assert!(system.contains("不用历史检索续读工具结果"));
+    assert_eq!(payload["tools"].as_array().unwrap().len(), 8);
+    // Neither native definitions nor their instructions may point back at removed base tools.
+    let serialized = payload.to_string();
+    for removed in [
+        "todo_update",
+        "workspace_map",
+        "search_files",
+        "search_code",
+    ] {
+        assert!(
+            !serialized.contains(removed),
+            "stale tool guidance: {removed}"
+        );
+    }
+    assert!(system.contains("never invented parameters/history retrieval"));
+    assert!(system.contains("read-only run_command under existing permissions/approvals"));
 }
 
 #[test]
@@ -163,7 +175,7 @@ fn generic_tool_wording_stays_below_pre_cleanup_budget() {
     // pre-cleanup ceilings use the production estimator, not provider-billed token usage.
     for (profile, previous_schema_tokens) in [
         (AgentContextProfile::Full, 9_696),
-        (AgentContextProfile::Minimal, 7_048),
+        (AgentContextProfile::Minimal, 5_200),
     ] {
         let input = wording_input(profile);
         let capabilities =
@@ -186,5 +198,12 @@ fn generic_tool_wording_stays_below_pre_cleanup_budget() {
             costs.tool_schema_tokens < previous_schema_tokens,
             "{profile:?} generic guidance regrew past its pre-cleanup budget: {costs:?}"
         );
+        if profile == AgentContextProfile::Minimal {
+            // A regression ceiling in production-estimator units, not a vendor token count.
+            assert!(
+                costs.system_tokens + costs.tool_schema_tokens <= 7_500,
+                "minimal fixed guidance grew: {costs:?}"
+            );
+        }
     }
 }

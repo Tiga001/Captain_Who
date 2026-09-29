@@ -839,18 +839,25 @@ async fn assert_skill_resource_approval_round_trip(
             "{context_profile:?} is missing {name}"
         );
     }
-    assert_eq!(
-        tool_names.contains("todo_update"),
-        context_profile == AgentContextProfile::Full,
-        "the provider must receive the selected profile's real tool set"
-    );
+    for name in [
+        "todo_update",
+        "workspace_map",
+        "search_files",
+        "search_code",
+    ] {
+        assert_eq!(
+            tool_names.contains(name),
+            context_profile == AgentContextProfile::Full,
+            "the provider must receive the selected profile's real tool set: {name}"
+        );
+    }
     let initial_messages = initial_request["messages"].to_string();
     assert!(initial_messages.contains(SKILL_INSTRUCTIONS));
     assert!(initial_messages.contains("skills_read_resource"));
-    assert_eq!(
-        initial_messages.contains("## 必要工具约束"),
-        context_profile == AgentContextProfile::Minimal
-    );
+    if context_profile == AgentContextProfile::Minimal {
+        assert!(initial_messages.contains("obey apply_patch's credential/state/silence contract"));
+        assert!(initial_messages.contains("children have independent Runs"));
+    }
     let model_request = second_request.lock().unwrap().clone().unwrap();
     assert_eq!(initial_request["tools"], model_request["tools"]);
     assert!(model_request["messages"]
