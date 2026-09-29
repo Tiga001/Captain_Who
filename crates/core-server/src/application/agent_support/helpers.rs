@@ -214,6 +214,7 @@ pub(crate) fn message_attachments_from_input(
                 kind: input_attachment_kind_label(attachment.kind).to_string(),
                 name: attachment.name.clone(),
                 mime_type: attachment.mime_type.clone(),
+                pasted_text: attachment.pasted_text.clone(),
                 size_bytes: attachment.size_bytes,
                 preview_mime_type: preview_data.as_ref().and(attachment.mime_type.clone()),
                 preview_data,

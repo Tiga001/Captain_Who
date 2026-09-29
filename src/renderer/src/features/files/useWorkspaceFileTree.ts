@@ -13,7 +13,8 @@ interface UseWorkspaceFileTreeOptions {
   isActive: boolean
   onFileSelect: (path: string) => void
   projectId: string
-  selectedPath: string | null
+  /** Undefined keeps the workspace selection while an attachment is previewed. */
+  selectedPath: string | null | undefined
 }
 
 export function useWorkspaceFileTree({

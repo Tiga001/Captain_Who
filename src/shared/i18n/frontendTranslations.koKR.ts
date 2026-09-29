@@ -1164,6 +1164,8 @@ export const koKRTranslations = {
   'chat.guidanceQueued': '대기 중',
   'chat.guidanceSubmittingStatus': '보내는 중',
   'chat.guidanceFailed': '안내를 보낼 수 없습니다. 수정하고 다시 시도하세요.',
+  'chat.pastedTextFileName': '붙여넣은 텍스트.txt',
+  'chat.showPastedTextInEditor': '텍스트 상자에 표시',
   'chat.attachmentOperationFailed': '첨부파일을 처리할 수 없습니다. 다시 시도해 보세요.',
   'chat.editMessageFailed': '이 메시지를 다시 보낼 수 없습니다. 다시 시도해 보세요.',
   'chat.guidanceInterrupted': '이전 실행이 중단되었습니다. 메시지가 대기열에 복원되었습니다.',

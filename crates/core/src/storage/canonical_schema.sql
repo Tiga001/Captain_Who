@@ -7067,3 +7067,6 @@ WHERE status = 'open';
 CREATE INDEX workflow_execution_input_pending_sequence
 ON workflow_execution_inputs(sequence)
 WHERE status = 'pending';
+
+-- Long pasted text source metadata, schema v63.
+ALTER TABLE attachments ADD COLUMN pasted_text_json TEXT;

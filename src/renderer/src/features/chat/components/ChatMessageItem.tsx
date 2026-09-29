@@ -263,11 +263,13 @@ export const ChatMessageItem = memo(function ChatMessageItem({
       {message.role === 'user' && (
         <>
           <ComposerFolderReferences
+            canOpen={mode === 'interactive'}
             folders={message.folderReferences ?? []}
             label={t('chat.attachments')}
             removeLabel=""
           />
           <MessageAttachments
+            canOpenFile={message.status !== 'pending' && message.status !== 'error'}
             attachments={message.attachments}
             messageId={message.id}
             mode={mode}

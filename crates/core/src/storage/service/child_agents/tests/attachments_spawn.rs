@@ -103,6 +103,35 @@ fn all_snapshot_copies_attachment_to_independent_path_and_retry_is_idempotent() 
 }
 
 #[test]
+fn pasted_text_source_metadata_survives_independent_child_snapshot() {
+    let fixture = Fixture::new(Some("model-a"));
+    save_settled_history(&fixture, 1, false);
+    let mut source = attach_file_to_first_user_message(&fixture, "paste", true);
+    source.pasted_text = Some(crate::AgentPastedTextMetadata {
+        preview: "attachment bytes for paste".into(),
+        character_count: source.size_bytes,
+    });
+    attachment_repository::save_attachment(&fixture.service.state.connection().unwrap(), &source)
+        .unwrap();
+    let mut input = spawn_input("spawn-pasted-attachment", "pasted_attachment");
+    input.fork_turns = AgentForkTurns::All;
+    let created = fixture.service.create_child_agent(&input).unwrap();
+    let target = attachment_repository::list_conversation_attachments(
+        &fixture.service.state.connection().unwrap(),
+        &created.agent.conversation_id,
+    )
+    .unwrap()
+    .remove(0);
+    assert_ne!(target.id, source.id);
+    assert_eq!(target.pasted_text, source.pasted_text);
+    let restored = fixture
+        .service
+        .load_input_attachments(&[target.id])
+        .unwrap();
+    assert_eq!(restored[0].pasted_text, source.pasted_text);
+}
+
+#[test]
 fn missing_snapshot_attachment_rolls_back_all_database_facts_without_files() {
     let fixture = Fixture::new(Some("model-a"));
     save_settled_history(&fixture, 1, false);

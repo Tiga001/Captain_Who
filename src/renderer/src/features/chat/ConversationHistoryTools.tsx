@@ -9,6 +9,13 @@ import {
 } from 'react'
 import { Search, X, ChevronUp, ChevronDown, History } from 'lucide-react'
 import { copyTextToClipboard } from '../../components/clipboard'
+import {
+  getSelectionInteractionRevision,
+  installSelectionScopes,
+  isSelectionScopeActive,
+  SELECTION_ALL_EVENT,
+  selectScopeContents
+} from '../../components/selection/selectionScope'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { copyCollaborationTimelineSelection } from '../agentCollaboration/CollaborationTimelineActivity'
 import {
@@ -69,16 +76,16 @@ function textPoint(root: HTMLElement, offset: number): [Node, number] {
 }
 
 function restoreSelection(root: HTMLElement, snapshot?: SelectionSnapshot) {
-  const range = document.createRange()
-  if (snapshot) {
-    const start = findConversationMessage(root, snapshot.start.messageId)
-    const end = findConversationMessage(root, snapshot.end.messageId)
-    if (!start || !end) return false
-    range.setStart(...textPoint(start, snapshot.start.offset))
-    range.setEnd(...textPoint(end, snapshot.end.offset))
-  } else {
-    range.selectNodeContents(root)
+  if (!snapshot) {
+    selectScopeContents(root)
+    return true
   }
+  const range = document.createRange()
+  const start = findConversationMessage(root, snapshot.start.messageId)
+  const end = findConversationMessage(root, snapshot.end.messageId)
+  if (!start || !end) return false
+  range.setStart(...textPoint(start, snapshot.start.offset))
+  range.setEnd(...textPoint(end, snapshot.end.offset))
   const selection = window.getSelection()
   selection?.removeAllRanges()
   selection?.addRange(range)
@@ -99,12 +106,27 @@ export function useConversationHistoryTools(
   const [matchIndex, setMatchIndex] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)
+  const searchInteractionRevision = useRef<number | null>(null)
   const intent = useRef<{
     conversationId: string
+    interactionRevision: number
     copy: boolean
     selection?: SelectionSnapshot
     selectAgain?: boolean
   } | null>(null)
+
+  useEffect(() => installSelectionScopes(contentRef.current?.ownerDocument), [contentRef])
+
+  const hasCurrentSelectionIntent = useCallback(() => {
+    const root = contentRef.current
+    const pending = intent.current
+    return Boolean(
+      root &&
+      pending?.conversationId === conversationId &&
+      pending.interactionRevision === getSelectionInteractionRevision(root.ownerDocument) &&
+      isSelectionScopeActive(root)
+    )
+  }, [contentRef, conversationId])
 
   useLayoutEffect(() => {
     const root = contentRef.current
@@ -129,19 +151,59 @@ export function useConversationHistoryTools(
     setMatches([])
     setNotice(null)
     intent.current = null
+    searchInteractionRevision.current = null
   }, [conversationId])
 
+  const rememberSearchIntent = useCallback(() => {
+    const root = contentRef.current
+    searchInteractionRevision.current = root
+      ? getSelectionInteractionRevision(root.ownerDocument)
+      : null
+  }, [contentRef])
+
   const showSearch = useCallback(() => {
+    const root = contentRef.current
+    rememberSearchIntent()
+    const revision = searchInteractionRevision.current
     setOpen(true)
     if (segments.remaining) segments.expandAll()
-    requestAnimationFrame(() => input.current?.focus())
-  }, [segments])
+    requestAnimationFrame(() => {
+      if (
+        root &&
+        isSelectionScopeActive(root) &&
+        revision === getSelectionInteractionRevision(root.ownerDocument)
+      )
+        input.current?.focus()
+    })
+  }, [contentRef, rememberSearchIntent, segments])
   const closeSearch = useCallback(() => {
     // Release focus before removing the input; React's selection plugin tracks it globally.
     input.current?.blur()
     setOpen(false)
     setMatches([])
+    searchInteractionRevision.current = null
   }, [])
+
+  useEffect(() => {
+    const root = contentRef.current
+    if (!root) return
+    const selectAll = (event: Event) => {
+      if (event.target !== root || event.defaultPrevented || !isSelectionScopeActive(root)) return
+      event.preventDefault()
+      intent.current = {
+        conversationId,
+        interactionRevision: getSelectionInteractionRevision(root.ownerDocument),
+        copy: false
+      }
+      if (segments.remaining) segments.expandAll()
+      else {
+        intent.current = null
+        selectScopeContents(root)
+      }
+    }
+    root.addEventListener(SELECTION_ALL_EVENT, selectAll)
+    return () => root.removeEventListener(SELECTION_ALL_EVENT, selectAll)
+  }, [contentRef, conversationId, segments])
 
   useEffect(() => {
     if (!segments.segmented) return
@@ -151,32 +213,33 @@ export function useConversationHistoryTools(
       if (!canHandleHistoryShortcut(root, event)) return
       const target = event.target instanceof HTMLElement ? event.target : null
       const editing = target?.closest('input,textarea,[contenteditable="true"]')
-      if (event.key.toLowerCase() === 'f') {
+      if (event.key.toLowerCase() === 'f' && (editing || (root && isSelectionScopeActive(root)))) {
         event.preventDefault()
         showSearch()
-      } else if (event.key.toLowerCase() === 'a' && !editing) {
-        event.preventDefault()
-        intent.current = { conversationId, copy: false }
-        if (segments.remaining) segments.expandAll()
-        else if (contentRef.current) restoreSelection(contentRef.current)
       }
     }
     document.addEventListener('keydown', handle)
     return () => document.removeEventListener('keydown', handle)
-  }, [containerRef, contentRef, conversationId, segments, showSearch])
+  }, [containerRef, segments.segmented, showSearch])
 
   const onCopy = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
       const root = contentRef.current
       const selection = window.getSelection()
-      if (segments.remaining && intent.current?.conversationId === conversationId) {
+      if (segments.remaining && hasCurrentSelectionIntent()) {
         event.preventDefault()
-        intent.current.copy = true
+        intent.current!.copy = true
         setNotice(t('chat.history.copyNeedsHistory'))
         segments.expandAll()
         return
       }
-      if (root && segments.remaining && selection?.rangeCount && !selection.isCollapsed) {
+      if (
+        root &&
+        isSelectionScopeActive(root) &&
+        segments.remaining &&
+        selection?.rangeCount &&
+        !selection.isCollapsed
+      ) {
         const range = selection.getRangeAt(0)
         const crossesGap = [...root.querySelectorAll('[data-segment-placeholder]')].some((gap) =>
           range.intersectsNode(gap)
@@ -187,6 +250,7 @@ export function useConversationHistoryTools(
           const end = point(root, range.endContainer, range.endOffset)
           intent.current = {
             conversationId,
+            interactionRevision: getSelectionInteractionRevision(root.ownerDocument),
             copy: true,
             selection: start && end ? { start, end } : undefined,
             selectAgain: !(start && end)
@@ -198,7 +262,7 @@ export function useConversationHistoryTools(
       }
       copyCollaborationTimelineSelection(event)
     },
-    [contentRef, conversationId, segments, t]
+    [contentRef, conversationId, hasCurrentSelectionIntent, segments, t]
   )
 
   useEffect(() => {
@@ -207,7 +271,7 @@ export function useConversationHistoryTools(
     const copyPendingSelection = (event: globalThis.ClipboardEvent) => {
       if (
         !segments.remaining ||
-        intent.current?.conversationId !== conversationId ||
+        !hasCurrentSelectionIntent() ||
         !canHandleHistoryShortcut(containerRef.current, event)
       )
         return
@@ -217,20 +281,22 @@ export function useConversationHistoryTools(
       )
         return
       event.preventDefault()
-      intent.current.copy = true
+      intent.current!.copy = true
       setNotice(t('chat.history.copyNeedsHistory'))
       segments.expandAll()
     }
     document.addEventListener('copy', copyPendingSelection)
     return () => document.removeEventListener('copy', copyPendingSelection)
-  }, [containerRef, conversationId, segments, t])
+  }, [containerRef, hasCurrentSelectionIntent, segments, t])
 
   useEffect(() => {
     if (segments.remaining) return
     const pending = intent.current
     const root = contentRef.current
     if (!pending || pending.conversationId !== conversationId || !root) return
+    const isCurrent = hasCurrentSelectionIntent()
     intent.current = null
+    if (!isCurrent) return
     if (pending.selectAgain) {
       setNotice(t('chat.history.selectAgain'))
       return
@@ -252,7 +318,7 @@ export function useConversationHistoryTools(
       () => setNotice(null),
       () => setNotice(t('chat.history.selectAgain'))
     )
-  }, [containerRef, contentRef, conversationId, segments.remaining, t])
+  }, [containerRef, contentRef, conversationId, hasCurrentSelectionIntent, segments.remaining, t])
 
   useEffect(() => {
     if (!open || segments.remaining || !query.trim()) {
@@ -286,7 +352,13 @@ export function useConversationHistoryTools(
   useEffect(() => {
     const match = matches[matchIndex]
     const root = contentRef.current
-    if (!match || !root) return
+    if (
+      !match ||
+      !root ||
+      !isSelectionScopeActive(root) ||
+      searchInteractionRevision.current !== getSelectionInteractionRevision(root.ownerDocument)
+    )
+      return
     revealMessage(match.messageId, 'center')
     restoreSelection(root, {
       start: { messageId: match.messageId, offset: match.start },
@@ -321,7 +393,9 @@ export function useConversationHistoryTools(
             aria-label={t('chat.history.searchPlaceholder')}
             placeholder={t('chat.history.searchPlaceholder')}
             value={query}
+            onFocus={rememberSearchIntent}
             onChange={(event) => {
+              rememberSearchIntent()
               setQuery(event.target.value)
               if (segments.remaining) segments.expandAll()
             }}
@@ -329,10 +403,12 @@ export function useConversationHistoryTools(
               if (event.key === 'Escape') {
                 closeSearch()
               }
-              if (event.key === 'Enter' && matches.length)
+              if (event.key === 'Enter' && matches.length) {
+                rememberSearchIntent()
                 setMatchIndex(
                   (index) => (index + (event.shiftKey ? matches.length - 1 : 1)) % matches.length
                 )
+              }
             }}
           />
           <span role="status">
@@ -346,7 +422,10 @@ export function useConversationHistoryTools(
             type="button"
             aria-label={t('chat.history.previous')}
             disabled={!matches.length}
-            onClick={() => setMatchIndex((index) => (index + matches.length - 1) % matches.length)}
+            onClick={() => {
+              rememberSearchIntent()
+              setMatchIndex((index) => (index + matches.length - 1) % matches.length)
+            }}
           >
             <ChevronUp aria-hidden="true" />
           </button>
@@ -354,7 +433,10 @@ export function useConversationHistoryTools(
             type="button"
             aria-label={t('chat.history.next')}
             disabled={!matches.length}
-            onClick={() => setMatchIndex((index) => (index + 1) % matches.length)}
+            onClick={() => {
+              rememberSearchIntent()
+              setMatchIndex((index) => (index + 1) % matches.length)
+            }}
           >
             <ChevronDown aria-hidden="true" />
           </button>

@@ -26,7 +26,11 @@ export interface ScheduledPageLayerProps {
 
 export function ScheduledPageLayer(props: ScheduledPageLayerProps) {
   return (
-    <div className="scheduled-page-layer" data-testid="scheduled-page-layer">
+    <div
+      className="scheduled-page-layer"
+      data-testid="scheduled-page-layer"
+      data-selection-region="main"
+    >
       <ScheduledPage {...props} />
     </div>
   )

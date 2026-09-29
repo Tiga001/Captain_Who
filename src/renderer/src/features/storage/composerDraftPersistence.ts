@@ -83,7 +83,7 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
       !isExactRecord(
         candidate,
         ['id', 'kind', 'name', 'sizeBytes', 'encoding', 'data'],
-        ['mimeType', 'contentSha256', 'truncated']
+        ['mimeType', 'contentSha256', 'truncated', 'pastedText']
       ) ||
       typeof candidate.id !== 'string' ||
       (candidate.kind !== 'file' && candidate.kind !== 'image') ||
@@ -96,7 +96,15 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
       (candidate.contentSha256 !== undefined &&
         (typeof candidate.contentSha256 !== 'string' ||
           !/^sha256:[0-9a-f]{64}$/u.test(candidate.contentSha256))) ||
-      (candidate.truncated !== undefined && typeof candidate.truncated !== 'boolean')
+      (candidate.truncated !== undefined && typeof candidate.truncated !== 'boolean') ||
+      (candidate.pastedText !== undefined &&
+        (candidate.kind !== 'file' ||
+          !isExactRecord(candidate.pastedText, ['preview', 'characterCount']) ||
+          typeof candidate.pastedText.preview !== 'string' ||
+          Array.from(candidate.pastedText.preview).length > 80 ||
+          !Number.isSafeInteger(candidate.pastedText.characterCount) ||
+          (candidate.pastedText.characterCount as number) <= 0 ||
+          candidate.pastedText.preview.length > (candidate.pastedText.characterCount as number)))
     ) {
       throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
     }

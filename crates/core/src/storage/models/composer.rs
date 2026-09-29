@@ -21,6 +21,8 @@ struct StoredComposerAttachment {
     #[serde(default)]
     content_sha256: Option<String>,
     truncated: Option<bool>,
+    #[serde(default)]
+    pasted_text: Option<crate::protocol::AgentPastedTextMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +130,16 @@ fn validate_stored_composer_attachments(
     for attachment in attachments {
         // Reading every field here makes the current durable contract explicit. These values are
         // intentionally opaque to storage, but their shape must be complete before persistence.
+        if let Some(metadata) = &attachment.pasted_text {
+            metadata
+                .validate()
+                .map_err(|_| COMPOSER_DRAFT_PAYLOAD_ERROR.to_string())?;
+            if attachment.kind != AgentInputAttachmentKind::File
+                || attachment.mime_type.as_deref() != Some("text/plain")
+            {
+                return Err(COMPOSER_DRAFT_PAYLOAD_ERROR.to_string());
+            }
+        }
         let _ = (
             &attachment.id,
             &attachment.kind,

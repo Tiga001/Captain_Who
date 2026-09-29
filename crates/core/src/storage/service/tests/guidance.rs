@@ -370,6 +370,9 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
     )
     .unwrap();
     assert_eq!(queued_run["timeline"][0]["status"], "queued");
+    assert!(service
+        .resolve_attachment_file("attachment-guidance-owned", "assistant-guidance-attachment")
+        .is_err());
     assert_eq!(
         queued_run["timeline"][0]["attachments"][0],
         serde_json::json!({
@@ -396,6 +399,9 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
             .len(),
         1
     );
+    assert!(service
+        .resolve_attachment_file("attachment-guidance-owned", "assistant-guidance-attachment")
+        .is_ok());
     let child_library = service
         .build_attachment_library_context("conversation-guidance-child", None)
         .unwrap();
@@ -498,4 +504,56 @@ fn abandoned_acknowledged_guidance_projects_as_recoverable_without_binary_payloa
     )
     .unwrap();
     assert_eq!(bytes, b"recover");
+}
+
+#[test]
+fn abandoned_pasted_guidance_can_be_restored_from_recovered_managed_reference() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(guidance_conversation(
+            "recover-paste-chat",
+            "recover-paste-assistant",
+        ))
+        .unwrap();
+    let text = "  recovered 原文🙂\r\n";
+    let attachment = super::attachment_imports::pasted_attachment(&service, "recover-paste", text);
+    let record = AgentRunGuidanceRecord {
+        guidance_id: "recover-paste-guidance".into(),
+        client_message_id: "recover-paste-client".into(),
+        run_id: "recover-paste-run".into(),
+        conversation_id: "recover-paste-chat".into(),
+        assistant_message_id: "recover-paste-assistant".into(),
+        content: "".into(),
+        status: crate::AgentGuidanceStatus::Queued,
+        attachment_ids: vec![attachment.id.clone()],
+        folder_references_json: "[]".into(),
+        applied_trace_sequence: None,
+        terminal_reason: None,
+        created_at: 2,
+        updated_at: 2,
+    };
+    service
+        .store_agent_run_guidance_with_attachments(record, None, std::slice::from_ref(&attachment))
+        .unwrap();
+    service
+        .abandon_queued_agent_run_guidances("recover-paste-run", "interrupted", 3)
+        .unwrap();
+    let recovered = service
+        .load_input_attachments(std::slice::from_ref(&attachment.id))
+        .unwrap();
+    assert_eq!(recovered[0].pasted_text, attachment.pasted_text);
+    assert_eq!(
+        service.load_input_attachment_text(&recovered[0]).unwrap(),
+        text
+    );
+    assert!(service
+        .resolve_attachment_file(&attachment.id, "recover-paste-assistant")
+        .is_err());
+    assert!(attachment_repository::get_attachment(
+        &service.state.connection().unwrap(),
+        &attachment.id
+    )
+    .unwrap()
+    .is_some());
 }

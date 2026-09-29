@@ -170,6 +170,7 @@ fn input_attachment(
             kind,
             name: name.into(),
             mime_type: mime_type.map(str::to_owned),
+            pasted_text: None,
             size_bytes: bytes.len() as u64,
         })
         .unwrap();

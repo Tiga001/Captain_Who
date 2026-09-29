@@ -128,6 +128,9 @@ impl ConversationTraceValidationState {
                             return Err("conversation trace user guidance attachment is invalid"
                                 .to_string());
                         }
+                        if let Some(metadata) = &attachment.pasted_text {
+                            metadata.validate()?;
+                        }
                         ensure_no_binary_text("user guidance attachment name", &attachment.name)?;
                         if let Some(mime_type) = &attachment.mime_type {
                             ensure_no_binary_text("user guidance attachment MIME type", mime_type)?;

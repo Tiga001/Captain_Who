@@ -93,6 +93,7 @@ fn project_durable_trace_suffix(
                             name,
                             mime_type,
                             size_bytes: attachment.size_bytes,
+                            pasted_text: attachment.pasted_text.clone(),
                         }
                     })
                     .collect();

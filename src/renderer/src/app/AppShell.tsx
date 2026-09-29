@@ -34,6 +34,7 @@ import { useGitRepositoryCapability } from '../features/gitReview/useGitReposito
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import type {
   RightSidebarAgentNavigationRequest,
+  RightSidebarAttachmentNavigationRequest,
   RightSidebarCapabilities,
   RightSidebarModuleId,
   RightSidebarModuleNavigationRequest,
@@ -44,6 +45,10 @@ import type {
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { ConversationNavigationProvider } from '../features/chat/ConversationNavigationContext'
+import {
+  AttachmentFileNavigationContext,
+  type AttachmentFileNavigationTarget
+} from '../features/files/AttachmentFileNavigationContext'
 import { useConversationAttention } from '../features/chat/useConversationAttention'
 import {
   isAssistantMessageGenerating,
@@ -211,6 +216,9 @@ export function AppShell() {
   const [workspaceReferenceNavigationRequest, setWorkspaceReferenceNavigationRequest] =
     useState<RightSidebarWorkspaceReferenceNavigationRequest | null>(null)
   const workspaceReferenceNavigationRequestIdRef = useRef(0)
+  const [attachmentNavigationRequest, setAttachmentNavigationRequest] =
+    useState<RightSidebarAttachmentNavigationRequest | null>(null)
+  const attachmentNavigationRequestIdRef = useRef(0)
   const [rightSidebarAgentNavigationRequest, setRightSidebarAgentNavigationRequest] =
     useState<RightSidebarAgentNavigationRequest | null>(null)
   const rightSidebarAgentNavigationRequestIdRef = useRef(0)
@@ -496,6 +504,17 @@ export function AppShell() {
       setWorkspaceReferenceNavigationRequest({
         ...target,
         requestId: workspaceReferenceNavigationRequestIdRef.current
+      })
+      openRightSidebar()
+    },
+    [openRightSidebar]
+  )
+  const openAttachmentFile = useCallback(
+    (target: AttachmentFileNavigationTarget) => {
+      attachmentNavigationRequestIdRef.current += 1
+      setAttachmentNavigationRequest({
+        ...target,
+        requestId: attachmentNavigationRequestIdRef.current
       })
       openRightSidebar()
     },
@@ -1596,6 +1615,7 @@ export function AppShell() {
       <AppShellCoveredRegion
         as="main"
         className="main-panel"
+        data-selection-region="main"
         aria-label={t('app.mainWorkspace')}
         covered={primaryView !== 'conversation' || (rightOpen && rightMaximized)}
       >
@@ -1704,7 +1724,12 @@ export function AppShell() {
                 showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
                 onApproveAgentAction={handleApproveAgentAction}
                 onCancelAgentAction={handleCancelAgentAction}
-                onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
+                onComposerDraftChange={(draft) => {
+                  // Pending paste recovery can run during unmount; never recreate a deleted chat's draft.
+                  if (conversationsRef.current.some((item) => item.id === activeConversation.id)) {
+                    updateDraft(activeConversation.id, draft)
+                  }
+                }}
                 onComposerDraftMessageChange={(draft) =>
                   persistDraftMessageOnly(activeConversation.id, draft)
                 }
@@ -1804,6 +1829,7 @@ export function AppShell() {
           onBeforeWorkflowNavigate={requestWorkflowNavigation}
           onWorkflowVisibilityChange={setWorkflowSidebarVisible}
           agentNavigationRequest={rightSidebarAgentNavigationRequest}
+          attachmentNavigationRequest={attachmentNavigationRequest}
           capabilities={rightSidebarCapabilities}
           browserSurfaceCommand={browserSurfaceBridge.command}
           collaborationSnapshot={collaborationSnapshot}
@@ -1944,7 +1970,9 @@ export function AppShell() {
   )
   return (
     <ConversationNavigationProvider onOpenConversation={requestOpenConversationFromScheduled}>
-      {workspace}
+      <AttachmentFileNavigationContext.Provider value={openAttachmentFile}>
+        {workspace}
+      </AttachmentFileNavigationContext.Provider>
     </ConversationNavigationProvider>
   )
 }

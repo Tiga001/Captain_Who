@@ -44,11 +44,13 @@ import type { WorkspaceReferenceTarget } from '../workspaceMentions'
 import { MessageAttachments } from './MessageAttachments'
 
 export function GuidanceTimelineItemView({
+  assistantMessageId,
   item,
   mode,
   onOpenWorkspaceReference,
   projectId
 }: {
+  assistantMessageId?: string
   item: ChatGuidanceTimelineItem
   mode: 'interactive' | 'observer'
   onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
@@ -74,13 +76,19 @@ export function GuidanceTimelineItemView({
     >
       {(item.folderReferences?.length ?? 0) > 0 && (
         <ComposerFolderReferences
+          canOpen={mode === 'interactive'}
           folders={item.folderReferences ?? []}
           label={t('chat.attachments')}
           removeLabel=""
         />
       )}
       {item.attachments.length > 0 && (
-        <MessageAttachments attachments={item.attachments} messageId={item.id} mode={mode} />
+        <MessageAttachments
+          attachments={item.attachments}
+          messageId={assistantMessageId ?? item.id}
+          mode={mode}
+          canOpenFile={item.status === 'applied' && Boolean(assistantMessageId)}
+        />
       )}
       {(humanAnswer || content) && (
         <div className="chat-guidance__bubble">
@@ -212,6 +220,7 @@ export function AgentTimelineItemView({
   if (item.type === 'user_guidance') {
     return (
       <GuidanceTimelineItemView
+        assistantMessageId={assistantMessageId}
         item={item}
         mode={mode}
         onOpenWorkspaceReference={onOpenWorkspaceReference}

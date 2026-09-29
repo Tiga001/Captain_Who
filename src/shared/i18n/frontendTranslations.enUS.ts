@@ -1180,6 +1180,8 @@ export const enUSTranslations = {
   'chat.guidanceQueued': 'Queued',
   'chat.guidanceSubmittingStatus': 'Sending',
   'chat.guidanceFailed': 'Guidance could not be sent. Edit it and try again.',
+  'chat.pastedTextFileName': 'Pasted text.txt',
+  'chat.showPastedTextInEditor': 'Show in text box',
   'chat.attachmentOperationFailed': 'Unable to process the attachment. Try again.',
   'chat.editMessageFailed': 'Unable to resend this message. Try again.',
   'chat.guidanceInterrupted': 'The previous run was interrupted. Message restored to the queue.',

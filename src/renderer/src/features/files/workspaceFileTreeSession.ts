@@ -18,7 +18,7 @@ export interface WorkspaceFileTreeSnapshot {
 export interface WorkspaceFileTreeConsumer {
   isActive: boolean
   onFileSelect: (path: string) => void
-  selectedPath: string | null
+  selectedPath: string | null | undefined
 }
 
 export const WORKSPACE_FILE_TREE_UNSAFE_CSS = `
@@ -282,7 +282,8 @@ export class WorkspaceFileTreeSession {
     this.model.resetPaths([...entries.keys()], { initialExpandedPaths: expandedPaths })
   }
 
-  private revealSelectedPath(selectedPath: string | null): void {
+  private revealSelectedPath(selectedPath: string | null | undefined): void {
+    if (selectedPath === undefined) return
     if (!selectedPath) {
       this.synchronizeSelection(null)
       return
@@ -304,7 +305,8 @@ export class WorkspaceFileTreeSession {
     }
   }
 
-  private synchronizeSelection(selectedPath: string | null): void {
+  private synchronizeSelection(selectedPath: string | null | undefined): void {
+    if (selectedPath === undefined) return
     const selectedPaths = this.model.getSelectedPaths()
     if (
       selectedPaths.length === (selectedPath ? 1 : 0) &&

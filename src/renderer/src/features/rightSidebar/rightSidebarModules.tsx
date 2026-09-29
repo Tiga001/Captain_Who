@@ -306,19 +306,25 @@ function renderFilesModule({
   page,
   t
 }: RightSidebarModuleRenderProps) {
-  if (availability === 'unavailable' || !page.workspaceKey) return null
+  const attachmentState = page.moduleState?.kind === 'attachment-file' ? page.moduleState : null
+  if (availability === 'unavailable' || (!page.workspaceKey && !attachmentState)) return null
   const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
   const folderState = page.moduleState?.kind === 'workspace-folder' ? page.moduleState : null
-  const filePath = fileState?.path ?? null
+  const previewState = attachmentState ?? fileState
+  const filePath = attachmentState?.name ?? fileState?.path ?? null
   const selectedDirectoryPath = folderState?.path ?? null
   const markdownAnchor = fileState?.preview?.markdownAnchor
-  const markdownView = fileState?.preview?.markdownView ?? 'preview'
-  const pdfPage = fileState?.preview?.pdfPage ?? 1
-  const wrapLines = fileState?.preview?.wrapLines ?? false
+  const markdownView = previewState?.preview?.markdownView ?? 'preview'
+  const pdfPage = previewState?.preview?.pdfPage ?? 1
+  const wrapLines = previewState?.preview?.wrapLines ?? false
 
   return (
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
+        attachment={attachmentState ?? undefined}
+        onAttachmentName={(name) => {
+          if (attachmentState && name !== page.title) onPageUpdate({ title: name })
+        }}
         filePath={filePath}
         selectedDirectoryPath={selectedDirectoryPath}
         folderId={fileState?.folderId ?? folderState?.folderId}
@@ -327,11 +333,11 @@ function renderFilesModule({
         markdownAnchor={markdownAnchor}
         markdownView={markdownView}
         onMarkdownViewChange={(nextMarkdownView) => {
-          if (!fileState) return
+          if (!previewState) return
           onPageUpdate({
             moduleState: {
-              ...fileState,
-              preview: { ...fileState?.preview, markdownView: nextMarkdownView }
+              ...previewState,
+              preview: { ...previewState?.preview, markdownView: nextMarkdownView }
             }
           })
         }}
@@ -339,26 +345,26 @@ function renderFilesModule({
           onOpenPage(createWorkspaceFileOpenRequest(path, anchor, folderId, assistantMessageId))
         }}
         onPdfPageChange={(nextPdfPage) => {
-          if (!fileState) return
+          if (!previewState) return
           onPageUpdate({
             moduleState: {
-              ...fileState,
-              preview: { ...fileState?.preview, pdfPage: nextPdfPage }
+              ...previewState,
+              preview: { ...previewState?.preview, pdfPage: nextPdfPage }
             }
           })
         }}
         onWrapLinesChange={(nextWrapLines) => {
-          if (!fileState) return
+          if (!previewState) return
           onPageUpdate({
             moduleState: {
-              ...fileState,
-              preview: { ...fileState?.preview, wrapLines: nextWrapLines }
+              ...previewState,
+              preview: { ...previewState?.preview, wrapLines: nextWrapLines }
             }
           })
         }}
         onSurfaceFocus={onSurfaceFocus}
         pdfPage={pdfPage}
-        projectId={page.workspaceKey}
+        projectId={page.projectId ?? (attachmentState ? '' : (page.workspaceKey ?? ''))}
         projectName={page.workspaceName || t('rightSidebar.files')}
         wrapLines={wrapLines}
       />

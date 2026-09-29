@@ -47,6 +47,12 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
       ipcRenderer.on(HOST_CHANNELS.app.windowStateChange, listener)
       return () => ipcRenderer.removeListener(HOST_CHANNELS.app.windowStateChange, listener)
     },
+    onSelectAllRequested: (handler) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(HOST_CHANNELS.app.selectAllRequested, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.app.selectAllRequested, listener)
+    },
+    selectAllNative: () => ipcRenderer.invoke(HOST_CHANNELS.app.selectAllNative),
     setNativeThemeSource: (themeSource) =>
       ipcRenderer.invoke(HOST_CHANNELS.app.setNativeThemeSource, themeSource),
     showAbout: () => ipcRenderer.invoke(HOST_CHANNELS.app.showAbout),

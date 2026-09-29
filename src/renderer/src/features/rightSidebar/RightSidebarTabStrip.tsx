@@ -22,6 +22,7 @@ interface RightSidebarTabStripProps {
   onMenuOpenChange: (open: boolean) => void
   onOpenModule: (moduleId: RightSidebarModuleId) => void
   pages: RightSidebarPage[]
+  selectionOwner?: string
   t: Translate
 }
 
@@ -38,6 +39,7 @@ export function RightSidebarTabStrip({
   onMenuOpenChange,
   onOpenModule,
   pages,
+  selectionOwner,
   t
 }: RightSidebarTabStripProps) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -211,7 +213,7 @@ export function RightSidebarTabStrip({
           </button>
           {isMenuOpen &&
             createPortal(
-              <div ref={menuRef}>
+              <div ref={menuRef} data-selection-owner={selectionOwner}>
                 <RightSidebarModulePicker
                   modules={availableModules}
                   onOpenModule={(moduleId) => {

@@ -245,7 +245,8 @@ export function useAppShellRunControls({
             kind: attachment.kind,
             name: attachment.name,
             mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes
+            sizeBytes: attachment.sizeBytes,
+            ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {})
           }))
           const acceptedEvent: AgentEvent =
             output.status === 'applied'

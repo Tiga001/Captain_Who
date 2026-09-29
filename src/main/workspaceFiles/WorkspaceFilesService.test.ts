@@ -38,6 +38,87 @@ describe('WorkspaceFilesService', () => {
     await rm(root, { force: true, recursive: true })
   })
 
+  it('previews a sent attachment by identity without a project and reveals its actual path', async () => {
+    const storedPath = join(root, 'stored-blob')
+    await writeFile(storedPath, '# Attached document')
+    const resolveAttachmentFile = vi.fn(async () => ({
+      path: storedPath,
+      name: 'document.md',
+      mimeType: 'text/markdown',
+      sizeBytes: 19,
+      conversationId: 'conversation',
+      messageId: 'message'
+    }))
+    const resolveProject = vi.fn(async () => null)
+    service = new WorkspaceFilesService(resolveProject, undefined, { resolveAttachmentFile })
+    const request = { attachmentId: 'attachment', messageId: 'message' }
+    const preview = await service.readPreview(request)
+    expect(preview.metadata).toMatchObject({
+      name: 'document.md',
+      path: await realpath(storedPath),
+      previewKind: 'text'
+    })
+    expect(preview.text?.content).toBe('# Attached document')
+    expect(await service.resolvePathForReveal(request)).toBe(await realpath(storedPath))
+    expect(resolveAttachmentFile).toHaveBeenCalledWith(request)
+    expect(resolveProject).not.toHaveBeenCalled()
+    await expect(service.readPreview({ projectId: 'unknown', path: storedPath })).rejects.toThrow(
+      'must be relative'
+    )
+  })
+
+  it('detects attachment PDFs using their original names and preserves bounded preview fallbacks', async () => {
+    const storedPath = join(root, 'stored-blob')
+    const attachment = {
+      path: storedPath,
+      name: 'document.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 11,
+      conversationId: 'conversation',
+      messageId: 'message'
+    }
+    service = new WorkspaceFilesService(async () => null, undefined, {
+      resolveAttachmentFile: async () => attachment
+    })
+    const request = { attachmentId: 'attachment', messageId: 'message' }
+    await writeFile(storedPath, '%PDF-1.7\n')
+    expect((await service.readPreview(request)).pdf?.mimeType).toBe('application/pdf')
+    await truncate(storedPath, PDF_PREVIEW_LIMIT_BYTES + 1)
+    expect((await service.readPreview(request)).metadata.previewKind).toBe('too-large')
+    attachment.name = 'archive.bin'
+    await writeFile(storedPath, Buffer.from([0, 1, 2, 3]))
+    expect((await service.readPreview(request)).metadata.previewKind).toBe('binary')
+  })
+
+  it('rejects attachment resolution failures, mismatched messages, directories and symlinks', async () => {
+    const storedPath = join(root, 'stored-blob')
+    await writeFile(storedPath, 'document')
+    const attachment = {
+      path: storedPath,
+      name: 'document.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 8,
+      conversationId: 'conversation',
+      messageId: 'other-message'
+    }
+    const resolveAttachmentFile = vi.fn(async () => attachment)
+    service = new WorkspaceFilesService(async () => null, undefined, { resolveAttachmentFile })
+    const request = { attachmentId: 'attachment', messageId: 'message' }
+    await expect(service.readPreview(request)).rejects.toThrow('not available')
+    attachment.messageId = 'message'
+    attachment.path = root
+    await expect(service.readPreview(request)).rejects.toThrow('not available')
+    const linkPath = join(root, 'linked-file')
+    await symlink(storedPath, linkPath)
+    attachment.path = linkPath
+    await expect(service.readPreview(request)).rejects.toThrow('not available')
+    resolveAttachmentFile.mockRejectedValueOnce(new Error('Attachment does not belong to message'))
+    await expect(service.readPreview(request)).rejects.toThrow('does not belong')
+    await expect(
+      service.resolvePathForReveal({ attachmentId: '', messageId: 'message' })
+    ).rejects.toThrow('invalid')
+  })
+
   it('keeps listing, preview, and reveal bound to the requested folder after a primary switch', async () => {
     const auxiliary = join(root, 'auxiliary')
     await mkdir(auxiliary)

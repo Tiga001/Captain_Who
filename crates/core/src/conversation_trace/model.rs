@@ -430,8 +430,12 @@ pub(crate) fn validate_model_item_against_trace(
                 && !item.content.trim().is_empty()
         }
         ConversationTurnTraceItem::WorkflowDelivery { content, .. } => {
-            item.ordinal == 0 && item.role == "user" && item.tool_call_id.is_none()
-                && item.tool_calls.is_empty() && !item.is_error && item.content == *content
+            item.ordinal == 0
+                && item.role == "user"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty()
+                && !item.is_error
+                && item.content == *content
         }
         ConversationTurnTraceItem::ContextMaterial {
             content, images, ..
@@ -665,6 +669,8 @@ pub struct ConversationTraceAttachment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<crate::protocol::AgentPastedTextMetadata>,
 }
 
 impl ConversationTurnTraceItem {

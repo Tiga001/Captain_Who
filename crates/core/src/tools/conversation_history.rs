@@ -189,6 +189,8 @@ struct HistoryAttachment {
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pasted_text: Option<crate::protocol::AgentPastedTextMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -1313,6 +1315,7 @@ fn build_history_turns(
                                 name: attachment.name.clone(),
                                 mime_type: attachment.mime_type.clone(),
                                 size_bytes: attachment.size_bytes,
+                                pasted_text: attachment.pasted_text.clone(),
                             }
                         }));
                     }
@@ -1421,6 +1424,7 @@ fn history_attachment_from_message(attachment: &ChatMessageAttachmentRecord) -> 
         name: attachment.name.clone(),
         mime_type: attachment.mime_type.clone(),
         size_bytes: attachment.size_bytes,
+        pasted_text: attachment.pasted_text.clone(),
     }
 }
 

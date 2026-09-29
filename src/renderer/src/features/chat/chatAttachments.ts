@@ -145,6 +145,7 @@ export interface ComposerAttachment {
   mimeType?: string
   sizeBytes: number
   previewUrl?: string
+  pastedText?: AgentInputAttachment['pastedText']
   agentAttachment: AgentInputAttachment
 }
 
@@ -227,6 +228,7 @@ export interface AttachmentImportOptions {
   onProgress?: (progress: AttachmentImportProgress) => void
   onImported?: (attachment: ComposerAttachment) => void
   id?: string
+  pastedText?: AgentInputAttachment['pastedText']
 }
 
 export async function createComposerAttachmentsFromFiles(
@@ -254,6 +256,7 @@ export function composerAttachmentFromAgentAttachment(
     name: attachment.name,
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
+    ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {}),
     agentAttachment: attachment
   }
 }
@@ -275,7 +278,8 @@ async function createComposerAttachmentFromFile(
     kind,
     name: file.name || (kind === 'image' ? 'image' : 'attachment'),
     mimeType: file.type || inferMimeType(file.name, kind),
-    sizeBytes: file.size
+    sizeBytes: file.size,
+    ...(options.pastedText ? { pastedText: options.pastedText } : {})
   }
   const host = getAttachmentsHost()
   let importId: string | undefined

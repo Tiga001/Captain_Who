@@ -1987,6 +1987,7 @@ mod tests {
                     kind: AgentInputAttachmentKind::Image,
                     name: "campus.png".to_string(),
                     mime_type: Some("image/png".to_string()),
+                    pasted_text: None,
                     size_bytes,
                     read_path: read_path.to_string(),
                     storage_rel_path: storage_rel_path.to_string(),

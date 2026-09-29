@@ -34,6 +34,12 @@ export type AgentInputAttachmentKind = 'file' | 'image'
 
 export type AgentInputAttachmentEncoding = 'utf8' | 'base64' | 'managed'
 
+export interface AgentPastedTextMetadata {
+  preview: string
+  /** JavaScript string length (UTF-16 code units) of the complete original text. */
+  characterCount: number
+}
+
 export interface AgentInputAttachment {
   id: string
   kind: AgentInputAttachmentKind
@@ -45,6 +51,7 @@ export interface AgentInputAttachment {
   /** Content identity returned by the managed importer; never supplied by the renderer. */
   contentSha256?: string
   truncated?: boolean
+  pastedText?: AgentPastedTextMetadata
 }
 
 export interface AgentConversationMessageAttachment {
@@ -56,6 +63,7 @@ export interface AgentConversationMessageAttachment {
   previewData?: string | null
   previewMimeType?: string | null
   createdAt?: number
+  pastedText?: AgentPastedTextMetadata
 }
 
 export interface AgentWorkspaceFolder {
@@ -89,6 +97,7 @@ export interface AgentAttachmentReference {
   readPath: string
   storageRelPath: string
   createdAt: number
+  pastedText?: AgentPastedTextMetadata
 }
 
 export interface AgentAttachmentLibraryContext {

@@ -4,7 +4,7 @@ import { HOST_CHANNELS } from '@mycopilot/host-api'
 import { createAppIpcBridge } from './AppIpcBridge'
 
 describe('AppIpcBridge', () => {
-  it.each(['showAbout', 'openDocumentation'] as const)(
+  it.each(['showAbout', 'openDocumentation', 'selectAllNative'] as const)(
     'invokes %s without forwarding renderer arguments',
     async (method) => {
       const invoke = vi.fn(async () => undefined)
@@ -63,6 +63,25 @@ describe('AppIpcBridge', () => {
       HOST_CHANNELS.app.dockOpenConversationPending,
       listener
     )
+  })
+
+  it('subscribes to scoped native select-all requests without exposing the IPC event', () => {
+    const on = vi.fn()
+    const removeListener = vi.fn()
+    const bridge = createAppIpcBridge({
+      invoke: vi.fn(),
+      on,
+      removeListener,
+      send: vi.fn()
+    } as unknown as IpcRenderer)
+    const handler = vi.fn()
+    const unsubscribe = bridge.onSelectAllRequested(handler)
+    const listener = on.mock.calls[0][1] as (...args: unknown[]) => void
+    listener({ sender: 'private event' })
+    expect(on.mock.calls[0][0]).toBe(HOST_CHANNELS.app.selectAllRequested)
+    expect(handler).toHaveBeenCalledExactlyOnceWith()
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith(HOST_CHANNELS.app.selectAllRequested, listener)
   })
 
   it('acknowledges a quit flush only after the Renderer handler settles', async () => {

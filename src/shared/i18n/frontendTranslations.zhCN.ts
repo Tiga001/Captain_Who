@@ -1123,6 +1123,8 @@ export const zhCNTranslations = {
   'chat.guidanceQueued': '已排队',
   'chat.guidanceSubmittingStatus': '正在发送',
   'chat.guidanceFailed': '引导发送失败，请编辑后重试。',
+  'chat.pastedTextFileName': '粘贴的文本.txt',
+  'chat.showPastedTextInEditor': '在文本框中显示',
   'chat.attachmentOperationFailed': '附件处理失败，请重试。',
   'chat.editMessageFailed': '消息重新发送失败，请重试。',
   'chat.guidanceInterrupted': '上次运行中断，消息已恢复到队列',

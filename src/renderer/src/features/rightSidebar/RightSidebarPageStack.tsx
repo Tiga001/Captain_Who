@@ -127,6 +127,7 @@ const RightSidebarPageFrame = memo(function RightSidebarPageFrame({
   return (
     <section
       className="right-sidebar__page"
+      data-selection-content={isSelected ? 'page' : undefined}
       data-active={isSelected ? 'true' : undefined}
       data-agent-rendering={
         automationActive && module.surfaceKind === 'webview' ? 'true' : undefined

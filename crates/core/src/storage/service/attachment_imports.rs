@@ -225,6 +225,15 @@ impl StorageService {
         {
             return Err("附件导入元数据无效".into());
         }
+        if let Some(metadata) = &input.pasted_text {
+            metadata.validate()?;
+            if input.kind != AgentInputAttachmentKind::File
+                || input.mime_type.as_deref() != Some("text/plain")
+                || metadata.character_count > input.size_bytes
+            {
+                return Err("粘贴文本必须是完整 UTF-8 文本文件".into());
+            }
+        }
         let import_id = Uuid::new_v4().to_string();
         let directory = self.import_directory(&import_id)?;
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -311,6 +320,13 @@ impl StorageService {
                 }
                 self.cache_model_image(&payload, &prepared.bytes)?;
             }
+            if let Some(metadata) = &manifest.input.pasted_text {
+                metadata.validate()?;
+                let text = fs::read_to_string(&payload).map_err(|_| "粘贴文本不是有效的 UTF-8")?;
+                if text.encode_utf16().count() as u64 != metadata.character_count {
+                    return Err("粘贴文本字符数与原文不匹配".into());
+                }
+            }
             manifest.sha256 = Some(hash);
             manifest.complete = true;
             Self::write_import_manifest(&directory, &manifest)?;
@@ -346,6 +362,7 @@ impl StorageService {
             || manifest.input.name != attachment.name
             || manifest.input.mime_type != attachment.mime_type
             || manifest.input.size_bytes != attachment.size_bytes
+            || manifest.input.pasted_text != attachment.pasted_text
             || attachment.truncated == Some(true)
         {
             return Err("附件引用元数据不匹配".into());
@@ -420,6 +437,7 @@ impl StorageService {
             kind: agent_attachment_kind(&attachment.kind),
             name: attachment.original_name.clone(),
             mime_type: attachment.mime_type.clone(),
+            pasted_text: attachment.pasted_text.clone(),
             size_bytes: attachment.size_bytes,
         };
         // Runtime queue idempotency compares its immutable admitted input. Rehydrating a durable
@@ -468,6 +486,37 @@ impl StorageService {
         fs::write(&temporary_index, import_id.as_bytes()).map_err(|error| error.to_string())?;
         fs::rename(&temporary_index, index_path).map_err(|error| error.to_string())?;
         Ok(managed_reference(&import_id, input, &sha256))
+    }
+
+    /// Read a pasted-text capability issued by the managed importer, including durable
+    /// references recovered into an unsent queue. This never changes the original record.
+    /// Read and hash the same bytes so a changed payload can never be returned as the original.
+    pub fn load_input_attachment_text(
+        &self,
+        attachment: &AgentInputAttachment,
+    ) -> Result<String, String> {
+        let (_, manifest) = self.read_import_manifest(&attachment.data)?;
+        let metadata = attachment.pasted_text.as_ref().ok_or("附件不是粘贴文本")?;
+        metadata.validate()?;
+        if attachment.kind != AgentInputAttachmentKind::File
+            || attachment.mime_type.as_deref() != Some("text/plain")
+            || attachment.id != manifest.input.id
+        {
+            return Err("粘贴文本附件身份不匹配".into());
+        }
+        let AttachmentData::Managed { path, size, sha256 } = self.attachment_data(attachment)?;
+        if attachment.content_sha256.as_deref() != Some(format!("sha256:{sha256}").as_str()) {
+            return Err("粘贴文本内容标识不匹配".into());
+        }
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        if bytes.len() as u64 != size || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+            return Err("粘贴文本内容校验失败".into());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| "粘贴文本不是有效的 UTF-8")?;
+        if text.encode_utf16().count() as u64 != metadata.character_count {
+            return Err("粘贴文本字符数与原文不匹配".into());
+        }
+        Ok(text)
     }
 
     pub fn load_input_attachment_preview(
@@ -538,6 +587,7 @@ fn managed_reference(
         kind: input.kind,
         name: input.name,
         mime_type: input.mime_type,
+        pasted_text: input.pasted_text.clone(),
         size_bytes: input.size_bytes,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: import_id.to_string(),

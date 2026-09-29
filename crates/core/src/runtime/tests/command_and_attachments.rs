@@ -314,6 +314,7 @@ fn runtime_attachment_library(
                 kind: attachment.kind,
                 name: attachment.name.clone(),
                 mime_type: attachment.mime_type.clone(),
+                pasted_text: attachment.pasted_text.clone(),
                 size_bytes: attachment.size_bytes,
                 read_path: format!("@attachments/{}/{}", attachment.id, attachment.name),
                 storage_rel_path: format!(
@@ -538,6 +539,7 @@ fn attachment_context_does_not_decode_skill_gated_office_payloads() {
         mime_type: Some(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
         ),
+        pasted_text: None,
         size_bytes: 10,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: "unread-managed-reference".to_string(),
@@ -561,6 +563,7 @@ fn attachment_context_routes_pdf_without_decoding_its_payload() {
         kind: AgentInputAttachmentKind::File,
         name: "manual.pdf".to_string(),
         mime_type: Some("application/pdf".to_string()),
+        pasted_text: None,
         size_bytes: 10,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: "unread-managed-reference".to_string(),
@@ -609,6 +612,7 @@ fn activated_document_reader_can_read_the_same_authoritative_attachment_path() {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     .to_string(),
             ),
+            pasted_text: None,
             size_bytes: u64::try_from(bytes.len()).unwrap(),
             read_path: read_path.to_string(),
             storage_rel_path: storage_rel_path.to_string(),
@@ -839,6 +843,7 @@ async fn managed_initial_and_steer_images_survive_durable_history_reconstruction
             kind: AgentInputAttachmentKind::Image,
             name,
             mime_type: Some("image/png".into()),
+            pasted_text: None,
             size_bytes: bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Managed,
             data: format!("opaque-import-{index}"),

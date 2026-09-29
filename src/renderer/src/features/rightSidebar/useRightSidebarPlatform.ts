@@ -55,7 +55,8 @@ export function useRightSidebarPlatform({
       const module = modules.find((candidate) => candidate.id === moduleId)
       if (
         !module ||
-        getRightSidebarModuleAvailability(moduleAvailability, moduleId) !== 'available'
+        (getRightSidebarModuleAvailability(moduleAvailability, moduleId) !== 'available' &&
+          !(moduleId === 'files' && moduleState?.kind === 'attachment-file'))
       ) {
         return null
       }

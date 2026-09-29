@@ -11,6 +11,7 @@ import type {
   ConversationTraceAttachment
 } from '../agent'
 import type { AgentFolderReference } from '../attachments'
+import { parsePastedTextMetadata } from '../attachments'
 import type { ActivatedSkillSummary } from '../skills'
 import {
   expectBoolean,
@@ -124,7 +125,11 @@ export function parseConversationTraceAttachments(
   return expectBoundedArray(value, context, 256).map((entry, index) => {
     const itemContext = `${context}[${index}]`
     const item = expectRecord(entry, itemContext)
-    expectOnlyKeys(item, ['id', 'kind', 'name', 'mimeType', 'sizeBytes'] as const, itemContext)
+    expectOnlyKeys(
+      item,
+      ['id', 'kind', 'name', 'mimeType', 'sizeBytes', 'pastedText'] as const,
+      itemContext
+    )
     return {
       id: expectOpaqueRunId(item.id, `${itemContext}.id`),
       kind: expectEnum(item.kind, ['file', 'image'] as const, `${itemContext}.kind`),
@@ -134,7 +139,10 @@ export function parseConversationTraceAttachments(
         : {
             mimeType: expectBoundedNonEmptyString(item.mimeType, `${itemContext}.mimeType`, 1024)
           }),
-      sizeBytes: expectSafeInteger(item.sizeBytes, `${itemContext}.sizeBytes`, 0)
+      sizeBytes: expectSafeInteger(item.sizeBytes, `${itemContext}.sizeBytes`, 0),
+      ...(item.pastedText === undefined
+        ? {}
+        : { pastedText: parsePastedTextMetadata(item.pastedText) })
     }
   })
 }

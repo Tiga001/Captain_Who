@@ -829,6 +829,7 @@ fn build_single_conversation_fork_plan_at_point(
                     kind: source_attachment.kind.clone(),
                     original_name: source_attachment.original_name.clone(),
                     mime_type: source_attachment.mime_type.clone(),
+                    pasted_text: source_attachment.pasted_text.clone(),
                     size_bytes: source_attachment.size_bytes,
                     storage_rel_path: String::new(),
                     created_at: source_attachment.created_at,

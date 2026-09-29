@@ -3,12 +3,14 @@ import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import { extname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import type {
   AgentWorkspaceContext,
+  AttachmentFileRequest,
   StorageProjectRecord,
   WorkspaceDirectoryEntry,
   WorkspaceDirectoryEntryKind,
   WorkspaceDirectoryListing,
   WorkspaceFileMetadata,
   WorkspaceFilePreviewResult,
+  WorkspaceFilePreviewRequest,
   WorkspaceFileRequest,
   WorkspaceListDirectoryInput,
   WorkspaceMentionSearchInput,
@@ -67,7 +69,19 @@ interface WorkspaceRunFileSource {
   }): Promise<string>
 }
 
+interface AttachmentFileSource {
+  resolveAttachmentFile(input: AttachmentFileRequest): Promise<{
+    path: string
+    name: string
+    mimeType: string | null
+    sizeBytes: number
+    conversationId: string
+    messageId: string
+  }>
+}
+
 interface ResolvedWorkspaceEntry {
+  name?: string
   kind: WorkspaceDirectoryEntryKind
   modifiedAtMs: number
   path: string
@@ -78,7 +92,8 @@ interface ResolvedWorkspaceEntry {
 export class WorkspaceFilesService {
   constructor(
     private readonly resolveProject: WorkspaceProjectResolver,
-    private readonly runFiles?: WorkspaceRunFileSource
+    private readonly runFiles?: WorkspaceRunFileSource,
+    private readonly attachmentFiles?: AttachmentFileSource
   ) {}
 
   /**
@@ -211,12 +226,11 @@ export class WorkspaceFilesService {
     }
   }
 
-  async readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult> {
-    const request = normalizeFileRequest(input)
-    const entry = await this.resolveFileRequest(request)
+  async readPreview(input: WorkspaceFilePreviewRequest): Promise<WorkspaceFilePreviewResult> {
+    const entry = await this.resolvePreviewRequest(input)
 
     if (entry.kind === 'symlink' || !entry.realPath) {
-      return { metadata: metadataFromEntry(entry, request.path, 'unsupported', null) }
+      return { metadata: metadataFromEntry(entry, entry.path, 'unsupported', null) }
     }
 
     const fileStat = await lstat(entry.realPath)
@@ -226,15 +240,15 @@ export class WorkspaceFilesService {
       sizeBytes: fileStat.size
     }
     if (!fileStat.isFile()) {
-      return { metadata: metadataFromEntry(currentEntry, request.path, 'unsupported', null) }
+      return { metadata: metadataFromEntry(currentEntry, entry.path, 'unsupported', null) }
     }
 
-    const extension = extname(request.path).toLowerCase()
+    const extension = extname(entry.name ?? entry.path).toLowerCase()
     if (extension === '.pdf') {
       const mimeType = 'application/pdf' as const
       if (currentEntry.sizeBytes > PDF_PREVIEW_LIMIT_BYTES) {
         return {
-          metadata: metadataFromEntry(currentEntry, request.path, 'too-large', mimeType)
+          metadata: metadataFromEntry(currentEntry, entry.path, 'too-large', mimeType)
         }
       }
 
@@ -245,17 +259,17 @@ export class WorkspaceFilesService {
       )
       if (!hasPdfHeader(data)) {
         return {
-          metadata: metadataFromEntry(currentEntry, request.path, 'unsupported', mimeType)
+          metadata: metadataFromEntry(currentEntry, entry.path, 'unsupported', mimeType)
         }
       }
 
       return {
-        metadata: metadataFromEntry(currentEntry, request.path, 'pdf', mimeType),
+        metadata: metadataFromEntry(currentEntry, entry.path, 'pdf', mimeType),
         pdf: {
           data,
           mimeType,
           modifiedAtMs: currentEntry.modifiedAtMs,
-          path: request.path,
+          path: entry.path,
           sizeBytes: data.byteLength
         }
       }
@@ -265,7 +279,7 @@ export class WorkspaceFilesService {
     if (mimeType) {
       if (currentEntry.sizeBytes > IMAGE_PREVIEW_LIMIT_BYTES) {
         return {
-          metadata: metadataFromEntry(currentEntry, request.path, 'too-large', mimeType)
+          metadata: metadataFromEntry(currentEntry, entry.path, 'too-large', mimeType)
         }
       }
       const data = await readBoundedFile(
@@ -278,15 +292,15 @@ export class WorkspaceFilesService {
           data: data.toString('base64'),
           mimeType,
           modifiedAtMs: currentEntry.modifiedAtMs,
-          path: request.path,
+          path: entry.path,
           sizeBytes: data.byteLength
         },
-        metadata: metadataFromEntry(currentEntry, request.path, 'image', mimeType)
+        metadata: metadataFromEntry(currentEntry, entry.path, 'image', mimeType)
       }
     }
 
     if (currentEntry.sizeBytes > TEXT_PREVIEW_LIMIT_BYTES) {
-      return { metadata: metadataFromEntry(currentEntry, request.path, 'too-large', null) }
+      return { metadata: metadataFromEntry(currentEntry, entry.path, 'too-large', null) }
     }
 
     const data = await readBoundedFile(
@@ -296,27 +310,57 @@ export class WorkspaceFilesService {
     )
     const decodedText = decodeWorkspaceText(data)
     if (!decodedText) {
-      return { metadata: metadataFromEntry(currentEntry, request.path, 'binary', null) }
+      return { metadata: metadataFromEntry(currentEntry, entry.path, 'binary', null) }
     }
 
     return {
-      metadata: metadataFromEntry(currentEntry, request.path, 'text', decodedText.mimeType),
+      metadata: metadataFromEntry(currentEntry, entry.path, 'text', decodedText.mimeType),
       text: {
         content: decodedText.content,
         modifiedAtMs: currentEntry.modifiedAtMs,
-        path: request.path,
+        path: entry.path,
         sizeBytes: data.byteLength
       }
     }
   }
 
-  async resolvePathForReveal(input: WorkspaceFileRequest): Promise<string> {
-    const request = normalizeFileRequest(input)
-    const entry = await this.resolveFileRequest(request)
+  async resolvePathForReveal(input: WorkspaceFilePreviewRequest): Promise<string> {
+    const entry = await this.resolvePreviewRequest(input)
     if (!entry.realPath) {
       throw new Error('Symbolic links cannot be revealed from the file browser')
     }
     return entry.realPath
+  }
+
+  private async resolvePreviewRequest(
+    input: WorkspaceFilePreviewRequest
+  ): Promise<ResolvedWorkspaceEntry> {
+    if (input && 'attachmentId' in input) {
+      const attachmentId = normalizeOptionalIdentity(input.attachmentId, 'Attachment id')
+      const messageId = normalizeOptionalIdentity(input.messageId, 'Message id')
+      if (!attachmentId || !messageId) throw new Error('Attachment and message ids are required')
+      if (!this.attachmentFiles) throw new Error('Attachment file is not available')
+      const attachment = await this.attachmentFiles.resolveAttachmentFile({
+        attachmentId,
+        messageId
+      })
+      if (attachment.messageId !== messageId || !isAbsolute(attachment.path)) {
+        throw new Error('Attachment file is not available')
+      }
+      const info = await lstat(attachment.path)
+      if (!info.isFile() || info.isSymbolicLink())
+        throw new Error('Attachment file is not available')
+      const path = await realpath(attachment.path)
+      return {
+        kind: 'file',
+        modifiedAtMs: info.mtimeMs,
+        name: attachment.name,
+        path,
+        realPath: path,
+        sizeBytes: info.size
+      }
+    }
+    return this.resolveFileRequest(normalizeFileRequest(input))
   }
 
   private async resolveFileRequest(request: WorkspaceFileRequest): Promise<ResolvedWorkspaceEntry> {
@@ -507,6 +551,7 @@ function metadataFromEntry(
 ): WorkspaceFileMetadata {
   return {
     kind: entry.kind,
+    ...(entry.name === undefined ? {} : { name: entry.name }),
     mimeType,
     modifiedAtMs: entry.modifiedAtMs,
     path,

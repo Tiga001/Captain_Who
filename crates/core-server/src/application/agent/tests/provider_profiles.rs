@@ -724,6 +724,7 @@ async fn ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message() {
             kind: mycopilot_core::AgentInputAttachmentKind::File,
             name: "queued.txt".to_string(),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes: 14,
         })
         .unwrap();
@@ -838,6 +839,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
             kind: mycopilot_core::AgentInputAttachmentKind::File,
             name: "evidence.txt".to_string(),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes: 16,
         })
         .unwrap();

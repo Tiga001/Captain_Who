@@ -1213,6 +1213,8 @@ export const frFRTranslations = {
   'chat.guidanceQueued': "En file d'attente",
   'chat.guidanceSubmittingStatus': 'Envoi',
   'chat.guidanceFailed': "Les conseils n'ont pas pu être envoyés. Modifiez-le et réessayez.",
+  'chat.pastedTextFileName': 'Texte collé.txt',
+  'chat.showPastedTextInEditor': 'Afficher dans la zone de texte',
   'chat.attachmentOperationFailed': 'Impossible de traiter la pièce jointe. Essayer à nouveau.',
   'chat.editMessageFailed': 'Impossible de renvoyer ce message. Essayer à nouveau.',
   'chat.guidanceInterrupted':

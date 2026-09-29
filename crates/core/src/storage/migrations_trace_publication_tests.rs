@@ -5,7 +5,7 @@ fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            &CANONICAL_SCHEMA
+            &canonical_schema_v62()
                 .replace(workflow_pending_schema(), "")
                 .replace(trace_publication_schema(), ""),
         )
@@ -68,7 +68,7 @@ fn v61_upgrade_failure_keeps_exact_v60_catalog_and_rows() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
-            &CANONICAL_SCHEMA
+            &canonical_schema_v62()
                 .replace(workflow_pending_schema(), "")
                 .replace(trace_publication_schema(), ""),
         )

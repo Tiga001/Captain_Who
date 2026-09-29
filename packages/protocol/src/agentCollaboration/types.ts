@@ -4,7 +4,7 @@ import type {
   AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
 } from './constants'
 import type { HumanInteractionResponseDisplay } from '../humanInteraction'
-import type { AgentEvent, AgentProposedAction } from '../agent'
+import type { AgentEvent, AgentPastedTextMetadata, AgentProposedAction } from '../agent'
 
 export interface AgentCollaborationSettings {
   enabled: boolean
@@ -139,6 +139,7 @@ export interface AgentObserverAttachment {
   previewData: string | null
   previewMimeType: string | null
   createdAt: number
+  pastedText?: AgentPastedTextMetadata
 }
 
 export interface AgentObserverConversation {

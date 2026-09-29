@@ -48,6 +48,7 @@ const LANGUAGE_ALIASES: Readonly<Record<string, GitReviewSyntaxLanguageId>> = {
 }
 
 interface WorkspaceMarkdownPreviewProps {
+  allowWorkspaceLinks?: boolean
   assistantMessageId?: string
   folderId?: string
   anchor?: string
@@ -59,6 +60,7 @@ interface WorkspaceMarkdownPreviewProps {
 }
 
 export function WorkspaceMarkdownPreview({
+  allowWorkspaceLinks = true,
   assistantMessageId,
   folderId,
   anchor,
@@ -74,6 +76,7 @@ export function WorkspaceMarkdownPreview({
       a: (props) => (
         <WorkspaceMarkdownAnchor
           {...props}
+          allowWorkspaceLinks={allowWorkspaceLinks}
           currentPath={path}
           onOpenFile={onOpenFile}
           onScrollToAnchor={(nextAnchor) => scrollToMarkdownAnchor(scrollRef, nextAnchor)}
@@ -82,6 +85,7 @@ export function WorkspaceMarkdownPreview({
       img: (props) => (
         <WorkspaceMarkdownImage
           {...props}
+          allowWorkspaceLinks={allowWorkspaceLinks}
           currentPath={path}
           projectId={projectId}
           folderId={folderId}
@@ -93,7 +97,7 @@ export function WorkspaceMarkdownPreview({
       ),
       pre: WorkspaceMarkdownPre
     }),
-    [assistantMessageId, folderId, onOpenFile, path, projectId, scrollRef]
+    [allowWorkspaceLinks, assistantMessageId, folderId, onOpenFile, path, projectId, scrollRef]
   )
 
   useEffect(() => {
@@ -194,12 +198,14 @@ function MetadataEntry({ entry }: { entry: WorkspaceMarkdownMetadataEntry }) {
 }
 
 interface WorkspaceMarkdownAnchorProps extends ComponentProps<'a'> {
+  allowWorkspaceLinks: boolean
   currentPath: string
   onOpenFile: (path: string, anchor?: string) => void
   onScrollToAnchor: (anchor: string) => void
 }
 
 function WorkspaceMarkdownAnchor({
+  allowWorkspaceLinks,
   children,
   currentPath,
   href,
@@ -209,7 +215,7 @@ function WorkspaceMarkdownAnchor({
 }: WorkspaceMarkdownAnchorProps) {
   const { t } = useFrontendConfig()
   const target = resolveWorkspaceMarkdownLink(currentPath, href)
-  if (target.kind === 'unsupported') {
+  if (target.kind === 'unsupported' || (!allowWorkspaceLinks && target.kind === 'workspace-file')) {
     return (
       <span
         className="files-panel__markdown-link-unavailable"
@@ -252,6 +258,7 @@ function WorkspaceMarkdownAnchor({
 }
 
 interface WorkspaceMarkdownImageProps extends Omit<ComponentProps<'img'>, 'src'> {
+  allowWorkspaceLinks: boolean
   assistantMessageId?: string
   folderId?: string
   currentPath: string
@@ -260,6 +267,7 @@ interface WorkspaceMarkdownImageProps extends Omit<ComponentProps<'img'>, 'src'>
 }
 
 function WorkspaceMarkdownImage({
+  allowWorkspaceLinks,
   assistantMessageId,
   folderId,
   alt,
@@ -274,7 +282,7 @@ function WorkspaceMarkdownImage({
   const [localImageFailed, setLocalImageFailed] = useState(false)
 
   useEffect(() => {
-    if (target.kind !== 'workspace-file') {
+    if (!allowWorkspaceLinks || target.kind !== 'workspace-file') {
       setLocalImageUrl(null)
       setLocalImageFailed(false)
       return
@@ -303,12 +311,12 @@ function WorkspaceMarkdownImage({
     return () => {
       cancelled = true
     }
-  }, [assistantMessageId, folderId, projectId, target])
+  }, [allowWorkspaceLinks, assistantMessageId, folderId, projectId, target])
 
   if (target.kind === 'external') {
     return <img {...props} alt={alt ?? ''} src={target.url} />
   }
-  if (target.kind !== 'workspace-file' || localImageFailed) {
+  if (!allowWorkspaceLinks || target.kind !== 'workspace-file' || localImageFailed) {
     return (
       <span className="files-panel__markdown-image-placeholder" role="img" aria-label={alt ?? ''}>
         {alt || t('files.markdown.imageUnavailable')}

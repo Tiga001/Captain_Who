@@ -54,7 +54,17 @@ export interface WorkspaceFileRequest {
   projectId: string
 }
 
+/** A persisted message attachment. Native paths are resolved only by the Host. */
+export interface AttachmentFileRequest {
+  attachmentId: string
+  messageId: string
+}
+
+export type WorkspaceFilePreviewRequest = WorkspaceFileRequest | AttachmentFileRequest
+
 export interface WorkspaceFileMetadata {
+  /** Original attachment name, which may differ from the stored filename. */
+  name?: string
   kind: WorkspaceDirectoryEntryKind
   mimeType: string | null
   modifiedAtMs: number

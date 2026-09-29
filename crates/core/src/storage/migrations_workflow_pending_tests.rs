@@ -3,7 +3,7 @@ use super::*;
 fn v61() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     connection
-        .execute_batch(&CANONICAL_SCHEMA.replace(workflow_pending_schema(), ""))
+        .execute_batch(&canonical_schema_v62().replace(workflow_pending_schema(), ""))
         .unwrap();
     connection.pragma_update(None, "user_version", 61).unwrap();
     validate_schema_fingerprint(&connection, V61_SCHEMA_FINGERPRINT).unwrap();
@@ -15,7 +15,10 @@ fn workflow_pending_v61_upgrade_only_adds_index_and_reopens() {
     let connection = v61();
     run_migrations(&connection).unwrap();
     run_migrations(&connection).unwrap();
-    assert_eq!(read_schema_version(&connection).unwrap(), 62);
+    assert_eq!(
+        read_schema_version(&connection).unwrap(),
+        STORAGE_SCHEMA_VERSION
+    );
     assert_eq!(
         connection
             .query_row("SELECT title FROM conversations WHERE id='keep'", [], |r| r

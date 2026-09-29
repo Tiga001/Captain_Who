@@ -573,6 +573,7 @@ fn registered_attachments_are_read_only_sources() {
         mime_type: Some(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
         ),
+        pasted_text: None,
         size_bytes: fs::metadata(&stored).unwrap().len(),
         read_path: read_path.clone(),
         storage_rel_path: "stored.docx".to_string(),

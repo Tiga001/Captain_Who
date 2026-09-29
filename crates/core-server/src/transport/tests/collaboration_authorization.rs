@@ -107,6 +107,7 @@ fn attachment(storage: &StorageService, id: &str) -> AgentInputAttachment {
             kind: AgentInputAttachmentKind::Image,
             name: format!("{id}.png"),
             mime_type: Some("image/png".to_string()),
+            pasted_text: None,
             size_bytes: bytes.len() as u64,
         })
         .unwrap();

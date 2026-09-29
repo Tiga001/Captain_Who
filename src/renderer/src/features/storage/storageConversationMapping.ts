@@ -144,7 +144,8 @@ function mapMessageAttachmentFromStorage(
     sizeBytes: attachment.sizeBytes,
     previewData: attachment.previewData,
     previewMimeType: attachment.previewMimeType,
-    createdAt: attachment.createdAt
+    createdAt: attachment.createdAt,
+    ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {})
   }
 }
 

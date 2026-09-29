@@ -363,6 +363,7 @@ impl AgentService {
                 name: attachment.name.clone(),
                 mime_type: attachment.mime_type.clone(),
                 size_bytes: attachment.size_bytes,
+                pasted_text: attachment.pasted_text.clone(),
             })
             .collect::<Vec<_>>();
         let queued_folder_references = input.folder_references.clone();
@@ -1244,6 +1245,7 @@ mod attachment_budget_tests {
             kind: mycopilot_core::AgentInputAttachmentKind::File,
             name: format!("file-{id}.txt"),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes,
             encoding: mycopilot_core::AgentInputAttachmentEncoding::Base64,
             data: String::new(),
@@ -1286,6 +1288,7 @@ mod attachment_budget_tests {
                     kind: mycopilot_core::AgentInputAttachmentKind::File,
                     name: name.into(),
                     mime_type: Some(mime.into()),
+                    pasted_text: None,
                     size_bytes: bytes.len() as u64,
                 })
                 .unwrap();

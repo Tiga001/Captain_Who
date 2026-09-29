@@ -47,7 +47,7 @@
 
 .composer-folder-reference {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) 20px;
+  grid-template-columns: minmax(0, 1fr) 20px;
   width: 212px;
   height: 28px;
   min-width: 0;
@@ -58,6 +58,27 @@
   background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-lg);
+}
+
+.composer-folder-reference__open {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.composer-folder-reference__open:disabled {
+  cursor: default;
+}
+
+.composer-folder-reference__open .composer-folder-reference__icon {
+  flex-shrink: 0;
 }
 
 .composer-folder-reference__icon {
@@ -242,4 +263,55 @@
   .attachment-card {
     scroll-behavior: auto;
   }
+}
+
+.attachment-card .composer-attachment__file-button {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.attachment-card:has(.composer-attachment__file-button) .composer-attachment__file-button::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  content: '';
+}
+
+.chat-composer__attachments .attachment-card[data-pasted-text='true'] {
+  width: 320px;
+}
+
+.attachment-card .composer-attachment__restore {
+  flex: 0 0 auto;
+  padding: 2px 3px;
+  color: var(--mc-color-text-subtle);
+  font: inherit;
+  font-size: var(--mc-font-size-chat-toolbar);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-lg);
+  cursor: pointer;
+}
+
+.attachment-card .composer-attachment__restore:hover {
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+}
+
+.attachment-card .composer-attachment__restore:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.attachment-card .composer-attachment__file-button:focus-visible,
+.attachment-card .composer-attachment__restore:focus-visible {
+  outline: 2px solid var(--mc-color-text-primary);
+  outline-offset: 2px;
 }

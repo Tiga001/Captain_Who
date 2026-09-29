@@ -1874,6 +1874,7 @@ mod tests {
                     kind: AgentInputAttachmentKind::Image,
                     name: "image.png".to_string(),
                     mime_type: Some("image/png".to_string()),
+                    pasted_text: None,
                     size_bytes: bytes.len() as u64,
                     read_path: "@attachments/a1/image.png".to_string(),
                     storage_rel_path: "a1/image.png".to_string(),

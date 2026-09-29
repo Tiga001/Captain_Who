@@ -1307,6 +1307,7 @@ mod steer_input_queue_tests {
             kind: crate::AgentInputAttachmentKind::File,
             name: "notes.txt".to_string(),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes: 5,
             encoding: crate::AgentInputAttachmentEncoding::Managed,
             data: String::new(),

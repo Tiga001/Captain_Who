@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
-import type { WorkspaceFilePreviewResult, WorkspaceTextFileContent } from '@mycopilot/protocol'
+import type {
+  AttachmentFileRequest,
+  WorkspaceFileMetadata,
+  WorkspaceFilePreviewResult,
+  WorkspaceTextFileContent
+} from '@mycopilot/protocol'
 import { AlertCircle, FileQuestion, FileWarning, FolderOpen, LoaderCircle } from 'lucide-react'
+import {
+  SELECTION_COPY_EVENT,
+  type SelectionCopyAllEvent
+} from '../../components/selection/selectionScope'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { resolveGitReviewFileLanguageDescriptor } from '../gitReview/syntax/fileLanguageRegistry'
@@ -28,6 +37,8 @@ type PreviewState =
     }
 
 interface WorkspaceFilePreviewProps {
+  attachment?: AttachmentFileRequest
+  onMetadata?: (metadata: WorkspaceFileMetadata) => void
   assistantMessageId?: string
   folderId?: string
   isActive: boolean
@@ -38,10 +49,13 @@ interface WorkspaceFilePreviewProps {
   path: string | null
   pdfPage: number
   projectId: string
+  selectionRootRef?: RefObject<HTMLElement | null>
   wrapLines: boolean
 }
 
 export function WorkspaceFilePreview({
+  attachment,
+  onMetadata,
   assistantMessageId,
   folderId,
   isActive,
@@ -52,18 +66,50 @@ export function WorkspaceFilePreview({
   path,
   pdfPage,
   projectId,
+  selectionRootRef,
   wrapLines
 }: WorkspaceFilePreviewProps): ReactNode {
   const { t } = useFrontendConfig()
+  const metadataCallbackRef = useRef(onMetadata)
+  useEffect(() => {
+    metadataCallbackRef.current = onMetadata
+  }, [onMetadata])
+  const attachmentId = attachment?.attachmentId
+  const attachmentMessageId = attachment?.messageId
   const [retryToken, setRetryToken] = useState(0)
   const [state, setState] = useState<PreviewState>({ status: 'idle' })
   const requestSequenceRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const officeDocumentType = getWorkspaceOfficeDocumentType(path)
   const isMarkdown = isWorkspaceMarkdownFile(path)
+  const sourceText = state.status === 'ready' ? state.preview.text?.content : undefined
 
   useEffect(() => {
-    if (!path || officeDocumentType) {
+    const root = selectionRootRef?.current
+    if (
+      !root ||
+      !isActive ||
+      !path ||
+      officeDocumentType ||
+      (isMarkdown && markdownView === 'preview') ||
+      sourceText === undefined ||
+      sourceText.split('\n').length > MAX_RENDERED_LINES
+    )
+      return
+
+    const copyAll = (event: Event) => {
+      if (event.target !== root) return
+      const { clipboardData } = (event as SelectionCopyAllEvent).detail
+      // A full source selection must preserve whitespace and exclude the visual line gutter.
+      clipboardData.setData('text/plain', sourceText)
+      event.preventDefault()
+    }
+    root.addEventListener(SELECTION_COPY_EVENT, copyAll)
+    return () => root.removeEventListener(SELECTION_COPY_EVENT, copyAll)
+  }, [isActive, isMarkdown, markdownView, officeDocumentType, path, selectionRootRef, sourceText])
+
+  useEffect(() => {
+    if (!path || (officeDocumentType && !attachmentId)) {
       requestSequenceRef.current += 1
       setState({ status: 'idle' })
       return
@@ -77,15 +123,19 @@ export function WorkspaceFilePreview({
 
     void (async () => {
       try {
-        const request = {
-          path,
-          projectId,
-          ...(folderId === undefined ? {} : { folderId }),
-          ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-        }
+        const request =
+          attachmentId && attachmentMessageId
+            ? { attachmentId, messageId: attachmentMessageId }
+            : {
+                path,
+                projectId,
+                ...(folderId === undefined ? {} : { folderId }),
+                ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+              }
         const preview = await readWorkspaceFilePreview(request)
         if (requestSequenceRef.current !== requestId) return
         setState({ preview, status: 'ready' })
+        metadataCallbackRef.current?.(preview.metadata)
       } catch {
         if (requestSequenceRef.current === requestId) setState({ status: 'error' })
       }
@@ -94,7 +144,17 @@ export function WorkspaceFilePreview({
     return () => {
       if (requestSequenceRef.current === requestId) requestSequenceRef.current += 1
     }
-  }, [assistantMessageId, folderId, isActive, officeDocumentType, path, projectId, retryToken])
+  }, [
+    assistantMessageId,
+    attachmentId,
+    attachmentMessageId,
+    folderId,
+    isActive,
+    officeDocumentType,
+    path,
+    projectId,
+    retryToken
+  ])
 
   if (!path) {
     return (
@@ -153,6 +213,7 @@ export function WorkspaceFilePreview({
     if (isMarkdown && markdownView === 'preview') {
       return (
         <WorkspaceMarkdownPreview
+          allowWorkspaceLinks={!attachmentId}
           assistantMessageId={assistantMessageId}
           folderId={folderId}
           anchor={markdownAnchor}
@@ -166,7 +227,13 @@ export function WorkspaceFilePreview({
     }
     return (
       <TextFilePreview
-        sourceKey={JSON.stringify([projectId, folderId, assistantMessageId])}
+        sourceKey={JSON.stringify([
+          projectId,
+          folderId,
+          assistantMessageId,
+          attachmentId,
+          attachmentMessageId
+        ])}
         content={state.preview.text}
         path={path}
         scrollRef={scrollRef}

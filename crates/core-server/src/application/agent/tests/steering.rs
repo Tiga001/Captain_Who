@@ -251,6 +251,7 @@ fn encoded_attachment(
             kind,
             name: name.into(),
             mime_type: Some(mime_type.into()),
+            pasted_text: None,
             size_bytes: bytes.len() as u64,
         })
         .unwrap();
@@ -712,6 +713,7 @@ fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
         kind: AgentInputAttachmentKind::Image,
         name: "image.png".to_string(),
         mime_type: Some("image/png".to_string()),
+        pasted_text: None,
         size_bytes: 4,
         encoding: AgentInputAttachmentEncoding::Base64,
         data: "aW1n".to_string(),
@@ -924,6 +926,7 @@ fn large_managed_guidance_history_does_not_limit_following_imports() {
             kind: AgentInputAttachmentKind::File,
             name: "large.txt".into(),
             mime_type: Some("text/plain".into()),
+            pasted_text: None,
             size_bytes: chunk.len() as u64 * 130,
         })
         .unwrap();
@@ -977,6 +980,7 @@ fn managed_guidance_retries_reuse_admitted_identity_and_reject_different_bytes()
                 kind: AgentInputAttachmentKind::File,
                 name: "identity.txt".into(),
                 mime_type: Some("text/plain".into()),
+                pasted_text: None,
                 size_bytes: bytes.len() as u64,
             })
             .unwrap();
@@ -1044,6 +1048,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         kind: AgentInputAttachmentKind::File,
         name: "notes.txt".to_string(),
         mime_type: Some("text/plain".to_string()),
+        pasted_text: None,
         size_bytes: 4,
         encoding: AgentInputAttachmentEncoding::Base64,
         data: "%%%".to_string(),

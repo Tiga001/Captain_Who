@@ -191,3 +191,6 @@ pub const STORAGE_LIST_BROWSER_HISTORY_METHOD: &str = "storage.listBrowserHistor
 pub const STORAGE_DELETE_BROWSER_HISTORY_METHOD: &str = "storage.deleteBrowserHistory";
 pub const STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD: &str = "storage.summarizeBrowserOwnedData";
 pub const STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD: &str = "storage.clearBrowserOwnedData";
+
+pub const STORAGE_LOAD_INPUT_ATTACHMENT_TEXT_METHOD: &str = "storage.loadInputAttachmentText";
+pub const STORAGE_RESOLVE_ATTACHMENT_FILE_METHOD: &str = "storage.resolveAttachmentFile";

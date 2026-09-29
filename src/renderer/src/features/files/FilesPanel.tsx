@@ -1,3 +1,5 @@
+import type { WorkspaceFileMetadata } from '@mycopilot/protocol'
+import type { AttachmentFileNavigationTarget } from './AttachmentFileNavigationContext'
 import { FileTree } from '@pierre/trees/react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent, KeyboardEvent, PointerEvent, ReactNode } from 'react'
@@ -28,6 +30,8 @@ import type { WorkspaceMarkdownView } from './workspaceFilePreviewTypes'
 import './FilesPanel.css'
 
 interface FilesPanelProps {
+  attachment?: AttachmentFileNavigationTarget
+  onAttachmentName?: (name: string) => void
   assistantMessageId?: string
   filePath: string | null
   folderId?: string
@@ -68,6 +72,8 @@ const TREE_STYLE = {
 } as CSSProperties
 
 export function FilesPanel({
+  attachment,
+  onAttachmentName,
   assistantMessageId,
   filePath,
   folderId,
@@ -86,9 +92,18 @@ export function FilesPanel({
   wrapLines
 }: FilesPanelProps): ReactNode {
   const { t } = useFrontendConfig()
+  const [attachmentMetadata, setAttachmentMetadata] = useState<WorkspaceFileMetadata | null>(null)
+  const handleMetadata = useCallback(
+    (metadata: WorkspaceFileMetadata) => {
+      setAttachmentMetadata(metadata)
+      if (metadata.name) onAttachmentName?.(metadata.name)
+    },
+    [onAttachmentName]
+  )
   const treeRoot = useWorkspaceFileRoot(projectId)
   const fileFolderId = folderId ?? (assistantMessageId ? undefined : treeRoot.primaryFolderId)
   const workspaceRevision = useWorkspaceFileRevision(projectId, fileFolderId)
+  const previewSelectionRef = useRef<HTMLElement>(null)
   const [isOptionsMenuOpen, setIsOptionsMenuOpen] = useState(false)
   const optionsControlRef = useRef<HTMLDivElement>(null)
   const optionsTriggerRef = useRef<HTMLButtonElement>(null)
@@ -142,11 +157,12 @@ export function FilesPanel({
     setTreeVisible
   } = useWorkspaceFileTree({
     folderId: treeRoot.folderId,
-    isActive,
+    isActive: isActive && Boolean(projectId),
     onFileSelect: handleFileSelect,
     projectId,
-    selectedPath:
-      !assistantMessageId && fileFolderId === treeRoot.folderId
+    selectedPath: attachment
+      ? undefined
+      : !assistantMessageId && fileFolderId === treeRoot.folderId
         ? (filePath ?? selectedDirectoryPath)
         : null
   })
@@ -163,18 +179,29 @@ export function FilesPanel({
 
   const revealSelectedFile = useCallback(() => {
     if (!filePath) return
-    void revealWorkspaceFile({
-      path: filePath,
-      projectId,
-      ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
-      ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-    }).catch(() => undefined)
-  }, [assistantMessageId, fileFolderId, filePath, projectId])
+    void revealWorkspaceFile(
+      attachment
+        ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
+        : {
+            path: filePath,
+            projectId,
+            ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+            ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+          }
+    ).catch(() => undefined)
+  }, [attachment, assistantMessageId, fileFolderId, filePath, projectId])
 
-  const segments = filePath?.split('/') ?? []
+  const displayPath = attachment ? (attachmentMetadata?.path ?? attachment.name) : filePath
+  const segments = displayPath?.split(/[\\/]/) ?? []
   const fileName = segments.at(-1) ?? null
-  const ancestorPath = [projectName, ...segments.slice(0, -1)].join(' › ')
-  const fullPathLabel = filePath ? `${projectName}/${filePath}` : projectName
+  const ancestorPath = attachment
+    ? segments.slice(0, -1).join('/')
+    : [projectName, ...segments.slice(0, -1)].join(' › ')
+  const fullPathLabel = attachment
+    ? (displayPath ?? '')
+    : filePath
+      ? `${projectName}/${filePath}`
+      : projectName
 
   const focusOptionItem = (index: number): void => {
     const items = optionItemRefs.current.filter((item): item is HTMLButtonElement => item !== null)
@@ -234,12 +261,16 @@ export function FilesPanel({
   const copySelectedFilePath = (): void => {
     if (!filePath) return
     closeOptionsMenuAndRestoreFocus()
-    void copyWorkspaceFilePath({
-      path: filePath,
-      projectId,
-      ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
-      ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-    }).catch(() => undefined)
+    void copyWorkspaceFilePath(
+      attachment
+        ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
+        : {
+            path: filePath,
+            projectId,
+            ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+            ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+          }
+    ).catch(() => undefined)
   }
 
   const wrapLinesOptionIndex = isMarkdown ? 2 : 0
@@ -395,14 +426,22 @@ export function FilesPanel({
         className="files-panel__workspace"
         data-tree-visible={isTreeVisible ? 'true' : undefined}
       >
-        <main className="files-panel__preview">
+        <main
+          className="files-panel__preview"
+          data-selection-content="primary"
+          ref={previewSelectionRef}
+        >
           <WorkspaceFilePreview
             key={JSON.stringify([
               projectId,
+              attachment?.attachmentId,
+              attachment?.messageId,
               fileFolderId,
               assistantMessageId,
-              assistantMessageId ? null : workspaceRevision
+              attachment || assistantMessageId ? null : workspaceRevision
             ])}
+            attachment={attachment}
+            onMetadata={attachment ? handleMetadata : undefined}
             assistantMessageId={assistantMessageId}
             folderId={fileFolderId}
             isActive={isActive}
@@ -413,6 +452,7 @@ export function FilesPanel({
             path={filePath}
             pdfPage={pdfPage}
             projectId={projectId}
+            selectionRootRef={previewSelectionRef}
             wrapLines={wrapLines}
           />
         </main>
@@ -484,7 +524,8 @@ export function FilesPanel({
                 </button>
               </div>
             )}
-            {rootState?.status === 'ready' && rootState.value.entries.length === 0 && (
+            {(!projectId ||
+              (rootState?.status === 'ready' && rootState.value.entries.length === 0)) && (
               <div className="files-panel__tree-overlay">{t('files.emptyProject')}</div>
             )}
           </div>

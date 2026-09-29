@@ -719,6 +719,21 @@ export class CoreServerStorageApi {
     return this.rpc.request('storage.loadInputAttachmentPreview', input)
   }
 
+  loadInputAttachmentText(input: { attachment: AgentInputAttachment }): Promise<{ text: string }> {
+    return this.rpc.request('storage.loadInputAttachmentText', input)
+  }
+
+  resolveAttachmentFile(input: { attachmentId: string; messageId: string }): Promise<{
+    path: string
+    name: string
+    mimeType: string | null
+    sizeBytes: number
+    conversationId: string
+    messageId: string
+  }> {
+    return this.rpc.request('storage.resolveAttachmentFile', input)
+  }
+
   loadBrowserDownloadSettings(): Promise<BrowserDownloadSettingsRecord> {
     return this.rpc
       .request<unknown>(STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD)

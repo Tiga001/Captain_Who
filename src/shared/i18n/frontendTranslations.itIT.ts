@@ -1205,6 +1205,8 @@ export const itITTranslations = {
   'chat.guidanceQueued': 'In coda',
   'chat.guidanceSubmittingStatus': 'Invio',
   'chat.guidanceFailed': 'Impossibile inviare la guida. Modificalo e riprova.',
+  'chat.pastedTextFileName': 'Testo incollato.txt',
+  'chat.showPastedTextInEditor': 'Mostra nella casella di testo',
   'chat.attachmentOperationFailed': "Impossibile elaborare l'allegato. Riprova.",
   'chat.editMessageFailed': 'Impossibile inviare nuovamente questo messaggio. Riprova.',
   'chat.guidanceInterrupted':

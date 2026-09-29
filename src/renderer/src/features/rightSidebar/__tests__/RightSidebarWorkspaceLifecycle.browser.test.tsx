@@ -56,6 +56,37 @@ afterEach(() => {
 })
 
 describe('RightSidebar workspace lifecycle', () => {
+  it('opens projectless attachment previews and reuses the same tab on repeated clicks', async () => {
+    const renderSidebar = (requestId: number) => (
+      <RightSidebar
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        workspaceKeys={['project-a']}
+        onToggleMaximized={NOOP}
+        attachmentNavigationRequest={{
+          attachmentId: 'attachment',
+          messageId: 'message',
+          name: 'note.md',
+          requestId
+        }}
+      />
+    )
+    const screen = await render(renderSidebar(1))
+    await expect.poll(() => lifecycleCount('mount', 'files')).toBe(1)
+    const surface = getSurface(screen.container, 'files')
+    const pageId = surface.dataset.pageId
+    expect(surface.dataset.projectId).toBe('none')
+    expect(getTabLabels(screen.container)).toEqual(['note.md'])
+    surface.querySelector('button')!.click()
+    await expect.poll(() => surface.querySelector('button')?.textContent).toBe('1')
+    await screen.rerender(renderSidebar(2))
+    expect(getTabLabels(screen.container)).toEqual(['note.md'])
+    expect(getSurface(screen.container, 'files').dataset.pageId).toBe(pageId)
+    expect(lifecycleCount('mount', 'files')).toBe(1)
+    expect(getSurface(screen.container, 'files').querySelector('button')?.textContent).toBe('1')
+  })
+
   it('opens one fresh browser page per navigation request and preserves existing page state', async () => {
     const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
     const browserModule = RIGHT_SIDEBAR_MODULES.find((module) => module.id === 'browser')!
@@ -104,6 +135,16 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(surfaces[1]?.dataset.activity).toBe('foreground')
     expect(surfaces[1]?.querySelector('button')?.textContent).toBe('0')
     expect(surfaces[1]?.dataset.browserUrl).toBeUndefined()
+    expect(screen.container.querySelector('[data-selection-region="sidebar"]')).toHaveClass(
+      'right-sidebar'
+    )
+    const selectionPages = screen.container.querySelectorAll('[data-selection-content="page"]')
+    expect(selectionPages).toHaveLength(1)
+    expect(selectionPages[0]).toBe(surfaces[1]?.closest('.right-sidebar__page'))
+    expect(selectionPages[0]?.querySelector('[role="tablist"]')).toBeNull()
+    expect(surfaces[0]?.closest('.right-sidebar__page')).not.toHaveAttribute(
+      'data-selection-content'
+    )
     expect(getTabLabels(screen.container)).toEqual(['browser.newTab', 'browser.newTab (1)'])
     expect(lifecycleCount('unmount', 'browser')).toBe(0)
 

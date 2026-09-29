@@ -593,6 +593,33 @@ pub(crate) fn handle_request(
                 storage.cancel_attachment_import(&input.import_id),
             )
         }
+        mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_TEXT_METHOD => {
+            let input = match parse_params::<InputAttachmentTextRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .load_input_attachment_text(&input.attachment)
+                    .map(|text| json!({ "text": text })),
+            )
+        }
+        mycopilot_protocol_rs::STORAGE_RESOLVE_ATTACHMENT_FILE_METHOD => {
+            let input = match parse_params::<ResolveAttachmentFileRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service
+                .authorize_user_attachment_reads(std::slice::from_ref(&input.attachment_id))
+            {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.resolve_attachment_file(&input.attachment_id, &input.message_id),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
         mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD => {
             let input = match parse_params::<InputAttachmentPreviewRequest>(request.params) {
                 Ok(input) => input,
@@ -953,6 +980,19 @@ pub(crate) struct AppendAttachmentImportRequest {
     pub(crate) import_id: String,
     pub(crate) offset: u64,
     pub(crate) data: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InputAttachmentTextRequest {
+    pub(crate) attachment: mycopilot_core::AgentInputAttachment,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ResolveAttachmentFileRequest {
+    pub(crate) attachment_id: String,
+    pub(crate) message_id: String,
 }
 
 #[derive(Debug, Deserialize)]

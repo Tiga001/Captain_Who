@@ -40,6 +40,56 @@ const WORKSPACE_B = createRightSidebarWorkspaceContext('project-b', 'Project B',
 const HOME = createRightSidebarWorkspaceContext(null, null, undefined)
 
 describe('right sidebar platform context lifecycle', () => {
+  it('reuses a sent attachment tab with its preview state and keeps projectless pages available', () => {
+    const open = (state: RightSidebarPlatformState, workspace: RightSidebarWorkspaceContext) =>
+      reduceRightSidebarPlatform(state, {
+        type: 'open',
+        module: getModule('files'),
+        pageId: 'attachment-page',
+        t: translate,
+        workspace,
+        moduleState: {
+          kind: 'attachment-file',
+          attachmentId: 'attachment',
+          messageId: 'message',
+          name: 'note.md'
+        }
+      })
+    let state = open(INITIAL_RIGHT_SIDEBAR_PLATFORM_STATE, HOME)
+    expect(state.pages[0]).toMatchObject({ title: 'note.md', projectId: null })
+    state = reduceRightSidebarPlatform(state, {
+      type: 'update',
+      pageId: 'attachment-page',
+      update: {
+        moduleState: {
+          kind: 'attachment-file',
+          attachmentId: 'attachment',
+          messageId: 'message',
+          name: 'note.md',
+          preview: { markdownView: 'source', wrapLines: true }
+        }
+      }
+    })
+    state = open(state, HOME)
+    expect(state.pages).toHaveLength(1)
+    expect(state.pages[0].moduleState).toMatchObject({
+      preview: { markdownView: 'source', wrapLines: true }
+    })
+    state = reduceRightSidebarPlatform(state, {
+      type: 'synchronize-context',
+      modules: MODULES,
+      availability: { files: 'unavailable' },
+      workspace: HOME,
+      workspaceKeys: ['project-a']
+    })
+    expect(state.pages).toHaveLength(1)
+    const workspaceState = open(INITIAL_RIGHT_SIDEBAR_PLATFORM_STATE, WORKSPACE_A)
+    expect(workspaceState.pages[0]).toMatchObject({
+      workspacePath: '/repo/a',
+      projectId: 'project-a'
+    })
+  })
+
   it('replaces a transient file preview, stabilizes it on repeat, then preserves it', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const firstPreview = reduceRightSidebarPlatform(initial, {

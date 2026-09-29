@@ -4,7 +4,7 @@ use rusqlite::{config::DbConfig, types::Value};
 fn initialize_v59(connection: &Connection) {
     connection
         .execute_batch(
-            &CANONICAL_SCHEMA
+            &canonical_schema_v62()
                 .replace(workflow_pending_schema(), "")
                 .replace(trace_publication_schema(), "")
                 .replace(history_timeline_schema(), ""),
@@ -186,7 +186,7 @@ fn v59_and_current_snapshots_restore_with_consistent_timeline_projection() {
         } else if version == 60 {
             source
                 .execute_batch(
-                    &CANONICAL_SCHEMA
+                    &canonical_schema_v62()
                         .replace(workflow_pending_schema(), "")
                         .replace(trace_publication_schema(), ""),
                 )

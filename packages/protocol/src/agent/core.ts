@@ -5,7 +5,11 @@ import type {
   AgentCommandSafetyPolicy,
   AgentCommandSessionStatus
 } from './command'
-import type { AgentInputAttachmentKind, AgentToolCall } from './conversation'
+import type {
+  AgentInputAttachmentKind,
+  AgentPastedTextMetadata,
+  AgentToolCall
+} from './conversation'
 import type { AgentFolderReference } from '../attachments'
 import type { AgentContextCompactionEventOutcome } from './events'
 
@@ -347,6 +351,7 @@ export interface ConversationTraceAttachment {
   name: string
   mimeType?: string
   sizeBytes: number
+  pastedText?: AgentPastedTextMetadata
 }
 
 /** Immutable Host-owned image reference; never carries image bytes or local paths. */

@@ -18,11 +18,13 @@ export interface PendingAttachmentImport {
   importState: 'importing' | 'failed'
   importedBytes: number
   error?: string
+  pastedText?: AgentInputAttachment['pastedText']
 }
 
 interface ImportEntry {
   value: PendingAttachmentImport
   file?: File
+  pastedTextContent?: string
   fileKey?: string
   controller: AbortController
   scope: string
@@ -36,6 +38,7 @@ interface AttachmentImportsOptions {
   onAttachments: (attachments: ComposerAttachment[]) => void
   onError: (error: unknown) => void
   errorMessage: (error: unknown) => string
+  onDiscardPastedText?: (texts: string[]) => void
 }
 
 function visibleProgress(value: PendingAttachmentImport): number {
@@ -45,8 +48,16 @@ function visibleProgress(value: PendingAttachmentImport): number {
 export function useAttachmentImports(options: AttachmentImportsOptions) {
   const optionsRef = useRef(options)
   const scopeVersion = useRef({ key: options.scope, version: 0 })
+  const entries = useRef(new Map<string, ImportEntry>())
   useLayoutEffect(() => {
     if (scopeVersion.current.key !== options.scope) {
+      const texts = [...entries.current.values()]
+        .filter(
+          (entry) =>
+            entry.scope === optionsRef.current.scope && entry.pastedTextContent !== undefined
+        )
+        .map((entry) => entry.pastedTextContent!)
+      if (texts.length) optionsRef.current.onDiscardPastedText?.(texts)
       scopeVersion.current = { key: options.scope, version: scopeVersion.current.version + 1 }
     }
     optionsRef.current = {
@@ -54,7 +65,6 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
       scope: JSON.stringify([options.scope, scopeVersion.current.version])
     }
   })
-  const entries = useRef(new Map<string, ImportEntry>())
   const cancelledIds = useRef(new Set<string>())
   const nativeRequests = useRef(new Map<string, string>())
   // File metadata is only used while a browser import is in flight. The durable content hash
@@ -146,6 +156,10 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     const currentPendingFileKeys = pendingFileKeys.current
     return () => {
       mounted.current = false
+      const texts = [...currentEntries.values()]
+        .filter((entry) => entry.pastedTextContent !== undefined)
+        .map((entry) => entry.pastedTextContent!)
+      if (texts.length) optionsRef.current.onDiscardPastedText?.(texts)
       for (const entry of currentEntries.values()) {
         entry.controller.abort()
         if (!entry.file)
@@ -176,8 +190,12 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
   const attachmentHash = (attachment: ComposerAttachment): string | undefined => {
     const value = attachment.agentAttachment.contentSha256?.trim().toLowerCase()
     if (!value) return undefined
-    if (/^[0-9a-f]{64}$/.test(value)) return `sha256:${value}`
-    return /^sha256:[0-9a-f]{64}$/.test(value) ? value : undefined
+    const hash = /^[0-9a-f]{64}$/.test(value)
+      ? `sha256:${value}`
+      : /^sha256:[0-9a-f]{64}$/.test(value)
+        ? value
+        : undefined
+    return hash ? `${attachment.pastedText ? 'paste' : 'file'}:${hash}` : undefined
   }
 
   const isDuplicate = (attachment: ComposerAttachment): boolean => {
@@ -210,6 +228,7 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     try {
       const attachments = await createComposerAttachmentsFromFiles([entry.file], {
         id: entry.value.id,
+        pastedText: entry.value.pastedText,
         signal: entry.controller.signal,
         onProgress: (progress) => {
           if (!isCurrent(entry)) return
@@ -232,10 +251,20 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     }
   }
 
-  const addFiles = async (files: FileList | File[]) => {
+  const addFiles = async (
+    files: FileList | File[],
+    pasted?: { metadata: NonNullable<AgentInputAttachment['pastedText']>; text: string }
+  ) => {
     const newEntries: ImportEntry[] = []
     for (const file of Array.from(files)) {
-      const fileKey = [file.name, file.size, file.lastModified, file.type].join('\u0000')
+      const fileKey = [
+        pasted ? 'paste' : 'file',
+        file.name,
+        file.size,
+        file.lastModified,
+        file.type,
+        ...(pasted ? [crypto.randomUUID()] : [])
+      ].join('\u0000')
       if (pendingFileKeys.current.has(fileKey)) continue
       pendingFileKeys.current.add(fileKey)
       newEntries.push({
@@ -249,9 +278,11 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
           name: file.name || 'attachment',
           sizeBytes: file.size,
           importState: 'importing',
-          importedBytes: 0
+          importedBytes: 0,
+          ...(pasted ? { pastedText: pasted.metadata } : {})
         },
         file,
+        pastedTextContent: pasted?.text,
         fileKey,
         controller: new AbortController(),
         scope: optionsRef.current.scope
@@ -375,6 +406,7 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     cancel,
     cancelAll,
     retry,
+    pendingText: (id: string) => entries.current.get(id)?.pastedTextContent,
     hasPending: selecting || pending.length > 0
   }
 }

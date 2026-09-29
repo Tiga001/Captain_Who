@@ -21,6 +21,7 @@ import { createRightSidebarWorkspaceSessionKey } from './rightSidebarWorkspace'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import type {
   RightSidebarCapabilities,
+  RightSidebarAttachmentNavigationRequest,
   AgentObserverRenderContext,
   RightSidebarAgentNavigationRequest,
   RightSidebarModuleDefinition,
@@ -40,6 +41,7 @@ import {
 import './RightSidebar.css'
 
 interface RightSidebarProps {
+  attachmentNavigationRequest?: RightSidebarAttachmentNavigationRequest | null
   activeConversationId?: string | null
   activeWorkflow?: { id: string; name: string; color: string } | null
   agentNavigationRequest?: RightSidebarAgentNavigationRequest | null
@@ -107,6 +109,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 }
 
 export const RightSidebar = memo(function RightSidebar({
+  attachmentNavigationRequest,
   activeConversationId,
   activeWorkflow,
   agentNavigationRequest,
@@ -141,6 +144,7 @@ export const RightSidebar = memo(function RightSidebar({
 }: RightSidebarProps): ReactNode {
   const { t } = useFrontendConfig()
   const documentVisible = useRightSidebarDocumentVisibility()
+  const handledAttachmentNavigationRequestIdRef = useRef<number | null>(null)
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
   const handledWorkspaceReferenceNavigationRequestIdRef = useRef<number | null>(null)
   const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
@@ -421,7 +425,13 @@ export const RightSidebar = memo(function RightSidebar({
     () => [
       ...new Set(
         pages.flatMap((page) =>
-          page.moduleId === 'files' && page.workspaceKey ? [page.workspaceKey] : []
+          page.moduleId === 'files'
+            ? [
+                page.moduleState?.kind === 'attachment-file'
+                  ? (page.projectId ?? '')
+                  : (page.workspaceKey ?? '')
+              ]
+            : []
         )
       )
     ],
@@ -554,6 +564,24 @@ export const RightSidebar = memo(function RightSidebar({
   ])
 
   useEffect(() => {
+    const request = attachmentNavigationRequest
+    if (
+      !request ||
+      (handledAttachmentNavigationRequestIdRef.current !== null &&
+        request.requestId <= handledAttachmentNavigationRequestIdRef.current)
+    )
+      return
+    handledAttachmentNavigationRequestIdRef.current = request.requestId
+    openModulePage('files', {
+      kind: 'attachment-file',
+      attachmentId: request.attachmentId,
+      messageId: request.messageId,
+      name: request.name,
+      preview: { markdownView: 'preview' }
+    })
+  }, [attachmentNavigationRequest, openModulePage])
+
+  useEffect(() => {
     const request = workspaceReferenceNavigationRequest
     if (!request || !workspaceKey || request.projectId !== workspaceKey) return
     if (
@@ -658,6 +686,8 @@ export const RightSidebar = memo(function RightSidebar({
 
   return (
     <aside
+      data-selection-region="sidebar"
+      data-selection-hidden={sidebarVisible ? undefined : 'true'}
       className={`right-sidebar${hasOpenPages ? '' : ' right-sidebar--home'}${
         isMaximized ? ' right-sidebar--maximized' : ''
       }`}
@@ -669,6 +699,7 @@ export const RightSidebar = memo(function RightSidebar({
       >
         {hasOpenPages ? (
           <RightSidebarTabStrip
+            selectionOwner="sidebar"
             activePageId={activePageId}
             automationPageIds={automationPageIds}
             availableModules={availableModules}

@@ -641,6 +641,7 @@ export function SettingsPage({
   return (
     <div
       className="settings-page"
+      data-selection-region="main"
       ref={pageRef}
       tabIndex={-1}
       data-workflow-editor={workflowEditorVisible || undefined}
@@ -673,6 +674,7 @@ export function SettingsPage({
       />
 
       <main
+        data-selection-content="primary"
         className={`settings-content${workflowEditorVisible ? ' settings-content--workflow-editor' : ''}`}
         ref={contentRef}
         aria-label={t('settings.content')}

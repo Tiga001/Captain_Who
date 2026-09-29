@@ -201,6 +201,7 @@ fn user_guidance_is_canonical_ordered_and_never_persists_attachment_bytes() {
                 kind: AgentInputAttachmentKind::Image,
                 name: "diagram.png".to_string(),
                 mime_type: Some("image/png".to_string()),
+                pasted_text: None,
                 size_bytes: 6,
                 encoding: crate::protocol::AgentInputAttachmentEncoding::Base64,
                 data: "c2VjcmV0".to_string(),
@@ -241,6 +242,7 @@ fn attachment_only_user_guidance_is_recorded_without_fake_user_text() {
                 kind: AgentInputAttachmentKind::File,
                 name: "notes.txt".to_string(),
                 mime_type: Some("text/plain".to_string()),
+                pasted_text: None,
                 size_bytes: 5,
                 encoding: crate::protocol::AgentInputAttachmentEncoding::Managed,
                 data: String::new(),
@@ -916,8 +918,10 @@ fn workflow_delivery_preserves_provenance_exact_context_and_deduplicates_replay(
     assert!(!recorder.record_workflow_delivery(&delivery).unwrap());
     let snapshot = recorder.snapshot();
     assert_eq!(snapshot.items.len(), 1);
-    assert!(matches!(&snapshot.items[0], ConversationTurnTraceItem::WorkflowDelivery { input_id, instance_id, workflow_name, content, .. }
-        if input_id == &delivery.input_id && instance_id == &delivery.instance_id && workflow_name == &delivery.workflow_name && content == &delivery.content));
+    assert!(
+        matches!(&snapshot.items[0], ConversationTurnTraceItem::WorkflowDelivery { input_id, instance_id, workflow_name, content, .. }
+        if input_id == &delivery.input_id && instance_id == &delivery.instance_id && workflow_name == &delivery.workflow_name && content == &delivery.content)
+    );
     assert_eq!(snapshot.model_context_items[0].content, delivery.content);
     let mut altered = delivery.clone();
     altered.content = "forged replacement".into();
@@ -925,6 +929,8 @@ fn workflow_delivery_preserves_provenance_exact_context_and_deduplicates_replay(
     let serialized = serde_json::to_value(&snapshot.items[0]).unwrap();
     assert_eq!(serialized["type"], "workflow_delivery");
     assert_eq!(serialized["inputId"], delivery.input_id);
-    let mut gap = delivery.clone(); gap.input_id = "workflow-input-2".into(); gap.trace_sequence = 3;
+    let mut gap = delivery.clone();
+    gap.input_id = "workflow-input-2".into();
+    gap.trace_sequence = 3;
     assert!(recorder.record_workflow_delivery(&gap).is_err());
 }

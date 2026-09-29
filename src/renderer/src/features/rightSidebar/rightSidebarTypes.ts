@@ -1,3 +1,4 @@
+import type { AttachmentFileNavigationTarget } from '../files/AttachmentFileNavigationContext'
 import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
@@ -92,6 +93,17 @@ export type RightSidebarModulePageState =
       }
     }
   | {
+      kind: 'attachment-file'
+      attachmentId: string
+      messageId: string
+      name: string
+      preview?: {
+        markdownView?: 'preview' | 'source'
+        pdfPage?: number
+        wrapLines?: boolean
+      }
+    }
+  | {
       kind: 'workspace-folder'
       path: string
       folderId?: string
@@ -180,6 +192,10 @@ export interface RightSidebarModuleNavigationRequest {
   requestId: number
   workspaceKey?: string | null
   workspacePath?: string
+}
+
+export interface RightSidebarAttachmentNavigationRequest extends AttachmentFileNavigationTarget {
+  requestId: number
 }
 
 export interface RightSidebarWorkspaceReferenceNavigationRequest {

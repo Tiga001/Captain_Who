@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
   accepted: vi.fn(),
   errors: vi.fn(),
+  recovered: vi.fn(),
   listeners: new Set<(event: AttachmentImportProgress) => void>()
 }))
 
@@ -75,7 +76,8 @@ function Harness({
       setAttachments((previous) => [...previous, ...values])
     },
     onError: mocks.errors,
-    errorMessage: () => 'Import failed'
+    errorMessage: () => 'Import failed',
+    onDiscardPastedText: mocks.recovered
   })
   const previews = useComposerAttachmentPreviews(attachments)
   return (
@@ -88,6 +90,16 @@ function Harness({
         }
       >
         Add
+      </button>
+      <button
+        onClick={() =>
+          void imports.addFiles(
+            [new File(['testdata'], 'large.txt', { type: 'text/plain', lastModified: 123 })],
+            { metadata: { preview: 'testdata', characterCount: 8 }, text: 'testdata' }
+          )
+        }
+      >
+        Paste
       </button>
       <button onClick={() => void imports.select('file')}>Choose</button>
       <button
@@ -398,5 +410,22 @@ describe('Attachment imports', () => {
     pending.resolve([attachment()])
     await Promise.resolve()
     expect(mocks.accepted).not.toHaveBeenCalled()
+  })
+})
+
+it('keeps an ordinary file and a pasted text attachment with identical content as distinct inputs', async () => {
+  const ordinary = attachment('ordinary')
+  mocks.create.mockImplementation(async (_files, options) => {
+    const pasted = attachment(options.id)
+    pasted.pastedText = options.pastedText
+    pasted.agentAttachment.pastedText = options.pastedText
+    return [pasted]
+  })
+  const screen = await render(<Harness initialAttachments={[ordinary]} />)
+  await screen.getByRole('button', { name: 'Paste', exact: true }).click()
+  await expect.poll(() => screen.container.querySelectorAll('.composer-attachment').length).toBe(2)
+  expect(mocks.accepted.mock.calls.at(-1)?.[0][0].pastedText).toEqual({
+    preview: 'testdata',
+    characterCount: 8
   })
 })

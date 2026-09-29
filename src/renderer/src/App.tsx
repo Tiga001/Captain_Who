@@ -10,6 +10,10 @@ import { AccountAuthProvider } from './features/auth/AccountAuthProvider'
 import { LicenseProvider } from './features/license/LicenseProvider'
 import { useEffect, useState } from 'react'
 import { hostClient } from './host/hostClient'
+import {
+  installSelectionScopes,
+  requestScopedSelectAll
+} from './components/selection/selectionScope'
 
 function HostWorkspace(): React.JSX.Element | null {
   const [ready, setReady] = useState(false)
@@ -36,6 +40,17 @@ function HostWorkspace(): React.JSX.Element | null {
 }
 
 function App(): React.JSX.Element {
+  useEffect(() => {
+    const release = installSelectionScopes()
+    const unsubscribe = hostClient.app.onSelectAllRequested?.(() => {
+      if (!requestScopedSelectAll()) void hostClient.app.selectAllNative()
+    })
+    return () => {
+      unsubscribe?.()
+      release()
+    }
+  }, [])
+
   return (
     <FrontendConfigProvider>
       <ToastProvider>

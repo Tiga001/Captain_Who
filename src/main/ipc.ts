@@ -12,10 +12,12 @@ import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord, StorageProjectFolderPick } from '@mycopilot/protocol'
 import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { CoreServer } from './core/coreServer'
+import { selectAllNativeForRenderer } from './scopedSelectAllMenu'
 import { primaryProjectFolderPath } from './projects/projectFolders'
 import { resolveProjectFileReference, type ProjectFileReference } from './projects/projectFilePaths'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
+import { resolveAttachmentFolderForOpen } from './attachments/openAttachmentFolder'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { registerAgentIpc } from './ipc/agentIpc'
@@ -271,6 +273,7 @@ export function registerHostIpc(
   const workspaceFilesService = new WorkspaceFilesService(
     async (projectId) =>
       (await coreServer.loadProjects()).find((project) => project.id === projectId),
+    coreServer,
     coreServer
   )
   const ipcMain = createTrustedIpcMain(isTrustedRenderer)
@@ -325,6 +328,9 @@ export function registerHostIpc(
     applyAdaptiveAppIcon(themeSource)
   })
   ipcMain.handle(HOST_CHANNELS.app.showAbout, () => app.showAboutPanel())
+  ipcMain.handle(HOST_CHANNELS.app.selectAllNative, (event) =>
+    selectAllNativeForRenderer(event.sender)
+  )
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
@@ -352,6 +358,13 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.attachments.loadPreview, (_event, input) =>
     coreServer.loadInputAttachmentPreview(input)
   )
+  ipcMain.handle(HOST_CHANNELS.attachments.loadText, (_event, input) =>
+    coreServer.loadInputAttachmentText(input)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.openFolder, async (_event, input) => {
+    const error = await shell.openPath(await resolveAttachmentFolderForOpen(input?.folder))
+    if (error) throw new Error(error)
+  })
   const disposeBrowserDataIpc = browserDataIpc
     ? registerBrowserDataIpc(ipcMain, browserDataIpc)
     : () => undefined

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { AgentInputAttachment } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { ChatMessage } from '../chatTypes'
@@ -9,6 +9,7 @@ import { loadAttachmentImage } from '../../storage/storageClient'
 import * as storageClient from '../../storage/storageClient'
 import { ComposerAttachments, type ComposerAttachmentPresentation } from './ComposerAttachments'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
+import { AttachmentFileNavigationContext } from '../../files/AttachmentFileNavigationContext'
 
 function managedImageInput(
   attachment: NonNullable<ChatMessage['attachments']>[number]
@@ -28,14 +29,17 @@ function managedImageInput(
 
 export function MessageAttachments({
   attachments,
+  canOpenFile = true,
   messageId,
   mode
 }: {
   attachments?: ChatMessage['attachments']
+  canOpenFile?: boolean
   messageId: string
   mode: 'interactive' | 'observer'
 }) {
   const { t } = useFrontendConfig()
+  const openAttachmentFile = useContext(AttachmentFileNavigationContext)
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
   const [hydratedManagedAttachments, setHydratedManagedAttachments] = useState<
@@ -159,6 +163,7 @@ export function MessageAttachments({
     kind: attachment.kind,
     name: attachment.name,
     sizeBytes: attachment.sizeBytes,
+    pastedText: attachment.pastedText,
     previewUrl: getAttachmentPreviewUrl(attachment) ?? previewUrls.get(attachment.id)
   }))
 
@@ -167,6 +172,16 @@ export function MessageAttachments({
       attachments={displayAttachments}
       label={t('chat.attachments')}
       messageId={messageId}
+      onOpenFile={
+        mode === 'interactive' && canOpenFile && openAttachmentFile
+          ? (id) => {
+              const attachment = attachments.find((candidate) => candidate.id === id)
+              if (attachment?.kind === 'file') {
+                openAttachmentFile({ attachmentId: id, messageId, name: attachment.name })
+              }
+            }
+          : undefined
+      }
       onPreviewAttachment={(id) => {
         const attachment = attachments.find((candidate) => candidate.id === id)
         if (attachment) void openOriginalImageAttachment(attachment)

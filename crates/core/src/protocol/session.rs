@@ -47,6 +47,28 @@ pub enum AgentInputAttachmentEncoding {
     Managed,
 }
 
+/// Source metadata for a long paste. Full text remains in the managed UTF-8 file.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentPastedTextMetadata {
+    pub preview: String,
+    /// JavaScript string length, measured in UTF-16 code units.
+    pub character_count: u64,
+}
+
+impl AgentPastedTextMetadata {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.preview.chars().count() > 80
+            || self.character_count == 0
+            || self.character_count > 9_007_199_254_740_991
+            || self.preview.encode_utf16().count() as u64 > self.character_count
+        {
+            return Err("粘贴文本元数据无效".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttachmentImportInput {
@@ -55,6 +77,19 @@ pub struct AttachmentImportInput {
     pub name: String,
     pub mime_type: Option<String>,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<AgentPastedTextMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedAttachmentFile {
+    pub path: String,
+    pub name: String,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub conversation_id: String,
+    pub message_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -80,6 +115,8 @@ pub struct AgentInputAttachment {
     pub content_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<AgentPastedTextMetadata>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +664,8 @@ pub struct AgentAttachmentReference {
     pub read_path: String,
     pub storage_rel_path: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<AgentPastedTextMetadata>,
 }
 
 /// One model-visible, purpose-limited file input.

@@ -299,6 +299,7 @@ export interface ChatMessageAttachment {
   name: string
   mimeType?: string | null
   sizeBytes: number
+  pastedText?: AgentInputAttachment['pastedText']
   encoding?: AgentInputAttachment['encoding']
   data?: string
   previewData?: string | null

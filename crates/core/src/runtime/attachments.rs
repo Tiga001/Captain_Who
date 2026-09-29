@@ -71,6 +71,14 @@ pub(super) fn build_attachment_context(
             .filter(|value| !value.is_empty())
             .unwrap_or("application/octet-stream");
 
+        if let Some(metadata) = &attachment.pasted_text {
+            sections.push(format!(
+                "### {}\n来源：用户粘贴的文本\nMIME：{}\n大小：{} bytes\n字符数（UTF-16）：{}\n{}\n状态：完整原文已保存，正文尚未读取。请根据用户的具体请求使用 read_file 读取 readPath；需要理解或处理全文时，继续分页读取直到文件末尾，不要将首段或预览当作全文。如果本条消息只有粘贴文本附件，请先读取原文以理解用户意图；若原文没有明确任务，再询问用户希望如何处理。",
+                attachment.name, mime_type, attachment.size_bytes, metadata.character_count, read_path_line(read_path),
+            ));
+            continue;
+        }
+
         if attachment.kind == AgentInputAttachmentKind::Image
             && mime_type.starts_with("image/")
             && mime_type != "image/svg+xml"
@@ -271,6 +279,7 @@ pub(super) fn normalize_attachment_context_images(
             kind: AgentInputAttachmentKind::Image,
             name: attachment.name.clone(),
             mime_type: Some(prepared.mime_type.to_string()),
+            pasted_text: None,
             size_bytes: prepared.bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Base64,
             data: base64::engine::general_purpose::STANDARD.encode(&prepared.bytes),
@@ -328,6 +337,7 @@ fn registered_read_path<'a>(
                 && reference.name == attachment.name
                 && reference.mime_type == attachment.mime_type
                 && reference.size_bytes == attachment.size_bytes
+                && reference.pasted_text == attachment.pasted_text
         })
         .map(|reference| reference.read_path.as_str())
 }
@@ -625,6 +635,7 @@ mod tests {
             kind,
             name: name.into(),
             mime_type: mime_type.clone(),
+            pasted_text: None,
             size_bytes: bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Managed,
             data: "opaque-import-id".into(),
@@ -643,6 +654,7 @@ mod tests {
                 kind,
                 name: name.into(),
                 mime_type,
+                pasted_text: None,
                 size_bytes: bytes.len() as u64,
                 read_path: format!("@attachments/{id}/{name}"),
                 storage_rel_path: name.into(),
@@ -731,6 +743,36 @@ mod tests {
             context.text.matches('界').count(),
             ATTACHMENT_CONTEXT_TEXT_MAX_CHARS
         );
+    }
+
+    #[test]
+    fn pasted_text_context_is_metadata_only_even_for_small_text_and_attachment_only_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut attachment, mut library) = managed_attachment_fixture(
+            directory.path(),
+            "paste.txt",
+            b"BODY_MUST_NOT_ENTER_CONTEXT",
+            AgentInputAttachmentKind::File,
+        );
+        let metadata = crate::AgentPastedTextMetadata {
+            preview: "BODY_MUST_NOT_ENTER_CONTEXT".into(),
+            character_count: 26,
+        };
+        attachment.pasted_text = Some(metadata.clone());
+        library.conversation_attachments[0].pasted_text = Some(metadata);
+        // The model can be instructed to read it without pre-reading the file.
+        fs::remove_file(directory.path().join("paste.txt")).unwrap();
+        let context =
+            build_attachment_context(std::slice::from_ref(&attachment), Some(&library)).unwrap();
+        assert!(!context.text.contains("BODY_MUST_NOT_ENTER_CONTEXT"));
+        assert!(context
+            .text
+            .contains("@attachments/attachment-managed/paste.txt"));
+        assert!(context.text.contains("read_file"));
+        assert!(context.text.contains("直到文件末尾"));
+        assert!(context.text.contains("只有粘贴文本附件"));
+        library.conversation_attachments[0].pasted_text = None;
+        assert!(build_attachment_context(&[attachment], Some(&library)).is_err());
     }
 
     #[test]

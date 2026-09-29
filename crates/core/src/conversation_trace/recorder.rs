@@ -1126,6 +1126,7 @@ pub(crate) fn trace_attachments_from_input(
                 name,
                 mime_type,
                 size_bytes: attachment.size_bytes,
+                pasted_text: attachment.pasted_text.clone(),
             }
         })
         .collect();

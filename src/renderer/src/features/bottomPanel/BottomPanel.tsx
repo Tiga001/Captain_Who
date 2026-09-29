@@ -151,9 +151,15 @@ export const BottomPanel = memo(function BottomPanel({
   )
 
   return (
-    <section className="bottom-panel" aria-label={t('app.bottomPanel')}>
+    <section
+      className="bottom-panel"
+      aria-label={t('app.bottomPanel')}
+      data-selection-region="bottom"
+      data-selection-hidden={visible ? undefined : 'true'}
+    >
       <header className="bottom-panel__toolbar right-sidebar__toolbar">
         <RightSidebarTabStrip
+          selectionOwner="bottom"
           activePageId={activePageId}
           availableModules={availableModules}
           dragRegion={false}

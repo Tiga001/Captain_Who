@@ -17,9 +17,10 @@ pub fn save_attachment(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
             message_id = excluded.message_id,
@@ -29,7 +30,8 @@ pub fn save_attachment(
             mime_type = excluded.mime_type,
             size_bytes = excluded.size_bytes,
             storage_rel_path = excluded.storage_rel_path,
-            created_at = excluded.created_at
+            created_at = excluded.created_at,
+            pasted_text_json = excluded.pasted_text_json
         ",
         params![
             &attachment.id,
@@ -41,7 +43,13 @@ pub fn save_attachment(
             &attachment.mime_type,
             attachment.size_bytes,
             &attachment.storage_rel_path,
-            attachment.created_at
+            attachment.created_at,
+            attachment
+                .pasted_text
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
         ],
     )?;
 
@@ -64,9 +72,10 @@ pub fn insert_attachment(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             &attachment.id,
@@ -78,7 +87,13 @@ pub fn insert_attachment(
             &attachment.mime_type,
             attachment.size_bytes,
             &attachment.storage_rel_path,
-            attachment.created_at
+            attachment.created_at,
+            attachment
+                .pasted_text
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
         ],
     )?;
     Ok(())
@@ -100,7 +115,8 @@ pub fn list_conversation_attachments(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         FROM attachments
         WHERE conversation_id = ?1
         ORDER BY created_at ASC, id ASC
@@ -131,7 +147,8 @@ pub fn list_project_attachments_excluding_conversation(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         FROM attachments
         WHERE project_id = ?1
             AND conversation_id != ?2
@@ -166,7 +183,8 @@ pub fn list_conversation_attachments_for_library(
             attachment.mime_type,
             attachment.size_bytes,
             attachment.storage_rel_path,
-            attachment.created_at
+            attachment.created_at,
+            attachment.pasted_text_json
         FROM attachments AS attachment
         WHERE attachment.conversation_id = ?1
           AND NOT EXISTS (
@@ -230,7 +248,8 @@ pub(crate) fn list_shared_attachments_for_library_excluding_conversation(
             attachment.mime_type,
             attachment.size_bytes,
             attachment.storage_rel_path,
-            attachment.created_at
+            attachment.created_at,
+            attachment.pasted_text_json
         FROM attachments AS attachment
         WHERE attachment.conversation_id != ?1
           AND (
@@ -303,7 +322,8 @@ pub fn list_ordinary_conversation_attachments(
             attachment.mime_type,
             attachment.size_bytes,
             attachment.storage_rel_path,
-            attachment.created_at
+            attachment.created_at,
+            attachment.pasted_text_json
         FROM attachments AS attachment
         WHERE attachment.conversation_id = ?1
           AND NOT EXISTS (
@@ -340,7 +360,8 @@ pub(crate) fn list_guidance_attachments_for_conversation(
              attachment.mime_type,
              attachment.size_bytes,
              attachment.storage_rel_path,
-             attachment.created_at
+             attachment.created_at,
+             attachment.pasted_text_json
          FROM agent_run_guidances AS guidance
          INNER JOIN agent_run_guidance_attachments AS ownership
            ON ownership.guidance_id = guidance.guidance_id
@@ -372,7 +393,8 @@ pub fn list_project_deletion_attachments(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         FROM attachments
         WHERE project_id = ?1
             OR conversation_id IN (
@@ -452,7 +474,8 @@ pub fn get_attachment(
             mime_type,
             size_bytes,
             storage_rel_path,
-            created_at
+            created_at,
+            pasted_text_json
         FROM attachments
         WHERE id = ?1
         LIMIT 1
@@ -487,7 +510,8 @@ pub fn list_message_attachments(
                 mime_type,
                 size_bytes,
                 storage_rel_path,
-                created_at
+                created_at,
+                pasted_text_json
             FROM attachments
             WHERE conversation_id = ?1 AND message_id = ?2
             ORDER BY created_at ASC, id ASC
@@ -523,7 +547,8 @@ pub fn list_message_attachments_for_fork(
                 attachment.mime_type,
                 attachment.size_bytes,
                 attachment.storage_rel_path,
-                attachment.created_at
+                attachment.created_at,
+                attachment.pasted_text_json
             FROM attachments AS attachment
             WHERE attachment.conversation_id = ?1
               AND attachment.message_id = ?2
@@ -579,6 +604,18 @@ fn attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentRe
         kind: row.get(4)?,
         original_name: row.get(5)?,
         mime_type: row.get(6)?,
+        pasted_text: row
+            .get::<_, Option<String>>(10)?
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
         size_bytes: row.get(7)?,
         storage_rel_path: row.get(8)?,
         created_at: row.get(9)?,
@@ -605,7 +642,8 @@ mod tests {
                     mime_type TEXT,
                     size_bytes INTEGER NOT NULL,
                     storage_rel_path TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    pasted_text_json TEXT
                 );
                 ",
             )
@@ -653,6 +691,7 @@ mod tests {
             kind: "file".to_string(),
             original_name: format!("{id}.txt"),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes: 10,
             storage_rel_path: format!("{id}.txt"),
             created_at,

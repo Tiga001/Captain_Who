@@ -32,7 +32,11 @@ export function TerminalPanel({ initialCwd, projectId, isActive }: TerminalPanel
   return (
     <section className="terminal-panel" aria-label={t('terminal.title')}>
       <div className="terminal-panel__surface">
-        <div ref={terminalContainerRef} className="terminal-panel__xterm" />
+        <div
+          ref={terminalContainerRef}
+          className="terminal-panel__xterm"
+          data-selection-native="true"
+        />
         {sources.length > 1 && !hasUserInput && status !== 'error' && status !== 'exited' && (
           <div
             className="terminal-panel__sources"

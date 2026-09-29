@@ -80,6 +80,7 @@ mod tests {
             kind: crate::AgentInputAttachmentKind::Image,
             name: format!("{id}.png"),
             mime_type: Some("image/png".to_string()),
+            pasted_text: None,
             size_bytes: 3,
             encoding: crate::AgentInputAttachmentEncoding::Base64,
             data: "YWJj".to_string(),

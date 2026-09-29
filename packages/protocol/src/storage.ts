@@ -1,4 +1,9 @@
-import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
+import type {
+  AgentPastedTextMetadata,
+  AgentInputAttachment,
+  AgentPermissions,
+  AgentPromptPreferences
+} from './agent'
 import type { HumanInteractionResponseDisplay } from './humanInteraction'
 
 export type KnownProviderProfileId =
@@ -401,6 +406,7 @@ export interface StorageChatMessageAttachmentRecord {
   previewData?: string | null
   previewMimeType?: string | null
   createdAt: number
+  pastedText?: AgentPastedTextMetadata
 }
 
 export interface StorageAttachmentImageRecord {

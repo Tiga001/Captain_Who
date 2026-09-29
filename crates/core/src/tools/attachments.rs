@@ -336,7 +336,7 @@ fn attachment_catalog_revision(attachments: &[&AgentAttachmentReference]) -> Str
 }
 
 fn attachment_json(attachment: &AgentAttachmentReference) -> Value {
-    json!({
+    let mut value = json!({
         "id": attachment.id,
         "conversationId": attachment.conversation_id,
         "messageId": attachment.message_id,
@@ -347,7 +347,11 @@ fn attachment_json(attachment: &AgentAttachmentReference) -> Value {
         "sizeBytes": attachment.size_bytes,
         "readPath": attachment.read_path,
         "createdAt": attachment.created_at
-    })
+    });
+    if let Some(metadata) = &attachment.pasted_text {
+        value["pastedText"] = json!(metadata);
+    }
+    value
 }
 
 fn attachment_list_model_projection(result: &AgentToolResult) -> AgentToolResult {
@@ -377,7 +381,14 @@ fn attachment_list_model_value(value: &Value) -> Option<Value> {
                 .filter_map(|attachment| {
                     super::model_projection::retain_object_fields(
                         attachment,
-                        &["name", "kind", "mimeType", "sizeBytes", "readPath"],
+                        &[
+                            "name",
+                            "kind",
+                            "mimeType",
+                            "sizeBytes",
+                            "readPath",
+                            "pastedText",
+                        ],
                     )
                 })
                 .collect::<Vec<_>>()
@@ -794,6 +805,7 @@ mod tests {
             kind,
             name: format!("{id}.txt"),
             mime_type: Some("text/plain".to_string()),
+            pasted_text: None,
             size_bytes: 10,
             read_path: format!("@attachments/{id}/{id}.txt"),
             storage_rel_path: format!("conversations/{conversation_id}/{id}.txt"),

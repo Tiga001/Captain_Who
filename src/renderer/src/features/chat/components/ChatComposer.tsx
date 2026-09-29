@@ -42,6 +42,13 @@ import {
   stripAttachmentSummary
 } from '../chatAttachments'
 import type { ComposerAttachmentKind } from '../chatAttachments'
+import { hostClient } from '../../../host/hostClient'
+import {
+  PASTED_TEXT_ATTACHMENT_THRESHOLD,
+  pastedTextMetadata,
+  restorePastedText,
+  type EditorSelection
+} from '../pastedText'
 import { useAttachmentImports, useComposerAttachmentPreviews } from '../useAttachmentImports'
 import type {
   ChatComposerDraft,
@@ -190,6 +197,19 @@ export function ChatComposer({
   const draftRef = useRef(draft)
   const composerRef = useRef<HTMLFormElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const editorSelectionRef = useRef<EditorSelection>({
+    start: draft.message.length,
+    end: draft.message.length
+  })
+  const restoreVersionRef = useRef(0)
+  const restoringIdsRef = useRef(new Set<string>())
+  const [restoringAttachmentIds, setRestoringAttachmentIds] = useState<ReadonlySet<string>>(
+    new Set()
+  )
+  const latestScopePropsRef = useRef({ resetKey, draft })
+  useLayoutEffect(() => {
+    latestScopePropsRef.current = { resetKey, draft }
+  }, [resetKey, draft])
   const isComposingRef = useRef(false)
   const lastCompositionEndAtRef = useRef(0)
   const attachmentPickerRef = useRef<HTMLDivElement>(null)
@@ -283,11 +303,31 @@ export function ChatComposer({
     },
     onError: (error) =>
       setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed')),
-    errorMessage: (error) => getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed')
+    errorMessage: (error) => getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'),
+    onDiscardPastedText: (texts) => {
+      // Import cancellation must not discard a paste the user can no longer recover from the clipboard.
+      // This callback belongs to the source draft, before the new scope replaces draftRef.
+      const latest = latestScopePropsRef.current
+      const source =
+        latest.resetKey === resetKey && latest.draft.projectId !== draftRef.current.projectId
+          ? { ...draftRef.current, projectId: latest.draft.projectId, skills: latest.draft.skills }
+          : draftRef.current
+      onDraftChange({
+        ...source,
+        message: [source.message, ...texts].filter(Boolean).join('\n\n'),
+        updatedAt: Math.max(Date.now(), source.updatedAt + 1)
+      })
+    }
   })
   useLayoutEffect(() => {
     attachmentPreviewRequestRef.current += 1
+    restoreVersionRef.current += 1
+    restoringIdsRef.current.clear()
+    setRestoringAttachmentIds(new Set())
+    const position = latestScopePropsRef.current.draft.message.length
+    editorSelectionRef.current = { start: position, end: position }
     return () => {
+      restoreVersionRef.current += 1
       attachmentPreviewRequestRef.current += 1
     }
   }, [resetKey, draft.projectId])
@@ -385,6 +425,7 @@ export function ChatComposer({
     !hasUnsupportedImageAttachment &&
     !hasInvalidSkillSelection &&
     !attachmentImports.hasPending &&
+    restoringAttachmentIds.size === 0 &&
     !isModelTransitionRunning &&
     !isManualCompactionRunning &&
     Boolean(selectedModel)
@@ -850,6 +891,8 @@ export function ChatComposer({
   }
 
   const removeAttachment = (attachmentId: string) => {
+    restoringIdsRef.current.delete(attachmentId)
+    setRestoringAttachmentIds(new Set(restoringIdsRef.current))
     updateDraft({
       attachments: draftRef.current.attachments.filter(
         (attachment) => attachment.id !== attachmentId
@@ -877,6 +920,9 @@ export function ChatComposer({
     )
     if (!queuedMessage || queuedMessage.status === 'submitting') return
 
+    restoreVersionRef.current += 1
+    restoringIdsRef.current.clear()
+    setRestoringAttachmentIds(new Set())
     attachmentImports.cancelAll()
     updateDraft({
       message: stripAttachmentSummary(queuedMessage.content, queuedMessage.attachments),
@@ -1027,6 +1073,54 @@ export function ChatComposer({
     if (files.length === 0) return
     setAttachmentError(null)
     await attachmentImports.addFiles(files)
+  }
+
+  const showPastedTextInEditor = async (id: string) => {
+    if (restoringIdsRef.current.has(id)) return
+    const attachment = draftRef.current.attachments.find(
+      (item) => item.id === id && item.pastedText
+    )
+    const pendingText = attachmentImports.pendingText(id)
+    if (!attachment && pendingText === undefined) return
+    const version = restoreVersionRef.current
+    const textarea = textareaRef.current
+    const selection = textarea
+      ? { start: textarea.selectionStart, end: textarea.selectionEnd }
+      : { ...editorSelectionRef.current }
+    const originalMessage = draftRef.current.message
+    restoringIdsRef.current.add(id)
+    setRestoringAttachmentIds(new Set(restoringIdsRef.current))
+    try {
+      const text =
+        pendingText ?? (await hostClient.attachments.loadText({ attachment: attachment! })).text
+      if (version !== restoreVersionRef.current || !restoringIdsRef.current.has(id)) return
+      // The import may have completed while restoration was awaiting the managed file.
+      const exists =
+        draftRef.current.attachments.some((item) => item.id === id) ||
+        attachmentImports.pendingText(id) !== undefined
+      if (!exists) return
+      const restored = restorePastedText(draftRef.current.message, text, selection, originalMessage)
+      updateDraft({
+        message: restored.message,
+        attachments: draftRef.current.attachments.filter((item) => item.id !== id)
+      })
+      attachmentImports.cancel(id)
+      setAttachmentError(null)
+      editorSelectionRef.current = { start: restored.cursor, end: restored.cursor }
+      requestAnimationFrame(() => {
+        if (version !== restoreVersionRef.current) return
+        textareaRef.current?.focus({ preventScroll: true })
+        textareaRef.current?.setSelectionRange(restored.cursor, restored.cursor)
+      })
+    } catch (error) {
+      if (version === restoreVersionRef.current && restoringIdsRef.current.has(id))
+        setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
+    } finally {
+      if (version === restoreVersionRef.current) {
+        restoringIdsRef.current.delete(id)
+        setRestoringAttachmentIds(new Set(restoringIdsRef.current))
+      }
+    }
   }
 
   const addDroppedItems = async (dataTransfer: DataTransfer) => {
@@ -1268,9 +1362,19 @@ export function ChatComposer({
           setIsCommandSession(false)
           setIsCommandMenuOpen(false)
           if (isModelTransitionRunning) return
-          if (event.clipboardData.files.length === 0) return
+          if (event.clipboardData.files.length > 0) {
+            event.preventDefault()
+            void addDroppedOrPastedFiles(event.clipboardData.files)
+            return
+          }
+          if (event.target !== textareaRef.current) return
+          const text = event.clipboardData.getData('text/plain')
+          if (text.length < PASTED_TEXT_ATTACHMENT_THRESHOLD) return
           event.preventDefault()
-          void addDroppedOrPastedFiles(event.clipboardData.files)
+          setAttachmentError(null)
+          const metadata = pastedTextMetadata(text)
+          const file = new File([text], t('chat.pastedTextFileName'), { type: 'text/plain' })
+          void attachmentImports.addFiles([file], { metadata, text })
         }}
       >
         {(folderReferences.length > 0 ||
@@ -1290,8 +1394,13 @@ export function ChatComposer({
               cancelLabel={t('project.cancel')}
               retryLabel={t('files.retry')}
               failedLabel={t('chat.attachmentOperationFailed')}
+              restorePastedTextLabel={t('chat.showPastedTextInEditor')}
+              onRestorePastedText={(id) => void showPastedTextInEditor(id)}
+              restoringAttachmentIds={restoringAttachmentIds}
               onRetry={(id) => void attachmentImports.retry(id)}
               onRemove={(id) => {
+                restoringIdsRef.current.delete(id)
+                setRestoringAttachmentIds(new Set(restoringIdsRef.current))
                 if (attachmentImports.pending.some((attachment) => attachment.id === id))
                   attachmentImports.cancel(id)
                 else removeAttachment(id)
@@ -1447,6 +1556,12 @@ export function ChatComposer({
             commandTriggerRef.current = false
             setCommandIndex(0)
             updateDraftMessage(nextMessage)
+          }}
+          onSelect={(event) => {
+            editorSelectionRef.current = {
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd
+            }
           }}
           onCompositionStart={() => {
             isComposingRef.current = true

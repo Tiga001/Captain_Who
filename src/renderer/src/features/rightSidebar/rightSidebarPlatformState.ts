@@ -61,8 +61,19 @@ export function reduceRightSidebarPlatform(
 ): RightSidebarPlatformState {
   switch (action.type) {
     case 'open': {
-      const existingPage = findExistingPage(state.pages, action.module, action.workspace)
+      const attachment = action.moduleState?.kind === 'attachment-file' ? action.moduleState : null
+      const existingPage = attachment
+        ? state.pages.find(
+            (page) =>
+              page.moduleId === 'files' &&
+              page.moduleState?.kind === 'attachment-file' &&
+              page.moduleState.attachmentId === attachment.attachmentId &&
+              page.moduleState.messageId === attachment.messageId &&
+              page.workspaceSessionKey === action.workspace.sessionKey
+          )
+        : findExistingPage(state.pages, action.module, action.workspace)
       if (existingPage) {
+        if (attachment) return { ...state, activePageId: existingPage.id }
         const moduleState = action.moduleState ?? existingPage.moduleState
         if (state.activePageId === existingPage.id && moduleState === existingPage.moduleState) {
           return state
@@ -86,7 +97,18 @@ export function reduceRightSidebarPlatform(
         workspace: action.workspace
       })
       const page = bindNewPageToWorkspace(
-        action.moduleState ? { ...createdPage, moduleState: action.moduleState } : createdPage,
+        action.moduleState
+          ? {
+              ...createdPage,
+              moduleState: action.moduleState,
+              ...(attachment
+                ? {
+                    title: attachment.name,
+                    resourceKey: `attachment-file:${JSON.stringify([attachment.messageId, attachment.attachmentId])}`
+                  }
+                : {})
+            }
+          : createdPage,
         action.module,
         action.workspace
       )
@@ -437,6 +459,7 @@ function synchronizeContext(
       knownWorkspaceKeys &&
       module.orphanedWorkspacePolicy === 'close-page' &&
       currentPage.workspaceKey &&
+      !(currentPage.moduleState?.kind === 'attachment-file' && !currentPage.projectId) &&
       !knownWorkspaceKeys.has(currentPage.workspaceKey)
     ) {
       changed = true

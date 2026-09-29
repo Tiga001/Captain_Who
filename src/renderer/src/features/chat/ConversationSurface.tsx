@@ -900,6 +900,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       data-interaction-pending={activeQuestion ? 'true' : undefined}
       data-conversation-id={conversation.id}
       data-conversation-surface-mode={props.mode}
+      data-selection-region="conversation"
     >
       <div className="chat-conversation-page__messages-region">
         <div
@@ -908,7 +909,11 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
           onScroll={rememberCurrentScrollPosition}
           ref={messagesRef}
         >
-          <div className="chat-conversation-page__content" ref={contentRef}>
+          <div
+            className="chat-conversation-page__content"
+            data-selection-content="primary"
+            ref={contentRef}
+          >
             <ChatMessageList
               segments={segments}
               humanInteraction={interactive ? humanInteraction : undefined}

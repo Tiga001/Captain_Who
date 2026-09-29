@@ -3,6 +3,11 @@ import type { ComponentProps } from 'react'
 import type { AppProject } from '../../../config/projectConfig'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import {
+  installSelectionScopes,
+  SELECTION_COPY_EVENT,
+  type SelectionCopyAllEvent
+} from '../../../components/selection/selectionScope'
 import '../../../styles/global.css'
 import '../FilesPanel.css'
 
@@ -125,18 +130,21 @@ function RootFilesHarness({
   filePath = 'README.md',
   folderId = 'root-app',
   assistantMessageId,
-  markdownView = 'source'
+  markdownView = 'source',
+  attachment
 }: {
   project?: AppProject
   filePath?: string | null
   folderId?: string
   assistantMessageId?: string
   markdownView?: 'preview' | 'source'
+  attachment?: ComponentProps<typeof FilesPanel>['attachment']
 }) {
   return (
     <WorkspaceFileTreeSessionsProvider projectIds={[project.id]} projects={[project]}>
       <div style={{ height: 620, width: 760 }}>
         <FilesPanel
+          attachment={attachment}
           assistantMessageId={assistantMessageId}
           folderId={folderId}
           filePath={filePath}
@@ -235,6 +243,301 @@ beforeEach(() => {
 })
 
 describe('FilesPanel', () => {
+  it('selects and copies only the active file body through the shared Cmd+A shortcut', async () => {
+    const content = '  first\tline\r\n\r\nsecond line  \n'
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        path: 'notes.txt',
+        previewKind: 'text',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        sizeBytes: content.length
+      },
+      text: { content, path: 'notes.txt', modifiedAtMs: 1, sizeBytes: content.length }
+    })
+    const screen = await render(
+      <div>
+        <main data-selection-region="main">Main conversation content</main>
+        <aside data-selection-region="sidebar">
+          <header>Sidebar tab title</header>
+          <section data-selection-content="page">
+            <TestFilesPanel
+              filePath="notes.txt"
+              isActive
+              onOpenFile={openFileSpy}
+              onSurfaceFocus={() => undefined}
+              projectId="project-1"
+              projectName="Workspace breadcrumb"
+            />
+          </section>
+        </aside>
+      </div>
+    )
+    await expect.element(screen.getByRole('table', { name: 'notes.txt' })).toBeVisible()
+    const dispose = installSelectionScopes(document)
+    try {
+      const root = screen.container.querySelector<HTMLElement>(
+        '[data-selection-content="primary"]'
+      )!
+      root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      const selectAll = new KeyboardEvent('keydown', {
+        key: 'a',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true
+      })
+      root.dispatchEvent(selectAll)
+      expect(selectAll.defaultPrevented).toBe(true)
+      expect(document.getSelection()?.toString()).toContain('first')
+      expect(document.getSelection()?.toString()).not.toMatch(
+        /Sidebar tab title|Workspace breadcrumb|Main conversation content/
+      )
+      const clipboardData = new DataTransfer()
+      const copy = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData })
+      root.dispatchEvent(copy)
+      expect(copy.defaultPrevented).toBe(true)
+      expect(clipboardData.getData('text/plain')).toBe(content)
+
+      const code = root.querySelector('code')!.firstChild!
+      const partialRange = document.createRange()
+      partialRange.setStart(code, 2)
+      partialRange.setEnd(code, 7)
+      document.getSelection()!.removeAllRanges()
+      document.getSelection()!.addRange(partialRange)
+      const partialCopy = new ClipboardEvent('copy', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: new DataTransfer()
+      })
+      root.dispatchEvent(partialCopy)
+      expect(partialCopy.defaultPrevented).toBe(false)
+
+      const search = screen
+        .getByRole('textbox', { name: 'files.filter' })
+        .element() as HTMLInputElement
+      search.focus()
+      const selectInput = new KeyboardEvent('keydown', {
+        key: 'a',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true
+      })
+      search.dispatchEvent(selectInput)
+      expect(selectInput.defaultPrevented).toBe(false)
+
+      const main = screen.container.querySelector<HTMLElement>('[data-selection-region="main"]')!
+      main.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      main.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'a', metaKey: true, bubbles: true, cancelable: true })
+      )
+      expect(document.getSelection()?.toString()).toBe('Main conversation content')
+    } finally {
+      document.getSelection()?.removeAllRanges()
+      dispose()
+    }
+  })
+
+  it.each(['notes.txt', 'script.ts', 'README.md'])(
+    'copies all of %s exactly without the line gutter',
+    async (filePath) => {
+      const content = '  first\tline\r\n\r\nsecond line  \n'
+      readPreviewSpy.mockResolvedValue({
+        metadata: {
+          kind: 'file',
+          path: filePath,
+          previewKind: 'text',
+          mimeType: 'text/plain',
+          modifiedAtMs: 1,
+          sizeBytes: content.length
+        },
+        text: { content, path: filePath, modifiedAtMs: 1, sizeBytes: content.length }
+      })
+      const screen = await render(
+        <TestFilesPanel
+          filePath={filePath}
+          initialMarkdownView="source"
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      )
+      await expect.element(screen.getByRole('table', { name: filePath })).toBeVisible()
+      const root = screen.container.querySelector<HTMLElement>(
+        '[data-selection-content="primary"]'
+      )!
+      expect(root).toHaveClass('files-panel__preview')
+      expect(root.querySelector('.files-panel__toolbar')).toBeNull()
+      expect(root.querySelector('.files-panel__tree-pane')).toBeNull()
+      const clipboardData = new DataTransfer()
+      const event: SelectionCopyAllEvent = new CustomEvent(SELECTION_COPY_EVENT, {
+        bubbles: true,
+        cancelable: true,
+        detail: { clipboardData }
+      })
+      root.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(clipboardData.getData('text/plain')).toBe(content)
+
+      // Ordinary/partial selection copy is never intercepted by this source-only hook.
+      const partial = new ClipboardEvent('copy', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: new DataTransfer()
+      })
+      root.dispatchEvent(partial)
+      expect(partial.defaultPrevented).toBe(false)
+    }
+  )
+
+  it('keeps rendered Markdown copy native and removes the source override when switching views', async () => {
+    const screen = await render(
+      <TestFilesPanel
+        filePath="README.md"
+        initialMarkdownView="source"
+        isActive
+        onOpenFile={openFileSpy}
+        onSurfaceFocus={() => undefined}
+        projectId="project-1"
+        projectName="Workspace"
+      />
+    )
+    await expect.element(screen.getByRole('table', { name: 'README.md' })).toBeVisible()
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitemradio', { name: 'files.markdown.preview' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'Workspace', exact: true }))
+      .toBeVisible()
+    const root = screen.container.querySelector<HTMLElement>('[data-selection-content="primary"]')!
+    const clipboardData = new DataTransfer()
+    const event = new CustomEvent(SELECTION_COPY_EVENT, {
+      bubbles: true,
+      cancelable: true,
+      detail: { clipboardData }
+    })
+    root.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(clipboardData.getData('text/plain')).toBe('')
+  })
+
+  it('does not override copy when the source exceeds the rendered line limit', async () => {
+    const content = 'unrendered\n'.repeat(5001)
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        path: 'large.txt',
+        previewKind: 'text',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        sizeBytes: content.length
+      },
+      text: { content, path: 'large.txt', modifiedAtMs: 1, sizeBytes: content.length }
+    })
+    const screen = await render(
+      <TestFilesPanel
+        filePath="large.txt"
+        isActive
+        onOpenFile={openFileSpy}
+        onSurfaceFocus={() => undefined}
+        projectId="project-1"
+        projectName="Workspace"
+      />
+    )
+    await expect.element(screen.getByText('files.preview.tooManyLines')).toBeVisible()
+    const event = new CustomEvent(SELECTION_COPY_EVENT, {
+      bubbles: true,
+      cancelable: true,
+      detail: { clipboardData: new DataTransfer() }
+    })
+    screen.container.querySelector('[data-selection-content="primary"]')!.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('opens an attachment without changing the selected workspace root, expansion or filter', async () => {
+    const screen = await render(<RootFilesHarness />)
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    const tree = () =>
+      screen.container.querySelector<HTMLElement>('file-tree-container')?.shadowRoot
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/"]')).not.toBeNull()
+    tree()?.querySelector<HTMLElement>('[data-item-path="src/"]')?.click()
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    await screen.getByRole('textbox', { name: 'files.filter' }).fill('index')
+    const directoryCalls = listDirectorySpy.mock.calls.length
+    const attachment = { attachmentId: 'attachment', messageId: 'message', name: 'note.md' }
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        name: 'note.md',
+        path: '/attachments/hash/note.md',
+        previewKind: 'text',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        sizeBytes: 4
+      },
+      text: { content: 'note', path: '/attachments/hash/note.md', modifiedAtMs: 1, sizeBytes: 4 }
+    })
+    await screen.rerender(<RootFilesHarness attachment={attachment} filePath="note.md" />)
+    await expect.element(screen.getByRole('table', { name: 'note.md' })).toBeVisible()
+    expect(readPreviewSpy).toHaveBeenLastCalledWith({
+      attachmentId: 'attachment',
+      messageId: 'message'
+    })
+    expect(listDirectorySpy).toHaveBeenCalledTimes(directoryCalls)
+    await expect
+      .element(screen.getByRole('button', { name: 'files.selectRoot: docs' }))
+      .toBeVisible()
+    await expect.element(screen.getByRole('textbox', { name: 'files.filter' })).toHaveValue('index')
+    expect(tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    expect(screen.container.querySelector('.files-panel__breadcrumbs')?.getAttribute('title')).toBe(
+      '/attachments/hash/note.md'
+    )
+    await screen.getByRole('button', { name: 'files.reveal' }).click()
+    expect(revealSpy).toHaveBeenCalledWith({ attachmentId: 'attachment', messageId: 'message' })
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitem', { name: 'files.copyPath' }).click()
+    expect(copyPathSpy).toHaveBeenCalledWith({ attachmentId: 'attachment', messageId: 'message' })
+  })
+
+  it('previews projectless attachment markdown with no directory reads or workspace relative links', async () => {
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        name: 'note.md',
+        path: '/attachments/note.md',
+        previewKind: 'text',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        sizeBytes: 80
+      },
+      text: {
+        content: '# Attached note\n[Sibling](sibling.md)\n![Local](image.png)',
+        path: '/attachments/note.md',
+        modifiedAtMs: 1,
+        sizeBytes: 80
+      }
+    })
+    const screen = await render(
+      <TestFilesPanel
+        attachment={{ attachmentId: 'attachment', messageId: 'message', name: 'note.md' }}
+        filePath="note.md"
+        isActive
+        onOpenFile={openFileSpy}
+        onSurfaceFocus={() => undefined}
+        projectId=""
+        projectName="files"
+      />
+    )
+    await expect.element(screen.getByRole('heading', { name: 'Attached note' })).toBeVisible()
+    await expect.element(screen.getByText('files.emptyProject')).toBeVisible()
+    expect(listDirectorySpy).not.toHaveBeenCalled()
+    expect(readPreviewSpy).toHaveBeenCalledTimes(1)
+    expect(screen.container.querySelector('.files-panel__markdown a')).toBeNull()
+    expect(screen.container.querySelector('.files-panel__markdown img')).toBeNull()
+  })
+
   it('shows the root selector only for multiple folders and keeps each root tree separate from the open preview', async () => {
     listDirectorySpy.mockImplementation(async ({ folderId, directoryPath = '' }) => ({
       directoryPath,
@@ -722,7 +1025,7 @@ See [Conversation Trace](../docs/conversation-trace.md#details) and [OpenAI](htt
       .toBeGreaterThan(0)
     expect(createPdfLoadingTaskSpy).toHaveBeenCalledTimes(1)
     expect(createPdfLoadingTaskSpy).toHaveBeenCalledWith(pdfData)
-    expect(getPdfPageSpy).toHaveBeenCalledWith(1)
+    await expect.poll(() => getPdfPageSpy).toHaveBeenCalledWith(1)
 
     const canvas = screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')
     const firstPixel = canvas?.getContext('2d')?.getImageData(0, 0, 1, 1).data

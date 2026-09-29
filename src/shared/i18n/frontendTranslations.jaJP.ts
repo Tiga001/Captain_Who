@@ -1194,6 +1194,8 @@ export const jaJPTranslations = {
   'chat.guidanceQueued': 'キューに入れられました',
   'chat.guidanceSubmittingStatus': '送信中',
   'chat.guidanceFailed': '案内を送信できませんでした。編集して再試行してください。',
+  'chat.pastedTextFileName': '貼り付けたテキスト.txt',
+  'chat.showPastedTextInEditor': 'テキストボックスに表示',
   'chat.attachmentOperationFailed': '添付ファイルを処理できません。もう一度やり直してください。',
   'chat.editMessageFailed': 'このメッセージを再送信できません。もう一度やり直してください。',
   'chat.guidanceInterrupted': '前回の実行が中断されました。メッセージがキューに復元されました。',

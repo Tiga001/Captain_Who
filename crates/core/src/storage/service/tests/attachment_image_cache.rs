@@ -108,6 +108,7 @@ fn model_image_cache_collection_preserves_fork_sources_then_removes_orphans() {
             kind: "image".into(),
             original_name: "fork.png".into(),
             mime_type: Some("image/png".into()),
+            pasted_text: None,
             size_bytes: source_bytes.len() as u64,
             storage_rel_path: slash_path(&relative),
             created_at: 1,

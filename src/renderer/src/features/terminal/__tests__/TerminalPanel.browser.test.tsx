@@ -1,4 +1,6 @@
 import { page, userEvent } from 'vitest/browser'
+import { Terminal } from '@xterm/xterm'
+import { SELECTION_ALL_EVENT } from '../../../components/selection/selectionScope'
 import type { AppProjectFolder } from '../../../config/projectConfig'
 import { StrictMode, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -716,4 +718,85 @@ it('applies a resize that happened while creation was pending only after Host co
       )
     )
     .toBe(true)
+})
+
+describe('TerminalPanel scoped selection', () => {
+  it('selects only the terminal buffer on Command+A without forwarding input or selecting the page', async () => {
+    const selectAll = vi.spyOn(Terminal.prototype, 'selectAll')
+    try {
+      const screen = await render(<SourceTerminal />)
+      await expect.poll(() => createSession.mock.calls.length).toBe(1)
+      const { sessionId } = requestForCwd('/repo/a')
+      emitOutput(sessionId, 1, 'terminal first line\r\nterminal second line\r\n')
+      await expect.poll(() => acknowledgeOutput.mock.calls).toContainEqual([sessionId, 1])
+      const root = screen.container.querySelector<HTMLElement>('.terminal-panel__xterm')!
+      const textarea = root.querySelector('textarea')!
+      expect(root.dataset.selectionNative).toBe('true')
+      document.getSelection()?.removeAllRanges()
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        code: 'KeyA',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true
+      })
+      textarea.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(selectAll).toHaveBeenCalledOnce()
+      const terminal = selectAll.mock.contexts[0] as Terminal
+      expect(terminal.getSelection()).toContain('terminal first line\nterminal second line')
+      expect(document.getSelection()?.toString()).toBe('')
+      expect(writeInput).not.toHaveBeenCalled()
+      expect(markUserInput).not.toHaveBeenCalled()
+      expect(screen.container.querySelector('.terminal-panel__sources')).not.toBeNull()
+    } finally {
+      selectAll.mockRestore()
+    }
+  })
+
+  it('consumes the native menu request even after the shell exits', async () => {
+    const selectAll = vi.spyOn(Terminal.prototype, 'selectAll')
+    try {
+      const screen = await render(<TerminalTabsFixture />)
+      await expect.poll(() => createSession.mock.calls.length).toBe(1)
+      const { sessionId } = requestForCwd('/repo/a')
+      emitOutput(sessionId, 1, 'retained terminal output\r\n')
+      await expect.poll(() => acknowledgeOutput.mock.calls).toContainEqual([sessionId, 1])
+      subscriptions
+        .get(sessionId)!
+        .handlers.onExit({ sessionId, exitCode: 0, finalOutputSequence: 1 })
+      await expect
+        .poll(() => screen.container.querySelector('.xterm-rows')?.textContent)
+        .toContain('terminal exited')
+      const root = screen.container.querySelector<HTMLElement>('.terminal-panel__xterm')!
+      const request = new Event(SELECTION_ALL_EVENT, { cancelable: true })
+      expect(root.dispatchEvent(request)).toBe(false)
+      expect(selectAll).toHaveBeenCalledOnce()
+      expect((selectAll.mock.contexts[0] as Terminal).getSelection()).toContain(
+        'retained terminal output'
+      )
+      expect(writeInput).not.toHaveBeenCalled()
+    } finally {
+      selectAll.mockRestore()
+    }
+  })
+
+  it('preserves Control+A as shell input and ignores native selection for an inactive terminal', async () => {
+    const selectAll = vi.spyOn(Terminal.prototype, 'selectAll')
+    try {
+      const screen = await render(<TerminalTabsFixture />)
+      await expect.poll(() => createSession.mock.calls.length).toBe(1)
+      const { sessionId } = requestForCwd('/repo/a')
+      screen.container.querySelector('textarea')!.focus()
+      await userEvent.keyboard('{Control>}a{/Control}')
+      expect(writeInput.mock.calls).toContainEqual([sessionId, '\x01', true])
+      expect(selectAll).not.toHaveBeenCalled()
+      await screen.rerender(<TerminalTabsFixture shown={false} />)
+      const root = screen.container.querySelector<HTMLElement>('.terminal-panel__xterm')!
+      expect(root.dispatchEvent(new Event(SELECTION_ALL_EVENT, { cancelable: true }))).toBe(true)
+      expect(selectAll).not.toHaveBeenCalled()
+    } finally {
+      selectAll.mockRestore()
+    }
+  })
 })

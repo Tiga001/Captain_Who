@@ -1,3 +1,4 @@
+import { installScopedSelectAllMenu } from './scopedSelectAllMenu'
 import {
   app,
   BrowserWindow,
@@ -493,6 +494,7 @@ async function initializeApplication(): Promise<void> {
   })
   disposeUpdateIpc = registerUpdateIpc(desktopUpdateService, isTrustedRendererEvent)
   createWindow()
+  installScopedSelectAllMenu(() => mainWindow?.webContents ?? null)
   app.on('activate', activateMainWindow)
   coreServer.start()
   installDockRecentConversations()

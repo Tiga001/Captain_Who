@@ -43,6 +43,8 @@ const host: HostApi = {
     retryInputAttachment: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.attachments.retryInputAttachment, input),
     loadPreview: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.loadPreview, input),
+    loadText: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.loadText, input),
+    openFolder: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.openFolder, input),
     onImportProgress: (listener) => {
       const channel = HOST_CHANNELS.attachments.importProgress
       const handle: Parameters<typeof ipcRenderer.on>[1] = (_event, progress) => listener(progress)

@@ -1111,6 +1111,8 @@ export const zhTWTranslations = {
   'chat.guidanceQueued': '已排隊',
   'chat.guidanceSubmittingStatus': '正在發送',
   'chat.guidanceFailed': '引導發送失敗，請編輯後重試。',
+  'chat.pastedTextFileName': '貼上的文字.txt',
+  'chat.showPastedTextInEditor': '在文字框中顯示',
   'chat.attachmentOperationFailed': '附件處理失敗，請重試。',
   'chat.editMessageFailed': '訊息重新發送失敗，請重試。',
   'chat.guidanceInterrupted': '上次運行中斷，訊息已恢復到佇列',

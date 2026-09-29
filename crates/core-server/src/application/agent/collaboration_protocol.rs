@@ -203,6 +203,12 @@ impl AgentService {
                             name: attachment.name.clone(),
                             mime_type: attachment.mime_type.clone(),
                             size_bytes: attachment.size_bytes,
+                            pasted_text: attachment.pasted_text.as_ref().map(|metadata| {
+                                mycopilot_protocol_rs::AgentObserverPastedTextDto {
+                                    preview: metadata.preview.clone(),
+                                    character_count: metadata.character_count,
+                                }
+                            }),
                             preview_data: attachment.preview_data.clone(),
                             preview_mime_type: attachment.preview_mime_type.clone(),
                             created_at: attachment.created_at,

@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 62;
+pub const STORAGE_SCHEMA_VERSION: i32 = 63;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -16,8 +16,10 @@ const V60_SCHEMA_FINGERPRINT: &str =
     "sha256:41581217d0c9d997bafbe82c1c8ded1691c163b3b70c39601f570250fade8683";
 const V61_SCHEMA_FINGERPRINT: &str =
     "sha256:8909ce2f44597641f7cfb60c7cad159d0fb7ff0e165306992dc5d36785943cd7";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V62_SCHEMA_FINGERPRINT: &str =
     "sha256:704ff3fdec03347fc91caa2adb18468e51180aecb91bf28010a4d88bb0bf4ece";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:787e81d73f2a814771846a8cf104152623200986c5b7c8e3c4c72d9818aa1ee0";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -31,6 +33,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v59 adds a nullable default project for future auto-created workflow conversations.
 /// v60 indexes chronological history metadata without rewriting messages, traces or FTS content.
 /// v61 adds trusted trace publication revisions; v62 adds a pending-only workflow sequence index.
+/// v63 adds optional long-paste source metadata without changing existing attachment contents.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -88,6 +91,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 61 {
         upgrade_workflow_pending_v61(connection)?;
+    }
+
+    if read_schema_version(connection)? == 62 {
+        upgrade_pasted_text_v62(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -370,7 +377,29 @@ fn workflow_pending_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
         .find("-- Fair pending workflow scheduling, schema v62.")
         .unwrap();
-    &CANONICAL_SCHEMA[start..]
+    let end = CANONICAL_SCHEMA
+        .find("-- Long pasted text source metadata, schema v63.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn pasted_text_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Long pasted text source metadata, schema v63.")
+        .unwrap()..]
+}
+
+fn canonical_schema_v62() -> String {
+    CANONICAL_SCHEMA.replace(pasted_text_schema(), "")
+}
+
+fn upgrade_pasted_text_v62(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V62_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(pasted_text_schema())?;
+    transaction.pragma_update(None, "user_version", 63)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 
 fn upgrade_workflow_pending_v61(connection: &Connection) -> rusqlite::Result<()> {
@@ -378,7 +407,7 @@ fn upgrade_workflow_pending_v61(connection: &Connection) -> rusqlite::Result<()>
     validate_schema_fingerprint(&transaction, V61_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_pending_schema())?;
     transaction.pragma_update(None, "user_version", 62)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V62_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 
@@ -442,7 +471,7 @@ fn upgrade_workflow_execution_v57(connection: &Connection) -> rusqlite::Result<(
 }
 
 fn canonical_schema_v57() -> String {
-    CANONICAL_SCHEMA
+    canonical_schema_v62()
         .replace(workflow_pending_schema(), "")
         .replace(trace_publication_schema(), "")
         .replace(history_timeline_schema(), "")
@@ -611,11 +640,38 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn pasted_text_v62_upgrade_preserves_existing_attachment_and_reopens() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&super::canonical_schema_v62())
+            .unwrap();
+        connection.pragma_update(None, "user_version", 62).unwrap();
+        connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('chat','keep',1,1);
+            INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('message','chat','user','original','sent',1,0);
+            INSERT INTO attachments(id,conversation_id,message_id,kind,original_name,mime_type,size_bytes,storage_rel_path,created_at) VALUES('file','chat','message','file','keep.txt','text/plain',3,'keep.txt',1);").unwrap();
+        super::run_migrations(&connection).unwrap();
+        super::run_migrations(&connection).unwrap();
+        assert_eq!(
+            super::read_schema_version(&connection).unwrap(),
+            super::STORAGE_SCHEMA_VERSION
+        );
+        let original: (String, Option<String>) = connection
+            .query_row(
+                "SELECT original_name,pasted_text_json FROM attachments WHERE id='file'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(original, ("keep.txt".into(), None));
+        super::validate_canonical_schema(&connection).unwrap();
+    }
+
+    #[test]
     fn v58_workflow_default_project_migration_preserves_existing_data() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                &super::CANONICAL_SCHEMA
+                &super::canonical_schema_v62()
                     .replace(super::workflow_pending_schema(), "")
                     .replace(super::trace_publication_schema(), "")
                     .replace(super::history_timeline_schema(), "")

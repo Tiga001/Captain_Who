@@ -252,6 +252,7 @@ fn bundled_pdf_merges_explicit_attachment_and_workspace_inputs_deterministically
                     kind: AgentInputAttachmentKind::File,
                     name: "attached.pdf".to_string(),
                     mime_type: Some("application/pdf".to_string()),
+                    pasted_text: None,
                     size_bytes: attachment_bytes.len() as u64,
                     read_path: attachment_read_path.to_string(),
                     storage_rel_path: "objects/attached.pdf".to_string(),

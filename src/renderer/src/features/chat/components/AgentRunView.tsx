@@ -517,6 +517,7 @@ export function AgentRunView({
       {canToggleTimeline && timelineCollapsed && !hasInteractionEntries
         ? guidanceItems.map((item) => (
             <GuidanceTimelineItemView
+              assistantMessageId={message.id}
               item={item}
               mode={mode}
               onOpenWorkspaceReference={onOpenWorkspaceReference}

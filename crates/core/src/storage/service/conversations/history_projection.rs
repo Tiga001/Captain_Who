@@ -286,7 +286,10 @@ fn project_guidance_timeline(
     if let Some(trace) = trace {
         let mut emitted_terminal_error = false;
         run.insert("runId".to_string(), trace.run_id.clone().into());
-        run.insert("userInterrupted".to_string(), trace.user_interrupted().into());
+        run.insert(
+            "userInterrupted".to_string(),
+            trace.user_interrupted().into(),
+        );
         match trace.terminal_status {
             crate::ConversationTurnTraceTerminalStatus::InProgress => {}
             crate::ConversationTurnTraceTerminalStatus::Completed => {
@@ -566,23 +569,27 @@ fn project_guidance_timeline(
                     guidance.guidance_id
                 )
             })?;
-            attachments.push(serde_json::json!({
+            let mut projected_attachment = serde_json::json!({
                 "id": attachment.id,
                 "kind": attachment.kind,
                 "name": attachment.original_name,
                 "mimeType": attachment.mime_type,
                 "sizeBytes": attachment.size_bytes,
-            }));
+            });
+            if let Some(metadata) = &attachment.pasted_text {
+                projected_attachment["pastedText"] =
+                    serde_json::to_value(metadata).map_err(|error| error.to_string())?;
+            }
+            attachments.push(projected_attachment);
         }
-        let folder_references = crate::deserialize_folder_references_from_storage(
-            &guidance.folder_references_json,
-        )
-        .map_err(|error| {
-            format!(
-                "guidance `{}` has invalid folder references: {error}",
-                guidance.guidance_id
-            )
-        })?;
+        let folder_references =
+            crate::deserialize_folder_references_from_storage(&guidance.folder_references_json)
+                .map_err(|error| {
+                    format!(
+                        "guidance `{}` has invalid folder references: {error}",
+                        guidance.guidance_id
+                    )
+                })?;
         let folder_references = crate::model_folder_references(&folder_references);
         run.insert("runId".to_string(), guidance.run_id.clone().into());
         let mut projection = if guidance.status == crate::AgentGuidanceStatus::Abandoned {
@@ -1082,8 +1089,14 @@ mod request_owned_projection_tests {
     #[test]
     fn rebuilding_history_ignores_legacy_owner_cards_without_resetting_the_run() {
         let raw = chat_repository::canonical_agent_run_lifecycle_projection(
-            None, "legacy-run", "running", 2, 4, None,
-        ).unwrap();
+            None,
+            "legacy-run",
+            "running",
+            2,
+            4,
+            None,
+        )
+        .unwrap();
         let mut run: serde_json::Value = serde_json::from_str(&raw).unwrap();
         run["firstResponseAt"] = 3.into();
         run["collaborationTimelineActivities"] = serde_json::json!([{
@@ -1092,17 +1105,29 @@ mod request_owned_projection_tests {
         }]);
         let trace = conversation_trace_repository::ConversationTurnTraceRecord {
             trace: crate::ConversationTraceSnapshot::default().in_progress_trace(
-                "legacy-run", "legacy-chat", "legacy-assistant",
+                "legacy-run",
+                "legacy-chat",
+                "legacy-assistant",
             ),
             completed_at: None,
         };
         let projected = project_guidance_timeline(
-            Some(&run.to_string()), Some(&trace), &[], &[], &HashMap::new(), &[], 99,
-        ).unwrap();
+            Some(&run.to_string()),
+            Some(&trace),
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            99,
+        )
+        .unwrap();
         let projected: serde_json::Value = serde_json::from_str(&projected).unwrap();
         assert_eq!(projected["runId"], "legacy-run");
         assert_eq!(projected["startedAt"], 2);
         assert_eq!(projected["firstResponseAt"], 3);
-        assert_eq!(projected["collaborationTimelineActivities"], serde_json::json!([]));
+        assert_eq!(
+            projected["collaborationTimelineActivities"],
+            serde_json::json!([])
+        );
     }
 }

@@ -197,6 +197,22 @@ function Workspace({
 function scroller() {
   return document.querySelector<HTMLDivElement>('.chat-conversation-page__messages')!
 }
+
+function historyShortcut(key: string, target: HTMLElement = document.body) {
+  const event = new KeyboardEvent('keydown', {
+    bubbles: true,
+    cancelable: true,
+    key,
+    metaKey: true
+  })
+  target.dispatchEvent(event)
+  return event
+}
+
+function activateSelectionRegion(element: HTMLElement) {
+  ;(document.activeElement as HTMLElement)?.blur()
+  element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+}
 const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve))
 async function frames(count = 2) {
   for (let i = 0; i < count; i += 1) await frame()
@@ -608,6 +624,145 @@ it('does not intercept global find or select-all while the retained workspace is
   }
   expect(document.querySelector('.conversation-history-tools__search')).toBeNull()
 })
+
+it('selects only a short conversation and switches selection ownership to the sidebar', async () => {
+  await render(
+    <>
+      <aside data-selection-region="sidebar">
+        <div data-selection-content="primary">SIDEBAR ONLY</div>
+      </aside>
+      <Workspace chat={conversation(2)} />
+    </>
+  )
+  const content = document.querySelector<HTMLElement>(
+    '.conversation-surface [data-selection-content="primary"]'
+  )!
+  activateSelectionRegion(content)
+  expect(historyShortcut('a').defaultPrevented).toBe(true)
+  expect(window.getSelection()?.getRangeAt(0).commonAncestorContainer).toBe(content)
+  expect(window.getSelection()?.toString()).toContain('unique-search-0')
+  expect(window.getSelection()?.toString()).toContain('unique-search-1')
+  expect(window.getSelection()?.toString()).not.toContain('SIDEBAR ONLY')
+  const sidebar = document.querySelector<HTMLElement>('aside [data-selection-content]')!
+  activateSelectionRegion(sidebar)
+  expect(historyShortcut('a').defaultPrevented).toBe(true)
+  expect(window.getSelection()?.toString()).toBe('SIDEBAR ONLY')
+})
+
+it('keeps select-all and find in the active conversation when multiple conversations are mounted', async () => {
+  await render(
+    <div style={{ display: 'flex' }}>
+      <Workspace chat={conversation(100, 'first-selection-chat')} width={560} />
+      <Workspace chat={conversation(2, 'second-selection-chat')} width={560} />
+    </div>
+  )
+  const first = document.querySelector<HTMLElement>(
+    '[data-conversation-id="first-selection-chat"]'
+  )!
+  const second = document.querySelector<HTMLElement>(
+    '[data-conversation-id="second-selection-chat"]'
+  )!
+  const content = second.querySelector<HTMLElement>('[data-selection-content="primary"]')!
+  activateSelectionRegion(content)
+  expect(historyShortcut('a').defaultPrevented).toBe(true)
+  expect(window.getSelection()?.getRangeAt(0).commonAncestorContainer).toBe(content)
+  expect(first.querySelector('[data-segment-placeholder]')).not.toBeNull()
+  expect(historyShortcut('f').defaultPrevented).toBe(false)
+  expect(first.querySelector('.conversation-history-tools__search')).toBeNull()
+
+  const composer = first.querySelector<HTMLTextAreaElement>('textarea')!
+  composer.focus()
+  expect(historyShortcut('f', composer).defaultPrevented).toBe(true)
+  await expect.poll(() => first.querySelector('.conversation-history-tools__search')).not.toBeNull()
+  expect(second.querySelector('.conversation-history-tools__search')).toBeNull()
+})
+
+it.each(['pointer', 'focus'] as const)(
+  'cancels pending full-history selection and copy after a %s switches to another region',
+  async (interaction) => {
+    await render(
+      <>
+        <aside data-selection-region="sidebar">
+          <div data-selection-content="primary">KEEP SIDEBAR SELECTION</div>
+          <input aria-label="Sidebar input" defaultValue="native selection" />
+        </aside>
+        <Workspace chat={conversation(100)} />
+      </>
+    )
+    const content = document.querySelector<HTMLElement>(
+      '.conversation-surface [data-selection-content="primary"]'
+    )!
+    activateSelectionRegion(content)
+    expect(historyShortcut('a').defaultPrevented).toBe(true)
+    const copy = new ClipboardEvent('copy', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: new DataTransfer()
+    })
+    document.body.dispatchEvent(copy)
+    expect(copy.defaultPrevented).toBe(true)
+    const sidebar = document.querySelector<HTMLElement>('aside [data-selection-content]')!
+    const sidebarInput = document.querySelector<HTMLInputElement>('aside input')!
+    if (interaction === 'pointer') {
+      activateSelectionRegion(sidebar)
+      historyShortcut('a')
+    } else {
+      sidebarInput.focus()
+      sidebarInput.setSelectionRange(1, 6)
+    }
+    const afterSwitch = window.getSelection()?.toString()
+    const unrelatedCopy = new ClipboardEvent('copy', { bubbles: true, cancelable: true })
+    document.body.dispatchEvent(unrelatedCopy)
+    expect(unrelatedCopy.defaultPrevented).toBe(false)
+    await expect.poll(() => content.querySelector('[data-segment-placeholder]')).toBeNull()
+    expect(probes.copied).toBe('')
+    expect(window.getSelection()?.toString()).toBe(afterSwitch)
+    if (interaction === 'focus') {
+      expect(document.activeElement).toBe(sidebarInput)
+      expect(sidebarInput.selectionStart).toBe(1)
+      expect(sidebarInput.selectionEnd).toBe(6)
+    }
+  }
+)
+
+it.each(['expanding history', 'debouncing results'] as const)(
+  'does not replace a sidebar selection when Find finishes %s',
+  async (phase) => {
+    await render(
+      <>
+        <aside data-selection-region="sidebar">
+          <div data-selection-content="primary">KEEP SIDEBAR FIND SELECTION</div>
+        </aside>
+        <Workspace chat={conversation(phase === 'expanding history' ? 300 : 100)} />
+      </>
+    )
+    if (phase === 'debouncing results') {
+      await page.getByRole('button', { name: '展开全部历史' }).click()
+      await expect.poll(() => document.querySelector('[data-segment-placeholder]')).toBeNull()
+    }
+    await page.getByRole('button', { name: '查找对话', exact: true }).click()
+    const field = page.getByRole('textbox', { name: '搜索对话内容' })
+    await field.fill('unique-search-40')
+    if (phase === 'expanding history')
+      expect(document.querySelector('[data-segment-placeholder]')).not.toBeNull()
+    const sidebar = document.querySelector<HTMLElement>('aside [data-selection-content]')!
+    activateSelectionRegion(sidebar)
+    historyShortcut('a')
+    expect(window.getSelection()?.toString()).toBe('KEEP SIDEBAR FIND SELECTION')
+    await expect
+      .poll(
+        () =>
+          document.querySelector('.conversation-history-tools__search [role="status"]')?.textContent
+      )
+      .toBe('1 / 1')
+    await frames(2)
+    expect(window.getSelection()?.toString()).toBe('KEEP SIDEBAR FIND SELECTION')
+
+    // Returning to the search field creates a new intentional search in this conversation.
+    await field.fill('unique-search-41')
+    await expect.poll(() => window.getSelection()?.toString()).toBe('unique-search-41')
+  }
+)
 
 it('keeps resize observation bounded and releases every observed target on unmount', async () => {
   const nativeObserve = ResizeObserver.prototype.observe

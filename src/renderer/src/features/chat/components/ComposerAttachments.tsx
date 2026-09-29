@@ -5,7 +5,7 @@ import './AttachmentCards.css'
 
 export type ComposerAttachmentPresentation = Pick<
   ComposerAttachment,
-  'id' | 'kind' | 'name' | 'sizeBytes' | 'previewUrl'
+  'id' | 'kind' | 'name' | 'sizeBytes' | 'previewUrl' | 'pastedText'
 > & {
   importState?: 'importing' | 'failed'
   importedBytes?: number
@@ -20,6 +20,10 @@ interface ComposerAttachmentsProps {
   retryLabel?: string
   failedLabel?: string
   onRetry?: (id: string) => void
+  onOpenFile?: (id: string) => void
+  onRestorePastedText?: (id: string) => void
+  restorePastedTextLabel?: string
+  restoringAttachmentIds?: ReadonlySet<string>
   onPreviewAttachment?: (id: string) => void
   onRemove?: (id: string) => void
   onPreview?: (image: { alt: string; fileName: string; src: string }) => void
@@ -73,6 +77,10 @@ export function ComposerAttachments({
   retryLabel = 'Retry',
   failedLabel = '',
   onRetry,
+  onOpenFile,
+  onRestorePastedText,
+  restorePastedTextLabel = 'Show in text box',
+  restoringAttachmentIds,
   onPreviewAttachment,
   onRemove,
   onPreview,
@@ -99,6 +107,7 @@ export function ComposerAttachments({
               data-chat-attachment-id={variant === 'message' ? attachment.id : undefined}
               data-chat-attachment-message-id={variant === 'message' ? messageId : undefined}
               data-kind={attachment.kind}
+              data-pasted-text={Boolean(attachment.pastedText) || undefined}
               data-import-state={attachment.importState}
               key={attachment.id}
               onClick={(event) => {
@@ -110,7 +119,7 @@ export function ComposerAttachments({
                   onPreviewAttachment?.(attachment.id)
                 }
               }}
-              title={`${attachment.name} · ${fileSize(attachment.sizeBytes)}${attachment.error ? ` · ${attachment.error}` : ''}`}
+              title={`${attachment.pastedText?.preview || attachment.name} · ${fileSize(attachment.sizeBytes)}${attachment.error ? ` · ${attachment.error}` : ''}`}
             >
               {attachment.kind === 'image' && attachment.previewUrl ? (
                 <button
@@ -142,7 +151,28 @@ export function ComposerAttachments({
                     path={attachment.name}
                   />
                   <div className="composer-attachment__content">
-                    <AttachmentName name={attachment.name} />
+                    {onOpenFile && attachment.kind === 'file' ? (
+                      <button
+                        className="composer-attachment__file-button"
+                        type="button"
+                        onClick={() => onOpenFile(attachment.id)}
+                        title={attachment.pastedText?.preview || attachment.name}
+                      >
+                        <AttachmentName name={attachment.pastedText?.preview || attachment.name} />
+                      </button>
+                    ) : (
+                      <AttachmentName name={attachment.pastedText?.preview || attachment.name} />
+                    )}
+                    {variant === 'composer' && attachment.pastedText && onRestorePastedText && (
+                      <button
+                        className="composer-attachment__restore"
+                        type="button"
+                        disabled={restoringAttachmentIds?.has(attachment.id)}
+                        onClick={() => onRestorePastedText(attachment.id)}
+                      >
+                        {restorePastedTextLabel}
+                      </button>
+                    )}
                     {attachment.importState === 'importing' && (
                       <span
                         className="composer-attachment__progress"

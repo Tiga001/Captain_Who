@@ -258,7 +258,7 @@ import type {
   TerminalOutputEvent,
   WorkspaceDirectoryListing,
   WorkspaceFilePreviewResult,
-  WorkspaceFileRequest,
+  WorkspaceFilePreviewRequest,
   WorkspaceListDirectoryInput
 } from '@mycopilot/protocol'
 
@@ -286,6 +286,9 @@ export interface AttachmentsHostApi {
     attachment: AttachmentInputPayload
     purpose?: 'display'
   }): Promise<AttachmentPreview | null>
+  /** Restore an unsent pasted-text attachment without sending its file reference. */
+  loadText(input: { attachment: AttachmentInputPayload }): Promise<{ text: string }>
+  openFolder(input: { folder: AgentFolderReference }): Promise<void>
   onImportProgress(listener: (progress: AttachmentImportProgress) => void): () => void
 }
 
@@ -625,13 +628,13 @@ export interface TerminalSessionEventHandlers {
 }
 
 export interface WorkspaceFilesHostApi {
-  copyPath(input: WorkspaceFileRequest): Promise<void>
+  copyPath(input: WorkspaceFilePreviewRequest): Promise<void>
   listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing>
   searchMentions(
     input: import('@mycopilot/protocol').WorkspaceMentionSearchInput
   ): Promise<import('@mycopilot/protocol').WorkspaceMentionSearchResult>
-  readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult>
-  revealInFolder(input: WorkspaceFileRequest): Promise<void>
+  readPreview(input: WorkspaceFilePreviewRequest): Promise<WorkspaceFilePreviewResult>
+  revealInFolder(input: WorkspaceFilePreviewRequest): Promise<void>
 }
 
 export interface AgentHostApi {
@@ -773,6 +776,8 @@ export interface HostApi {
     openExternal(url: string): Promise<void>
     onFlushBeforeQuit(handler: () => void | Promise<void>): () => void
     onWindowStateChange(handler: (state: AppWindowState) => void): () => void
+    onSelectAllRequested(handler: () => void): () => void
+    selectAllNative(): Promise<void>
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
     showAbout(): Promise<void>
     takeDockOpenConversation(): Promise<string | null>

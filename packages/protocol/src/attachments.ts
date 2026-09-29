@@ -1,4 +1,4 @@
-import type { AgentInputAttachment } from './agent'
+import type { AgentInputAttachment, AgentPastedTextMetadata } from './agent'
 
 export type AttachmentSelectionKind = 'file' | 'image'
 
@@ -55,7 +55,7 @@ export type AttachmentInputPayload = AgentInputAttachment
 
 export type AttachmentImportMetadata = Pick<
   AgentInputAttachment,
-  'id' | 'kind' | 'name' | 'mimeType' | 'sizeBytes'
+  'id' | 'kind' | 'name' | 'mimeType' | 'sizeBytes' | 'pastedText'
 >
 
 export interface AttachmentImportHandle {
@@ -78,4 +78,24 @@ export interface AttachmentImportProgress {
 export interface AttachmentPreview {
   mimeType: string
   data: string
+}
+
+/** Validate optional source metadata at wire boundaries without touching original file bytes. */
+export function parsePastedTextMetadata(value: unknown): AgentPastedTextMetadata | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid pastedText metadata')
+  }
+  const metadata = value as Record<string, unknown>
+  if (
+    Object.keys(metadata).some((key) => key !== 'preview' && key !== 'characterCount') ||
+    typeof metadata.preview !== 'string' ||
+    [...metadata.preview].length > 80 ||
+    !Number.isSafeInteger(metadata.characterCount) ||
+    (metadata.characterCount as number) <= 0 ||
+    metadata.preview.length > (metadata.characterCount as number)
+  ) {
+    throw new Error('Invalid pastedText metadata')
+  }
+  return { preview: metadata.preview, characterCount: metadata.characterCount as number }
 }

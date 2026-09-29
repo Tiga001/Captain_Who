@@ -14,6 +14,7 @@ import {
   writeTerminalInput
 } from './terminalClient'
 import { TerminalOutputWriter } from './TerminalOutputWriter'
+import { SELECTION_ALL_EVENT } from '../../components/selection/selectionScope'
 import type {
   TerminalExitEvent,
   TerminalSessionStatus,
@@ -226,6 +227,13 @@ export function useTerminalSession({
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
     const isCurrentEffect = () => !isDisposed && terminalRef.current === terminal
+    const selectAll = (event: Event) => {
+      if (!isCurrentEffect() || !isActiveRef.current) return
+      event.preventDefault()
+      event.stopPropagation()
+      terminal.selectAll()
+    }
+    container.addEventListener(SELECTION_ALL_EVENT, selectAll)
 
     const runQueuedFit = () => {
       if (!isCurrentEffect() || !isActiveRef.current) return
@@ -295,6 +303,20 @@ export function useTerminalSession({
       terminal.focus()
     }
     terminal.attachCustomKeyEventHandler((event) => {
+      if (
+        isCurrentEffect() &&
+        isActiveRef.current &&
+        event.type === 'keydown' &&
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !event.isComposing &&
+        event.key.toLowerCase() === 'a'
+      ) {
+        selectAll(event)
+        return false
+      }
       if (
         !isCurrentEffect() ||
         sessionFinished ||
@@ -471,6 +493,7 @@ export function useTerminalSession({
       cursorSubscription.dispose()
       renderSubscription.dispose()
       scrollSubscription.dispose()
+      container.removeEventListener(SELECTION_ALL_EVENT, selectAll)
       container.removeEventListener('paste', onPaste, true)
       container.removeEventListener('input', onTextInput, true)
       container.removeEventListener('compositionupdate', onTextInput, true)

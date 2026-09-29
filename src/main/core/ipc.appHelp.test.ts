@@ -113,15 +113,16 @@ describe('App help IPC', () => {
     )
   })
 
-  it.each([HOST_CHANNELS.app.showAbout, HOST_CHANNELS.app.openDocumentation])(
-    'blocks untrusted senders on %s',
-    (channel) => {
-      const { handler, openAppUrl } = registerHelpHandlers(false)
+  it.each([
+    HOST_CHANNELS.app.showAbout,
+    HOST_CHANNELS.app.openDocumentation,
+    HOST_CHANNELS.app.selectAllNative
+  ])('blocks untrusted senders on %s', (channel) => {
+    const { handler, openAppUrl } = registerHelpHandlers(false)
 
-      expect(() => handler(channel)(event)).toThrow('Blocked untrusted IPC sender')
-      expect(showAboutPanel).not.toHaveBeenCalled()
-      expect(openExternal).not.toHaveBeenCalled()
-      expect(openAppUrl).not.toHaveBeenCalled()
-    }
-  )
+    expect(() => handler(channel)(event)).toThrow('Blocked untrusted IPC sender')
+    expect(showAboutPanel).not.toHaveBeenCalled()
+    expect(openExternal).not.toHaveBeenCalled()
+    expect(openAppUrl).not.toHaveBeenCalled()
+  })
 })

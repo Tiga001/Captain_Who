@@ -166,6 +166,13 @@ pub struct AgentObserverInputOriginDto {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverPastedTextDto {
+    pub preview: String,
+    pub character_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentObserverAttachmentDto {
     pub attachment_id: String,
     pub kind: String,
@@ -175,6 +182,8 @@ pub struct AgentObserverAttachmentDto {
     pub preview_data: Option<String>,
     pub preview_mime_type: Option<String>,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<AgentObserverPastedTextDto>,
 }
 
 /// Output-only display facts copied from the Host-validated history record. A matching JSON

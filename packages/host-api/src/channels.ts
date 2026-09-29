@@ -35,6 +35,8 @@ export const HOST_CHANNELS = {
     getWindowState: 'host:app.getWindowState',
     openDocumentation: 'host:app.openDocumentation',
     openExternal: 'host:app.openExternal',
+    selectAllRequested: 'host:app.selectAllRequested',
+    selectAllNative: 'host:app.selectAllNative',
     setNativeThemeSource: 'host:app.setNativeThemeSource',
     showAbout: 'host:app.showAbout',
     takeDockOpenConversation: 'host:app.takeDockOpenConversation',
@@ -104,6 +106,8 @@ export const HOST_CHANNELS = {
     cancelImport: 'host:attachments.cancelImport',
     retryInputAttachment: 'host:attachments.retryInputAttachment',
     loadPreview: 'host:attachments.loadPreview',
+    loadText: 'host:attachments.loadText',
+    openFolder: 'host:attachments.openFolder',
     importProgress: 'host:attachments.importProgress'
   },
   automations: {

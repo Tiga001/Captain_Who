@@ -2,18 +2,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { ChatMessage } from '../chatTypes'
 import { ChatMessageItem } from '../components/ChatMessageItem'
+import { AttachmentFileNavigationContext } from '../../files/AttachmentFileNavigationContext'
+import { GuidanceTimelineItemView } from '../components/AgentTimelineItemView'
 
 const mocks = vi.hoisted(() => ({
   thumbnail: vi.fn(),
   display: vi.fn(),
   storedImage: vi.fn(),
   open: vi.fn(),
-  notice: vi.fn()
+  notice: vi.fn(),
+  openFile: vi.fn(),
+  openFolder: vi.fn()
 }))
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'en-US', t: (key: string) => key })
 }))
-vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
+vi.mock('../../../host/hostClient', () => ({
+  hostClient: { attachments: { openFolder: mocks.openFolder } }
+}))
 vi.mock('../../../components/toast/ToastContext', () => ({
   useToast: () => ({ showToast: vi.fn() })
 }))
@@ -61,12 +67,118 @@ function message(
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.openFolder.mockResolvedValue(undefined)
   mocks.thumbnail.mockResolvedValue(imageUrl)
   mocks.display.mockResolvedValue(imageUrl)
   mocks.storedImage.mockResolvedValue({ name: 'photo.png', mimeType: 'image/png', data: imageData })
 })
 
 describe('Managed message attachments', () => {
+  it('opens only sent files through the sidebar and keeps image clicks in the existing viewer', async () => {
+    const file = {
+      ...managedAttachment,
+      id: 'file',
+      kind: 'file' as const,
+      name: 'report.md',
+      mimeType: 'text/markdown'
+    }
+    const renderMessage = (
+      status: ChatMessage['status'],
+      mode: 'interactive' | 'observer' = 'interactive'
+    ) => (
+      <AttachmentFileNavigationContext.Provider value={mocks.openFile}>
+        <ChatMessageItem
+          message={{ ...message([file, managedAttachment]), status }}
+          mode={mode}
+          showTokenUsageDetails={false}
+        />
+      </AttachmentFileNavigationContext.Provider>
+    )
+    const screen = await render(renderMessage('sent'))
+    await screen.getByRole('button', { name: 'report.md', exact: true }).click()
+    expect(mocks.openFile).toHaveBeenCalledWith({
+      attachmentId: 'file',
+      messageId: 'user-1',
+      name: 'report.md'
+    })
+    await screen.getByRole('button', { name: 'photo.png', exact: true }).click()
+    expect(mocks.open).toHaveBeenCalled()
+    expect(mocks.openFile).toHaveBeenCalledTimes(1)
+    await screen.rerender(renderMessage('pending'))
+    expect(screen.container.querySelector('[data-kind="file"] button')).toBeNull()
+    await screen.rerender(renderMessage('sent', 'observer'))
+    expect(screen.container.querySelector('[data-kind="file"] button')).toBeNull()
+    expect(mocks.openFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens actual sent folder references in the file manager and disables observer folder access', async () => {
+    const folder = {
+      schemaVersion: 1,
+      id: 'folder',
+      name: 'Documents',
+      rootPath: '/actual/Documents'
+    }
+    const screen = await render(
+      <ChatMessageItem
+        message={{ ...message([], [folder]), status: 'sent' }}
+        showTokenUsageDetails={false}
+      />
+    )
+    await screen.getByRole('button', { name: 'Documents', exact: true }).click()
+    expect(mocks.openFolder).toHaveBeenCalledWith({ folder })
+    await screen.rerender(
+      <ChatMessageItem
+        message={{ ...message([], [folder]), status: 'sent' }}
+        mode="observer"
+        showTokenUsageDetails={false}
+      />
+    )
+    await expect
+      .element(screen.getByRole('button', { name: 'Documents', exact: true }))
+      .toBeDisabled()
+    expect(mocks.openFolder).toHaveBeenCalledTimes(1)
+  })
+
+  it('anchors applied guidance attachment previews to the containing assistant message', async () => {
+    const attachment = {
+      ...managedAttachment,
+      id: 'file',
+      kind: 'file' as const,
+      name: 'guidance.md',
+      mimeType: 'text/markdown'
+    }
+    const item = {
+      id: 'synthetic-guidance',
+      clientMessageId: 'guidance-input',
+      type: 'user_guidance' as const,
+      content: '',
+      attachments: [attachment],
+      status: 'applied' as const,
+      createdAt: 1
+    }
+    const screen = await render(
+      <AttachmentFileNavigationContext.Provider value={mocks.openFile}>
+        <GuidanceTimelineItemView assistantMessageId="assistant" item={item} mode="interactive" />
+      </AttachmentFileNavigationContext.Provider>
+    )
+    await screen.getByRole('button', { name: 'guidance.md', exact: true }).click()
+    expect(mocks.openFile).toHaveBeenCalledWith({
+      attachmentId: 'file',
+      messageId: 'assistant',
+      name: 'guidance.md'
+    })
+    await screen.rerender(
+      <AttachmentFileNavigationContext.Provider value={mocks.openFile}>
+        <GuidanceTimelineItemView
+          assistantMessageId="assistant"
+          item={{ ...item, status: 'queued' }}
+          mode="interactive"
+        />
+      </AttachmentFileNavigationContext.Provider>
+    )
+    expect(screen.container.querySelector('[data-kind="file"] button')).toBeNull()
+  })
+
   it('renders persisted folder references alongside ordinary user messages', async () => {
     const fileAttachment = {
       ...managedAttachment,

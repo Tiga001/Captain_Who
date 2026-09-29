@@ -24,6 +24,7 @@ pub(super) fn agent_attachment_reference(record: AttachmentRecord) -> AgentAttac
         kind: agent_attachment_kind(&record.kind),
         name: record.original_name,
         mime_type: record.mime_type,
+        pasted_text: record.pasted_text.clone(),
         size_bytes: record.size_bytes,
         read_path,
         storage_rel_path: record.storage_rel_path,
@@ -223,6 +224,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
+                    pasted_text: attachment.pasted_text.clone(),
                     size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at,
@@ -377,6 +379,59 @@ impl StorageService {
         }))
     }
 
+    /// Resolve a sent user file or applied guidance file from its verified message owner.
+    pub fn resolve_attachment_file(
+        &self,
+        attachment_id: &str,
+        message_id: &str,
+    ) -> Result<crate::protocol::ResolvedAttachmentFile, String> {
+        let connection = self.state.connection()?;
+        let record = attachment_repository::get_attachment(&connection, attachment_id)
+            .map_err(storage_error)?
+            .ok_or("附件不存在")?;
+        if record.message_id != message_id || record.kind != "file" {
+            return Err("附件与消息不匹配，或不是普通文件".into());
+        }
+        let sent: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                SELECT 1 FROM messages
+                WHERE id = ?1 AND conversation_id = ?2
+                  AND ((role = 'user' AND status = 'sent') OR EXISTS (
+                    SELECT 1 FROM agent_run_guidance_attachments AS ownership
+                    JOIN agent_run_guidances AS guidance
+                      ON guidance.guidance_id = ownership.guidance_id
+                    WHERE ownership.attachment_id = ?3
+                      AND guidance.assistant_message_id = messages.id
+                      AND guidance.conversation_id = messages.conversation_id
+                      AND guidance.status = 'applied'
+                  ))
+            )",
+                rusqlite::params![message_id, record.conversation_id, attachment_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !sent {
+            return Err("只能预览已发送消息中的文件".into());
+        }
+        drop(connection);
+        let path =
+            safe_existing_attachment_storage_path(&self.attachment_root, &record.storage_rel_path)
+                .ok_or("附件存储路径无效")?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "附件文件不存在")?;
+        if !metadata.is_file() || metadata.len() != record.size_bytes {
+            return Err("附件文件已改变".into());
+        }
+        Ok(crate::protocol::ResolvedAttachmentFile {
+            path: path.to_string_lossy().to_string(),
+            name: record.original_name,
+            mime_type: record.mime_type,
+            size_bytes: record.size_bytes,
+            conversation_id: record.conversation_id,
+            message_id: record.message_id,
+        })
+    }
+
     pub fn save_input_attachments(
         &self,
         conversation_id: &str,
@@ -416,6 +471,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
+                    pasted_text: attachment.pasted_text.clone(),
                     size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at,
@@ -595,6 +651,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
+                    pasted_text: attachment.pasted_text.clone(),
                     size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at: record.created_at,
@@ -760,6 +817,7 @@ impl StorageService {
                     kind: AgentInputAttachmentKind::Image,
                     name: record.original_name,
                     mime_type: Some(reference.mime_type.clone()),
+                    pasted_text: None,
                     size_bytes: bytes.len() as u64,
                     encoding: AgentInputAttachmentEncoding::Base64,
                     data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -938,6 +996,7 @@ impl StorageService {
             kind: attachment.kind,
             name: attachment.original_name,
             mime_type: attachment.mime_type,
+            pasted_text: attachment.pasted_text.clone(),
             size_bytes: attachment.size_bytes,
             preview_data: None,
             preview_mime_type,

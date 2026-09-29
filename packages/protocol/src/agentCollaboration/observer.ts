@@ -1,3 +1,4 @@
+import { parsePastedTextMetadata } from '../attachments'
 import type {
   AgentObserverConversationRequest,
   AgentObserverInputOrigin,
@@ -232,7 +233,8 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
               'sizeBytes',
               'previewData',
               'previewMimeType',
-              'createdAt'
+              'createdAt',
+              ...('pastedText' in attachment ? ['pastedText'] : [])
             ],
             attachmentContext
           )
@@ -242,6 +244,9 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
             name: text(attachment.name, `${attachmentContext}.name`, 4_096),
             mimeType: nullableText(attachment.mimeType, `${attachmentContext}.mimeType`),
             sizeBytes: integer(attachment.sizeBytes, `${attachmentContext}.sizeBytes`),
+            ...(attachment.pastedText === undefined
+              ? {}
+              : { pastedText: parsePastedTextMetadata(attachment.pastedText) }),
             previewData: boundedOptionalString(
               attachment.previewData,
               `${attachmentContext}.previewData`,

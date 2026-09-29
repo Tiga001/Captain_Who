@@ -67,6 +67,8 @@ pub struct AttachmentRecord {
     pub size_bytes: u64,
     pub storage_rel_path: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<crate::protocol::AgentPastedTextMetadata>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -80,6 +82,8 @@ pub struct ChatMessageAttachmentRecord {
     pub preview_data: Option<String>,
     pub preview_mime_type: Option<String>,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pasted_text: Option<crate::protocol::AgentPastedTextMetadata>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -31,7 +31,8 @@ function mapInputAttachmentToMessageAttachment(
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
     encoding: attachment.encoding,
-    data: attachment.data
+    data: attachment.data,
+    ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {})
   }
 }
 

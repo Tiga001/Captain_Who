@@ -62,7 +62,8 @@ function mapObserverMessage(message: AgentObserverConversation['messages'][numbe
       sizeBytes: attachment.sizeBytes,
       previewData: attachment.previewData,
       previewMimeType: attachment.previewMimeType,
-      createdAt: attachment.createdAt
+      createdAt: attachment.createdAt,
+      ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {})
     })),
     agentRun,
     uiState: parseObserverUiState(message.uiStateJson),

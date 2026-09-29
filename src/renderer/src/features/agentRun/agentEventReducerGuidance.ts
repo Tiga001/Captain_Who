@@ -19,6 +19,7 @@ export function guidanceAttachments(
     name: string
     mimeType?: string
     sizeBytes: number
+    pastedText?: ChatMessageAttachment['pastedText']
     encoding?: ChatMessageAttachment['encoding']
     data?: string
     previewData?: string | null
@@ -31,6 +32,7 @@ export function guidanceAttachments(
     name: attachment.name,
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
+    ...(attachment.pastedText ? { pastedText: attachment.pastedText } : {}),
     ...(attachment.kind === 'image' && attachment.encoding
       ? { encoding: attachment.encoding }
       : {}),

@@ -102,3 +102,89 @@ async fn attachment_import_rpc_round_trip_validates_reference_and_preview_shapes
     )["error"]
         .is_object());
 }
+
+#[tokio::test]
+async fn pasted_text_restore_rpc_roundtrips_original_and_rejects_forged_identity() {
+    let temporary = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temporary.path().join("storage.sqlite")).unwrap());
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    let request = |method: &str, params: Value| {
+        let (notifications, _receiver) = crate::transport::outbound_channel();
+        handle_request(
+            &storage,
+            &agent,
+            notifications,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::Number(1),
+                method: method.into(),
+                params: Some(params),
+            },
+        )
+    };
+    let text = "  用户原文🙂\r\n尾部\t";
+    let metadata = json!({"preview":"用户原文🙂", "characterCount":text.encode_utf16().count()});
+    let begin = request(
+        "storage.beginAttachmentImport",
+        json!({
+            "id":"wire-paste", "kind":"file", "name":"pasted-text.txt", "mimeType":"text/plain",
+            "sizeBytes":text.len(), "pastedText":metadata,
+        }),
+    );
+    let import_id = begin["result"]["importId"].as_str().unwrap();
+    assert!(request("storage.appendAttachmentImport", json!({"importId":import_id,"offset":0,"data":base64::engine::general_purpose::STANDARD.encode(text)}))["error"].is_null());
+    let finish = request(
+        "storage.finishAttachmentImport",
+        json!({"importId":import_id}),
+    );
+    let attachment = finish["result"].clone();
+    assert_eq!(attachment["pastedText"], metadata);
+    assert_eq!(
+        request(
+            "storage.loadInputAttachmentText",
+            json!({"attachment":attachment})
+        )["result"],
+        json!({"text":text})
+    );
+    let mut forged = attachment.clone();
+    forged["id"] = json!("another-attachment");
+    assert!(request(
+        "storage.loadInputAttachmentText",
+        json!({"attachment":forged})
+    )["error"]
+        .is_object());
+    assert!(request(
+        "storage.loadInputAttachmentText",
+        json!({"attachment":attachment,"path":"/etc/passwd"})
+    )["error"]
+        .is_object());
+    assert!(request(
+        "storage.resolveAttachmentFile",
+        json!({"attachmentId":"wire-paste","messageId":"missing"})
+    )["error"]
+        .is_object());
+    assert!(request(
+        "storage.resolveAttachmentFile",
+        json!({"attachmentId":"wire-paste","messageId":"missing","path":"/etc/passwd"})
+    )["error"]
+        .is_object());
+    storage.save_conversation(serde_json::from_value(json!({
+        "id":"wire-chat", "projectId":null, "modelId":null, "title":"paste", "createdAt":1, "updatedAt":1,
+        "pinnedAt":null, "archivedAt":null, "unreadAt":null,
+        "messages":[{"id":"wire-message", "role":"user", "content":"", "createdAt":1, "status":"sent", "agentRunJson":null, "uiStateJson":null}]
+    })).unwrap()).unwrap();
+    let input: mycopilot_core::AgentInputAttachment = serde_json::from_value(attachment).unwrap();
+    storage
+        .save_input_attachments("wire-chat", "wire-message", None, &[input], 1)
+        .unwrap();
+    let resolved = request(
+        "storage.resolveAttachmentFile",
+        json!({"attachmentId":"wire-paste", "messageId":"wire-message"}),
+    );
+    assert_eq!(resolved["result"]["name"], "pasted-text.txt");
+    assert_eq!(resolved["result"]["conversationId"], "wire-chat");
+    assert_eq!(
+        std::fs::read_to_string(resolved["result"]["path"].as_str().unwrap()).unwrap(),
+        text
+    );
+}

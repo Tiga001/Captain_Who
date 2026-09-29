@@ -1188,6 +1188,31 @@ describe('agent collaboration protocol', () => {
     ).toThrow(/forged/)
   })
 
+  it('preserves pasted text source metadata in observer messages', () => {
+    const observer = structuredClone(fixture.observer) as {
+      messages: Array<{ attachments: unknown[] }>
+    }
+    const pastedText = { preview: '  source🙂', characterCount: 20_000 }
+    observer.messages[0]!.attachments = [
+      {
+        attachmentId: 'pasted-source',
+        kind: 'file',
+        name: 'pasted-text.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 40_000,
+        previewData: null,
+        previewMimeType: null,
+        createdAt: 1,
+        pastedText
+      }
+    ]
+    expect(
+      parseAgentObserverConversation(observer)?.messages[0]?.attachments[0]?.pastedText
+    ).toEqual(pastedText)
+    ;(observer.messages[0]!.attachments[0] as Record<string, unknown>).pastedText = null
+    expect(() => parseAgentObserverConversation(observer)).toThrow(/pastedText/)
+  })
+
   it('accepts bounded image previews but rejects forged observer actor combinations', () => {
     const observer = structuredClone(fixture.observer) as {
       messages: Array<{ attachments: unknown[]; inputOrigin: Record<string, unknown> }>

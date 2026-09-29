@@ -1199,6 +1199,8 @@ export const ruRUTranslations = {
   'chat.guidanceSubmittingStatus': 'Отправка',
   'chat.guidanceFailed':
     'Не удалось отправить руководство. Отредактируйте его и попробуйте еще раз.',
+  'chat.pastedTextFileName': 'Вставленный текст.txt',
+  'chat.showPastedTextInEditor': 'Показать в текстовом поле',
   'chat.attachmentOperationFailed': 'Не удалось обработать вложение. Попробуйте еще раз.',
   'chat.editMessageFailed': 'Невозможно повторно отправить это сообщение. Попробуйте еще раз.',
   'chat.guidanceInterrupted': 'Предыдущий запуск был прерван. Сообщение восстановлено в очереди.',

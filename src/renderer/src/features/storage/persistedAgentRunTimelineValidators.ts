@@ -17,7 +17,7 @@ function isTimelineAttachment(record: Record<string, unknown>): boolean {
     hasExactKeys(
       record,
       ['id', 'kind', 'name', 'sizeBytes'],
-      ['mimeType', 'encoding', 'data', 'previewData', 'previewMimeType', 'createdAt']
+      ['mimeType', 'encoding', 'data', 'previewData', 'previewMimeType', 'createdAt', 'pastedText']
     ) &&
     isBoundedString(record.id, 1024) &&
     (record.kind === 'file' || record.kind === 'image') &&
@@ -34,7 +34,16 @@ function isTimelineAttachment(record: Record<string, unknown>): boolean {
     (!hasOwn(record, 'previewMimeType') ||
       record.previewMimeType === null ||
       isBoundedString(record.previewMimeType, 1024, true)) &&
-    isOptionalSafeInteger(record, 'createdAt')
+    isOptionalSafeInteger(record, 'createdAt') &&
+    (record.pastedText === undefined ||
+      (record.kind === 'file' &&
+        isRecord(record.pastedText) &&
+        hasExactKeys(record.pastedText, ['preview', 'characterCount']) &&
+        isBoundedString(record.pastedText.preview, 160, true) &&
+        Array.from(record.pastedText.preview).length <= 80 &&
+        isSafeInteger(record.pastedText.characterCount) &&
+        record.pastedText.characterCount > 0 &&
+        record.pastedText.preview.length <= record.pastedText.characterCount))
   )
 }
 
