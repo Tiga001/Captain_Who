@@ -26,7 +26,7 @@ import {
 } from '../chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
 import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
-import { getAgentActionId } from './agentActionUtils'
+import { getAgentActionApprovalStatus, getAgentActionId } from './agentActionUtils'
 import { projectBuiltinCapabilityToolResult } from './builtinCapabilityResultProjection'
 import { getActionToolCall, getActionToolCallId } from './actionProjection'
 import {
@@ -1194,6 +1194,9 @@ export function applyAgentActionExecutionToChatMessage(
   mcpRejectionMessage?: string,
   decidedAction?: AgentProposedAction
 ): ChatMessage {
+  if (message.agentRun?.runId && message.agentRun.runId !== execution.agentOutput.runId) {
+    return message
+  }
   // Action-decision RPCs and Agent notifications travel on independent channels. In particular,
   // an approved command is dispatched on a background worker before the approval RPC response is
   // serialized, so a fast continuation can publish `done` first. A terminal parent Run is a
@@ -1204,8 +1207,18 @@ export function applyAgentActionExecutionToChatMessage(
   // Only the independent human-input continuation may advance that pause; an older approval RPC
   // may settle its own action, but cannot replace this newer Run state or cumulative usage.
   const parentIsWaitingForUserInput = message.agentRun?.status === 'waiting_for_user_input'
+  // The resumed worker can also reach another approval before this decision RPC returns. Its
+  // acknowledgement belongs to the earlier action, so retain the newer pause and cumulative
+  // state while still settling the exact decided action below.
+  const parentIsWaitingForAnotherApproval =
+    message.agentRun?.status === 'waiting_for_approval' &&
+    message.agentRun.approvals.some(
+      (action) =>
+        getAgentActionId(action) !== execution.actionId &&
+        getAgentActionApprovalStatus(action) === 'required'
+    )
   const messageWithAgentOutput =
-    parentIsTerminal || parentIsWaitingForUserInput
+    parentIsTerminal || parentIsWaitingForUserInput || parentIsWaitingForAnotherApproval
       ? message
       : applyAgentOutputToChatMessage(message, execution.agentOutput)
   // The Host keeps the logical Run's guidance inbox available across approval and tool

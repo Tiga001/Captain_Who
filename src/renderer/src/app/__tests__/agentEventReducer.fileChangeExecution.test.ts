@@ -181,6 +181,7 @@ describe('FileChange action execution projection', () => {
       action
     )
 
+    expect(settled.agentRun?.status).toBe('running')
     expect(settled.agentRun?.approvals).toEqual([])
     expect(settled.agentRun?.toolCalls).toContainEqual(
       expect.objectContaining({ id: action.fileChange.id, approvalStatus: 'approved' })
@@ -196,6 +197,170 @@ describe('FileChange action execution projection', () => {
     )
     expect(settled.agentRun?.toolResults).toEqual([notificationToolResult()])
     expect(settled.agentRun?.fileChangePreviews).toEqual([])
+  })
+
+  it('retains a newer approval when the earlier file decision RPC arrives after its continuation', () => {
+    const nextAction: Extract<AgentProposedAction, { type: 'file_change' }> = {
+      type: 'file_change',
+      fileChange: {
+        ...action.fileChange,
+        id: 'file-change-action-next',
+        transactionId: 'file-change-transaction-next',
+        summary: 'Fix the next assertion.'
+      }
+    }
+    const newerUsage = { totalTokens: 30, billableRequestCount: 3 }
+    const events: AgentEvent[] = [
+      { type: 'tool_result', runId: 'run-file-change', result: notificationToolResult() },
+      { type: 'approval_required', runId: 'run-file-change', action: nextAction },
+      {
+        type: 'state',
+        runId: 'run-file-change',
+        state: {
+          status: 'waiting_for_approval',
+          activeRunId: 'run-file-change',
+          lastError: null,
+          updatedAt: 3
+        }
+      },
+      {
+        type: 'done',
+        runId: 'run-file-change',
+        status: 'waiting_for_approval',
+        success: true,
+        proposedActions: [nextAction],
+        usage: newerUsage
+      }
+    ]
+    const waitingForNextAction = events.reduce(applyAgentEventToChatMessage, waitingMessage())
+    const lateExecution = execution({
+      agentOutput: {
+        ...execution().agentOutput,
+        usage: { totalTokens: 10, billableRequestCount: 1 }
+      }
+    })
+    const settled = applyAgentActionExecutionToChatMessage(
+      waitingForNextAction,
+      lateExecution,
+      undefined,
+      action
+    )
+
+    expect(settled.agentRun?.status).toBe('waiting_for_approval')
+    expect(settled.agentRun?.state?.status).toBe('waiting_for_approval')
+    expect(settled.agentRun?.approvals).toEqual([nextAction])
+    expect(settled.agentRun?.usage).toEqual(newerUsage)
+    expect(settled.agentRun?.toolResults).toContainEqual(notificationToolResult())
+    expect(settled.agentRun?.toolCalls).toContainEqual(
+      expect.objectContaining({ id: action.fileChange.id, approvalStatus: 'approved' })
+    )
+    expect(settled.agentRun?.toolCalls).toContainEqual(
+      expect.objectContaining({ id: nextAction.fileChange.id, approvalStatus: 'required' })
+    )
+    expect(
+      projectedSettlement(
+        applyAgentActionExecutionToChatMessage(settled, lateExecution, undefined, action)
+      )
+    ).toEqual(projectedSettlement(settled))
+  })
+
+  it('ignores an approval RPC belonging to a different Run', () => {
+    const current = waitingMessage()
+    current.agentRun!.runId = 'run-other'
+
+    expect(applyAgentActionExecutionToChatMessage(current, execution(), undefined, action)).toBe(
+      current
+    )
+  })
+
+  it.each(['acknowledgement', 'running receipt'])(
+    'preserves file approval B and a settled command when command A returns a late %s',
+    (responseKind) => {
+      const waiting = waitingMessage()
+      const run = waiting.agentRun!
+      run.toolCalls.push({
+        id: 'command-earlier',
+        tool: 'run_command',
+        args: { command: 'python3 binary_tree.py' },
+        approvalStatus: 'required',
+        reason: 'Run the assertions.'
+      })
+      const settledSession = {
+        callId: 'command-earlier',
+        sessionId: 'command-session-earlier',
+        status: 'exited' as const,
+        startedAt: 1,
+        endedAt: 2,
+        exitCode: 0,
+        latestSequence: 3,
+        outputTruncated: false
+      }
+      run.commandSessions = { 'command-earlier': settledSession }
+      const settled = applyAgentActionExecutionToChatMessage(waiting, {
+        actionId: 'command-earlier',
+        actionType: 'command',
+        toolName: 'run_command',
+        status: 'applied',
+        agentOutput: execution().agentOutput,
+        ...(responseKind === 'running receipt'
+          ? {
+              toolResult: {
+                callId: 'command-earlier',
+                tool: 'run_command',
+                ok: true,
+                result: {
+                  status: 'running',
+                  sessionId: settledSession.sessionId,
+                  startedAt: 1,
+                  latestSequence: 0
+                }
+              }
+            }
+          : {})
+      })
+
+      expect(settled.agentRun?.status).toBe('waiting_for_approval')
+      expect(settled.agentRun?.approvals).toEqual([action])
+      expect(settled.agentRun?.commandSessions?.['command-earlier']).toEqual(settledSession)
+      expect(settled.agentRun?.toolCalls).toContainEqual(
+        expect.objectContaining({ id: 'command-earlier', approvalStatus: 'approved' })
+      )
+      const lateStarted = applyAgentEventToChatMessage(settled, {
+        type: 'command_started',
+        runId: 'run-file-change',
+        conversationId: 'conversation-file-change',
+        assistantMessageId: waiting.id,
+        callId: 'command-earlier',
+        sessionId: settledSession.sessionId,
+        startedAt: 1
+      })
+      expect(lateStarted.agentRun?.status).toBe('waiting_for_approval')
+      expect(lateStarted.agentRun?.approvals).toEqual([action])
+      expect(lateStarted.agentRun?.commandSessions?.['command-earlier']).toEqual(settledSession)
+    }
+  )
+
+  it('settles the file action without reopening a completed Run on a late RPC', () => {
+    const completed = applyAgentEventToChatMessage(waitingMessage(), {
+      type: 'done',
+      runId: 'run-file-change',
+      status: 'completed',
+      success: true,
+      content: 'The task is complete.',
+      usage: { totalTokens: 30, billableRequestCount: 3 }
+    })
+    const settled = applyAgentActionExecutionToChatMessage(
+      completed,
+      execution(),
+      undefined,
+      action
+    )
+
+    expect(settled.status).toBe('sent')
+    expect(settled.content).toBe('The task is complete.')
+    expect(settled.agentRun?.status).toBe('completed')
+    expect(settled.agentRun?.usage).toEqual(completed.agentRun?.usage)
+    expect(settled.agentRun?.toolResults).toContainEqual(notificationToolResult())
   })
 
   it('converges idempotently when the ToolResult notification arrives before or after the RPC', () => {

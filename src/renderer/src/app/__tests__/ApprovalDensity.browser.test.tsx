@@ -1,4 +1,8 @@
-import type { AgentProposedAction } from '@mycopilot/protocol'
+import type {
+  AgentActionExecutionOutput,
+  AgentEvent,
+  AgentProposedAction
+} from '@mycopilot/protocol'
 import type { CSSProperties } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
@@ -7,6 +11,10 @@ import { ToastProvider } from '../../components/toast/ToastProvider'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
 import { getFrontendTheme } from '../../config/frontendTheme'
 import type { ChatConversation } from '../../features/chat/chatTypes'
+import {
+  applyAgentActionExecutionToChatMessage,
+  applyAgentEventToChatMessage
+} from '../../features/agentRun/agentEventReducer'
 import { AgentApprovalDialog } from '../../features/chat/components/AgentApprovalDialog'
 import { ConversationSurface } from '../../features/chat/ConversationSurface'
 import { createComposerDraft } from '../chatMessageFactory'
@@ -338,11 +346,13 @@ function conversation(action: AgentProposedAction): ChatConversation {
 
 function Workspace({
   action,
+  currentConversation,
   bottomOpen = true,
   onApprove,
   onReject
 }: {
   action: AgentProposedAction
+  currentConversation?: ChatConversation
   bottomOpen?: boolean
   onApprove: () => Promise<boolean>
   onReject: () => Promise<boolean>
@@ -369,7 +379,7 @@ function Workspace({
           <div className="main-panel__toolbar" data-testid="toolbar" />
           <div className="main-panel__surface">
             <ConversationSurface
-              conversation={conversation(action)}
+              conversation={currentConversation ?? conversation(action)}
               composerDraft={createComposerDraft()}
               editSelectedModelAvailable={false}
               editSelectedModelSupportsImage={false}
@@ -432,6 +442,131 @@ afterEach(async () => {
 })
 
 describe('Approval density in the real conversation surface', () => {
+  it('keeps the next approval actionable after the previous command approval reply arrives late', async () => {
+    const previousAction = commandAction(false)
+    const nextAction = fileChangeAction()
+    nextAction.fileChange.filePath = 'binary_tree.py'
+    nextAction.fileChange.summary = '修正二叉树自测断言'
+    const onApprove = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
+    const onReject = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
+    const initialConversation = conversation(previousAction)
+    const screen = await render(
+      <Workspace
+        action={previousAction}
+        currentConversation={initialConversation}
+        bottomOpen={false}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    )
+    await userEvent.click(requiredElement(screen.container, '[data-choice="primary"]'))
+    expect(onApprove).toHaveBeenCalledExactlyOnceWith(MESSAGE_ID, previousAction, 'singleAction')
+
+    // The command worker continues independently of its approval RPC response. Its failure
+    // reaches the model, which proposes a new edit and pauses for the next approval.
+    const continuationEvents: AgentEvent[] = [
+      {
+        type: 'tool_result',
+        runId: 'run-density',
+        result: {
+          callId: previousAction.command.id,
+          tool: 'run_command',
+          ok: false,
+          result: { code: 'commandFailed', exitCode: 1 },
+          error: 'AssertionError'
+        }
+      },
+      {
+        type: 'file_change_proposed',
+        runId: 'run-density',
+        fileChange: nextAction.fileChange
+      },
+      { type: 'approval_required', runId: 'run-density', action: nextAction },
+      {
+        type: 'state',
+        runId: 'run-density',
+        state: {
+          status: 'waiting_for_approval',
+          activeRunId: 'run-density',
+          lastError: null,
+          updatedAt: 3
+        }
+      },
+      {
+        type: 'done',
+        runId: 'run-density',
+        status: 'waiting_for_approval',
+        success: true,
+        proposedActions: [nextAction]
+      }
+    ]
+    const waitingMessage = continuationEvents.reduce(
+      applyAgentEventToChatMessage,
+      initialConversation.messages[1]
+    )
+    const waitingConversation = {
+      ...initialConversation,
+      messages: [initialConversation.messages[0], waitingMessage]
+    }
+    await screen.rerender(
+      <Workspace
+        action={nextAction}
+        currentConversation={waitingConversation}
+        bottomOpen={false}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    )
+    expect(requiredElement(screen.container, '.agent-approval-dialog__request').textContent).toBe(
+      nextAction.fileChange.summary
+    )
+
+    const lateExecution: AgentActionExecutionOutput = {
+      actionId: previousAction.command.id,
+      actionType: 'command',
+      toolName: 'run_command',
+      status: 'approved',
+      agentOutput: {
+        content: '',
+        status: 'running',
+        runId: 'run-density',
+        events: [],
+        toolDefinitions: [],
+        proposedActions: []
+      }
+    }
+    const afterLateReply = applyAgentActionExecutionToChatMessage(
+      waitingMessage,
+      lateExecution,
+      undefined,
+      previousAction
+    )
+    await screen.rerender(
+      <Workspace
+        action={nextAction}
+        currentConversation={{
+          ...waitingConversation,
+          messages: [initialConversation.messages[0], afterLateReply]
+        }}
+        bottomOpen={false}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    )
+
+    const dialog = requiredElement(screen.container, '.agent-approval-dialog')
+    await expect.element(dialog).toBeVisible()
+    expect(requiredElement(dialog, '.agent-approval-dialog__command').textContent).toBe(
+      'binary_tree.py'
+    )
+    const composer = requiredElement(screen.container, '.conversation-composer-slot')
+    expect(composer.hidden).toBe(true)
+    await expect.element(composer).not.toBeVisible()
+    await userEvent.click(requiredElement(dialog, '[data-choice="primary"]'))
+    expect(onApprove).toHaveBeenNthCalledWith(2, MESSAGE_ID, nextAction, 'singleAction')
+    expect(onReject).not.toHaveBeenCalled()
+  })
+
   it.each(cases)(
     'keeps %s approvals reachable in a 320px chat column above a half-height terminal',
     async (_name, factory) => {
