@@ -578,5 +578,7 @@ fn status_name(status: &InputStatus) -> &'static str {
 
 mod delivery;
 pub use delivery::*;
+mod awareness;
+pub use awareness::*;
 #[cfg(test)]
 mod tests;

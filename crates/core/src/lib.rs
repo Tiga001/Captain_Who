@@ -41,6 +41,7 @@ mod tools;
 mod turn_diff;
 mod usage;
 pub mod web_search;
+pub mod workflow_awareness;
 mod workflow_runtime;
 pub mod workspace;
 pub mod workspace_instructions;

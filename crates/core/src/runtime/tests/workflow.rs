@@ -17,6 +17,30 @@ impl crate::WorkflowRuntimeHost for WorkflowHost {
             "inputRule":"individual queue","outputRule":"No downstream exits","enabled":true
         })).unwrap()))
     }
+    fn state(&self, _: crate::workflow_awareness::StateQuery) -> AgentResult<Value> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Err(AgentError::new("workflow disabled"));
+        }
+        Ok(
+            json!({"available":true,"instanceId":"workflow-1","runtime":{"nodes":[{"nodeId":"review","state":"running"}]}}),
+        )
+    }
+    fn mailbox(&self, _: crate::workflow_awareness::MailboxQuery) -> AgentResult<Value> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Err(AgentError::new("workflow disabled"));
+        }
+        Ok(
+            json!({"available":true,"instanceId":"workflow-1","nodeId":"review","messages":[],"nextCursor":null}),
+        )
+    }
+    fn awareness(&self) -> AgentResult<Value> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Err(AgentError::new("workflow disabled"));
+        }
+        Ok(
+            json!({"available":true,"instanceId":"workflow-1","executionVersion":"epoch-1","currentNodeId":"review","nodes":[{"nodeId":"review","state":"running"}]}),
+        )
+    }
     fn send(
         &self,
         _: crate::WorkflowSendInvocation,
@@ -111,8 +135,14 @@ async fn workflow_wakes_empty_chat_without_human_message_and_revokes_tool_on_nex
             .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>()
     };
-    assert!(tool_names(&first).contains(&"workflow_send".into()));
-    assert!(!tool_names(&second).contains(&"workflow_send".into()));
+    for name in [
+        "workflow_send",
+        "workflow_get_state",
+        "workflow_get_mailbox",
+    ] {
+        assert!(tool_names(&first).contains(&name.into()));
+        assert!(!tool_names(&second).contains(&name.into()));
+    }
     for request in [&first, &second] {
         assert_eq!(
             request["messages"]
@@ -153,12 +183,23 @@ fn workflow_preview_never_grants_capability_to_children_automation_or_unbound_ro
     let services = AgentRuntimeHostServices::new().with_workflow_runtime(host);
     let root = workflow_input("https://example.test/v1/chat/completions".into());
     let exposes = |input: &AgentChatInput, services: &AgentRuntimeHostServices| {
-        prepare_context_window_tool_projection(input, services, false)
+        let projection = prepare_context_window_tool_projection(input, services, false)
             .unwrap()
-            .tool_set_checkpoint()
+            .tool_set_checkpoint();
+        let send = projection
             .exposed_tool_names
             .iter()
-            .any(|name| name == "workflow_send")
+            .any(|name| name == "workflow_send");
+        for tool in ["workflow_get_state", "workflow_get_mailbox"] {
+            assert_eq!(
+                projection
+                    .exposed_tool_names
+                    .iter()
+                    .any(|name| name == tool),
+                send
+            );
+        }
+        send
     };
     assert!(exposes(&root, &services));
     assert!(!exposes(&root, &AgentRuntimeHostServices::new()));
@@ -191,6 +232,72 @@ fn workflow_preview_never_grants_capability_to_children_automation_or_unbound_ro
     );
     automation.prompt_preferences = Some(preferences);
     assert!(!exposes(&automation, &services));
+}
+
+#[tokio::test]
+async fn workflow_read_tools_return_scoped_results_without_replaying_input() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let input = workflow_input(format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    ));
+    let host = Arc::new(WorkflowHost {
+        enabled: AtomicBool::new(true),
+        deliveries: AtomicUsize::new(0),
+    });
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let first = read_runtime_test_json_request(&mut stream).await;
+        write_runtime_test_json_response(&mut stream, json!({"choices":[{"message":{"role":"assistant","tool_calls":[
+            {"id":"read-state","type":"function","function":{"name":"workflow_get_state","arguments":"{\"view\":\"all\"}"}},
+            {"id":"read-mailbox","type":"function","function":{"name":"workflow_get_mailbox","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]})).await;
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let second = read_runtime_test_json_request(&mut stream).await;
+        write_runtime_test_json_response(&mut stream, json!({"choices":[{"message":{"role":"assistant","content":"Workflow checked"},"finish_reason":"stop"}]})).await;
+        (first, second)
+    });
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("workflow-run".into()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_workflow_runtime(host.clone())
+                    .with_workflow_inbox(host),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.content, "Workflow checked");
+    let (first, second) = server.await.unwrap();
+    assert!(first["messages"].to_string().contains("awareness"));
+    let results = second["messages"].as_array().unwrap();
+    let result = |tool: &str| {
+        let call = results
+            .iter()
+            .filter_map(|message| message["tool_calls"].as_array())
+            .flatten()
+            .find(|call| call["function"]["name"] == tool)
+            .expect("the tool call is part of the next model request");
+        let id = call["id"].as_str().unwrap();
+        let message = results
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+            .expect("the read tool result is part of the next model request");
+        message["content"].to_string()
+    };
+    assert!(result("workflow_get_state").contains("running"));
+    assert!(result("workflow_get_mailbox").contains("nextCursor"));
+    assert_eq!(
+        second["messages"]
+            .to_string()
+            .matches("SENTINEL_WORKFLOW_BODY")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

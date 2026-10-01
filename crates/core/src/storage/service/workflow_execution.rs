@@ -3,6 +3,35 @@ use crate::storage::workflow_execution_repository as repository;
 use crate::workflow_execution::*;
 
 impl StorageService {
+    pub fn workflow_execution_awareness_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        repository::awareness_for_conversation(&*self.state.connection()?, conversation_id)
+    }
+    pub fn workflow_execution_state_for_run(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        query: &crate::workflow_awareness::StateQuery,
+    ) -> Result<serde_json::Value, String> {
+        repository::state_for_run(&*self.state.connection()?, conversation_id, run_id, query)
+    }
+    pub fn workflow_execution_mailbox_for_run(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        query: &crate::workflow_awareness::MailboxQuery,
+    ) -> Result<serde_json::Value, String> {
+        repository::mailbox_for_run(&*self.state.connection()?, conversation_id, run_id, query)
+    }
+    pub fn workflow_execution_awareness_for_run(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        repository::awareness_for_run(&*self.state.connection()?, conversation_id, run_id)
+    }
     pub fn workflow_execution_node_messages(
         &self,
         instance_id: &str,

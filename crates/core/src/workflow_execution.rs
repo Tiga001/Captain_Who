@@ -268,11 +268,12 @@ pub fn assemble_message(snapshot: &ConversationSnapshot, messages: &[SourceMessa
         .enumerate()
         .map(|(i, m)| {
             format!(
-                "### Message {} — {} / {} / flow {}\n{}",
+                "### Message {} — {} / {} / flow {}\nMessage ID: {}\n{}",
                 i + 1,
                 m.source_node_name,
                 m.source_conversation_title,
                 m.flow_id,
+                m.id,
                 m.content
             )
         })

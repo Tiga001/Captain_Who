@@ -5,6 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::unbounded_channel;
 
+mod awareness;
+
 async fn request_body(stream: &mut tokio::net::TcpStream) -> Value {
     let mut bytes = Vec::new();
     loop {
@@ -188,6 +190,13 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     assert!(samples
         .iter()
         .any(|sample| sample.to_string().contains("workflow_send")));
+    for tool in ["workflow_get_state", "workflow_get_mailbox"] {
+        assert!(samples.iter().any(|sample| sample["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|definition| definition["function"]["name"] == tool)));
+    }
     let recipient = samples
         .iter()
         .find(|sample| {
@@ -381,6 +390,13 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
     while let Ok(request) = requests.try_recv() {
         samples.push(request);
     }
+    assert!(
+        samples.iter().any(|sample| {
+            let raw = sample.to_string();
+            raw.contains("Source trigger 86213") && raw.contains("waiting_interaction")
+        }),
+        "workflow awareness must include another root's pending human interaction"
+    );
     let incoming = samples
         .iter()
         .filter(|sample| {

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-01
 ---
 
 # 工作流定义与画布编辑
@@ -143,7 +143,21 @@ last_verified: 2026-09-28
 
 ## 工作流运行与上下文
 
-`workflow.execution` RuntimeExtension 使用同一次采样取得的后端快照，同时提供工具可用性、请求级能力说明和 Conversation World State section。section 包含工作流名称、公共背景、节点接收/任务/交付说明、前后节点、出口 ID 和逻辑门规则。身份在 Run 内冻结，后端实时检查实例是否仍开启及模板/绑定是否仍匹配；停用后的下一次采样移除发送能力并通过已有 CWS diff 机制更新上下文。checkpoint 不保存可恢复的授权，只恢复扩展结构。成员仍是独立根对话，子 Agent不继承工作流工具。不会自动插入「待命」用户消息。
+`workflow.execution` RuntimeExtension 使用同一次采样取得的后端快照，同时提供工具可用性、请求级能力说明和 Conversation World State section。section 的 `workflow` 包含工作流名称、公共背景、节点接收/任务/交付说明、前后节点、出口 ID 和逻辑门规则；`awareness` 保存单独读取的实时概览。身份在 Run 准入时冻结，后端实时检查实例是否仍开启及模板/绑定是否仍匹配。`workflow_send`、`workflow_get_state`、`workflow_get_mailbox` 共用动态能力开关：只有已准入开启工作流的独立根对话 Run 才会挂载，停用或身份失效后的下一次采样一起移除，并通过已有 CWS diff 机制更新上下文。Run 开始后新增成员资格不会追授工具，子 Agent 和仅继承历史的分叉不获得原工作流身份。checkpoint 不保存可恢复的授权，只恢复扩展结构；每次工具调用仍由 Host 校验当前执行段和冻结身份。不会自动插入「待命」用户消息。
+
+`awareness` 在每次模型采样前刷新，包含自己的当前输入 ID、待处理批次数、待组批消息数和缺少的入流，以及节点的简短状态和最近三条发件进度。摘要最多列 16 个节点，优先自己和直接上下游；每个节点最多展示 8 个当前输入 ID、16 个缺失入流 ID，同时提供总数和省略标记，完整情况通过只读工具查询。活动和待处理提示读取真实根 Turn、审批和 Human Interaction 状态，因此用户手动启动、没有工作流输入的轮次也可以被观察到。冻结身份不冻结运行状态；摘要不包含消息正文、完整拓扑或每次刷新的时间戳，同一状态重复读取保持相同内容，避免制造无意义 CWS diff。更新仅随正常采样进入上下文，不单独唤醒、恢复或消费任何工作流任务；工具说明要求按需查询，不轮询等待下游。
+
+### 模型可查询的拓扑与收发箱
+
+`workflow_get_state({ view?, nodeId? })` 查看 Host 绑定的当前工作流名称、简介、公共背景，`view` 为 `all`（默认）、`topology` 或 `runtime`。拓扑按实际定义包含入口（若存在）、智能体、用户、输入门、输出门及带稳定 ID 的有向连线，保留分支、汇合与回路；节点给出职责、绑定、上下游和穿过逻辑门后的交付关系，输入门给出逐条/批次及排队/插入策略，输出门给出完整选择约束。可选 `nodeId` 聚焦同一工作流中的节点，不能切换实例。运行部分给出组批到达与缺失入流、队列、当前输入和实际 Run 状态，不包含消息正文或其他对话历史。工具返回的是投递和执行事实，不证明业务任务完成。
+
+`workflow_get_mailbox({ direction?, cursor?, limit?, messageId?, inputId? })` 从现有持久消息、输入和 Trace 构建自己的收件箱或发件箱，没有第二套消息队列。`direction` 默认为 `inbox`，也可为 `outbox`；按消息序号倒序读取，默认每页 20 条、最多 50 条，继续查询使用返回的 `nextCursor`，也可按 `messageId` 或 `inputId` 过滤。每次结果最多包含 256,000 字节正文；超过预算的记录仍保留元数据并标明 `response_body_budget`，可按该 `messageId` 单独查询完整正文，不静默截断原文。实例、节点与对话身份只由 Host 提供，模型不能通过参数指定别人的邮箱；查询 ID 也必须属于自己的对应收发方向和当前工作流执行版本。
+
+全局拓扑查询将节点职责文本预览限制为 512 字符、简介和背景预览限制为 4,096 字符，使用 `truncatedFields` 与 `detailsQueryHint` 明确省略字段，指定 `nodeId` 可读取完整内容。两个只读工具在共享模型结果 Gate 中按可信工具名称保留上述语义结果，不再经过普通工具 10K 裁剪，防止丢弃邮箱条目后仍沿旧 cursor 跳过、或丢失图引用。原有整轮上下文测量、压缩和容量检查继续生效；预提交、历史恢复及发送前检查复用同一政策，豁免要求匹配真实 Tool Call 的名称与 ID，正文不能伪造身份。
+
+邮箱记录分别提供消息 ID、来源节点、目标节点、入流、所属输入、投递状态和关联 Run 的实际状态。发件箱可查看自己发送的正文；收件箱仅在既有调度器已将完整输入持久应用到接收对话的模型输入、存在相应投递 Trace 证明之后开放正文。仍在凑批、排队、暂停或尚未证明送达的消息只显示元数据及隐藏原因，不能借只读查询绕过输入门或忙碌策略。邮箱正文仍是协作资料，不是用户指令或权限授予；读取不确认、领取、重放消息，不清除 Stop 屏障，也不触发调度。
+
+每条原始消息都有稳定 `messageId`；`workflow_send` 的每个出口结果返回对应编号，同时返回本次形成的 `inputIds`。多条消息组成一个批次时各自保留消息 ID，并关联同一个输入 ID；一个 Run 可以处理多个输入，不能把 Run ID 当作批次 ID。相同 Run/tool call 重试返回原有编号，避免重复投递。`deliveryStatus` 与 `runStatus` 分开：消息被应用不等于处理成功，后续轮次可能被停止或失败；本次没有新增业务完成回执或自动回信通路。
 
 节点先根据职责与实际进展判断是否需要向下游交付；没有需要交接的新信息、成果或待处理事项，且没有尚未完成的明确交付要求时，可以不调用 `workflow_send` 并结束本次处理。避免为了推进图或凑齐批次发送空洞、重复或占位消息。明确要求的交付仍须完成，批次门缺少入流时继续等待；批次由后端组装，收件节点无需再次等待。
 
@@ -172,6 +186,7 @@ Core Server 后台推进完整输入，不依赖 Renderer 或看板打开。queu
 代码与测试真源：
 
 - 执行与投递：[workflow_execution.rs](../../crates/core/src/workflow_execution.rs)、[workflow_execution_repository.rs](../../crates/core/src/storage/workflow_execution_repository.rs)、[workflow extension](../../crates/core/src/runtime/extensions/workflow.rs)、[Host coordinator](../../crates/core-server/src/application/agent/workflow_execution.rs)、[runtime protocol](../../packages/protocol/src/workflowRuntime.ts)。
+- 模型状态与邮箱查询：[查询契约](../../crates/core/src/workflow_awareness.rs)、[只读存储投影](../../crates/core/src/storage/workflow_execution_repository/awareness.rs)、[Host 实时状态补充](../../crates/core-server/src/application/agent/workflow_execution/awareness.rs)。
 - 协议：[workflows.ts](../../packages/protocol/src/workflows.ts)、[workflows.test.ts](../../packages/protocol/src/workflows.test.ts)、[跨语言 fixture](../../packages/protocol/fixtures/workflow-definition-v1.json)。
 - 领域校验与管理：[workflow.rs](../../crates/core/src/workflow.rs)、[workflow_management.rs](../../crates/core/src/workflow_management.rs)、[workflow_repository](../../crates/core/src/storage/workflow_repository/)、[workflow_rpc.rs](../../crates/core-server/src/transport/workflow_rpc.rs)。
 - 模板与绑定：[WorkflowSettingsSection.tsx](../../src/renderer/src/features/workflows/WorkflowSettingsSection.tsx)、[WorkflowsPage.tsx](../../src/renderer/src/features/workflows/project/WorkflowsPage.tsx)、[useWorkflowWorkspace.ts](../../src/renderer/src/app/useWorkflowWorkspace.ts)。
@@ -185,6 +200,8 @@ Core Server 后台推进完整输入，不依赖 Renderer 或看板打开。queu
 - [ ] 草稿确认前不改对话；确认后保留输入、附件、队列与未变化节点的用户配置。
 - [ ] 开启颜色唯一、绑定唯一、归档保护与模板失效关闭在事务和存储边界仍成立。
 - [ ] 活动校准、只读导航、未读/待处理提示与 reduced-motion 有覆盖；没有把动画解释为消息路由。
+- [ ] 模型工具按冻结 Run 身份与当前开启状态动态挂载；只读查询不越过实例/邮箱边界，不提前暴露未交付正文，不唤醒或消费任务。
+- [ ] 动态摘要使用真实活动和注意事项，无变化时保持稳定；消息应用、轮次结束与业务完成没有混为一谈。
 
 ### Node observability
 

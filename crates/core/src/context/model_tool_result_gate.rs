@@ -3,7 +3,8 @@
 //! Tool-owned projections decide semantics. This module only applies the product-wide model
 //! budget after that projection, while keeping the result valid JSON and measuring the complete
 //! [`LlmMessage`] that will be sent to the provider. Agent collaboration carries complete messages;
-//! its results are measured here but governed by the whole-request context budget instead.
+//! workflow reads preserve tool-owned pages and complete graph references. These results are
+//! measured here but governed by their source bounds and whole-request context budget instead.
 
 use super::measurement::ContextTextBudget;
 use crate::llm::LlmMessage;
@@ -105,6 +106,11 @@ impl ModelToolResultGate {
     /// The same policy applies to live results, precommitted receipts and provider-bound replay.
     pub(crate) fn preserves_full_result(tool: &str) -> bool {
         crate::AGENT_COLLABORATION_TOOL_NAMES.contains(&tool)
+            // The mailbox owns body visibility, paging and per-response source limits. Generic
+            // array/string compaction could discard messages while retaining a cursor past them.
+            // State queries likewise own bounded previews and node-focused detail; dropping graph
+            // nodes/edges would break references without creating a valid continuation route.
+            || matches!(tool, "workflow_get_mailbox" | "workflow_get_state")
     }
 
     pub(crate) fn new(budget: ContextTextBudget) -> Self {
@@ -1169,15 +1175,78 @@ mod tests {
     }
 
     #[test]
+    fn workflow_mailbox_preserves_full_unicode_bodies_and_page_cursor() {
+        let gate = gate();
+        let payload = json!({
+            "instanceId": "workflow-1", "direction": "inbox",
+            "messages": (0..12).map(|index| json!({
+                "sequence": 200-index, "messageId": format!("message-{index}"),
+                "bodyAvailable": true, "deliveryStatus": "applied",
+                "content": format!("{}消息尾部-{index}", "完整协作内容🧪\n".repeat(250))
+            })).collect::<Vec<_>>(),
+            "nextCursor": 189
+        });
+        let mut result = successful_result(payload.clone());
+        result.tool = "workflow_get_mailbox".into();
+        let output = gate.project("mailbox-call", false, &result, None);
+
+        assert!(output.estimated_tokens > MODEL_TOOL_RESULT_MAX_TOKENS);
+        assert!(!output.truncated);
+        assert!(!gate.would_truncate("mailbox-call", false, &result));
+        let projected: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(projected, payload);
+        assert_eq!(projected["nextCursor"], 189);
+        assert!(projected["messages"][11]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("消息尾部-11"));
+    }
+
+    #[test]
+    fn workflow_state_preserves_full_topology_and_last_edge_references() {
+        let gate = gate();
+        let payload = json!({
+            "instanceId": "workflow-1",
+            "topology": {
+                "nodes": (0..128).map(|index| json!({
+                    "nodeId": format!("node-{index}"),
+                    "kind": "agent", "task": "保留节点职责与完整交付关系🧪".repeat(40)
+                })).collect::<Vec<_>>(),
+                "flows": (0..512).map(|index| json!({
+                    "flowId": format!("flow-{index}"),
+                    "source": {"kind":"node", "nodeId": format!("node-{}", index%128)},
+                    "target": {"kind":"node", "nodeId": format!("node-{}", (index+1)%128)}
+                })).collect::<Vec<_>>()
+            }
+        });
+        let mut result = successful_result(payload.clone());
+        result.tool = "workflow_get_state".into();
+        let output = gate.project("state-call", false, &result, None);
+
+        assert!(output.estimated_tokens > MODEL_TOOL_RESULT_MAX_TOKENS);
+        assert!(!output.truncated);
+        assert!(!gate.would_truncate("state-call", false, &result));
+        let projected: Value = serde_json::from_str(&output.content).unwrap();
+        assert_eq!(projected, payload);
+        assert_eq!(
+            projected["topology"]["flows"][511]["source"]["nodeId"],
+            "node-127"
+        );
+        assert_eq!(projected["topology"]["nodes"][127]["nodeId"], "node-127");
+    }
+
+    #[test]
     fn ordinary_tool_body_cannot_impersonate_a_collaboration_receipt() {
         let gate = gate();
-        let result = successful_result(json!({
-            "tool": "wait_agent", "content": "调研全文".repeat(20_000)
-        }));
-        assert!(!ModelToolResultGate::preserves_full_result(&result.tool));
-        let output = gate.project("ordinary-call", false, &result, None);
-        assert!(output.truncated);
-        assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
+        for claimed_tool in ["wait_agent", "workflow_get_mailbox", "workflow_get_state"] {
+            let result = successful_result(json!({
+                "tool": claimed_tool, "content": "调研全文".repeat(20_000)
+            }));
+            assert!(!ModelToolResultGate::preserves_full_result(&result.tool));
+            let output = gate.project("ordinary-call", false, &result, None);
+            assert!(output.truncated);
+            assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
+        }
     }
 
     #[test]
@@ -1199,6 +1268,10 @@ mod tests {
         for (tool, result_id, admitted) in [
             ("wait_agent", "receipt-call", true),
             ("wait_agent", "different-call", false),
+            ("workflow_get_mailbox", "receipt-call", true),
+            ("workflow_get_mailbox", "different-call", false),
+            ("workflow_get_state", "receipt-call", true),
+            ("workflow_get_state", "different-call", false),
             ("read_file", "receipt-call", false),
         ] {
             let frame = ContextFrame::new(vec![

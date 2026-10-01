@@ -3,6 +3,7 @@
 //! collaborator text at a safe sampling boundary. It never turns that text into human authority.
 use super::*;
 use mycopilot_core::storage::models::ChatMessageRecord;
+use mycopilot_core::workflow_awareness::{MailboxQuery, StateQuery};
 use mycopilot_core::workflow_execution::{
     ConversationSnapshot, Input, RuntimeSnapshot, SendReceipt, SendRequest,
 };
@@ -10,6 +11,8 @@ use mycopilot_core::{
     AgentWorkflowDelivery, AgentWorkflowInbox, WorkflowRuntimeHost, WorkflowSendInvocation,
 };
 use serde_json::json;
+
+mod awareness;
 
 pub(super) struct WorkflowTurnOwner<'a> {
     pub run_id: &'a str,
@@ -67,6 +70,37 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             .storage
             .workflow_execution_snapshot_for_run(&self.conversation_id, &self.run_id)
             .map_err(AgentError::new)
+    }
+    fn state(&self, query: StateQuery) -> AgentResult<Value> {
+        self.validate_owner()?;
+        let mut state = self
+            .service
+            .storage
+            .workflow_execution_state_for_run(&self.conversation_id, &self.run_id, &query)
+            .map_err(AgentError::new)?;
+        self.service
+            .enrich_workflow_awareness(&mut state)
+            .map_err(AgentError::new)?;
+        Ok(state)
+    }
+    fn mailbox(&self, query: MailboxQuery) -> AgentResult<Value> {
+        self.validate_owner()?;
+        self.service
+            .storage
+            .workflow_execution_mailbox_for_run(&self.conversation_id, &self.run_id, &query)
+            .map_err(AgentError::new)
+    }
+    fn awareness(&self) -> AgentResult<Value> {
+        self.validate_owner()?;
+        let mut awareness = self
+            .service
+            .storage
+            .workflow_execution_awareness_for_run(&self.conversation_id, &self.run_id)
+            .map_err(AgentError::new)?;
+        self.service
+            .enrich_workflow_awareness(&mut awareness)
+            .map_err(AgentError::new)?;
+        Ok(awareness)
     }
     fn send(&self, invocation: WorkflowSendInvocation) -> AgentResult<SendReceipt> {
         if invocation.conversation_id != self.conversation_id
@@ -633,7 +667,7 @@ impl AgentService {
 }
 
 struct WorkflowPreview {
-    storage: Arc<StorageService>,
+    service: AgentService,
     conversation_id: String,
     run_id: Option<String>,
 }
@@ -641,13 +675,42 @@ impl WorkflowRuntimeHost for WorkflowPreview {
     fn snapshot(&self) -> AgentResult<Option<ConversationSnapshot>> {
         match &self.run_id {
             Some(run_id) => self
+                .service
                 .storage
                 .workflow_execution_snapshot_for_run(&self.conversation_id, run_id),
             None => self
+                .service
                 .storage
                 .workflow_execution_snapshot(&self.conversation_id),
         }
         .map_err(AgentError::new)
+    }
+    fn state(&self, _query: StateQuery) -> AgentResult<Value> {
+        Err(AgentError::new(
+            "A workflow preview cannot execute model tools.",
+        ))
+    }
+    fn mailbox(&self, _query: MailboxQuery) -> AgentResult<Value> {
+        Err(AgentError::new(
+            "A workflow preview cannot execute model tools.",
+        ))
+    }
+    fn awareness(&self) -> AgentResult<Value> {
+        let mut awareness = match &self.run_id {
+            Some(run_id) => self
+                .service
+                .storage
+                .workflow_execution_awareness_for_run(&self.conversation_id, run_id),
+            None => self
+                .service
+                .storage
+                .workflow_execution_awareness_for_conversation(&self.conversation_id),
+        }
+        .map_err(AgentError::new)?;
+        self.service
+            .enrich_workflow_awareness(&mut awareness)
+            .map_err(AgentError::new)?;
+        Ok(awareness)
     }
     fn send(&self, _invocation: WorkflowSendInvocation) -> AgentResult<SendReceipt> {
         Err(AgentError::new(
@@ -662,7 +725,7 @@ impl AgentService {
         run_id: Option<&str>,
     ) -> Arc<dyn WorkflowRuntimeHost> {
         Arc::new(WorkflowPreview {
-            storage: self.storage.clone(),
+            service: self.clone(),
             conversation_id: conversation_id.into(),
             run_id: run_id.map(str::to_string),
         })
