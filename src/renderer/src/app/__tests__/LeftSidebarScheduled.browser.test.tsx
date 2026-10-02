@@ -10,7 +10,11 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     language: 'en-US',
     t: (key: string) =>
-      key === 'sidebar.scheduled' ? 'Scheduled' : key === 'sidebar.workflows' ? 'Workflows' : key
+      key === 'sidebar.scheduled'
+        ? 'Scheduled'
+        : key === 'sidebar.workflows'
+          ? 'Organizations'
+          : key
   })
 }))
 
@@ -134,10 +138,10 @@ describe('LeftSidebar scheduled navigation', () => {
     expect(onOpenScheduled).toHaveBeenCalledOnce()
   })
 
-  it('opens global workflows below Scheduled and makes conversations draggable for binding', async () => {
+  it('opens global organizations below Scheduled and makes conversations draggable for binding', async () => {
     const onOpenWorkflows = vi.fn()
     const screen = await renderSidebar({ onOpenWorkflows, workflowsSelected: true })
-    const workflows = screen.getByRole('button', { name: 'Workflows', exact: true })
+    const workflows = screen.getByRole('button', { name: 'Organizations', exact: true })
     const scheduled = screen.getByRole('button', { name: 'Scheduled', exact: true })
     await expect.element(workflows).toHaveAttribute('aria-current', 'page')
     expect(workflows.element().getBoundingClientRect().top).toBeGreaterThanOrEqual(

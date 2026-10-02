@@ -343,11 +343,11 @@ describe('MainPanelToolbar project card', () => {
     ]
   }
 
-  it('opens the workflow menu from its colored icon before the project folder', async () => {
+  it('opens the organization menu from its colored icon before the project folder', async () => {
     const onOpen = vi.fn()
     const onOpenConversation = vi.fn()
     const workflowProps = {
-      name: 'Review workflow',
+      name: 'Review organization',
       color: '#e472a0',
       members: [
         { nodeId: 'planner', name: 'Planner', conversationId: 'conversation-planner' },
@@ -377,17 +377,17 @@ describe('MainPanelToolbar project card', () => {
       </div>
     )
 
-    const workflow = screen.getByRole('button', { name: 'Review workflow' })
+    const workflow = screen.getByRole('button', { name: 'Review organization' })
     const folder = screen.getByRole('button', { name: 'Open project details' })
     const workflowBox = workflow.element().getBoundingClientRect()
     expect(workflowBox.right).toBeLessThanOrEqual(folder.element().getBoundingClientRect().left)
     expect(workflowBox.height).toBe(folder.element().getBoundingClientRect().height)
     expect(getComputedStyle(workflow.element()).color).toBe('rgb(228, 114, 160)')
     await userEvent.hover(workflow)
-    await expect.element(screen.getByRole('tooltip', { name: 'Review workflow' })).toBeVisible()
+    await expect.element(screen.getByRole('tooltip', { name: 'Review organization' })).toBeVisible()
 
     await workflow.click()
-    const menu = screen.getByRole('menu', { name: 'Review workflow' })
+    const menu = screen.getByRole('menu', { name: 'Review organization' })
     await expect.element(menu).toBeVisible()
     await expect.element(screen.getByRole('tooltip')).not.toBeInTheDocument()
     expect(onOpen).not.toHaveBeenCalled()
@@ -395,7 +395,14 @@ describe('MainPanelToolbar project card', () => {
       .getByRole('menuitem')
       .elements()
       .map((item) => item.textContent)
-    expect(items).toEqual(['View workflow board', 'Members'])
+    expect(items).toEqual(['View organization board', 'Members'])
+    expect(
+      menu
+        .getByRole('menuitem', { name: 'Members' })
+        .element()
+        .querySelector('svg.lucide-bot-group')
+    ).not.toBeNull()
+    expect(menu.element().querySelector('svg.lucide-users')).toBeNull()
 
     await menu.getByRole('menuitem', { name: 'Members' }).click()
     const upstream = screen.getByRole('menu', { name: 'Members' })
@@ -418,7 +425,7 @@ describe('MainPanelToolbar project card', () => {
     await expect.element(menu).not.toBeInTheDocument()
 
     await workflow.click()
-    await screen.getByRole('menuitem', { name: 'View workflow board' }).click()
+    await screen.getByRole('menuitem', { name: 'View organization board' }).click()
     expect(onOpen).toHaveBeenCalledOnce()
     await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
 

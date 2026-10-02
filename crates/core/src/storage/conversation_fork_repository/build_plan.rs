@@ -150,7 +150,43 @@ fn build_single_conversation_fork_plan_at_point(
     if message_limit < cutoff || message_limit >= source.messages.len() {
         return Err("成员对话的可见消息边界无效。".to_string().into());
     }
-    let source_messages = &source.messages[..=message_limit];
+    // A letter accepted during a turn has a top-level storage row after its assistant, but is
+    // part of that assistant's trace. Carry only those proven attachments across an assistant
+    // cutoff; later ordinary user messages and unconsumed mail remain outside the fork.
+    let workflow_origins =
+        crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+            connection, &source.id,
+        )
+        .map_err(ConversationForkError::Other)?;
+    let mut attached_workflow_messages = HashSet::new();
+    if !workflow_origins.is_empty() {
+        for message in &source.messages[..=message_limit] {
+            if message.role != "assistant" {
+                continue;
+            }
+            if let Some(trace) = source_snapshot.trace(connection, &message.id)? {
+                attached_workflow_messages.extend(
+                    crate::storage::workflow_execution_repository::delivery_presentations(
+                        &source,
+                        trace,
+                        &workflow_origins,
+                    )
+                    .into_iter()
+                    .map(|delivery| delivery.delivery_id),
+                );
+            }
+        }
+    }
+    let selected_messages = source
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| {
+            *index <= message_limit || attached_workflow_messages.contains(&message.id)
+        })
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    let source_messages = selected_messages.as_slice();
     let target_conversation_id = target_conversation_id
         .map(str::to_string)
         .unwrap_or_else(|| new_id("conversation"));
@@ -251,7 +287,7 @@ fn build_single_conversation_fork_plan_at_point(
         ConversationForkPoint::ManualCompactionBoundary { .. }
     ) && summaries.last().is_some_and(|version| {
         Some(version.summary.id.as_str()) == resolved.summary_id.as_deref()
-            && source_messages.last().is_some_and(|message| {
+            && source.messages.get(message_limit).is_some_and(|message| {
                 version.summary.covered_through == ContextJournalCursor::message(&message.id)
             })
     });

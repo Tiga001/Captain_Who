@@ -1,3 +1,35 @@
+.workflow-color-picker__trigger--canvas {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--mc-color-text-primary);
+  border-radius: 8px;
+  background: var(--mc-color-surface-card);
+  box-shadow: 0 2px 7px rgb(0 0 0 / 6%);
+  cursor: pointer;
+}
+
+.workflow-color-picker__trigger--canvas:hover:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+
+.workflow-color-picker__trigger--canvas:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+}
+
+.workflow-color-picker__trigger--canvas:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.workflow-color-picker__trigger--canvas svg {
+  width: 18px;
+  height: 18px;
+}
+
 .workflow-color-picker__popover {
   padding: 10px;
   border: 1px solid var(--mc-color-border-subtle);

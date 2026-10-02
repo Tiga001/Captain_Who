@@ -574,6 +574,25 @@ impl AgentService {
         {
             self.publish_human_delivery_changes(conversation_id, notifications);
         }
+        if append.changed
+            && publication.trace_items()[suffix_start..]
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.as_ref(),
+                        ConversationTurnTraceItem::WorkflowDelivery { .. }
+                    )
+                })
+        {
+            // The append above is the authority boundary. A failed append must never announce
+            // a letter as consumed, and replayed publications must not emit it a second time.
+            self.publish_workflow_delivery_timeline(
+                conversation_id,
+                assistant_message_id,
+                previous_sequence,
+                notifications,
+            );
+        }
         let committed_trace_count = publication_committed_trace_count(publication);
         let native_deferred =
             (|| {

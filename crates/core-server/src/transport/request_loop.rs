@@ -284,7 +284,7 @@ where
                 }
             }
             workflow_stop.await.map_err(|error| {
-                io::Error::other(format!("workflow shutdown fence failed: {error}"))
+                io::Error::other(format!("organization shutdown fence failed: {error}"))
             })?;
             return Ok(Some(shutdown_id));
         }

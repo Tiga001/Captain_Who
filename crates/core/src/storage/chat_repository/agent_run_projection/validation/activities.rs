@@ -189,6 +189,51 @@ pub(super) fn current_timeline_item_is_safe(
                 && bounded_string(&item["message"], 128 * 1_024, true)
                 && optional_safe_integer(item, "traceSequence")
         }
+        Some("workflow_delivery") => {
+            exact_keys(
+                item,
+                &[
+                    "id",
+                    "type",
+                    "inputId",
+                    "deliveryId",
+                    "instanceId",
+                    "workflowName",
+                    "content",
+                    "sources",
+                    "createdAt",
+                    "traceSequence",
+                ],
+            ) && bounded_string(&item["inputId"], 1024, false)
+                && bounded_string(&item["deliveryId"], 1024, false)
+                && bounded_string(&item["instanceId"], 1024, false)
+                && bounded_string(&item["workflowName"], 4096, true)
+                && bounded_string(&item["content"], 4 * 1024 * 1024, true)
+                && safe_integer(&item["createdAt"])
+                && safe_integer(&item["traceSequence"])
+                && item["sources"].as_array().is_some_and(|sources| {
+                    !sources.is_empty()
+                        && sources.len() <= 50
+                        && sources.iter().all(|source| {
+                            source.as_object().is_some_and(|source| {
+                                exact_keys(
+                                    source,
+                                    &[
+                                        "nodeId",
+                                        "nodeName",
+                                        "conversationId",
+                                        "conversationTitle",
+                                        "content",
+                                    ],
+                                ) && bounded_string(&source["nodeId"], 1024, false)
+                                    && bounded_string(&source["nodeName"], 4096, true)
+                                    && bounded_string(&source["conversationId"], 1024, false)
+                                    && bounded_string(&source["conversationTitle"], 4096, true)
+                                    && bounded_string(&source["content"], 4 * 1024 * 1024, true)
+                            })
+                        })
+                })
+        }
         Some("user_guidance") => {
             exact_required_optional_keys(
                 item,

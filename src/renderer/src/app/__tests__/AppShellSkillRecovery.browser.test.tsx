@@ -1350,8 +1350,8 @@ describe('title project editor removal', () => {
   })
 })
 
-describe('workflow sidebar migration', () => {
-  it('keeps a covered conversation unread and exposes its sidebar attention while the workflow is maximized', async () => {
+describe('organization sidebar migration', () => {
+  it('keeps a covered conversation unread and exposes its sidebar attention while the organization is maximized', async () => {
     mockSuccessfulTurnStarts()
     const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
@@ -1374,7 +1374,7 @@ describe('workflow sidebar migration', () => {
     await expect.element(screen.getByTestId('unread-conversation-a')).toHaveTextContent('true')
   })
 
-  it('opens the global workflow home maximized without replacing the chat or composer draft', async () => {
+  it('opens the global organization home maximized without replacing the chat or composer draft', async () => {
     testState.loadComposerDrafts.mockResolvedValue({
       'conversation-a': createComposerDraft({
         message: 'Keep my current draft',
@@ -1398,7 +1398,7 @@ describe('workflow sidebar migration', () => {
     expect(testState.startConversationTurn).not.toHaveBeenCalled()
   })
 
-  it('restores the conversation area when leaving scheduled after opening a maximized workflow', async () => {
+  it('restores the conversation area when leaving scheduled after opening a maximized organization', async () => {
     const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'open-workflows', exact: true }).click()
     const workflowRoute = screen.getByTestId('workflow-route').element().textContent

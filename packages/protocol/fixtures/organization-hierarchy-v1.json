@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "organization-hierarchy",
+  "name": "Research organization",
+  "description": "Implement then review; send findings back for revision.",
+  "background": "Deliver a reviewed implementation.",
+  "nodes": [
+    {
+      "id": "implement",
+      "name": "implement",
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Send useful results to the appropriate workflow member.",
+      "x": 280,
+      "y": 180,
+      "kind": "agent",
+      "permissionMode": "default",
+      "rank": 8,
+      "managementRole": "organization_admin",
+      "departmentId": "research"
+    },
+    {
+      "id": "review",
+      "name": "review",
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Send useful results to the appropriate workflow member.",
+      "x": 580,
+      "y": 180,
+      "kind": "agent",
+      "permissionMode": "default",
+      "rank": 5,
+      "managementRole": "department_admin",
+      "departmentId": "review-team"
+    },
+    {
+      "id": "result",
+      "name": "验收",
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Send useful results to the appropriate workflow member.",
+      "x": 1120,
+      "y": 180,
+      "kind": "agent",
+      "permissionMode": "default",
+      "rank": 2,
+      "departmentId": "research"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "departments": [
+    {
+      "id": "research",
+      "name": "Research",
+      "parentId": null,
+      "x": 200,
+      "y": 80,
+      "width": 1300,
+      "height": 540
+    },
+    {
+      "id": "review-team",
+      "name": "Review team",
+      "parentId": "research",
+      "x": 520,
+      "y": 140,
+      "width": 420,
+      "height": 350
+    }
+  ]
+}

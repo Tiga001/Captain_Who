@@ -261,7 +261,9 @@ fn immutable_graph_message(
             "SELECT role, content, status, agent_run_json, folder_references_json, created_at
              FROM messages
              WHERE conversation_id = ?1 AND id = ?2
-               AND input_origin_kind IN ('agent', 'snapshot')",
+               AND (input_origin_kind IN ('agent', 'snapshot')
+                    OR EXISTS (SELECT 1 FROM workflow_mail_message_origins origin
+                               WHERE origin.message_id=messages.id AND origin.conversation_id=messages.conversation_id))",
             params![conversation_id, message_id],
             |row| {
                 Ok(StoredImmutableMessage {
@@ -562,6 +564,17 @@ pub(crate) fn save_conversation_in_connection(
         [&conversation.id],
         |row| row.get::<_, bool>(0),
     )?;
+    // In-turn workflow bubbles may be absent from the renderer view. Their persisted rows and
+    // positions remain delivery evidence; a later full conversation save must retain both.
+    let workflow_message_ids = {
+        let mut statement = connection.prepare(
+            "SELECT message_id FROM workflow_mail_message_origins WHERE conversation_id=?1",
+        )?;
+        let ids = statement
+            .query_map([&conversation.id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        ids
+    };
     let mut next_agent_position = connection.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
         [&conversation.id],
@@ -633,7 +646,7 @@ pub(crate) fn save_conversation_in_connection(
             }
             continue;
         }
-        let position = if agent_bound {
+        let position = if agent_bound || !workflow_message_ids.is_empty() {
             existing_identity
                 .as_ref()
                 .map(|(_, position)| *position)
@@ -715,7 +728,10 @@ pub(crate) fn save_conversation_in_connection(
     };
     let mut removed_message_ids = existing_message_ids
         .into_iter()
-        .filter(|message_id| !retained_message_ids.contains(message_id.as_str()))
+        .filter(|message_id| {
+            !retained_message_ids.contains(message_id.as_str())
+                && !workflow_message_ids.contains(message_id)
+        })
         .collect::<Vec<_>>();
     if agent_bound && !removed_message_ids.is_empty() {
         let mut retained_graph_projections = HashSet::new();

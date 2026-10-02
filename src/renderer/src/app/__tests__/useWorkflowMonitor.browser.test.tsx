@@ -1,4 +1,5 @@
 import { act } from 'react'
+import { createWorkflow } from '../../features/workflows/workflowAuthoring'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type {
@@ -39,6 +40,7 @@ const workflow = (patch: Partial<WorkflowInstance> = {}): WorkflowInstance => ({
   id: 'workflow',
   templateId: 'template',
   templateRevision: 1,
+  definition: createWorkflow(),
   name: 'Review',
   color: '#2478d4',
   revision: 1,
@@ -185,7 +187,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('workflow read-only activity monitor', () => {
+describe('organization read-only activity monitor', () => {
   it('aggregates root and child approvals from authoritative trees even for unloaded and disabled conversations', async () => {
     mocks.getTree.mockImplementation(async ({ rootConversationId }) =>
       tree(rootConversationId, [], 0, [rootConversationId === 'chat-a' ? 'chat-a' : 'chat-b-child'])
@@ -317,7 +319,7 @@ describe('workflow read-only activity monitor', () => {
     await expect.element(view.getByTestId('waiting-approval')).toHaveTextContent('none')
   })
 
-  it('reads each metadata-only root and its children independently, including disabled workflows', async () => {
+  it('reads each metadata-only root and its children independently, including disabled organizations', async () => {
     mocks.getTree.mockImplementation(async ({ rootConversationId }) =>
       tree(rootConversationId, rootConversationId === 'chat-a' ? ['chat-a-child'] : [])
     )
@@ -396,7 +398,7 @@ describe('workflow read-only activity monitor', () => {
     expect(mocks.getTree).toHaveBeenCalledExactlyOnceWith({ rootConversationId: 'chat-a' })
   })
 
-  it('does not let a stale read overwrite newer events and isolates previous workflow responses', async () => {
+  it('does not let a stale read overwrite newer events and isolates previous organization responses', async () => {
     let resolve!: (value: AgentTreeSnapshot) => void
     mocks.getTree.mockImplementation(({ rootConversationId }) =>
       rootConversationId === 'chat-a'

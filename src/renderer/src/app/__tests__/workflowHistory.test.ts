@@ -7,7 +7,7 @@ import {
   workflowHistoryReducer
 } from '../../features/workflows/workflowHistory'
 
-describe('workflow editing history', () => {
+describe('organization editing history', () => {
   it('restores removed member settings while preserving the current viewport', () => {
     const graph = parseWorkflowDefinition(fixture)
     let state = workflowHistoryReducer(createWorkflowHistory(graph), {

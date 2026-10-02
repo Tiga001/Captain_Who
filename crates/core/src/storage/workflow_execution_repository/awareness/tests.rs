@@ -5,7 +5,7 @@ use crate::storage::workflow_execution_repository::tests::{
 
 #[test]
 fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monotonic() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(
         &mut c,
         "send",
@@ -61,7 +61,7 @@ fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monoto
 }
 #[test]
 fn workflow_awareness_mailbox_status_filter_pagination_and_body_budget_are_explicit() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let text = "a".repeat(100_000);
     let receipt = send_mail(&mut c, "send", &[("b", &text), ("b", &text), ("b", &text)]);
     start_run(&mut c, "b", "run-b");
@@ -121,7 +121,7 @@ fn workflow_awareness_mailbox_status_filter_pagination_and_body_budget_are_expli
 }
 #[test]
 fn workflow_awareness_mailbox_ownership_is_frozen_to_real_sender_and_recipient() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "private")]);
     start_run(&mut c, "c", "run-c");
     let chat = conversation(&c, "c");
@@ -148,10 +148,10 @@ fn workflow_awareness_mailbox_ownership_is_frozen_to_real_sender_and_recipient()
 }
 #[test]
 fn workflow_awareness_member_snapshot_is_small_but_focused_query_has_complete_roles() {
-    let c = fixture(false);
+    let c = fixture();
     let mut definition: Value = serde_json::from_str(
         &c.query_row(
-            "SELECT definition_json FROM workflow_definitions WHERE workflow_id='template'",
+            "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
             [],
             |r| r.get::<_, String>(0),
         )
@@ -160,7 +160,7 @@ fn workflow_awareness_member_snapshot_is_small_but_focused_query_has_complete_ro
     .unwrap();
     definition["nodes"][1]["task"] = value!("x".repeat(2000));
     c.execute(
-        "UPDATE workflow_definitions SET definition_json=?1",
+        "UPDATE workflow_instances SET definition_json=?1 WHERE instance_id='instance'",
         [definition.to_string()],
     )
     .unwrap();
@@ -186,7 +186,7 @@ fn workflow_awareness_member_snapshot_is_small_but_focused_query_has_complete_ro
 }
 #[test]
 fn workflow_awareness_monitor_uses_mail_state_without_bodies_or_terminal_override() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "private body")]);
     start_run(&mut c, "b", "run-b");
     let accept = action(
@@ -219,7 +219,7 @@ fn workflow_awareness_monitor_uses_mail_state_without_bodies_or_terminal_overrid
 }
 #[test]
 fn workflow_awareness_backlog_does_not_hide_mail_accepted_by_current_turn() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let messages = vec![("b", "waiting"); 128];
     send_mail(&mut c, "backlog", &messages);
     let receipt = send_mail(&mut c, "latest", &[("b", "handle this now")]);
@@ -237,4 +237,147 @@ fn workflow_awareness_backlog_does_not_hide_mail_accepted_by_current_turn() {
     assert_eq!(summary["currentInputCount"], 1);
     assert_eq!(summary["currentInputIds"], value!([receipt.input_ids[0]]));
     assert_eq!(summary["mailbox"]["pendingCount"], 128);
+}
+
+#[test]
+fn configuration_is_explicit_scoped_and_distinguishes_defaults_from_next_turn() {
+    let mut c = fixture();
+    let chat = conversation(&c, "a");
+    let query = StateQuery {
+        view: StateView::Configuration,
+        node_id: Some("b".into()),
+    };
+    assert!(state_for_run(&c, &chat, "run-a", &query).is_err());
+    let mut definition: Value = serde_json::from_str(
+        &c.query_row(
+            "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    definition["nodes"][0]["rank"] = value!(99);
+    definition["nodes"][0]["managementRole"] = value!("organization_admin");
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=?1 WHERE instance_id='instance'",
+        [definition.to_string()],
+    )
+    .unwrap();
+    let target = conversation(&c, "b");
+    crate::storage::composer_draft_repository::set_composer_configuration(
+        &c,
+        &target,
+        Some("next-model"),
+        "custom",
+        10,
+    )
+    .unwrap();
+    start_run(&mut c, "b", "run-b");
+    let result = state_for_run(&c, &chat, "run-a", &query).unwrap();
+    let member = &result["configuration"]["members"][0];
+    assert_eq!(member["memberDefaults"]["modelConfigId"], "model");
+    assert_eq!(member["nextTurn"]["modelConfigId"], "next-model");
+    assert_eq!(member["nextTurn"]["permissionMode"], "custom");
+    assert_eq!(member["activeRun"]["runId"], "run-b");
+    assert!(member["activeRun"].get("modelConfigId").is_none());
+    assert!(result.get("runtime").is_none());
+    assert!(state_for_run(&c, &chat, "run-a", &StateQuery::default())
+        .unwrap()
+        .get("configuration")
+        .is_none());
+    assert!(awareness_for_run(&c, &chat, "run-a")
+        .unwrap()
+        .get("configuration")
+        .is_none());
+
+    // A department administrator cannot inspect a member outside the department or a peer.
+    definition["departments"] =
+        value!([{"id":"team","name":"Team","parentId":null,"x":0,"y":0,"width":400,"height":300}]);
+    definition["nodes"][0]["managementRole"] = value!("department_admin");
+    definition["nodes"][0]["departmentId"] = value!("team");
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=?1 WHERE instance_id='instance'",
+        [definition.to_string()],
+    )
+    .unwrap();
+    assert!(state_for_run(&c, &chat, "run-a", &query).is_err());
+    definition["nodes"][1]["departmentId"] = value!("team");
+    definition["nodes"][1]["rank"] = value!(99);
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=?1 WHERE instance_id='instance'",
+        [definition.to_string()],
+    )
+    .unwrap();
+    assert!(state_for_run(&c, &chat, "run-a", &query).is_err());
+    let own = state_for_run(
+        &c,
+        &chat,
+        "run-a",
+        &StateQuery {
+            node_id: Some("a".into()),
+            ..query
+        },
+    )
+    .unwrap();
+    assert_eq!(own["configuration"]["members"][0]["editable"], false);
+}
+
+thread_local! {
+    static SUMMARY_SQL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn record_summary_sql(sql: &str) {
+    SUMMARY_SQL.with(|statements| statements.borrow_mut().push(sql.to_owned()));
+}
+
+#[test]
+fn automatic_summary_scales_without_loading_every_members_mail_details() {
+    let mut c = fixture();
+    let mut definition: Value = serde_json::from_str(
+        &c.query_row(
+            "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let prototype = definition["nodes"][0].clone();
+    for index in 3..128 {
+        let mut node = prototype.clone();
+        node["id"] = value!(format!("member-{index}"));
+        node["name"] = value!(format!("Member {index}"));
+        definition["nodes"].as_array_mut().unwrap().push(node);
+    }
+    crate::storage::workflow_repository::request(&mut c,
+        serde_json::from_value(value!({"operation":"saveInstance","id":"instance","name":"Team","color":"#123456","definition":definition,"bindings":[],"expectedRevision":1})).unwrap(),
+        &std::collections::HashSet::from(["model".into()])).unwrap();
+    send_mail(
+        &mut c,
+        "summary-mail",
+        &[("b", "private"), ("b", "waiting")],
+    );
+    let chat = conversation(&c, "a");
+    SUMMARY_SQL.with(|statements| statements.borrow_mut().clear());
+    c.trace(Some(record_summary_sql));
+    let summary = awareness_for_run(&c, &chat, "run-a").unwrap();
+    c.trace(None);
+    let statements = SUMMARY_SQL.with(|statements| statements.borrow().clone());
+    assert_eq!(summary["totalNodeCount"], 128);
+    assert_eq!(summary["nodes"].as_array().unwrap().len(), 16);
+    assert_eq!(summary["nodes"][0]["nodeId"], "a");
+    assert_eq!(summary["nodes"][1]["pendingCount"], 2);
+    assert!(summary["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node.get("inputs").is_none()));
+    assert!(
+        statements.len() < 25,
+        "automatic summary used {} SQL statements",
+        statements.len()
+    );
+    assert!(!statements
+        .iter()
+        .any(|sql| sql.contains("SELECT i.input_id,m.message_id")));
 }

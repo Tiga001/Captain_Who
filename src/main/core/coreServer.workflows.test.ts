@@ -29,13 +29,12 @@ describe('workflow IPC contract boundary', () => {
     await expect(server.requestWorkflows(request)).resolves.toEqual(response)
     expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
   })
-  it('forwards runtime reads and exact user completions without loading the template catalog', async () => {
+  it('forwards runtime reads without loading the template catalog', async () => {
     const server = new CoreServer()
     const runtime = { instanceId: 'workflow', sequence: 3, inputs: [], events: [] }
     rpcRequest.mockResolvedValue({ records: [], issues: [], runtime })
     for (const request of [
-      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', afterSequence: 2 },
-      { operation: 'completeUserInput' as const, instanceId: 'workflow', inputId: 'input' }
+      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', afterSequence: 2 }
     ]) {
       await expect(server.requestWorkflows(request)).resolves.toEqual({
         records: [],
@@ -66,6 +65,7 @@ describe('workflow IPC contract boundary', () => {
             id: fixture.id,
             templateId: fixture.id,
             templateRevision: 1,
+            definition: fixture,
             name: 'Review',
             color: '#4A82E8',
             bindings: [],
@@ -81,6 +81,23 @@ describe('workflow IPC contract boundary', () => {
       await expect(server.requestWorkflows(request)).resolves.toEqual(response)
       expect(rpcRequest).toHaveBeenLastCalledWith('agent.workflows.request', request)
     }
+  })
+  it('forwards live organization edits without template lookup or template revision', async () => {
+    const definition = parseWorkflowDefinition(fixture)
+    definition.id = 'instance'
+    definition.background = 'Updated independent organization context'
+    const request: WorkflowRequest = {
+      operation: 'saveInstance',
+      id: definition.id,
+      definition,
+      name: 'Live team',
+      color: '#123456',
+      bindings: [],
+      expectedRevision: 3
+    }
+    rpcRequest.mockResolvedValue({ records: [], issues: [], instances: [] })
+    await new CoreServer().requestWorkflows(request)
+    expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
   })
   it('preserves isolated recovery entries through the Host boundary for both workflow pages', async () => {
     const invalid = {
@@ -160,7 +177,7 @@ describe('workflow IPC contract boundary', () => {
         definition: contradictory,
         expectedRevision: 0
       })
-    ).toThrow('Invalid workflow permission mode')
+    ).toThrow('Invalid organization permission mode')
     expect(rpcRequest).not.toHaveBeenCalled()
     const invalidLayout = parseWorkflowDefinition(fixture)
     invalidLayout.nodes[0].x = Infinity

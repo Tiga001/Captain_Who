@@ -195,17 +195,17 @@ export function WorkflowNodePanel({
                 ? currentTask
                 : status === t('活跃中', 'Active')
                   ? t(
-                      '正在处理对话任务，暂无关联的工作流输入。',
-                      'Working on a conversation task with no linked workflow input.'
+                      '正在处理对话任务，暂无关联的组织邮件。',
+                      'Working on a conversation task with no linked organization mail.'
                     )
-                  : t('暂无正在处理的工作流输入', 'No workflow input is being processed')}
+                  : t('暂无正在处理的组织邮件', 'No organization mail is being processed')}
             </p>
           )}
         </section>
         <section>
           <h3>{t('消息记录', 'Message history')}</h3>
           <p className="workflow-node-panel__muted">
-            {t('按收到时间倒序展示工作流来信。', 'Workflow messages, newest first.')}
+            {t('按收到时间倒序展示组织来信。', 'Organization messages, newest first.')}
           </p>
           {error && (
             <p role="alert">
@@ -217,7 +217,7 @@ export function WorkflowNodePanel({
           )}
           {!loaded && !error && <p>{t('正在读取消息…', 'Loading messages…')}</p>}
           {loaded && messages.length === 0 && (
-            <p>{t('暂无工作流来信', 'No workflow messages yet')}</p>
+            <p>{t('暂无组织来信', 'No organization messages yet')}</p>
           )}
           {messages.map((row) => {
             const input = snapshot?.inputs.find(

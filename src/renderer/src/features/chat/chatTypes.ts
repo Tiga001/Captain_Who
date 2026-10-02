@@ -127,6 +127,20 @@ export interface ChatGuidanceTimelineItem {
   traceSequence?: number
 }
 
+/** A Host-confirmed mailbox delivery applied inside this run, distinct from human guidance. */
+export interface ChatWorkflowDeliveryTimelineItem {
+  id: string
+  type: 'workflow_delivery'
+  inputId: string
+  deliveryId: string
+  instanceId: string
+  workflowName: string
+  content: string
+  createdAt: number
+  traceSequence: number
+  sources: (WorkflowMessageSource['sources'][number] & { content: string })[]
+}
+
 export interface ChatCommandOutputChunk {
   sequence: number
   stream: AgentCommandOutputStream
@@ -192,6 +206,7 @@ export interface ChatMcpToolInvocationView {
 export type ChatAgentTimelineItem = (
   | { id: string; type: 'message'; content: string; streamId?: string }
   | ChatGuidanceTimelineItem
+  | ChatWorkflowDeliveryTimelineItem
   | { id: string; type: 'tool_call'; callId: string; identity?: AgentToolIdentity }
   | { id: string; type: 'mcp_tool_call'; invocationId: string }
   | {

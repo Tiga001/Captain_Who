@@ -158,7 +158,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge、release、suppress、list 或 summary 原生通知；这些方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Notification/Automation event、resync 和本机定时器只能触发重新读取 notification batch 或业务快照，不能被当作通知已显示或业务 Run 已终结的证据。
-10. Notification schema v1、Automation schema v1/permission mode v2、Workflow definition schema v1 与 SQLite schema 不得由 Main 合并为单一版本。
+10. Notification schema v1、Automation schema v1/permission mode v2、Organization definition schema v1 与 SQLite schema 不得由 Main 合并为单一版本。
 11. Dock 菜单与菜单栏托盘只展示用户可见的根 Conversation 摘要；点击导航经 Main 的一次性 pending id 与受信渲染进程单次领取传递，原生菜单回调不得直接写入业务状态。
 
 ## 代码真源

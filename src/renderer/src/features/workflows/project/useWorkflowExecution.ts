@@ -1,5 +1,5 @@
 import type { WorkflowRuntimeEvent, WorkflowRuntimeSnapshot } from '@mycopilot/protocol'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { hostClient } from '../../../host/hostClient'
 import { requestWorkflows } from '../workflowClient'
 
@@ -27,7 +27,6 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
     if (!foreground) setTransmissions(null)
     else refreshRef.current?.()
   }, [foreground])
-  const acceptRef = useRef<((value: WorkflowRuntimeSnapshot) => void) | null>(null)
 
   useEffect(() => {
     let disposed = false
@@ -80,7 +79,6 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
       }, 2_500)
       timers.add(timer)
     }
-    acceptRef.current = accept
     const refresh = async () => {
       if (disposed || document.visibilityState === 'hidden') return
       if (pending) {
@@ -124,7 +122,6 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
     recover()
     return () => {
       disposed = true
-      acceptRef.current = null
       refreshRef.current = null
       unsubscribe?.()
       clearInterval(interval)
@@ -134,22 +131,8 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
     }
   }, [instanceId, scope])
 
-  const completeUserInput = useCallback(
-    async (inputId: string) => {
-      const response = await requestWorkflows({
-        operation: 'completeUserInput',
-        instanceId,
-        inputId
-      })
-      if (!response.runtime) throw new Error('Workflow completion did not return its saved state')
-      acceptRef.current?.(response.runtime)
-    },
-    [instanceId]
-  )
-
   return {
     snapshot: snapshot?.scope === scope ? snapshot.value : null,
-    transmissions: foreground && transmissions?.scope === scope ? transmissions.events : [],
-    completeUserInput
+    transmissions: foreground && transmissions?.scope === scope ? transmissions.events : []
   }
 }

@@ -6,6 +6,42 @@ use mycopilot_core::{
     WorldStateLifetime, WorldStateRequestBoundary, WorldStateSectionId,
 };
 
+#[cfg(test)]
+type BeforeWorldStateRequestHook = Arc<dyn Fn(&AgentService, &str) + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_WORLD_STATE_REQUEST_HOOKS: Mutex<Vec<(String, BeforeWorldStateRequestHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_before_world_state_request_hook(
+    conversation_id: &str,
+    hook: BeforeWorldStateRequestHook,
+) {
+    BEFORE_WORLD_STATE_REQUEST_HOOKS
+        .lock()
+        .unwrap()
+        .push((conversation_id.to_string(), hook));
+}
+
+#[cfg(test)]
+fn run_before_world_state_request_hook(
+    service: &AgentService,
+    conversation_id: &str,
+    run_id: &str,
+) {
+    let hook = {
+        let mut hooks = BEFORE_WORLD_STATE_REQUEST_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == conversation_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook(service, run_id);
+    }
+}
+
 struct StoredConversationWorldState {
     service: AgentService,
     input: AgentChatInput,
@@ -52,6 +88,8 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
         &self,
         request: AgentConversationWorldStateRequest,
     ) -> AgentResult<Vec<AnchoredWorldStateRecord>> {
+        #[cfg(test)]
+        run_before_world_state_request_hook(&self.service, &self.conversation_id, &self.run_id);
         self.cancellation.check()?;
         self.validate_boundary(&request.boundary)?;
         if request.conversation_id != self.conversation_id {
@@ -63,9 +101,9 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
             "web.search",
             "human.interaction",
             "agent.collaboration",
-            "workflow.execution",
-            "workflow.awareness",
-            "workflow.mailbox",
+            "organization.execution",
+            "organization.awareness",
+            "organization.mailbox",
             "builtin.capabilities.policy",
         ]
         .into_iter()

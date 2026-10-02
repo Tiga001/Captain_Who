@@ -17,9 +17,9 @@ export function WorkflowMailActionToolActivity({
   const { language } = useFrontendConfig(),
     chinese = language.startsWith('zh')
   const kind =
-    call.tool === 'workflow_accept'
+    call.tool === 'organization_accept'
       ? 'accept'
-      : call.tool === 'workflow_complete'
+      : call.tool === 'organization_complete'
         ? 'complete'
         : 'recall'
   const data = record(result?.result),
@@ -42,7 +42,7 @@ export function WorkflowMailActionToolActivity({
     : settledStatus === 'failed'
   const success = Boolean(result?.ok && successful > 0)
   const number = success ? successful : count
-  const subject = chinese ? `工作流中的 ${number} 条消息` : `${number} workflow messages`
+  const subject = chinese ? `组织中的 ${number} 封邮件` : `${number} organization messages`
   const done = kind === 'complete' ? `已将${subject}标记为已处理` : `已${action.zh}${subject}`
   const progress = { accept: 'Accepting', complete: 'Completing', recall: 'Recalling' }[kind]
   let label = chinese
@@ -79,7 +79,7 @@ export function WorkflowMailActionToolActivity({
           const message = { ...record(row.message), ...row }
           const name =
             text(kind === 'recall' ? message.targetNodeName : message.sourceNodeName) ||
-            (chinese ? '工作流消息' : 'Workflow message')
+            (chinese ? '组织邮件' : 'Organization message')
           const conversationId = text(
             kind === 'recall' ? message.targetConversationId : message.sourceConversationId
           )

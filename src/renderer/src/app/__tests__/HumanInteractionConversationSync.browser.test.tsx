@@ -241,6 +241,76 @@ beforeEach(() => {
   client.agentListeners.clear()
 })
 
+it.each(['completed', 'cancelled'] as const)(
+  'attaches a late organization delivery after a %s run binding is retired without starting new work',
+  async (status) => {
+    const source = {
+      nodeId: 'boss',
+      nodeName: 'Boss',
+      conversationId: 'boss-chat',
+      conversationTitle: 'Boss',
+      content: 'Accepted mail'
+    }
+    let view!: HarnessView
+    const screen = await render(
+      <Harness
+        initial={[
+          conversation('chat', [
+            assistant(status, 'Final result'),
+            {
+              id: 'mail-projection',
+              role: 'user',
+              content: 'Organization wrapper',
+              createdAt: 2,
+              workflowSource: {
+                inputId: 'input',
+                instanceId: 'workflow',
+                workflowName: 'Review',
+                sources: [source]
+              }
+            }
+          ])
+        ]}
+        lifecycle
+        onRender={(next) => {
+          view = next
+        }}
+      />
+    )
+    await expect.poll(() => client.agentListeners.size).toBe(1)
+    view.refs.retiredAgentRunIds.current.add('host-run')
+    view.refs.cancelledRunIds.current.add('host-run')
+    view.refs.cancelledPendingMessageIds.current.add('assistant')
+    view.refs.activeRunBindings.current.delete('host-run')
+    const event: AgentEvent = {
+      type: 'workflow_delivery_applied',
+      conversationId: 'chat',
+      assistantMessageId: 'assistant',
+      runId: 'host-run',
+      inputId: 'input',
+      deliveryId: 'mail-projection',
+      instanceId: 'workflow',
+      workflowName: 'Review',
+      content: 'Organization wrapper',
+      createdAt: 2,
+      sequence: 4,
+      sources: [source]
+    }
+    for (const listener of client.agentListeners) listener(event)
+    await expect.poll(() => view.conversations[0].messages).toHaveLength(1)
+    expect(view.conversations[0].messages[0].agentRun!.timeline).toEqual([
+      expect.objectContaining({ type: 'workflow_delivery', inputId: 'input', traceSequence: 4 })
+    ])
+    expect(view.conversations[0].messages[0].agentRun!.status).toBe(status)
+    expect(view.conversations[0].messages[0].content).toBe('Final result')
+    expect(view.refs.activeRunBindings.current.has('host-run')).toBe(false)
+    expect(view.refs.bufferedAgentEvents.current.has('host-run')).toBe(false)
+    expect(client.start).not.toHaveBeenCalled()
+    expect(view.refs.autoSubmitQueuedMessage.current).not.toHaveBeenCalledWith('chat')
+    await screen.unmount()
+  }
+)
+
 it('loads Host-created User and Run identities on notification and replays buffered Run events without starting a model', async () => {
   const initial = conversation()
   let view!: HarnessView

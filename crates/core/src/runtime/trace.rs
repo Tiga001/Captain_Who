@@ -86,8 +86,12 @@ pub(super) fn finalize_runtime_trace(
                 run_id,
                 conversation_id,
                 assistant_message_id,
-                ConversationTurnTraceTerminalStatus::Failed,
-                Some(&message),
+                if error.is_cancelled() {
+                    ConversationTurnTraceTerminalStatus::Cancelled
+                } else {
+                    ConversationTurnTraceTerminalStatus::Failed
+                },
+                (!error.is_cancelled()).then_some(message.as_str()),
             );
             Err(error.with_conversation_turn_trace(trace))
         }
@@ -205,8 +209,12 @@ pub(super) fn attach_failed_runtime_trace(
         run_id,
         conversation_id,
         assistant_message_id,
-        ConversationTurnTraceTerminalStatus::Failed,
-        Some(&message),
+        if error.is_cancelled() {
+            ConversationTurnTraceTerminalStatus::Cancelled
+        } else {
+            ConversationTurnTraceTerminalStatus::Failed
+        },
+        (!error.is_cancelled()).then_some(message.as_str()),
     );
     debug_assert!(trace.validate().is_ok());
     error.with_conversation_turn_trace(trace)

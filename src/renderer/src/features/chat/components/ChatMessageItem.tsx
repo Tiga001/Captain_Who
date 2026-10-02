@@ -139,7 +139,7 @@ function MessageInputOrigin({
           .map((item) => `${item.nodeName} · ${item.conversationTitle}`)
           .join('\n')}
       >
-        <span>{language.startsWith('zh') ? '来自工作流' : 'From workflow'}</span>
+        <span>{language.startsWith('zh') ? '来自组织' : 'From organization'}</span>
         <strong>{source.workflowName}</strong>
         <span>· {source.sources.map((item) => item.nodeName).join('、')}</span>
       </div>

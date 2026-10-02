@@ -92,7 +92,13 @@ function Harness({
   return (
     <>
       <button onClick={() => update([conversation()])}>Hydrate</button>
-      <output data-unread={!!conversations[0]?.unreadAt}>
+      <output
+        data-unread={!!conversations[0]?.unreadAt}
+        data-timeline={conversations[0]?.messages
+          .flatMap((message) => message.agentRun?.timeline ?? [])
+          .map((item) => item.id)
+          .join('|')}
+      >
         {conversations[0]?.messages.map((message) => `${message.id}:${message.content}`).join('|')}
       </output>
     </>
@@ -107,7 +113,9 @@ beforeEach(() => {
 it('recovers a receipt that arrived before conversation metadata hydration', async () => {
   mocks.load.mockResolvedValue({
     ...conversation(),
-    messages: [{ id: 'delivery', role: 'user', content: 'Recovered workflow input', createdAt: 2 }]
+    messages: [
+      { id: 'delivery', role: 'user', content: 'Recovered organization input', createdAt: 2 }
+    ]
   })
   const view = await render(<Harness hydrated={false} />)
   await act(() => {
@@ -120,7 +128,7 @@ it('recovers a receipt that arrived before conversation metadata hydration', asy
   })
   await expect
     .element(view.getByRole('status'))
-    .toHaveTextContent('delivery:Recovered workflow input')
+    .toHaveTextContent('delivery:Recovered organization input')
   expect(mocks.load).toHaveBeenCalledTimes(1)
 })
 it('reloads a terminal event even when the delivery receipt did not change', async () => {
@@ -208,4 +216,75 @@ it('loads a single batch bubble from Host notifications without erasing a live r
   expect(mocks.load).toHaveBeenCalledTimes(1)
   await view.unmount()
   expect(mocks.listeners.size).toBe(0)
+})
+
+it('recovers a same-turn delivery after a claimed snapshot and keeps it inside the live assistant', async () => {
+  const claimed = conversation()
+  claimed.messages[0].content = 'Older persisted narration'
+  claimed.messages.push({
+    id: 'delivery',
+    role: 'user',
+    content: 'Wrapped collaborator mail',
+    createdAt: 2,
+    workflowSource: {
+      inputId: 'input',
+      instanceId: 'workflow',
+      workflowName: 'Review',
+      sources: [
+        {
+          nodeId: 'source',
+          nodeName: 'Boss',
+          conversationId: 'source-chat',
+          conversationTitle: 'Boss',
+          content: 'Please continue'
+        }
+      ]
+    }
+  })
+  mocks.load.mockResolvedValue(claimed)
+  const view = await render(<Harness />)
+  await act(() => {
+    mocks.listeners.forEach((listener) => listener(snapshot('claimed')))
+  })
+  await expect
+    .element(view.getByRole('status'))
+    .toHaveTextContent('delivery:Wrapped collaborator mail')
+
+  const applied = conversation()
+  applied.messages[0].content = 'Older persisted narration'
+  applied.messages[0].agentRun!.timeline = [
+    {
+      id: 'workflow-delivery-input',
+      type: 'workflow_delivery',
+      inputId: 'input',
+      deliveryId: 'delivery',
+      instanceId: 'workflow',
+      workflowName: 'Review',
+      content: 'Wrapped collaborator mail',
+      createdAt: 2,
+      traceSequence: 4,
+      sources: [
+        {
+          nodeId: 'source',
+          nodeName: 'Boss',
+          conversationId: 'source-chat',
+          conversationTitle: 'Boss',
+          content: 'Please continue'
+        }
+      ]
+    }
+  ]
+  mocks.load.mockResolvedValue(applied)
+  await act(() => {
+    mocks.listeners.forEach((listener) => listener(snapshot('applied')))
+  })
+  await expect.element(view.getByRole('status')).toHaveTextContent('assistant:Live streamed text')
+  await expect.element(view.getByRole('status')).not.toHaveTextContent('delivery:')
+  await expect
+    .element(view.getByRole('status'))
+    .toHaveAttribute('data-timeline', 'workflow-delivery-input')
+  await act(() => {
+    mocks.listeners.forEach((listener) => listener(snapshot('applied')))
+  })
+  expect(mocks.load).toHaveBeenCalledTimes(2)
 })

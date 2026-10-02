@@ -10,13 +10,23 @@ export interface CanvasBounds {
   right: number
   bottom: number
 }
-export function graphBounds(graph: Pick<WorkflowDefinition, 'nodes'>): CanvasBounds {
+export function graphBounds(
+  graph: Pick<WorkflowDefinition, 'nodes' | 'departments'>
+): CanvasBounds {
   const bounds = graph.nodes.map((n) => ({
     left: n.x - 9,
     top: n.y - 5,
     right: n.x + workflowNodeSize(n).width + 9,
     bottom: n.y + workflowNodeSize(n).height + 5
   }))
+  bounds.push(
+    ...(graph.departments ?? []).map((department) => ({
+      left: department.x - 4,
+      top: department.y - 4,
+      right: department.x + department.width + 4,
+      bottom: department.y + department.height + 4
+    }))
+  )
   return bounds.length
     ? {
         left: Math.min(...bounds.map((b) => b.left)),

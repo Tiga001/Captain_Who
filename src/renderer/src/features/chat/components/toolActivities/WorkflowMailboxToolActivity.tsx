@@ -30,13 +30,13 @@ export function WorkflowMailboxToolActivity(props: WorkflowQueryProps) {
   const messages = records(data.messages)
   let label = queryLabel(
     props,
-    outbox ? l('工作流发件箱', 'workflow outbox') : l('工作流收件箱', 'workflow inbox'),
+    outbox ? l('组织发件箱', 'organization outbox') : l('组织收件箱', 'organization inbox'),
     l
   )
   if (queryStatus(props) === 'completed')
     label += messages.length
-      ? l(` · 本次查到 ${messages.length} 条消息`, ` · ${messages.length} messages in this result`)
-      : l(' · 暂无消息', ' · No messages')
+      ? l(` · 本次查到 ${messages.length} 封邮件`, ` · ${messages.length} messages in this result`)
+      : l(' · 暂无邮件', ' · No messages')
   const groups = new Map<string, RecordValue[]>()
   for (const message of messages) {
     const status = text(message.status)
@@ -61,7 +61,7 @@ export function WorkflowMailboxToolActivity(props: WorkflowQueryProps) {
                 ? l('待处理', 'Pending')
                 : key === 'processing'
                   ? l('处理中', 'Processing')
-                  : l('历史消息', 'History')}
+                  : l('历史邮件', 'History')}
             </small>
             {groups.get(key)!.map((message, index) => (
               <MailboxMessage
@@ -110,7 +110,7 @@ export function MailboxMessage({
   const canCopy = message.bodyAvailable === true && typeof message.content === 'string'
   const long = content.length > 320 || content.split('\n').length > 6
   const preview = content.slice(0, 320).split('\n').slice(0, 6).join('\n')
-  const copyLabel = copied ? l('已复制', 'Copied') : l('复制消息', 'Copy message')
+  const copyLabel = copied ? l('已复制', 'Copied') : l('复制邮件', 'Copy message')
   const jumpLabel = l('打开对话', 'Open conversation')
   const time = timeLabel(message.createdAt, language)
   return (
@@ -164,7 +164,7 @@ export function MailboxMessage({
       {canCopy ? (
         <>
           <div className="workflow-send-message__body">
-            {long && !expanded ? `${preview}…` : content || l('（空消息）', '(Empty message)')}
+            {long && !expanded ? `${preview}…` : content || l('（空邮件）', '(Empty message)')}
           </div>
           {long && (
             <button
@@ -181,10 +181,10 @@ export function MailboxMessage({
         <p className="workflow-query__withheld">
           {message.withholdingReason === 'response_body_budget'
             ? l(
-                '本次查询内容较多，未包含这条消息的正文。',
+                '本次查询内容较多，未包含这封邮件的正文。',
                 'This query omitted the message body due to its size limit.'
               )
-            : l('本次查询未提供消息正文。', 'The message body was not returned.')}
+            : l('本次查询未提供邮件正文。', 'The message body was not returned.')}
         </p>
       )}
     </section>

@@ -14,7 +14,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 const { RightSidebar } = await import('../RightSidebar')
 const NOOP = () => undefined
-const WORKFLOW = { id: 'workflow-a', name: 'Workflow A', color: '#37aa99' }
+const WORKFLOW = { id: 'workflow-a', name: 'Organization A', color: '#37aa99' }
 const MODULES: RightSidebarModuleDefinition[] = [
   {
     id: 'terminal',
@@ -93,8 +93,8 @@ function closeWorkflowTab(container: HTMLElement) {
 
 afterEach(() => vi.restoreAllMocks())
 
-describe('Workflow right sidebar', () => {
-  it('shows its entry only for workflow members and preserves the global tab across conversation and workspace changes', async () => {
+describe('Organization right sidebar', () => {
+  it('shows its entry only for organization members and preserves the global tab across conversation and workspace changes', async () => {
     const screen = await render(sidebar({ activeConversationId: 'outside' }))
     expect(screen.container.textContent).not.toContain('sidebar.workflows')
     await screen.rerender(
@@ -131,7 +131,7 @@ describe('Workflow right sidebar', () => {
     expect(surface.textContent).toContain('draft 1')
   })
 
-  it('opens the home externally without membership and reuses one tab for every workflow route', async () => {
+  it('opens the home externally without membership and reuses one tab for every organization route', async () => {
     const screen = await render(
       sidebar({ workflowNavigationRequest: { instanceId: null, requestId: 1 } })
     )
@@ -197,7 +197,7 @@ describe('Workflow right sidebar', () => {
     expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
   })
 
-  it('reports workflow visibility without changing its route when the sidebar is hidden', async () => {
+  it('reports organization visibility without changing its route when the sidebar is hidden', async () => {
     const visibility = vi.fn()
     const props = {
       onWorkflowVisibilityChange: visibility,

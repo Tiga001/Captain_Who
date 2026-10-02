@@ -24,7 +24,7 @@ last_verified: 2026-09-26
 | 子 Agent 模板（UI：Subagents） | SQLite                    | 工作区级模板库，通过 binding 分配给一个或多个项目                 |
 | Browser 偏好与下载设置         | SQLite + Electron Main    | Rust Core 保存 revision/实际目录；Main 持有原生选择与文件操作能力 |
 | Automation 任务配置            | SQLite                    | 在 Scheduled 编辑；包含 revision、目标、调度与冻结权限投影        |
-| 工作流模板、实例与编辑草稿     | SQLite                    | Workflows 使用独立 revision/CAS；配置与执行生命周期分离           |
+| 组织模板、实例与编辑草稿       | SQLite                    | Organizations 使用独立 revision/CAS；配置与执行生命周期分离       |
 | 账号会话、桌面许可             | Electron Main             | 登录会话由 safeStorage 加密；许可只保存在当前进程内存             |
 
 对应入口见 [`SettingsPage.tsx`](../../src/renderer/src/features/settings/SettingsPage.tsx)、
@@ -47,7 +47,7 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 
 所有模型消费者共用 Host 生成的 `execution` 投影：`available`，或带明确 reason 的 `unavailable`。判断覆盖
 enabled、连接/Profile/revision/runtime identity 和实际凭据可解析性；设置编辑器保留不可用模型以便修复，任务选择器、
-协作目录、模板、Automation 和工作流校验只接受可执行项。Renderer 不通过 URL、Token 状态或名称自行推断。
+协作目录、模板、Automation 和组织校验只接受可执行项。Renderer 不通过 URL、Token 状态或名称自行推断。
 Turn-start 目录可按 `configurationRevision` 复用缓存，执行和 spawn 边界仍重新解析；外部修改凭据 backend
 不能凭旧缓存获得执行授权。真源为 [`model_projection.rs`](../../crates/core/src/storage/service/model_projection.rs)。
 
@@ -123,13 +123,9 @@ Automation 不是 Settings 页面中的第二份模型/权限配置。保存任�
 
 完整契约见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
-### 工作流配置
+### 组织配置
 
-Settings 的 Workflows 管理模板，工作流页面管理独立实例与绑定；图节点直接保存 Agent 配置，不依赖子 Agent
-模板身份。模板可用性、实例启用状态、编辑草稿和图 revision 是独立事实。保存图、发布模板或启用实例不会创建
-Agent、发起 Provider 请求或执行节点。编辑中的未保存内容受离开保护，保存期间不能切换编辑器；Host 对图、模型
-可用性和 CAS 进行最终校验。启用实例保护其关联 Conversation 不被归档，暂停后再按正常归档流程处理。
-完整状态与尚未接入的执行边界见[工作流编排](../subsystems/workflow-authoring.md)。
+Settings 的 Organizations 管理模板，组织页面管理独立实例与绑定；成员直接保存模型、权限和职责，不依赖子 Agent 模板身份。模板可用性、实例启用状态、编辑草稿和 revision 是独立事实。保存模板不启动模型；确认激活时为未绑定成员创建对话，空闲对话有待处理邮件时才自动唤醒。编辑中的未保存内容受离开保护，保存期间不能切换编辑器；Host 对成员、模型可用性和 CAS 进行最终校验。启用实例保护其关联 Conversation 不被归档，关闭后再按正常归档流程处理。完整规则见[组织邮件网络](../subsystems/workflow-authoring.md)。
 
 ## 敏感值
 
@@ -157,7 +153,7 @@ closed。数据库事务和 SQLite mutex 内不得执行操作系统凭据或开
 ## 设置页范围
 
 当前设置导航包含 General、Profile、Appearance、Configuration、Personalization、Usage & Billing、Skills、
-MCP、Browser、Subagents、Workflows、Environment 和 Archived Conversations。Browser 页面还拥有 Settings/History/Download History 子视图。增加页面时需同时处理：导航与搜索、多语言、
+MCP、Browser、Subagents、Organizations、Environment 和 Archived Conversations。Browser 页面还拥有 Settings/History/Download History 子视图。增加页面时需同时处理：导航与搜索、多语言、
 作用域、启动水合、脏表单离开保护、错误恢复、测试与本文件的所有权表。
 
 ## 变更检查表
@@ -165,7 +161,7 @@ MCP、Browser、Subagents、Workflows、Environment 和 Archived Conversations�
 - 配置 DTO 与 parser 是否拒绝未知/无效字段；
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
-- reset/backup 是否应保留该配置；当前 reset 仅可对 exact current catalog 恢复 allowlisted 配置与 credential reference，旧源恢复受代码中的目标版本 gate 限制，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。不复制或恢复操作系统 secret；通知事件、Browser history/download records、Agent template library 和工作流模板/实例/草稿不保留；
+- reset/backup 是否应保留该配置；当前 reset 仅可对 exact current catalog 恢复 allowlisted 配置与 credential reference，旧源恢复受代码中的目标版本 gate 限制，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。不复制或恢复操作系统 secret；通知事件、Browser history/download records、Agent template library 和组织模板/实例/草稿不保留；
 - 删除项目是否应删除该配置或仅移除 Agent template assignment；
 - Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；

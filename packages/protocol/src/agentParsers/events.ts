@@ -54,6 +54,7 @@ export const AGENT_EVENT_TYPES = {
   message: true,
   guidance_queued: true,
   guidance_applied: true,
+  workflow_delivery_applied: true,
   guidance_rejected: true,
   tool_call: true,
   tool_result: true,
@@ -222,6 +223,86 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
           MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
         )
       }
+    case 'workflow_delivery_applied': {
+      expectOnlyKeys(
+        record,
+        [
+          'type',
+          'conversationId',
+          'runId',
+          'assistantMessageId',
+          'inputId',
+          'deliveryId',
+          'instanceId',
+          'workflowName',
+          'content',
+          'sources',
+          'createdAt',
+          'sequence'
+        ],
+        context
+      )
+      if (
+        !Array.isArray(record.sources) ||
+        record.sources.length === 0 ||
+        record.sources.length > 50
+      )
+        throw invalidProtocolValue(`${context}.sources`, 'expected 1 to 50 sources')
+      const sources = record.sources.map((value, index) => {
+        const location = `${context}.sources[${index}]`
+        const source = expectRecord(value, location)
+        expectOnlyKeys(
+          source,
+          ['nodeId', 'nodeName', 'conversationId', 'conversationTitle', 'content'],
+          location
+        )
+        return {
+          nodeId: expectBoundedNonEmptyString(source.nodeId, `${location}.nodeId`, 1024),
+          nodeName: expectBoundedString(source.nodeName, `${location}.nodeName`, 4096),
+          conversationId: expectBoundedNonEmptyString(
+            source.conversationId,
+            `${location}.conversationId`,
+            1024
+          ),
+          conversationTitle: expectBoundedString(
+            source.conversationTitle,
+            `${location}.conversationTitle`,
+            4096
+          ),
+          content: expectBoundedString(
+            source.content,
+            `${location}.content`,
+            MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+          )
+        }
+      })
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        conversationId: expectBoundedNonEmptyString(
+          record.conversationId,
+          `${context}.conversationId`,
+          1024
+        ),
+        assistantMessageId: expectBoundedNonEmptyString(
+          record.assistantMessageId,
+          `${context}.assistantMessageId`,
+          1024
+        ),
+        inputId: expectBoundedNonEmptyString(record.inputId, `${context}.inputId`, 1024),
+        deliveryId: expectBoundedNonEmptyString(record.deliveryId, `${context}.deliveryId`, 1024),
+        instanceId: expectBoundedNonEmptyString(record.instanceId, `${context}.instanceId`, 1024),
+        workflowName: expectBoundedString(record.workflowName, `${context}.workflowName`, 4096),
+        content: expectBoundedString(
+          record.content,
+          `${context}.content`,
+          MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+        ),
+        sources,
+        createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0),
+        sequence: expectSafeInteger(record.sequence, `${context}.sequence`, 0)
+      }
+    }
     case 'guidance_queued':
     case 'guidance_applied':
     case 'guidance_rejected':

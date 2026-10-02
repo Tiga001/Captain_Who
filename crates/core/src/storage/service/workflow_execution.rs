@@ -3,6 +3,65 @@ use crate::storage::workflow_execution_repository as repository;
 use crate::workflow_execution::*;
 
 impl StorageService {
+    pub fn workflow_mail_receipt(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        call: &crate::WorkflowMailReceiptCall,
+    ) -> Result<Option<crate::WorkflowMailReceipt>, String> {
+        repository::mail_receipt_for_call(
+            &*self.state.connection()?,
+            conversation_id,
+            run_id,
+            tool_call_id,
+            call,
+        )
+    }
+    pub fn organization_edit_receipt(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<Option<crate::organization_personnel::Receipt>, String> {
+        crate::storage::organization_personnel_repository::receipt_for_model_call(
+            &*self.state.connection()?,
+            conversation_id,
+            run_id,
+            tool_call_id,
+            input,
+        )
+    }
+    pub fn organization_edit(
+        &self,
+        request: &crate::organization_personnel::Request,
+    ) -> Result<crate::organization_personnel::Receipt, String> {
+        // Keep the exact credential-aware model directory stable until commit. Model settings
+        // writers use this same coordinator; a model cannot become unavailable between this
+        // validation and the organization mutation because of an in-app settings update.
+        let _models_guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| "model credential coordinator is unavailable".to_string())?;
+        let stored = crate::storage::config_repository::load_model_settings_snapshot(
+            &mut *self.state.connection()?,
+        )
+        .map_err(|error| error.to_string())?;
+        let available_models = stored
+            .as_ref()
+            .map(|stored| self.model_projection_from_stored(stored))
+            .into_iter()
+            .flat_map(|projection| projection.models)
+            .filter(|entry| entry.execution.is_available())
+            .map(|entry| entry.model.id)
+            .collect();
+        crate::storage::organization_personnel_repository::manage(
+            &mut *self.state.connection()?,
+            request,
+            &available_models,
+        )
+    }
     pub fn workflow_execution_mutate(
         &self,
         request: &MutationRequest,
@@ -67,6 +126,35 @@ impl StorageService {
     ) -> Result<Option<ConversationSnapshot>, String> {
         repository::snapshot_for_run(&*self.state.connection()?, conversation_id, run_id)
     }
+    /// Renderer consumption positions are derived from committed trace and mailbox provenance.
+    pub fn workflow_execution_delivery_presentations(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Vec<DeliveryPresentation>, String> {
+        let connection = self.state.connection()?;
+        let Some(conversation) =
+            crate::storage::chat_repository::get_active_conversation(&connection, conversation_id)
+                .map_err(|error| error.to_string())?
+        else {
+            return Ok(vec![]);
+        };
+        let Some(trace) = crate::storage::conversation_trace_repository::get_trace_for_message(
+            &connection,
+            assistant_message_id,
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            return Ok(vec![]);
+        };
+        let origins = repository::delivery_origins_for_conversation(&connection, conversation_id)?;
+        Ok(repository::delivery_presentations(
+            &conversation,
+            &trace,
+            &origins,
+        ))
+    }
+
     pub fn workflow_execution_delivery_origins(
         &self,
         conversation_id: &str,
@@ -166,8 +254,5 @@ impl StorageService {
         after_sequence: Option<u64>,
     ) -> Result<RuntimeSnapshot, String> {
         repository::runtime_snapshot(&*self.state.connection()?, instance_id, after_sequence)
-    }
-    pub fn workflow_execution_complete_user(&self, input_id: &str) -> Result<(), String> {
-        repository::complete_user_input(&mut *self.state.connection()?, input_id)
     }
 }

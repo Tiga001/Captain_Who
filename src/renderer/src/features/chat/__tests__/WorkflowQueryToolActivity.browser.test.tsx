@@ -22,7 +22,7 @@ const copy = vi.fn().mockResolvedValue(undefined)
 vi.mock('../components/clipboard', () => ({ copyTextToClipboard: (value: string) => copy(value) }))
 const call: AgentToolCall = {
   id: 'query',
-  tool: 'workflow_get_state',
+  tool: 'organization_get_state',
   args: { view: 'all', reason: '确认上游是否已完成交付' },
   approvalStatus: 'not_required',
   reason: null
@@ -33,7 +33,7 @@ const result: AgentToolResult = {
   ok: true,
   result: {
     available: true,
-    workflowName: '文案润色',
+    organizationName: '文案润色',
     instanceId: 'private-workflow',
     executionVersion: 'private-version',
     currentNodeId: 'writer',
@@ -43,14 +43,18 @@ const result: AgentToolResult = {
     topology: { nodes: [{ nodeName: '文书', task: '润色文案' }] }
   }
 }
-const mailCall = { ...call, tool: 'workflow_get_mailbox', args: { direction: 'inbox', limit: 50 } }
+const mailCall = {
+  ...call,
+  tool: 'organization_get_mailbox',
+  args: { direction: 'inbox', limit: 50 }
+}
 function mailResult(messages: unknown[], extra = {}): AgentToolResult {
   return {
     ...result,
     tool: mailCall.tool,
     result: {
       available: true,
-      workflowName: '文案润色',
+      organizationName: '文案润色',
       instanceId: 'private-workflow',
       observedAt: 1790856000000,
       direction: 'inbox',
@@ -77,7 +81,7 @@ afterEach(() => {
   config.language = 'zh-CN'
 })
 
-describe('workflow query presentation', () => {
+describe('organization query presentation', () => {
   it('renders state as a non-expandable reason without any returned details', async () => {
     const view = await render(
       <AgentToolActivity
@@ -88,7 +92,7 @@ describe('workflow query presentation', () => {
         showImageGenerationPreview={false}
       />
     )
-    await expect.element(view.getByText('已查看工作流 · 确认上游是否已完成交付')).toBeVisible()
+    await expect.element(view.getByText('已查看组织 · 确认上游是否已完成交付')).toBeVisible()
     expect(view.container.querySelector('details')).toBeNull()
     for (const forbidden of [
       'private-version',
@@ -101,30 +105,29 @@ describe('workflow query presentation', () => {
     ])
       expect(view.container.textContent).not.toContain(forbidden)
     await view.rerender(<WorkflowStateToolActivity call={call} />)
-    await expect.element(view.getByText('正在查看工作流 · 确认上游是否已完成交付')).toBeVisible()
+    await expect.element(view.getByText('正在查看组织 · 确认上游是否已完成交付')).toBeVisible()
     await view.rerender(
       <WorkflowStateToolActivity
         call={call}
         result={{ ...result, ok: false, error: 'private-error' }}
       />
     )
-    await expect.element(view.getByText('查看工作流失败 · 确认上游是否已完成交付')).toBeVisible()
+    await expect.element(view.getByText('查看组织失败 · 确认上游是否已完成交付')).toBeVisible()
     expect(view.container.textContent).not.toContain('private-error')
   })
 
-  it('handles legacy calls without inventing a reason and supports English', async () => {
-    const legacy = { ...call, args: { view: 'all' } }
-    const view = await render(<WorkflowStateToolActivity call={legacy} result={result} />)
-    await expect.element(view.getByText('已查看工作流', { exact: true })).toBeVisible()
-    expect(view.container.querySelector('details')).toBeNull()
+  it('shows the reason in English without exposing query details', async () => {
     config.language = 'en'
-    await view.rerender(
+    const view = await render(
       <WorkflowStateToolActivity
-        call={{ ...legacy, reason: 'Check upstream progress' }}
+        call={{ ...call, args: { reason: 'Check member progress' } }}
         result={result}
       />
     )
-    await expect.element(view.getByText('Checked workflow · Check upstream progress')).toBeVisible()
+    await expect
+      .element(view.getByText('Checked organization · Check member progress'))
+      .toBeVisible()
+    expect(view.container.querySelector('details')).toBeNull()
   })
 
   it('never expands empty inbox/outbox and uses the same tray with different curved arrows', async () => {
@@ -136,7 +139,7 @@ describe('workflow query presentation', () => {
         showImageGenerationPreview={false}
       />
     )
-    await expect.element(view.getByText('已查看工作流收件箱 · 暂无消息')).toBeVisible()
+    await expect.element(view.getByText('已查看组织收件箱 · 暂无邮件')).toBeVisible()
     expect(view.container.querySelector('details')).toBeNull()
     const inboxPaths = [...view.container.querySelectorAll('svg path')].map((path) =>
       path.getAttribute('d')
@@ -147,7 +150,7 @@ describe('workflow query presentation', () => {
         result={mailResult([], { direction: 'outbox' })}
       />
     )
-    await expect.element(view.getByText('已查看工作流发件箱 · 暂无消息')).toBeVisible()
+    await expect.element(view.getByText('已查看组织发件箱 · 暂无邮件')).toBeVisible()
     expect(view.container.querySelector('details')).toBeNull()
     const outboxPaths = [...view.container.querySelectorAll('svg path')].map((path) =>
       path.getAttribute('d')
@@ -170,11 +173,11 @@ describe('workflow query presentation', () => {
         />
       </ConversationNavigationProvider>
     )
-    await view.getByText('已查看工作流收件箱 · 本次查到 2 条消息').click()
-    await expect.element(view.getByText('历史消息')).toBeVisible()
+    await view.getByText('已查看组织收件箱 · 本次查到 2 封邮件').click()
+    await expect.element(view.getByText('历史邮件')).toBeVisible()
     await expect.element(view.getByText('还有更多记录，本次查询未全部返回。')).toBeVisible()
     await expect.element(view.getByText('已停止').first()).toBeVisible()
-    await view.getByRole('button', { name: '复制消息 · 文书', exact: true }).click()
+    await view.getByRole('button', { name: '复制邮件 · 文书', exact: true }).click()
     expect(copy).toHaveBeenCalledExactlyOnceWith(message.content)
     await view.getByRole('button', { name: '打开对话 · 文书', exact: true }).click()
     expect(open).toHaveBeenCalledExactlyOnceWith('writer-chat')
@@ -200,10 +203,10 @@ describe('workflow query presentation', () => {
         ])}
       />
     )
-    await view.getByText('已查看工作流收件箱 · 本次查到 1 条消息').click()
-    await expect.element(view.getByText('本次查询内容较多，未包含这条消息的正文。')).toBeVisible()
+    await view.getByText('已查看组织收件箱 · 本次查到 1 封邮件').click()
+    await expect.element(view.getByText('本次查询内容较多，未包含这封邮件的正文。')).toBeVisible()
     expect(view.container.textContent).not.toContain('must-not-render')
-    expect(view.getByRole('button', { name: /复制消息/ }).elements()).toHaveLength(0)
+    expect(view.getByRole('button', { name: /复制邮件/ }).elements()).toHaveLength(0)
   })
 
   it('collapses long outbox bodies and opens recipients rather than senders', async () => {
@@ -217,7 +220,7 @@ describe('workflow query presentation', () => {
         />
       </ConversationNavigationProvider>
     )
-    await view.getByText('已查看工作流发件箱 · 本次查到 1 条消息').click()
+    await view.getByText('已查看组织发件箱 · 本次查到 1 封邮件').click()
     expect(view.container.querySelector('.workflow-send-message__body')?.textContent).not.toBe(
       content
     )
@@ -225,31 +228,31 @@ describe('workflow query presentation', () => {
     expect(view.container.querySelector('.workflow-send-message__body')?.textContent).toBe(content)
     await view.getByRole('button', { name: '打开对话 · 审核' }).click()
     expect(open).toHaveBeenCalledExactlyOnceWith('review-chat')
-    await view.getByRole('button', { name: '复制消息 · 审核' }).click()
+    await view.getByRole('button', { name: '复制邮件 · 审核' }).click()
     expect(copy).toHaveBeenCalledExactlyOnceWith(content)
   })
 
   it('shows running, cancellation, failure and unavailable states without empty disclosures', async () => {
     const view = await render(<WorkflowMailboxToolActivity call={mailCall} />)
-    await expect.element(view.getByText('正在查看工作流收件箱')).toBeVisible()
+    await expect.element(view.getByText('正在查看组织收件箱')).toBeVisible()
     await view.rerender(<WorkflowMailboxToolActivity call={mailCall} cancelled />)
-    await expect.element(view.getByText('已取消查看工作流收件箱')).toBeVisible()
+    await expect.element(view.getByText('已取消查看组织收件箱')).toBeVisible()
     await view.rerender(
       <WorkflowMailboxToolActivity
         call={mailCall}
         result={{ ...mailResult([]), ok: false, error: 'internal-error' }}
       />
     )
-    await expect.element(view.getByText('查看工作流收件箱失败')).toBeVisible()
+    await expect.element(view.getByText('查看组织收件箱失败')).toBeVisible()
     await view.rerender(<WorkflowMailboxToolActivity call={mailCall} settledStatus="completed" />)
-    await expect.element(view.getByText('工作流收件箱的查询结果待确认')).toBeVisible()
+    await expect.element(view.getByText('组织收件箱的查询结果待确认')).toBeVisible()
     await view.rerender(
       <WorkflowMailboxToolActivity
         call={mailCall}
         result={{ ...mailResult([]), result: { available: false } }}
       />
     )
-    await expect.element(view.getByText('工作流信息暂不可用')).toBeVisible()
+    await expect.element(view.getByText('组织信息暂不可用')).toBeVisible()
     expect(view.container.querySelector('details')).toBeNull()
   })
 
@@ -283,7 +286,7 @@ describe('workflow query presentation', () => {
           <WorkflowMailboxToolActivity call={mailCall} result={mailResult([message])} />
         </div>
       )
-      await view.getByText('已查看工作流收件箱 · 本次查到 1 条消息').click()
+      await view.getByText('已查看组织收件箱 · 本次查到 1 封邮件').click()
       const panel = view.container.firstElementChild as HTMLElement
       expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth)
       await page.screenshot({

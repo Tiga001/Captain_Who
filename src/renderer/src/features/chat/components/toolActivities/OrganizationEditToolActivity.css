@@ -1,0 +1,52 @@
+.organization-edit-changes {
+  max-width: 640px;
+}
+.organization-edit-change {
+  min-width: 0;
+  padding-block: 4px;
+}
+.organization-edit-change__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.organization-edit-change__heading svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  margin-top: 3px;
+  color: var(--mc-color-text-secondary);
+}
+.organization-edit-change__heading strong {
+  font-size: inherit;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.organization-edit-change__fields {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 0 23px;
+}
+.organization-edit-change__fields > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+}
+.organization-edit-change__fields dt,
+.organization-edit-change__before,
+.organization-edit-change__arrow {
+  color: var(--mc-color-text-secondary);
+}
+.organization-edit-change__fields dd {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+  margin: 0;
+}
+.organization-edit-change__fields dd > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

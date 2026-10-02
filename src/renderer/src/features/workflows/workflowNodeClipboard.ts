@@ -1,5 +1,5 @@
-import { parseWorkflowDefinition, type WorkflowNode } from '@mycopilot/protocol'
-import { createWorkflow } from './workflowAuthoring'
+import { parseWorkflowNode, type WorkflowNode } from '@mycopilot/protocol'
+import { availableWorkflowMemberName } from './workflowAuthoring'
 
 export const WORKFLOW_NODE_CLIPBOARD_TYPE = 'application/x-captain-workflow-node'
 
@@ -12,8 +12,9 @@ export function readWorkflowNodeClipboard(value: string): WorkflowNode | null {
   try {
     const data = JSON.parse(value)
     if (data?.type !== WORKFLOW_NODE_CLIPBOARD_TYPE || data.version !== 1) return null
-    const [node] = parseWorkflowDefinition({ ...createWorkflow(), nodes: [data.node] }).nodes
-    return node
+    // A copied member can refer to a department in another template. Validate
+    // the member here; the editor assigns its destination department on paste.
+    return parseWorkflowNode(data.node)
   } catch {
     return null
   }
@@ -21,8 +22,15 @@ export function readWorkflowNodeClipboard(value: string): WorkflowNode | null {
 
 export function duplicateWorkflowNode(
   source: WorkflowNode,
-  position: { x: number; y: number }
+  position: { x: number; y: number },
+  existingNodes: readonly { name: string }[] = []
 ): WorkflowNode {
-  const node = { ...structuredClone(source), x: position.x, y: position.y, id: crypto.randomUUID() }
+  const node = {
+    ...structuredClone(source),
+    name: availableWorkflowMemberName(source.name, existingNodes),
+    x: position.x,
+    y: position.y,
+    id: crypto.randomUUID()
+  }
   return node
 }

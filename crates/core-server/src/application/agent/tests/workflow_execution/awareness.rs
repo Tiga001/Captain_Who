@@ -21,6 +21,163 @@ pub(super) fn tool_result(sample: &Value, tool: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn organization_configuration_query_exposes_only_executable_choices_and_actual_caller_grants()
+{
+    let directory = tempdir().unwrap();
+    let storage =
+        Arc::new(StorageService::open(&directory.path().join("configuration.sqlite")).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    let mut other = settings.models[0].clone();
+    other.id = "other-model".into();
+    other.display_name = "Other model".into();
+    settings.models.push(other.clone());
+    other.id = "disabled-model".into();
+    other.display_name = "Disabled model".into();
+    other.enabled = false;
+    settings.models.push(other);
+    storage.save_model_settings(settings).unwrap();
+    let mut preferences = storage.load_ui_preferences().unwrap();
+    preferences.full_permission_enabled = true;
+    preferences.custom_permission_enabled = true;
+    preferences.custom_permissions = mycopilot_core::AgentPermissions {
+        read: mycopilot_core::AgentReadPermission::All,
+        write: mycopilot_core::AgentWritePermission::All,
+        ..mycopilot_core::AgentPermissions::default()
+    };
+    storage.save_ui_preferences(preferences).unwrap();
+    let (source, target) = workflow_fixture(&storage);
+    let promote = |role: &str| {
+        let response = storage
+            .workflow_request(mycopilot_core::workflow::Request::Manage(
+                mycopilot_core::workflow_management::Request::ListInstances {},
+            ))
+            .unwrap();
+        let instance = &response.instances[0];
+        let mut definition = serde_json::to_value(&instance.definition).unwrap();
+        definition["nodes"][0]["rank"] = json!(90);
+        definition["nodes"][0]["managementRole"] = json!(role);
+        storage.workflow_request(serde_json::from_value(json!({"operation":"saveInstance","id":instance.id,"name":instance.name,"color":instance.color,"definition":definition,"bindings":instance.bindings,"expectedRevision":instance.revision})).unwrap()).unwrap();
+    };
+    promote("organization_admin");
+    let mut target_draft = storage.load_composer_draft(&target).unwrap().unwrap();
+    target_draft.model_id = Some("other-model".into());
+    target_draft.updated_at += 1;
+    storage.save_composer_draft(target_draft).unwrap();
+    assert_eq!(
+        storage
+            .load_composer_draft(&target)
+            .unwrap()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some("other-model")
+    );
+    let (captured, mut requests) = unbounded_channel();
+    let provider_storage = storage.clone();
+    let provider_source = source.clone();
+    let provider = tokio::spawn(async move {
+        for sample in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            captured.send(request_body(&mut stream).await).unwrap();
+            if sample == 0 {
+                let mut draft = provider_storage
+                    .load_composer_draft(&provider_source)
+                    .unwrap()
+                    .unwrap();
+                draft.model_id = Some("other-model".into());
+                draft.permission_mode = "full".into();
+                draft.updated_at += 1;
+                provider_storage.save_composer_draft(draft).unwrap();
+                let saved = provider_storage
+                    .load_composer_draft(&provider_source)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.model_id.as_deref(), Some("other-model"));
+                assert_eq!(saved.permission_mode, "full");
+            } else if sample == 1 {
+                let response = provider_storage
+                    .workflow_request(mycopilot_core::workflow::Request::Manage(
+                        mycopilot_core::workflow_management::Request::ListInstances {},
+                    ))
+                    .unwrap();
+                let instance = &response.instances[0];
+                let mut definition = serde_json::to_value(&instance.definition).unwrap();
+                definition["nodes"][0]["managementRole"] = json!("member");
+                provider_storage.workflow_request(serde_json::from_value(json!({"operation":"saveInstance","id":instance.id,"name":instance.name,"color":instance.color,"definition":definition,"bindings":instance.bindings,"expectedRevision":instance.revision})).unwrap()).unwrap();
+            }
+            if sample < 2 {
+                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("configuration-{sample}"),"type":"function","function":{"name":"organization_get_state","arguments":json!({"view":"configuration","member":"人事负责人","reason":"Check the member's model before editing"}).to_string()}}]}), "tool_calls").await;
+            } else {
+                respond(
+                    &mut stream,
+                    json!({"role":"assistant","content":"Configuration reviewed."}),
+                    "stop",
+                )
+                .await;
+            }
+        }
+    });
+    let service = AgentService::new_authorized_for_test(storage);
+    let (notifications, mut events) = crate::transport::outbound_channel();
+    let mut input = root_input(&source, "Check the organization's model choices");
+    input.permissions.write = mycopilot_core::AgentWritePermission::WorkspaceOnly;
+    service
+        .start_conversation_turn(input, notifications)
+        .unwrap();
+    let samples = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            samples.push(requests.recv().await.unwrap());
+        }
+        while let Some(event) = events.recv().await {
+            if event["params"]["type"] == "done" {
+                break;
+            }
+        }
+        samples
+    })
+    .await
+    .unwrap();
+    provider.await.unwrap();
+    assert!(!samples[0]["messages"]
+        .to_string()
+        .contains("availableModels"));
+    let result = tool_result(&samples[1], "organization_get_state");
+    let configuration = &result["configuration"];
+    assert_eq!(
+        configuration["members"][0]["memberDefaults"]["model"],
+        "Model 1"
+    );
+    assert_eq!(
+        configuration["members"][0]["nextTurn"]["model"],
+        "Other model"
+    );
+    assert_eq!(
+        configuration["availableModels"].as_array().unwrap().len(),
+        2
+    );
+    assert!(!configuration.to_string().contains("disabled-model"));
+    assert!(configuration["availableModels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(Value::is_string));
+    assert_eq!(configuration["callerCurrentRun"]["model"], "Model 1");
+    assert_eq!(
+        configuration["callerCurrentRun"]["allowedPermissionModes"],
+        json!(["default"])
+    );
+    let denied = tool_result(&samples[2], "organization_get_state");
+    assert!(denied.to_string().contains("administrator"));
+    assert!(denied.get("configuration").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_delivery() {
     let directory = tempdir().unwrap();
     let storage =
@@ -65,6 +222,8 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         .unwrap();
     let receipt = storage
         .workflow_execution_send(&SendRequest {
+            model_input: None,
+            recipient_versions: Default::default(),
             conversation_id: source.clone(),
             source_run_id: "seed-run".into(),
             tool_call_id: "seed-call".into(),
@@ -89,22 +248,22 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         let calls = [
             (
                 "inspect-state",
-                "workflow_get_state",
+                "organization_get_state",
                 json!({"view":"all","reason":"Check workflow progress"}),
             ),
             (
                 "inspect-node",
-                "workflow_get_state",
-                json!({"view":"runtime","nodeId":"b","reason":"Inspect stopped receiver details"}),
+                "organization_get_state",
+                json!({"view":"runtime","member":"人事负责人","reason":"Inspect stopped receiver details"}),
             ),
             (
                 "inspect-outbox",
-                "workflow_get_mailbox",
+                "organization_get_mailbox",
                 json!({"direction":"outbox","messageId":message_id}),
             ),
             (
                 "inspect-inbox",
-                "workflow_get_mailbox",
+                "organization_get_mailbox",
                 json!({"direction":"inbox"}),
             ),
         ];
@@ -147,9 +306,12 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
     }
     assert_eq!(samples.len(), 5);
     for name in [
-        "workflow_send",
-        "workflow_get_state",
-        "workflow_get_mailbox",
+        "organization_send",
+        "organization_get_state",
+        "organization_get_mailbox",
+        "organization_accept",
+        "organization_complete",
+        "organization_recall",
     ] {
         assert!(samples[0]["tools"]
             .as_array()
@@ -157,12 +319,20 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
             .iter()
             .any(|tool| tool["function"]["name"] == name));
     }
-    let state = tool_result(&samples[1], "workflow_get_state");
+    assert!(samples[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| !tool["function"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("workflow_")));
+    let state = tool_result(&samples[1], "organization_get_state");
     let members = &state["members"];
     assert_eq!(members.as_array().unwrap().len(), 2);
     assert!(state.get("topology").is_none());
-    let nodes = state["runtime"]["nodes"].as_array().unwrap();
-    let current = nodes.iter().find(|node| node["nodeId"] == "a").unwrap();
+    let nodes = state["runtime"]["members"].as_array().unwrap();
+    let current = nodes.iter().find(|node| node["member"] == "Boss").unwrap();
     assert_eq!(
         state["runtime"]["summaryPolicy"],
         "unchanged_from_world_state_omitted"
@@ -173,9 +343,13 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
             "unchanged {key} must come from World State"
         );
     }
-    assert!(samples[0]["messages"].to_string().contains(&turn.run_id));
+    let model_context = samples[0]["messages"].to_string();
+    assert!(!model_context.contains(&turn.run_id));
+    assert!(model_context.contains("Boss"));
+    assert!(model_context.contains("人事负责人"));
     for key in [
         "workflowName",
+        "organizationName",
         "executionVersion",
         "currentNodeId",
         "background",
@@ -186,7 +360,7 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["nodeId"] == "a")
+        .find(|node| node["member"] == "Boss")
         .unwrap();
     assert!(own.get("task").is_none());
     assert!(own.get("outputs").is_none());
@@ -194,24 +368,46 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["nodeId"] == "b")
+        .find(|node| node["member"] == "人事负责人")
         .unwrap();
     assert!(other.get("task").is_some());
-    let stopped = nodes.iter().find(|node| node["nodeId"] == "b").unwrap();
+    let stopped = nodes
+        .iter()
+        .find(|node| node["member"] == "人事负责人")
+        .unwrap();
     assert!(stopped.get("state").is_none());
-    assert_eq!(stopped["inputs"].as_array().unwrap().len(), 1);
-    let focused = tool_result(&samples[2], "workflow_get_state");
+    assert_eq!(stopped["mail"].as_array().unwrap().len(), 1);
+    let focused = tool_result(&samples[2], "organization_get_state");
     assert_eq!(focused["runtime"]["summaryPolicy"], "complete");
-    assert_eq!(focused["runtime"]["nodes"].as_array().unwrap().len(), 1);
-    assert_eq!(focused["runtime"]["nodes"][0]["state"], "stopped");
+    assert_eq!(focused["runtime"]["members"].as_array().unwrap().len(), 1);
+    assert_eq!(focused["runtime"]["members"][0]["state"], "stopped");
     assert!(focused.get("members").is_none());
-    let outbox = tool_result(&samples[3], "workflow_get_mailbox");
+    let outbox = tool_result(&samples[3], "organization_get_mailbox");
+    assert!(outbox.get("workflowName").is_none());
+    assert!(outbox["organizationName"].is_string());
     let messages = outbox["messages"].as_array().unwrap();
+    assert!(messages[0].get("workflowName").is_none());
+    assert!(messages[0].get("organizationName").is_none());
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["messageId"], receipt.messages[0].id);
     assert_eq!(messages[0]["content"], "Own sent payload 72310");
-    assert_eq!(messages[0]["inputId"], receipt.input_ids[0]);
-    let inbox = tool_result(&samples[4], "workflow_get_mailbox");
+    assert_eq!(messages[0]["from"], "Boss");
+    assert_eq!(messages[0]["to"], "人事负责人");
+    for field in [
+        "id",
+        "nodeId",
+        "inputId",
+        "sourceNodeId",
+        "targetNodeId",
+        "sourceConversationId",
+        "targetConversationId",
+    ] {
+        assert!(
+            messages[0].get(field).is_none(),
+            "internal identity leaked: {field}"
+        );
+    }
+    let inbox = tool_result(&samples[4], "organization_get_mailbox");
     assert!(inbox["messages"].as_array().unwrap().is_empty());
     let runtime = storage.workflow_execution_runtime("instance").unwrap();
     assert_eq!(runtime.inputs.len(), 1);

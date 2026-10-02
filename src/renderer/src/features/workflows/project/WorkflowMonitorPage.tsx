@@ -1,23 +1,17 @@
 import { WorkflowTransmissionLayer } from './WorkflowTransmissionLayer'
 import { WorkflowNodeMailbox } from './WorkflowNodeMailbox'
-import type {
-  WorkflowDefinition,
-  WorkflowInstance,
-  WorkflowRuntimeInput
-} from '@mycopilot/protocol'
+import type { WorkflowInstance } from '@mycopilot/protocol'
 import { ArrowLeft, Maximize2, Minus, Plus } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { dismissActiveTooltip, Tooltip } from '../../../components/overlay/Tooltip'
-import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { AgentAvatar } from '../../agentCollaboration/AgentAvatar'
-import { AccountAvatar } from '../../auth/AccountAvatar'
-import { useAccountAuth } from '../../auth/AccountAuthContext'
 import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
 import type { ConversationAttentionById } from '../../chat/useConversationAttention'
 import { getChatPermissionPresentation } from '../../chat/chatPermissionPresentation'
 import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import { workflowNodeSize } from '../workflowAuthoring'
+import { workflowDepartmentLevel } from '../workflowDepartments'
 import { graphBounds } from '../workflowCanvasGeometry'
 import { workflowNodeModelLabel, type WorkflowModelDisplay } from '../workflowModelPresentation'
 import { workflowText } from '../workflowText'
@@ -34,7 +28,6 @@ import './workflowMonitor.css'
 interface Props {
   foreground?: boolean
   instance: WorkflowInstance
-  graph: WorkflowDefinition
   conversations: readonly ChatConversation[]
   conversationDrafts?: Readonly<Record<string, ChatComposerDraft>>
   conversationAttention?: ConversationAttentionById
@@ -47,7 +40,6 @@ interface Props {
 export function WorkflowMonitorPage({
   foreground = true,
   instance,
-  graph,
   conversations,
   conversationDrafts,
   conversationAttention,
@@ -55,15 +47,11 @@ export function WorkflowMonitorPage({
   onBack,
   onOpenConversation
 }: Props) {
+  const graph = instance.definition
   const { language } = useFrontendConfig()
   const text = workflowText(language)
   const t = projectWorkflowText(language)
-  const profile = useAccountAuth()?.state.profile
-  const userName = profile?.displayName || t('当前用户', 'Current user')
-  const { snapshot, transmissions, completeUserInput } = useWorkflowExecution(
-    instance.id,
-    foreground
-  )
+  const { snapshot, transmissions } = useWorkflowExecution(instance.id, foreground)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const selectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cancelNodeSelection = () => {
@@ -87,8 +75,6 @@ export function WorkflowMonitorPage({
       setSelectedNodeId(nodeId)
     }, 300)
   }
-  const [userInput, setUserInput] = useState<WorkflowRuntimeInput | null>(null)
-  const [completionError, setCompletionError] = useState<string | null>(null)
   const { runningConversationIds, waitingApprovalConversationIds } = useWorkflowMonitor(
     instance,
     conversations
@@ -107,7 +93,6 @@ export function WorkflowMonitorPage({
   const height = Math.max(260, bounds.bottom - bounds.top + 128)
   const { viewportRef, size, zoom, left, top, dragging, zoomTo, resetView, panHandlers } =
     useWorkflowMonitorViewport(width, height)
-  const selectedUserNode = graph.nodes.find((node) => node.id === userInput?.nodeId)
 
   const selectedNode = graph.nodes.find(
     (node) => node.id === selectedNodeId && node.kind === 'agent'
@@ -131,7 +116,7 @@ export function WorkflowMonitorPage({
     if (runningConversationIds.has(conversationId)) return t('活跃中', 'Active')
     if (!snapshot) return t('正在读取状态', 'Loading state')
     const queue = workflowNodeQueue(snapshot, nodeId)
-    if (!instance.enabled) return t('工作流已关闭', 'Workflow disabled')
+    if (!instance.enabled) return t('组织已关闭', 'Organization disabled')
     if (queue.waiting.length) return t('等待处理', 'Waiting to process')
     return t('待命', 'Standby')
   }
@@ -139,15 +124,15 @@ export function WorkflowMonitorPage({
   return (
     <section
       className="workflow-monitor"
-      aria-label={t('工作流流程图', 'Workflow diagram')}
+      aria-label={t('组织看板', 'Organization board')}
       style={{ '--workflow-instance-color': instance.color } as CSSProperties}
     >
       <header className="workflow-monitor__header">
-        <Tooltip content={t('返回工作流', 'Back to workflows')}>
+        <Tooltip content={t('返回组织', 'Back to organizations')}>
           <button
             type="button"
             className="workflow-monitor__back"
-            aria-label={t('返回工作流', 'Back to workflows')}
+            aria-label={t('返回组织', 'Back to organizations')}
             onClick={onBack}
           >
             <ArrowLeft size={18} />
@@ -161,7 +146,7 @@ export function WorkflowMonitorPage({
           <div
             ref={viewportRef}
             className={`workflow-binding-canvas workflow-monitor__canvas${dragging ? ' is-panning' : ''}`}
-            aria-label={t('工作流只读画布', 'Read-only workflow canvas')}
+            aria-label={t('组织只读画布', 'Read-only organization canvas')}
             onPointerDownCapture={() => dismissActiveTooltip()}
             {...panHandlers}
           >
@@ -182,6 +167,32 @@ export function WorkflowMonitorPage({
                   transform: `scale(${zoom})`
                 }}
               >
+                {[...(graph.departments ?? [])]
+                  .sort((a, b) => b.width * b.height - a.width * a.height)
+                  .map((department) => (
+                    <div
+                      key={department.id}
+                      className="workflow-department workflow-monitor__department"
+                      data-workflow-department-id={department.id}
+                      aria-label={`${department.name} · ${text('departmentLevel').replace('{level}', String(workflowDepartmentLevel(graph, department.id)))}`}
+                      style={{
+                        left: department.x + origin.x,
+                        top: department.y + origin.y,
+                        width: department.width,
+                        height: department.height
+                      }}
+                    >
+                      <div className="workflow-department__heading">
+                        <strong>{department.name}</strong>
+                        <span>
+                          {text('departmentLevel').replace(
+                            '{level}',
+                            String(workflowDepartmentLevel(graph, department.id))
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
                 <WorkflowTransmissionLayer
                   nodes={graph.nodes}
                   events={transmissions}
@@ -196,65 +207,6 @@ export function WorkflowMonitorPage({
                     top: node.y + origin.y,
                     width: dimensions.width,
                     height: dimensions.height
-                  }
-                  if (node.kind === 'user') {
-                    const waiting = snapshot?.inputs.find(
-                      (input) => input.nodeId === node.id && input.status === 'waiting_user'
-                    )
-                    return (
-                      <div key={node.id} className="workflow-binding-node-anchor" style={style}>
-                        <Tooltip
-                          content={
-                            <div className="workflow-binding-node-tooltip">
-                              <strong>{node.name || userName}</strong>
-                              <p>
-                                {node.task ||
-                                  t(
-                                    '完成操作后，点击“我已完成”。',
-                                    'Complete your task, then choose “I’m done”.'
-                                  )}
-                              </p>
-                            </div>
-                          }
-                          delayMs={1000}
-                          delayOnFocus
-                          describeTrigger
-                          anchorClassName="workflow-binding-node-tooltip-anchor"
-                        >
-                          <button
-                            type="button"
-                            className={`workflow-node workflow-monitor__node${waiting ? ' is-bound' : ''}`}
-                            data-node-id={node.id}
-                            data-waiting={waiting ? 'user' : undefined}
-                            disabled={!waiting}
-                            onClick={() => {
-                              setCompletionError(null)
-                              setUserInput(waiting ?? null)
-                            }}
-                            aria-label={`${node.name || userName}${waiting ? ` · ${t('等待用户操作', 'Waiting for user action')}` : ''}`}
-                          >
-                            <WorkflowNodeMailbox
-                              count={workflowNodeQueue(snapshot, node.id).waiting.length}
-                            />
-                            <span className="workflow-node__avatar workflow-user-avatar">
-                              <AccountAvatar
-                                src={profile?.avatarDataUrl}
-                                localAvatarSeed={profile?.localAccount?.avatarSeed}
-                              />
-                            </span>
-                            <span className="workflow-node__copy">
-                              <strong>{userName}</strong>
-                              <span>{node.name || t('用户', 'User')}</span>
-                            </span>
-                            {waiting && (
-                              <span className="workflow-monitor__node-attention">
-                                {t('等待用户操作', 'Waiting for user action')}
-                              </span>
-                            )}
-                          </button>
-                        </Tooltip>
-                      </div>
-                    )
                   }
                   const conversationId = bindings.get(node.id)
                   const conversation = conversationId
@@ -491,28 +443,6 @@ export function WorkflowMonitorPage({
           />
         )}
       </div>
-      {userInput?.instanceId === instance.id && (
-        <ConfirmationDialog
-          title={t('等待用户操作', 'Waiting for user action')}
-          description={
-            completionError ?? (selectedUserNode?.kind === 'user' ? selectedUserNode.task : '')
-          }
-          cancelLabel={t('取消', 'Cancel')}
-          confirmLabel={t('我已完成', 'I’m done')}
-          confirmVariant="primary"
-          onCancel={() => setUserInput(null)}
-          onConfirm={async () => {
-            try {
-              await completeUserInput(userInput.id)
-              setUserInput(null)
-            } catch {
-              setCompletionError(
-                t('未能保存完成状态，请重试。', 'Could not save completion. Please retry.')
-              )
-            }
-          }}
-        />
-      )}
     </section>
   )
 }

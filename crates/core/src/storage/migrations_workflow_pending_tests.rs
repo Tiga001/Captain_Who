@@ -28,7 +28,7 @@ fn workflow_pending_v61_upgrade_only_adds_index_and_reopens() {
     );
     let index: String = connection
         .query_row(
-            "SELECT sql FROM sqlite_schema WHERE name='workflow_execution_input_pending_sequence'",
+            "SELECT sql FROM sqlite_schema WHERE name='workflow_mail_input_pending_sequence'",
             [],
             |r| r.get(0),
         )

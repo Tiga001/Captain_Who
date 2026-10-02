@@ -2900,3 +2900,106 @@ fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_hi
         .unwrap()
         .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
 }
+
+#[test]
+fn organization_edit_uses_executable_model_directory_instead_of_enabled_flag() {
+    use crate::organization_personnel::{Input, Request, TrustedEditContext};
+    use crate::workflow::WorkflowPermissionMode;
+    use serde_json::json;
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = || ModelSettingsRecord {
+        api_url: "https://provider.example/v1/chat/completions".into(),
+        api_token: "organization-model-test".into(),
+        search_mode: "disabled".into(),
+        tavily_api_key: String::new(),
+        models: vec![official_profile_test_model("available-model", None, None)],
+    };
+    service.save_model_settings(settings()).unwrap();
+    let definition = json!({"schemaVersion":1,"id":"team","name":"Team","description":"","background":"","viewport":{"x":0,"y":0,"zoom":1},"nodes":[{"kind":"agent","id":"admin","name":"Admin","rank":99,"managementRole":"organization_admin","x":0,"y":0,"modelConfigId":"available-model","permissionMode":"default","task":"Manage","receives":"","delivers":""}]});
+    let response=service.workflow_request(serde_json::from_value(json!({"operation":"saveInstance","id":"team","definition":definition,"name":"Team","color":"#123456","expectedRevision":0,"bindings":[]})).unwrap()).unwrap();
+    let chat = response.instances[0].bindings[0].conversation_id.clone();
+    {
+        let c = service.state.connection().unwrap();
+        c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES('admin-message',?1,'assistant','',1,0)",[&chat]).unwrap();
+        c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES('admin-message',?1,'admin-run',?2,'in_progress',0,1,1)",rusqlite::params![chat,crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION]).unwrap();
+    }
+    let owner = service
+        .workflow_execution_bind_run(&chat, "admin-run")
+        .unwrap()
+        .unwrap();
+    let preferences = service.load_ui_preferences().unwrap();
+    let request=Request {
+        model_input: None,
+        conversation_id:chat,source_run_id:"admin-run".into(),tool_call_id:"add".into(),execution_version:owner.execution_version,expected_revision:1,
+        input:serde_json::from_value::<Input>(json!({"reason":"Add a helper","changes":[{"action":"add_member","name":"Helper","task":"Help","modelConfigId":"available-model"}]})).unwrap(),
+        context:TrustedEditContext {current_model_id:"available-model".into(),permission_settings_fingerprint:serde_json::to_string(&(preferences.full_permission_enabled,preferences.custom_permission_enabled,preferences.custom_permissions)).unwrap(),default_permission_mode:Some(WorkflowPermissionMode::Default),allowed_permission_modes:vec![WorkflowPermissionMode::Default]},
+    };
+    let reference: String = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT api_token_ref FROM model_provider_settings",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    fixture
+        .model_credentials
+        .delete(&CredentialReference::parse(&reference).unwrap())
+        .unwrap();
+    assert!(service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT enabled FROM models WHERE id='available-model'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(service
+        .organization_edit(&request)
+        .unwrap_err()
+        .contains("unavailable"));
+    assert_eq!(
+        service
+            .state
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM workflow_instance_bindings", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+    service.save_model_settings(settings()).unwrap();
+    let receipt = service.organization_edit(&request).unwrap();
+    assert_eq!(receipt.changes.len(), 1);
+    // Exact receipt recovery does not depend on a credential that may disappear after commit.
+    fixture
+        .model_credentials
+        .delete(
+            &CredentialReference::parse(
+                service
+                    .state
+                    .connection()
+                    .unwrap()
+                    .query_row(
+                        "SELECT api_token_ref FROM model_provider_settings",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .organization_edit(&request)
+            .unwrap()
+            .organization_revision,
+        receipt.organization_revision
+    );
+}

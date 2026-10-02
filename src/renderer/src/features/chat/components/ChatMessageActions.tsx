@@ -78,11 +78,11 @@ export function ChatMessageActions({
   const Icon = copied ? Check : Copy
   const workflowContextLabel = language.startsWith('zh')
     ? workflowContextExpanded
-      ? '收起工作流上下文'
-      : '展开工作流上下文'
+      ? '收起组织上下文'
+      : '展开组织上下文'
     : workflowContextExpanded
-      ? 'Collapse workflow context'
-      : 'Expand workflow context'
+      ? 'Collapse organization context'
+      : 'Expand organization context'
 
   useEffect(() => {
     if (!copied) return undefined

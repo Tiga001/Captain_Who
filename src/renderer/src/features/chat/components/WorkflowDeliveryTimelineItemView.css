@@ -1,0 +1,41 @@
+.workflow-delivery {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: 100%;
+  min-width: 0;
+  margin: 8px 0;
+  gap: 5px;
+}
+
+.workflow-delivery__bubble {
+  max-width: min(78%, 760px);
+  min-width: 0;
+  padding: 7px 17px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-message);
+  font-size: var(--mc-font-size-chat-assistant);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-chat, 1.55);
+  overflow-wrap: break-word;
+}
+
+.chat-message--assistant .workflow-delivery .chat-message__actions {
+  position: static;
+  justify-content: flex-end;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-message--assistant .workflow-delivery .chat-message__actions time,
+.chat-message--assistant .workflow-delivery .chat-message__actions > button {
+  order: 0;
+}
+
+.chat-message--assistant[data-copy-pinned='true']:not(:hover):not(:focus-within)
+  .workflow-delivery
+  .chat-message__actions
+  time {
+  opacity: 1;
+}

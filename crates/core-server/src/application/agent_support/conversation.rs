@@ -290,7 +290,7 @@ pub(crate) fn prepare_reserved_workflow_turn(
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
-            Err("workflow delivery cannot replay a rewrite"
+            Err("organization delivery cannot replay a rewrite"
                 .to_string()
                 .into())
         }
@@ -478,7 +478,7 @@ fn prepare_conversation_turn_from_source(
             || input.user_message_id.as_deref()
                 != Some(format!("workflow-message-{}", workflow.id).as_str())
         {
-            return Err("Workflow input does not match its trusted admission."
+            return Err("Organization input does not match its trusted admission."
                 .to_string()
                 .into());
         }

@@ -1,16 +1,20 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import type { ChatConversation, ChatMessage } from '../features/chat/chatTypes'
+import { upsertWorkflowDeliveryTimelineItem } from '../features/agentRun/workflowDeliveryTimeline'
 import { loadConversation } from '../features/storage/storageClient'
 import { hostClient } from '../host/hostClient'
+import { removeCoveredWorkflowMessages } from './workflowConversationDelivery'
 
 const terminal = (status: string) => ['completed', 'failed', 'cancelled'].includes(status)
-function durableSequence(message: ChatMessage): number {
+function durableSequence(message: ChatMessage, excludeWorkflow = false): number {
   return Math.max(
     0,
-    ...(message.agentRun?.timeline ?? []).map(
-      (item) =>
-        item.traceSequence ?? (item.type === 'user_guidance' ? item.sequence : undefined) ?? 0
-    )
+    ...(message.agentRun?.timeline ?? [])
+      .filter((item) => !excludeWorkflow || item.type !== 'workflow_delivery')
+      .map(
+        (item) =>
+          item.traceSequence ?? (item.type === 'user_guidance' ? item.sequence : undefined) ?? 0
+      )
   )
 }
 function liveMessageIsAhead(live: ChatMessage, stored: ChatMessage): boolean {
@@ -21,11 +25,32 @@ function liveMessageIsAhead(live: ChatMessage, stored: ChatMessage): boolean {
   const currentSequence = durableSequence(live),
     storedSequence = durableSequence(stored)
   if (currentSequence > storedSequence) return true
+  // A newly committed delivery can advance the stored trace while its subsequent narration is
+  // still streaming locally. Merge that delivery without replacing the uncommitted live text.
+  if (
+    current.status === 'running' &&
+    incoming.status === 'running' &&
+    durableSequence(live, true) >= durableSequence(stored, true)
+  )
+    return true
   if (currentSequence < storedSequence || terminal(incoming.status)) return false
   // Deltas can lead both the durable trace and the last saved Renderer projection. A same-boundary
   // reload must not erase that live stream even if it arrived just before the read began.
   if (current.status === 'running' && incoming.status === 'running') return true
   return (current.lastResponseAt ?? 0) > (incoming.lastResponseAt ?? 0)
+}
+
+/** A newer stream must retain deliveries already committed to the same Run's trace. */
+function mergeWorkflowDeliveries(preferred: ChatMessage, other: ChatMessage): ChatMessage {
+  const run = preferred.agentRun
+  if (!run?.runId || run.runId !== other.agentRun?.runId) return preferred
+  let timeline = run.timeline
+  for (const item of other.agentRun.timeline) {
+    if (item.type === 'workflow_delivery') {
+      timeline = upsertWorkflowDeliveryTimelineItem(timeline, item)
+    }
+  }
+  return timeline === run.timeline ? preferred : { ...preferred, agentRun: { ...run, timeline } }
 }
 
 /** Only attaches authoritative messages/Run identities; never submits or restarts an agent. */
@@ -48,14 +73,17 @@ export function mergeHumanInteractionConversation(
         latest.content !== atReadStart?.content ||
         latest.status !== atReadStart?.status)
     )
-      return latest
-    if (latest && liveMessageIsAhead(latest, message)) return latest
-    return latest ? { ...message, uiState: latest.uiState ?? message.uiState } : message
+      return mergeWorkflowDeliveries(latest, message)
+    if (latest && liveMessageIsAhead(latest, message))
+      return mergeWorkflowDeliveries(latest, message)
+    return latest
+      ? mergeWorkflowDeliveries({ ...message, uiState: latest.uiState ?? message.uiState }, latest)
+      : message
   })
   messages.push(...current.messages.filter((message) => !storedIds.has(message.id)))
   return {
     ...current,
-    messages,
+    messages: removeCoveredWorkflowMessages(messages),
     messagesLoaded: true,
     updatedAt: Math.max(current.updatedAt, stored.updatedAt)
   }

@@ -19,8 +19,7 @@ const activity = vi.hoisted(() => ({
 }))
 const execution = vi.hoisted(() => ({
   snapshot: null as import('@mycopilot/protocol').WorkflowRuntimeSnapshot | null,
-  transmissions: [] as import('@mycopilot/protocol').WorkflowRuntimeEvent[],
-  completeUserInput: vi.fn().mockResolvedValue(undefined)
+  transmissions: [] as import('@mycopilot/protocol').WorkflowRuntimeEvent[]
 }))
 vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
   useWorkflowExecution: () => execution
@@ -61,8 +60,7 @@ const graph: WorkflowDefinition = {
   nodes: [
     agent('plan', '任务架构师', 280, 160),
     agent('build', '开发工程师', 710, 60),
-    agent('review', 'Review 专家', 710, 260),
-    { id: 'user', kind: 'user', name: '用户验收', x: 1150, y: 160, task: '' }
+    agent('review', 'Review 专家', 710, 260)
   ]
 }
 const instance: WorkflowInstance = {
@@ -70,6 +68,7 @@ const instance: WorkflowInstance = {
   name: '新功能开发',
   templateId: graph.id,
   templateRevision: 1,
+  definition: structuredClone(graph),
   revision: 1,
   updatedAt: 1,
   enabled: true,
@@ -121,8 +120,7 @@ const renderPage = (
 ) => (
   <div style={{ width: '100vw', height: '100vh' }}>
     <WorkflowMonitorPage
-      instance={workflow}
-      graph={definition}
+      instance={{ ...workflow, definition }}
       conversations={chats}
       conversationAttention={attention}
       models={[{ id: 'model', displayName: 'Qwen3.8MAX', execution: { status: 'available' } }]}
@@ -155,12 +153,11 @@ beforeEach(async () => {
   activity.waitingApproval = new Set()
   execution.snapshot = null
   execution.transmissions = []
-  execution.completeUserInput.mockClear()
   onBack.mockReset()
   onOpenConversation.mockReset()
 })
 
-describe('workflow read-only monitor', () => {
+describe('organization read-only monitor', () => {
   it('pans a fitted graph and zooms around the mouse without editing the graph', async () => {
     const before = structuredClone(graph)
     const screen = await render(renderPage())
@@ -223,43 +220,6 @@ describe('workflow read-only monitor', () => {
     expect(graph).toEqual(before)
     expect(onOpenConversation).not.toHaveBeenCalled()
   })
-  it('shows received user work and confirms only that pending input', async () => {
-    const input: import('@mycopilot/protocol').WorkflowRuntimeInput = {
-      id: 'user-input',
-      instanceId: instance.id,
-      nodeId: 'user',
-      conversationId: null,
-      executionVersion: 'v1',
-      content: 'Review the two results',
-      messages: [],
-      mailStatus: 'pending',
-      status: 'waiting_user',
-      runId: null,
-      deliveryId: null,
-      createdAt: 1,
-      error: null
-    }
-    execution.snapshot = { instanceId: instance.id, sequence: 1, inputs: [input], events: [] }
-    execution.transmissions = [
-      {
-        instanceId: instance.id,
-        sequence: 1,
-        inputId: input.id,
-        messageId: 'm',
-        sourceNodeId: 'build',
-        targetNodeId: 'user',
-        kind: 'sent',
-        createdAt: Date.now()
-      }
-    ]
-    const screen = await render(renderPage())
-    expect(screen.container.querySelectorAll('.workflow-monitor__transmission')).toHaveLength(1)
-    await screen.getByRole('button', { name: '用户验收 · 等待用户操作' }).click()
-    await expect.element(page.getByRole('dialog', { name: '等待用户操作' })).toBeVisible()
-    await page.getByRole('button', { name: '我已完成' }).click()
-    expect(execution.completeUserInput).toHaveBeenCalledExactlyOnceWith('user-input')
-    expect(onOpenConversation).not.toHaveBeenCalled()
-  })
   it('preserves independent member coordinates and opens only bound conversations', async () => {
     const screen = await render(renderPage())
     expect(screen.container.querySelectorAll('.workflow-node')).toHaveLength(graph.nodes.length)
@@ -283,7 +243,7 @@ describe('workflow read-only monitor', () => {
     expect(onOpenConversation).not.toHaveBeenCalled()
     await userEvent.dblClick(conversationNode)
     expect(onOpenConversation).toHaveBeenCalledExactlyOnceWith('chat-build')
-    await screen.getByRole('button', { name: '返回工作流', exact: true }).click()
+    await screen.getByRole('button', { name: '返回组织', exact: true }).click()
     expect(onBack).toHaveBeenCalledOnce()
     await screen.rerender(renderPage({ ...instance, bindings: instance.bindings.slice(0, 2) }))
     await expect
@@ -473,7 +433,7 @@ describe('workflow read-only monitor', () => {
     expect(build.dataset.waiting).toBe('approval')
   })
 
-  it('keeps observing real activity when the workflow is disabled and supports read-only zoom', async () => {
+  it('keeps observing real activity when the organization is disabled and supports read-only zoom', async () => {
     activity.running = new Set(['chat-plan'])
     const screen = await render(renderPage({ ...instance, enabled: false }))
     await waitForCanvasFit(screen.container)
@@ -488,5 +448,37 @@ describe('workflow read-only monitor', () => {
     expect(stage.style.transform).not.toBe(originalTransform)
     await screen.getByRole('button', { name: '适应画布', exact: true }).click()
     expect(stage.style.transform).toBe(originalTransform)
+  })
+  it('shows nested department frames from the organization definition with runtime mailboxes', async () => {
+    const definition: WorkflowDefinition = {
+      ...graph,
+      departments: [
+        {
+          id: 'engineering',
+          name: '工程部',
+          parentId: null,
+          x: 150,
+          y: 0,
+          width: 900,
+          height: 450
+        },
+        {
+          id: 'review-team',
+          name: '评审组',
+          parentId: 'engineering',
+          x: 650,
+          y: 200,
+          width: 340,
+          height: 200
+        }
+      ]
+    }
+    const view = await render(renderPage(instance, undefined, conversations, definition))
+    await expect.element(view.getByLabelText('工程部 · 1 级部门')).toBeVisible()
+    await expect.element(view.getByLabelText('评审组 · 2 级部门')).toBeVisible()
+    expect(view.container.querySelectorAll('.workflow-monitor__department')).toHaveLength(2)
+    await page.screenshot({ path: '../../../../../.cache/organizations/live-departments.png' })
+    expect(view.container.querySelector('.workflow-node__rank')).toBeNull()
+    expect(view.container.querySelector('.workflow-node__mailbox')).not.toBeNull()
   })
 })

@@ -12,7 +12,7 @@ vi.mock('../components/clipboard', () => ({
 }))
 const call: AgentToolCall = {
   id: 'action',
-  tool: 'workflow_accept',
+  tool: 'organization_accept',
   args: { messageIds: ['private-id'] },
   approvalStatus: 'not_required',
   reason: null
@@ -34,7 +34,7 @@ function receipt(tool: string, messages: unknown[] = [message]): AgentToolResult
     ok: true,
     result: {
       action: tool.slice(9),
-      workflowName: '研究项目',
+      organizationName: '研究项目',
       instanceId: 'private-instance',
       messages
     }
@@ -43,9 +43,9 @@ function receipt(tool: string, messages: unknown[] = [message]): AgentToolResult
 afterEach(() => copy.mockClear())
 describe('mail actions', () => {
   it.each([
-    ['workflow_accept', '已接手工作流中的 1 条消息'],
-    ['workflow_complete', '已将工作流中的 1 条消息标记为已处理'],
-    ['workflow_recall', '已撤回工作流中的 1 条消息']
+    ['organization_accept', '已接手组织中的 1 封邮件'],
+    ['organization_complete', '已将组织中的 1 封邮件标记为已处理'],
+    ['organization_recall', '已撤回组织中的 1 封邮件']
   ])('shows %s as a compact expandable message action', async (tool, label) => {
     const open = vi.fn()
     const view = await render(
@@ -57,11 +57,13 @@ describe('mail actions', () => {
     await expect.element(view.getByText(message.content)).not.toBeVisible()
     await view.getByText(label).click()
     await expect.element(view.getByText(message.content)).toBeVisible()
-    const name = tool === 'workflow_recall' ? '审核' : '研究员'
-    await view.getByRole('button', { name: `复制消息 · ${name}` }).click()
+    const name = tool === 'organization_recall' ? '审核' : '研究员'
+    await view.getByRole('button', { name: `复制邮件 · ${name}` }).click()
     expect(copy).toHaveBeenCalledExactlyOnceWith(message.content)
     await view.getByRole('button', { name: `打开对话 · ${name}` }).click()
-    expect(open).toHaveBeenCalledWith(tool === 'workflow_recall' ? 'receiver-chat' : 'sender-chat')
+    expect(open).toHaveBeenCalledWith(
+      tool === 'organization_recall' ? 'receiver-chat' : 'sender-chat'
+    )
     for (const hidden of ['private-id', 'private-instance', '参数', '技术详情'])
       expect(view.container.textContent).not.toContain(hidden)
   })
@@ -72,19 +74,19 @@ describe('mail actions', () => {
         cancelled
         result={receipt(call.tool, [
           message,
-          { ...message, messageId: 'failed', success: false, error: '这封消息已被其他轮次接手' }
+          { ...message, messageId: 'failed', success: false, error: '这封邮件已被其他轮次接手' }
         ])}
       />
     )
-    await expect.element(view.getByText('已接手工作流中的 1 条消息 · 1 条未完成')).toBeVisible()
-    await view.getByText('已接手工作流中的 1 条消息 · 1 条未完成').click()
-    await expect.element(view.getByText('这封消息已被其他轮次接手')).toBeVisible()
+    await expect.element(view.getByText('已接手组织中的 1 封邮件 · 1 条未完成')).toBeVisible()
+    await view.getByText('已接手组织中的 1 封邮件 · 1 条未完成').click()
+    await expect.element(view.getByText('这封邮件已被其他轮次接手')).toBeVisible()
   })
   it('never infers completion from an ended model turn without a receipt', async () => {
     const view = await render(
       <WorkflowMailActionToolActivity call={call} settledStatus="completed" />
     )
-    await expect.element(view.getByText('接手工作流中的 1 条消息的结果待确认')).toBeVisible()
+    await expect.element(view.getByText('接手组织中的 1 封邮件的结果待确认')).toBeVisible()
     expect(view.container.querySelector('details')).toBeNull()
   })
 })

@@ -7153,3 +7153,80 @@ CREATE TABLE workflow_mail_mutations (
     created_at INTEGER NOT NULL,
     PRIMARY KEY(source_run_id, tool_call_id)
 );
+
+
+-- Independent organization instances and member identities, schema v65.
+DROP TRIGGER workflow_bound_conversation_before_delete;
+DROP TRIGGER workflow_bound_conversation_archive_changed;
+DROP TRIGGER workflow_active_conversation_archive_guard;
+CREATE TABLE workflow_instances_v65_backup AS SELECT i.*, d.definition_json FROM workflow_instances i JOIN workflow_definitions d ON d.workflow_id=i.template_id;
+CREATE TABLE workflow_bindings_v65_backup AS SELECT * FROM workflow_instance_bindings;
+DROP TABLE workflow_instance_bindings;
+DROP TABLE workflow_instances;
+CREATE TABLE workflow_instances (
+    instance_id TEXT PRIMARY KEY CHECK (length(instance_id) BETWEEN 1 AND 256),
+    template_id TEXT NOT NULL,
+    template_revision INTEGER NOT NULL CHECK (template_revision BETWEEN 1 AND 9007199254740991),
+    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 512),
+    color TEXT NOT NULL CHECK (length(color) = 7 AND substr(color, 1, 1) = '#' AND substr(color, 2) NOT GLOB '*[^0-9a-fA-F]*'),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    needs_review INTEGER NOT NULL DEFAULT 0 CHECK (needs_review IN (0, 1)),
+    running INTEGER NOT NULL DEFAULT 0 CHECK (running IN (0, 1)),
+    last_request_json TEXT NOT NULL CHECK (json_valid(last_request_json)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    definition_json TEXT NOT NULL CHECK (json_valid(definition_json) AND json_type(definition_json) = 'object' AND json_extract(definition_json,'$.schemaVersion') IS 1 AND json_extract(definition_json,'$.id') IS instance_id AND length(CAST(definition_json AS BLOB)) <= 2000000)
+) STRICT;
+INSERT INTO workflow_instances SELECT instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,project_id,json_set(definition_json,'$.id',instance_id) FROM workflow_instances_v65_backup;
+CREATE TABLE workflow_instance_bindings (
+    instance_id TEXT NOT NULL REFERENCES workflow_instances(instance_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL CHECK (length(node_id) BETWEEN 1 AND 256),
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    membership_id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    PRIMARY KEY (instance_id, node_id)
+) STRICT;
+INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) SELECT instance_id,node_id,conversation_id FROM workflow_bindings_v65_backup;
+DROP TABLE workflow_bindings_v65_backup;
+DROP TABLE workflow_instances_v65_backup;
+CREATE TRIGGER workflow_bound_conversation_before_delete
+BEFORE DELETE ON conversations
+BEGIN
+    UPDATE workflow_instances SET revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, OLD.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = OLD.id);
+END;
+CREATE TRIGGER workflow_bound_conversation_archive_changed
+AFTER UPDATE OF archived_at ON conversations
+WHEN NEW.archived_at IS NOT OLD.archived_at
+BEGIN
+    UPDATE workflow_instances SET revision = revision + 1,
+        last_request_json = '{}', updated_at = MAX(updated_at + 1, NEW.updated_at)
+    WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id = NEW.id);
+END;
+CREATE TRIGGER workflow_active_conversation_archive_guard
+BEFORE UPDATE OF archived_at ON conversations
+WHEN OLD.archived_at IS NULL AND NEW.archived_at IS NOT NULL
+     AND EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN workflow_instances w ON w.instance_id=b.instance_id WHERE b.conversation_id=OLD.id AND w.enabled=1)
+BEGIN
+    SELECT RAISE(ABORT, 'workflow_active_archive_blocked');
+END;
+CREATE TABLE organization_personnel_receipts (
+    source_run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(source_run_id, tool_call_id)
+);
+
+
+-- Remove retired graph execution storage, schema v66.
+-- The independent organization mailbox tables and current chat history are unchanged.
+DROP TABLE workflow_execution_sends;
+DROP TABLE workflow_execution_messages;
+DROP TABLE workflow_execution_inputs;
+DROP TABLE workflow_execution_events;
+DROP TABLE workflow_execution_pauses;
+DROP TABLE workflow_execution_runs;
+DROP TABLE workflow_execution_message_origins;

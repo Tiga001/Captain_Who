@@ -359,7 +359,7 @@ impl AgentRuntime {
                 &crate::WorldStateRequestBoundary {
                     run_id: run_id.clone(),
                     assistant_message_id: trace_assistant_message_id.clone().ok_or_else(|| {
-                        AgentError::new("Workflow delivery requires an assistant message identity.")
+                        AgentError::new("Organization mail delivery requires an assistant message identity.")
                     })?,
                     request_index: 1,
                     after_trace_sequence: None,
@@ -691,7 +691,7 @@ impl AgentRuntime {
                             let deliveries = inbox.bind_for_model_batch(boundary.clone())
                                 .or_else(|_| inbox.bind_for_model_batch(boundary))?;
                             if workflow_only_bootstrap && next_model_request_index == 0 && deliveries.is_empty() {
-                                return Err(AgentError::new("Workflow startup input is no longer available; no model request was sent."));
+                                return Err(AgentError::new("Organization startup mail is no longer available; no model request was sent."));
                             }
                             apply_workflow_deliveries(&deliveries, &mut active_context,
                                 &conversation_trace, trace_observer.as_ref(), assistant_message_id)?;

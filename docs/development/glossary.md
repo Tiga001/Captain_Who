@@ -28,27 +28,27 @@ last_verified: 2026-09-26
 
 ## Agent 运行
 
-| 规范名称            | 含义                                                                               |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| Agent               | 持有模型上下文、工具能力和生命周期的运行实体                                       |
-| 根 Agent / 子 Agent | 持久 Agent 树中的 root/child；不要使用“主智能体/从智能体”                          |
-| Subagents           | 仅指设置页或 UI 中的产品名称                                                       |
-| Conversation        | 持久对话容器；不等同于一次模型请求                                                 |
-| Turn                | 一次用户或 Wake 驱动的 Agent 执行周期                                              |
-| Run                 | Turn 的可执行/可观察运行实例；引用 DTO 时保留具体 `runId` 语义                     |
-| Agent Runtime       | Provider、上下文、Tool Loop、Checkpoint 和结算的运行边界                           |
-| Wake                | 使子 Agent 可被 Dispatcher 调度的持久事实                                          |
-| Mailbox             | Agent 间任务、消息、跟进和结果的持久投递域                                         |
-| Dispatcher          | 领取 Wake、获取并发许可并启动子 Agent Turn 的进程级调度器                          |
-| Approval            | 对一项冻结 action 的用户决定；不是一般配置权限                                     |
-| Permission          | 当前任务/工作区允许的能力范围和自动审批策略                                        |
-| Automation          | 用户配置并由 Core Server 持久调度的 Agent 定时任务；不要用它泛指浏览器自动化       |
-| Automation Run      | 一次计划、手动或恢复触发的 Automation 执行实例                                     |
-| Attention           | Automation 中需要用户查看或处理的持久提醒投影，不等同于原生通知                    |
-| Agent Template      | 工作区模板库中的子 Agent 配置；通过显式项目分配控制可用范围                        |
-| Workflow Definition | 设置页编辑的图定义，包含 Agent/用户节点、逻辑门、流股与布局；独立于 Agent Template |
-| Workflow Instance   | 全局工作流实例，把定义中的 Agent 节点绑定到对话；开启状态不代表图已开始执行        |
-| Workflow Monitor    | 使用原工作流布局观察绑定对话及其子 Agent 活动、审批、提问和未读状态的只读页面      |
+| 规范名称                | 含义                                                                         |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| Agent                   | 持有模型上下文、工具能力和生命周期的运行实体                                 |
+| 根 Agent / 子 Agent     | 持久 Agent 树中的 root/child；不要使用“主智能体/从智能体”                    |
+| Subagents               | 仅指设置页或 UI 中的产品名称                                                 |
+| Conversation            | 持久对话容器；不等同于一次模型请求                                           |
+| Turn                    | 一次用户或 Wake 驱动的 Agent 执行周期                                        |
+| Run                     | Turn 的可执行/可观察运行实例；引用 DTO 时保留具体 `runId` 语义               |
+| Agent Runtime           | Provider、上下文、Tool Loop、Checkpoint 和结算的运行边界                     |
+| Wake                    | 使子 Agent 可被 Dispatcher 调度的持久事实                                    |
+| Mailbox                 | Agent 间任务、消息、跟进和结果的持久投递域                                   |
+| Dispatcher              | 领取 Wake、获取并发许可并启动子 Agent Turn 的进程级调度器                    |
+| Approval                | 对一项冻结 action 的用户决定；不是一般配置权限                               |
+| Permission              | 当前任务/工作区允许的能力范围和自动审批策略                                  |
+| Automation              | 用户配置并由 Core Server 持久调度的 Agent 定时任务；不要用它泛指浏览器自动化 |
+| Automation Run          | 一次计划、手动或恢复触发的 Automation 执行实例                               |
+| Attention               | Automation 中需要用户查看或处理的持久提醒投影，不等同于原生通知              |
+| Agent Template          | 工作区模板库中的子 Agent 配置；通过显式项目分配控制可用范围                  |
+| Organization Definition | 设置页编辑的成员、职责、公共背景与布局；独立于 Agent Template                |
+| Organization Instance   | 全局组织实例，把成员绑定到独立对话；开启空邮箱不会启动模型                   |
+| Organization Monitor    | 观察成员活动、邮箱状态及临时邮件传输动画的实时看板                           |
 
 中文正文统一写 `Agent`、`Turn`、`Run`，不交替使用“智能体”“轮次”“回合”“执行任务”来指代同一
 领域对象。“多智能体”可作为产品能力名称，具体实体仍写根 Agent/子 Agent。
@@ -104,7 +104,7 @@ Artifact 首次出现可写“Artifact（制品）”，之后保持 `Artifact`�
 Artifact、Browser Download 和 Attachment 是四种不同授权模型，不要仅因它们最终可关联文件就混称。
 
 文件输入的完整边界见[对话输入与附件](../subsystems/conversation-inputs.md)，canonical schema 见
-[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。Workflow 的 `enabled`、`running`、
+[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。Organization 的 `enabled`、`running`、
 `needsReview` 分别指实例开关、当前活动投影与配置复核要求；模板的 `enabled` 是校验结果派生的可用性，
 不可与实例开关或 Agent Run 状态混称。
 

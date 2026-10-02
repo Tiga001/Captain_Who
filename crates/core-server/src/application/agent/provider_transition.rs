@@ -139,7 +139,7 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if workflow && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
-            return Err("Workflow delivery is shutting down.".to_string().into());
+            return Err("Organization delivery is shutting down.".to_string().into());
         }
         if let Some(operation) = self
             .provider_transition_operations

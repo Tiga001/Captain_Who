@@ -4,9 +4,13 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
 import { classicLightTheme } from '../../config/themes/classic'
+import { ToastProvider } from '../../components/toast/ToastProvider'
 import '../../styles/global.css'
 
 const service = vi.hoisted(() => ({ request: vi.fn(), openConversation: vi.fn() }))
+vi.mock('../../host/hostClient', () => ({
+  hostClient: { agent: { onWorkflowRuntimeChanged: vi.fn(() => () => undefined) } }
+}))
 vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
 vi.mock('../../features/workflows/project/useWorkflowActivity', () => ({
   useWorkflowActivity: () => new Set<string>()
@@ -20,18 +24,21 @@ vi.mock('../../features/workflows/project/useWorkflowMonitor', () => ({
 vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
   useWorkflowExecution: () => ({
     snapshot: null,
-    transmissions: [],
-    completeUserInput: vi.fn()
+    transmissions: []
   })
 }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ language: 'zh-CN', resolvedColorScheme: 'light' })
+  useFrontendConfig: () => ({
+    language: 'zh-CN',
+    resolvedColorScheme: 'light',
+    t: (key: string) => key
+  })
 }))
 vi.mock('../../features/auth/AccountAuthContext', () => ({
   useAccountAuth: () => ({ state: { profile: null } })
 }))
 vi.mock('../../config/ModelSettingsProvider', () => ({
-  useModelSettings: () => ({ models: [] })
+  useModelSettings: () => ({ models: [], enabledModels: [] })
 }))
 
 const { WorkflowsPage } = await import('../../features/workflows/project/WorkflowsPage')
@@ -69,6 +76,7 @@ const instance: WorkflowInstance = {
   bindings: [{ nodeId: 'writer', conversationId: 'chat' }],
   templateId: record.definition.id,
   templateRevision: 1,
+  definition: structuredClone(record.definition),
   revision: 1,
   updatedAt: 1,
   color: '#26AB94',
@@ -89,27 +97,29 @@ beforeEach(async () => {
 
 function sidebar(width: number) {
   return (
-    <div style={{ width, height: 700, marginLeft: 1440 - width }}>
-      <div className="workflow-sidebar-page">
-        <WorkflowsPage
-          conversations={[
-            {
-              id: 'chat',
-              title: '文书对话',
-              projectId: null,
-              modelId: 'model',
-              messages: [],
-              createdAt: 1,
-              updatedAt: 1
-            }
-          ]}
-          projects={[]}
-          onManageTemplates={vi.fn()}
-          onCommitted={vi.fn()}
-          onOpenConversation={service.openConversation}
-        />
+    <ToastProvider>
+      <div style={{ width, height: 700, marginLeft: 1440 - width }}>
+        <div className="workflow-sidebar-page">
+          <WorkflowsPage
+            conversations={[
+              {
+                id: 'chat',
+                title: '文书对话',
+                projectId: null,
+                modelId: 'model',
+                messages: [],
+                createdAt: 1,
+                updatedAt: 1
+              }
+            ]}
+            projects={[]}
+            onManageTemplates={vi.fn()}
+            onCommitted={vi.fn()}
+            onOpenConversation={service.openConversation}
+          />
+        </div>
       </div>
-    </div>
+    </ToastProvider>
   )
 }
 
@@ -133,7 +143,7 @@ it.each([360, 560])(
     document
       .querySelectorAll('.project-workflows__header button, .project-workflows__instance button')
       .forEach(expectInsideSidebar)
-    await page.getByRole('button', { name: '激活新工作流', exact: true }).click()
+    await page.getByRole('button', { name: '激活新组织', exact: true }).click()
     await page.getByRole('button', { name: /^模版:/ }).click()
     await page.getByRole('option', { name: '文案润色流程', exact: true }).click()
     document
@@ -141,16 +151,61 @@ it.each([360, 560])(
         '.project-workflows__binding-toolbar button, .project-workflows__binding-toolbar input'
       )
       .forEach(expectInsideSidebar)
-    const canvas = document.querySelector('.workflow-binding-canvas')!
+    const canvas = document.querySelector('.workflow-canvas')!
     expectInsideSidebar(canvas)
     expect(canvas.getBoundingClientRect().height).toBeGreaterThan(300)
     expect(document.querySelector('.project-workflows')!.scrollWidth).toBeLessThanOrEqual(width)
+    if (width === 360) {
+      await page.screenshot({
+        path: '../../../../../.cache/workflow-authoring/organization-toolbar-narrow.png'
+      })
+      await page.getByRole('group', { name: '节点 文书', exact: true }).dblClick()
+      const binding = page.getByRole('button', { name: /^绑定对话 · 文书:/ })
+      await expect.element(binding).toBeVisible()
+      expectInsideSidebar(binding.element())
+      await page.screenshot({
+        path: '../../../../../.cache/workflow-authoring/organization-binding-inspector-narrow.png'
+      })
+    }
   }
 )
 
+it('keeps the active organization toolbar on one row at 1040px and colors beside canvas layout', async () => {
+  await render(sidebar(1040))
+  await page.getByRole('button', { name: '配置 文案润色', exact: true }).click()
+  const controls = [
+    page.getByRole('textbox', { name: '名称', exact: true }),
+    page.getByRole('button', { name: /^所属项目:/ }),
+    page.getByRole('tab', { name: '基本信息', exact: true }),
+    page.getByRole('tab', { name: '组织设计', exact: true }),
+    page.getByRole('button', { name: '取消', exact: true }),
+    page.getByRole('button', { name: '保存', exact: true })
+  ]
+  const first = controls[0].element().getBoundingClientRect()
+  for (const control of controls) {
+    expectInsideSidebar(control.element())
+    const bounds = control.element().getBoundingClientRect()
+    expect(Math.abs(bounds.top + bounds.height / 2 - first.top - first.height / 2)).toBeLessThan(2)
+  }
+  expect(page.getByRole('button', { name: '刷新版本', exact: true }).query()).toBeNull()
+  const palette = page.getByRole('button', { name: '组织颜色', exact: true }).element()
+  const layout = page.getByRole('button', { name: '优化布局', exact: true }).element()
+  expect(palette.closest('.workflow-canvas-actions')).not.toBeNull()
+  expectInsideSidebar(palette)
+  expect(palette.getBoundingClientRect().right).toBeLessThan(layout.getBoundingClientRect().left)
+  expect(
+    Math.abs(palette.getBoundingClientRect().top - layout.getBoundingClientRect().top)
+  ).toBeLessThan(2)
+  await page.getByRole('button', { name: '组织颜色', exact: true }).click()
+  expectInsideSidebar(page.getByRole('dialog', { name: '组织颜色', exact: true }).element())
+  await page.screenshot({
+    path: '../../../../../.cache/workflow-authoring/organization-toolbar-compact-1040.png'
+  })
+})
+
 it('contains the node dashboard in the sidebar and restores the unobstructed canvas when closed', async () => {
   const view = await render(sidebar(360))
-  await page.getByRole('button', { name: '工作流看板 文案润色', exact: true }).click()
+  await page.getByRole('button', { name: '组织看板 文案润色', exact: true }).click()
   await page.getByRole('button', { name: '双击打开对话 · 文书对话', exact: true }).click()
   const close = page.getByRole('button', { name: '收起节点看板', exact: true })
   await expect.element(close).toBeVisible()
@@ -181,7 +236,7 @@ it.each([360, 1100])(
   'opens a conversation on the first double-click in a %ipx sidebar',
   async (width) => {
     await render(sidebar(width))
-    await page.getByRole('button', { name: '工作流看板 文案润色', exact: true }).click()
+    await page.getByRole('button', { name: '组织看板 文案润色', exact: true }).click()
     await page.getByRole('button', { name: '双击打开对话 · 文书对话', exact: true }).dblClick()
     await expect.poll(() => service.openConversation.mock.calls).toEqual([['chat']])
     await new Promise((resolve) => setTimeout(resolve, 400))

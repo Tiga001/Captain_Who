@@ -1,4 +1,5 @@
 use super::*;
+const UNSETTLED_INPUTS_SQL: &str = "SELECT i.input_json FROM workflow_mail_messages m JOIN workflow_mail_inputs i ON i.input_id=m.input_id WHERE m.instance_id=?1 AND m.mail_status IN('pending','processing') ORDER BY i.sequence";
 pub(super) const PENDING_CANDIDATES_SQL: &str = "SELECT i.input_id,i.sequence,i.instance_id,i.execution_version,i.conversation_id FROM workflow_mail_inputs i INDEXED BY workflow_mail_input_pending_sequence JOIN workflow_mail_messages m ON m.input_id=i.input_id WHERE i.status='pending' AND m.mail_status='pending' AND i.sequence>?1 AND NOT EXISTS(SELECT 1 FROM workflow_mail_inputs older JOIN workflow_mail_messages om ON om.input_id=older.input_id WHERE older.conversation_id=i.conversation_id AND om.mail_status='pending' AND older.sequence<i.sequence) ORDER BY i.sequence LIMIT ?2";
 
 pub fn load_input(c: &Connection, input_id: &str) -> Result<Option<Input>, String> {
@@ -135,7 +136,7 @@ pub fn bind_input_in_connection(
         input.conversation_id.as_deref().unwrap_or_default(),
         run_id,
     )?
-    .ok_or("Workflow identity was not admitted for this run")?;
+    .ok_or("Organization identity was not admitted for this run")?;
     input.content = assemble_message(&owner, &input.messages);
     input.execution_version = owner.execution_version;
     c.execute("INSERT INTO workflow_mail_message_origins(message_id,conversation_id,input_id) VALUES(?1,?2,?3)",params![delivery_id,input.conversation_id,input.id]).map_err(db)?;
@@ -200,13 +201,13 @@ pub fn mark_applied(c: &mut Connection, input_id: &str) -> Result<(), String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
     let Some(mut input) = load_input(&tx, input_id)? else {
-        return Err("Workflow input no longer exists".into());
+        return Err("Organization input no longer exists".into());
     };
     if current_mail_status(&tx, input_id)?.is_terminal() {
         return Ok(());
     }
     if !has_delivery_proof(&tx, &input)? {
-        return Err("Workflow input has no durable delivery receipt".into());
+        return Err("Organization input has no durable delivery receipt".into());
     }
     apply_proven_input(&tx, &mut input)?;
     tx.commit().map_err(db)
@@ -272,24 +273,18 @@ fn conversation_event(c: &Connection, conversation_id: &str, kind: &str) -> Resu
 }
 /// Structural removal fences pending work; immutable mail and completed results remain inspectable.
 pub fn invalidate_instance(c: &Connection, instance_id: &str, reason: &str) -> Result<(), String> {
-    for mut input in list(
-        c,
-        "SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence",
-        instance_id,
-    )? {
-        if !current_mail_status(c, &input.id)?.is_terminal() {
-            input.mail_status = MailStatus::Failed;
-            input.status = InputStatus::Invalidated;
-            input.error = Some(reason.into());
-            write(c, &input)?;
-            event(
-                c,
-                instance_id,
-                Some(&input.id),
-                input.messages.first(),
-                "failed",
-            )?;
-        }
+    for mut input in list(c, UNSETTLED_INPUTS_SQL, instance_id)? {
+        input.mail_status = MailStatus::Failed;
+        input.status = InputStatus::Invalidated;
+        input.error = Some(reason.into());
+        write(c, &input)?;
+        event(
+            c,
+            instance_id,
+            Some(&input.id),
+            input.messages.first(),
+            "failed",
+        )?;
     }
     Ok(())
 }
@@ -298,28 +293,18 @@ pub fn reconcile_recipients(c: &Connection, instance_id: &str) -> Result<(), Str
     let Some(graph) = graph(c, instance_id)? else {
         return Ok(());
     };
-    for mut input in list(
-        c,
-        "SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence",
-        instance_id,
-    )? {
-        if current_mail_status(c, &input.id)?.is_terminal() {
-            continue;
-        }
+    for mut input in list(c, UNSETTLED_INPUTS_SQL, instance_id)? {
         let recipient_matches = graph
             .definition
             .nodes
             .iter()
             .find(|n| n.id == input.node_id)
-            .is_some_and(|n| match &n.config {
-                NodeConfig::User { .. } => input.conversation_id.is_none(),
-                NodeConfig::Agent(_) => graph.bindings.get(&n.id) == input.conversation_id.as_ref(),
-            });
+            .is_some_and(|n| graph.bindings.get(&n.id) == input.conversation_id.as_ref());
         if !recipient_matches {
             input.mail_status = MailStatus::Failed;
             input.status = InputStatus::Invalidated;
             input.error =
-                Some("Original mail recipient is no longer bound to this workflow node".into());
+                Some("Original mail recipient is no longer bound to this organization node".into());
             write(c, &input)?;
             event(
                 c,
@@ -332,35 +317,6 @@ pub fn reconcile_recipients(c: &Connection, instance_id: &str) -> Result<(), Str
     }
     Ok(())
 }
-pub fn complete_user_input(c: &mut Connection, input_id: &str) -> Result<(), String> {
-    let tx = c
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(db)?;
-    let Some(mut input) = load_input(&tx, input_id)? else {
-        return Err("Workflow mail is unavailable".into());
-    };
-    if input.mail_status == MailStatus::Processed {
-        return Ok(());
-    }
-    if input.status != InputStatus::WaitingUser
-        || input.conversation_id.is_some()
-        || !eligible(&tx, &input)?
-    {
-        return Err("This mail is not waiting for user completion".into());
-    }
-    input.mail_status = MailStatus::Processed;
-    input.status = InputStatus::Completed;
-    write(&tx, &input)?;
-    event(
-        &tx,
-        &input.instance_id,
-        Some(&input.id),
-        input.messages.first(),
-        "completed",
-    )?;
-    tx.commit().map_err(db)
-}
-
 /// Called within the same transaction as the authoritative terminal run trace.
 pub fn settle_run(c: &Connection, run_id: &str, status: &str) -> Result<(), String> {
     let final_status = match status {
@@ -428,7 +384,7 @@ pub fn runtime_snapshot(
         )
         .map_err(db)?;
     if !exists {
-        return Err("Workflow instance no longer exists".into());
+        return Err("Organization instance no longer exists".into());
     }
     let sequence: u64 = c
         .query_row(
@@ -493,6 +449,7 @@ pub fn runtime_snapshot(
         events,
         paused_conversation_ids,
         input_runs,
+        preference_updates: vec![],
     })
 }
 pub fn node_messages(
@@ -501,7 +458,7 @@ pub fn node_messages(
     node_id: &str,
     before: Option<u64>,
 ) -> Result<NodeMessages, String> {
-    let graph = graph(c, instance_id)?.ok_or("Workflow no longer exists")?;
+    let graph = graph(c, instance_id)?.ok_or("Organization no longer exists")?;
     let target = node(&graph, node_id)?;
     let mut s=c.prepare("SELECT m.sequence,m.message_json,m.input_id,m.mail_status,t.terminal_status,json_extract(i.input_json,'$.error') FROM workflow_mail_messages m LEFT JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND m.recipient_conversation_id IS ?3 AND (?4 IS NULL OR m.sequence<?4) ORDER BY m.sequence DESC LIMIT 21").map_err(db)?;
     let mut messages = vec![];
@@ -560,11 +517,11 @@ pub fn bind_run(
     let live = snapshot_for_conversation(&tx, conversation_id)?;
     let result = if let Some((owner, raw)) = existing {
         if owner != conversation_id {
-            return Err("Workflow run belongs to another conversation".into());
+            return Err("Organization run belongs to another conversation".into());
         }
         let old: Option<ConversationSnapshot> = parse(&raw)?;
-        old.filter(|old| {
-            live.as_ref().is_some_and(|new| {
+        live.filter(|new| {
+            old.as_ref().is_some_and(|old| {
                 new.execution_version == old.execution_version
                     && new.node_id == old.node_id
                     && new.instance_id == old.instance_id
@@ -592,8 +549,8 @@ pub fn snapshot_for_run(
         .map_err(db)?;
     let old: Option<ConversationSnapshot> = raw.as_deref().map(parse).transpose()?.flatten();
     let live = snapshot_for_conversation(c, conversation_id)?;
-    Ok(old.filter(|old| {
-        live.as_ref().is_some_and(|new| {
+    Ok(live.filter(|new| {
+        old.as_ref().is_some_and(|old| {
             new.instance_id == old.instance_id
                 && new.node_id == old.node_id
                 && new.execution_version == old.execution_version
@@ -675,7 +632,7 @@ pub fn mark_run_unread(c: &mut Connection, run_id: &str) -> Result<(), String> {
             )
             .map_err(db)?;
         }
-        // Explicit workflow_complete may have settled this mail before the final answer existed.
+        // Explicit organization_complete may have settled this mail before the final answer existed.
         // Notify chat subscribers about the later terminal turn even when Input status is unchanged.
         // No transmission endpoints: this is a local refresh event, not another delivered letter.
         event(

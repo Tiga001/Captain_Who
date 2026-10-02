@@ -26,6 +26,10 @@ import { createComposerDraft } from './chatMessageFactory'
 import type { ActiveRunBinding } from './appTypes'
 import { STREAM_DELTA_FLUSH_MS, STREAM_DELTA_MAX_BUFFER_CHARS } from './AppShellSupport'
 import { useClearPendingMessageDelta } from './useClearPendingMessageDelta'
+import {
+  applyWorkflowDeliveryToConversation,
+  removeCoveredWorkflowMessages
+} from './workflowConversationDelivery'
 
 import { useRequestAssistantResponse } from './useRequestAssistantResponse'
 import {
@@ -250,23 +254,25 @@ export function useAgentRunLifecycle({
 
             return {
               ...conversation,
-              messages: conversation.messages.map((currentMessage) => {
-                if (
-                  currentMessage.id !== assistantMessageId ||
-                  currentMessage.agentRun?.runId !== runId
-                ) {
-                  return currentMessage
-                }
+              messages: removeCoveredWorkflowMessages(
+                conversation.messages.map((currentMessage) => {
+                  if (
+                    currentMessage.id !== assistantMessageId ||
+                    currentMessage.agentRun?.runId !== runId
+                  ) {
+                    return currentMessage
+                  }
 
-                // A terminal done notification is emitted only after the backend has committed the
-                // complete assistant trace. Replacing the bounded live projection here prevents an
-                // early Skill/resource event from being lost when pre-binding buffering overflowed.
-                // Managed command sessions outlive the Agent Run, so retain their newer live view.
-                messageToSave = hasAuthoritativeTerminal
-                  ? mergeAuthoritativeTerminalMessage(currentMessage, storedMessage)
-                  : currentMessage
-                return messageToSave
-              })
+                  // A terminal done notification is emitted only after the backend has committed the
+                  // complete assistant trace. Replacing the bounded live projection here prevents an
+                  // early Skill/resource event from being lost when pre-binding buffering overflowed.
+                  // Managed command sessions outlive the Agent Run, so retain their newer live view.
+                  messageToSave = hasAuthoritativeTerminal
+                    ? mergeAuthoritativeTerminalMessage(currentMessage, storedMessage)
+                    : currentMessage
+                  return messageToSave
+                })
+              )
             }
           })
         )
@@ -1228,6 +1234,18 @@ export function useAgentRunLifecycle({
         return
       }
 
+      // Workflow delivery events are durable presentation facts, even if Stop or completion
+      // retired the active binding before the notification reached us. Never revive the Run.
+      if (agentEvent.type === 'workflow_delivery_applied') {
+        flushPendingMessageDelta(agentEvent.runId)
+        setConversations((current) =>
+          current.map((conversation) =>
+            applyWorkflowDeliveryToConversation(conversation, agentEvent)
+          )
+        )
+        return
+      }
+
       const runId = agentEvent.runId
       if (!runId) return
       if (cancelledRunIdSet.has(runId)) return
@@ -1253,9 +1271,11 @@ export function useAgentRunLifecycle({
     activeRunBindingMap,
     bufferedAgentEventMap,
     cancelledRunIdSet,
+    flushPendingMessageDelta,
     handleBoundAgentEvent,
     recordContextWindowSnapshot,
-    retiredAgentRunIdSet
+    retiredAgentRunIdSet,
+    setConversations
   ])
 
   useEffect(() => {

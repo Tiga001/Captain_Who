@@ -21,6 +21,7 @@ mod terminal_message_streams;
 mod trace_reconciliation;
 mod turn_rewrites;
 mod waiting_persistence;
+mod workflow_timeline;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 

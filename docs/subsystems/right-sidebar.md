@@ -161,7 +161,7 @@ Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assist
 
 Agent Center 的设置入口打开通用 Agent template 设置页。模板定义现在是 workspace-wide library，CRUD 不绑定单个 project；每个模板以独立 assignment 关联零到多个 project，只有分配给当前 project 且 enabled 的模板可用于该树。模板保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。表单的 description/instructions 提供 guidance-oriented placeholder，但 placeholder 不会写入空字段。模板编辑或 assignment 变化只影响后续 Agent，现有 Agent 显示创建时快照。
 
-持久化的是 Agent、状态、模板、审批、子 Agent Conversation 和语义事件。Agent Center 当前打开页/detail、折叠和滚动位置不会跨完整 Renderer reload 恢复。Agent Center 不提供子 Agent 删除、可编辑协作图或跨根 Agent dashboard。独立的 [Workflow 画布与只读流程图](./workflow-authoring.md)属于主工作区视图，按模板连接与对话绑定显示，不能与这里的真实父子 Agent 树混为一谈。
+持久化的是 Agent、状态、模板、审批、子 Agent Conversation 和语义事件。Agent Center 当前打开页/detail、折叠和滚动位置不会跨完整 Renderer reload 恢复。Agent Center 不提供子 Agent 删除、可编辑协作图或跨根 Agent dashboard。独立的[组织画布与实时看板](./workflow-authoring.md)位于右侧栏，按成员布局与对话绑定显示，不能与这里的真实父子 Agent 树混为一谈。
 
 ## 增加 React 模块
 

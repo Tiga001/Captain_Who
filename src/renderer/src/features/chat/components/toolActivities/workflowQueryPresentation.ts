@@ -38,7 +38,7 @@ export function queryLabel(props: WorkflowQueryProps, subject: string, l: Locali
     case 'cancelled':
       return l(`已取消查看${subject}`, `Cancelled checking ${subject}`)
     case 'unavailable':
-      return l('工作流信息暂不可用', 'Workflow information unavailable')
+      return l('组织信息暂不可用', 'Organization information unavailable')
     default:
       return l(`${subject}的查询结果待确认`, `Query result for ${subject} is unconfirmed`)
   }

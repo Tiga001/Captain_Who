@@ -331,11 +331,21 @@ fn invalidate_workflows_before_trigger_disabled_deletion(
     if conversation_ids.is_empty() {
         return Ok(());
     }
-    // Agent-tree teardown temporarily disables SQLite triggers. Reproduce the workflow
-    // invalidation before cascading away its bindings, in the same deletion transaction.
+    // Detach only deleted conversations. Agent-tree teardown disables SQLite triggers, so
+    // retire bindings and pending recipients explicitly in the same deletion transaction.
     let placeholders = std::iter::repeat_n("?", conversation_ids.len())
         .collect::<Vec<_>>()
         .join(",");
+    let instances = {
+        let mut statement = connection.prepare(&format!("SELECT DISTINCT instance_id FROM workflow_instance_bindings WHERE conversation_id IN ({placeholders})")).map_err(storage_error)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(conversation_ids), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_error)?
+    };
     let mut values = vec![rusqlite::types::Value::Integer(now_ms())];
     values.extend(
         conversation_ids
@@ -344,9 +354,20 @@ fn invalidate_workflows_before_trigger_disabled_deletion(
             .map(rusqlite::types::Value::Text),
     );
     connection.execute(
-        &format!("UPDATE workflow_instances SET enabled=0,needs_review=1,revision=revision+1,updated_at=MAX(updated_at+1,?),last_request_json='{{}}' WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id IN ({placeholders}))"),
+        &format!("UPDATE workflow_instances SET revision=revision+1,updated_at=MAX(updated_at+1,?),last_request_json='{{}}' WHERE instance_id IN (SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id IN ({placeholders}))"),
         rusqlite::params_from_iter(values),
     ).map_err(storage_error)?;
+    connection
+        .execute(
+            &format!(
+                "DELETE FROM workflow_instance_bindings WHERE conversation_id IN ({placeholders})"
+            ),
+            rusqlite::params_from_iter(conversation_ids),
+        )
+        .map_err(storage_error)?;
+    for instance in instances {
+        crate::storage::workflow_execution_repository::reconcile_recipients(connection, &instance)?;
+    }
     Ok(())
 }
 

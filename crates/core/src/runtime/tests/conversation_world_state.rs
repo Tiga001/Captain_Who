@@ -303,3 +303,52 @@ fn conversation_preview_rediscovers_workspace_instructions_on_every_read() {
     let sections = state.preview_sections(Vec::new()).unwrap();
     assert_eq!(read_content(&sections), None);
 }
+
+struct CancelledWorldStateHost;
+
+impl AgentConversationWorldStateHost for CancelledWorldStateHost {
+    fn prepare_request(
+        &self,
+        _: AgentConversationWorldStateRequest,
+    ) -> AgentResult<Vec<AnchoredWorldStateRecord>> {
+        Err(AgentError::cancelled())
+    }
+
+    fn mark_request_observed(&self, _: &crate::WorldStateRequestBoundary) -> AgentResult<()> {
+        panic!("a cancelled sampling boundary must not reach the provider")
+    }
+}
+
+#[tokio::test]
+async fn conversation_world_state_cancellation_keeps_cancelled_trace_without_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input(format!(
+                "http://{}/v1/chat/completions",
+                listener.local_addr().unwrap()
+            )),
+            Some("cancel-world-state".into()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_conversation_world_state(Arc::new(CancelledWorldStateHost)),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.is_cancelled());
+    let trace = error.conversation_turn_trace().unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert!(trace.terminal_error.is_none());
+    assert!(trace.validate().is_ok());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}

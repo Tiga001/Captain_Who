@@ -1,4 +1,6 @@
 //! Read projections over immutable envelopes and their minimal processing state.
+mod configuration;
+mod summary;
 use super::*;
 use crate::workflow_awareness::{MailboxDirection, MailboxQuery, StateQuery, StateView};
 
@@ -8,21 +10,14 @@ fn scope(
     run_id: &str,
 ) -> Result<(Graph, ConversationSnapshot), String> {
     let identity = snapshot_for_run(c, conversation_id, run_id)?
-        .ok_or("The current run has no active workflow identity")?;
-    let graph = graph(c, &identity.instance_id)?.ok_or("Workflow is unavailable")?;
+        .ok_or("The current run has no active organization identity")?;
+    let graph = graph(c, &identity.instance_id)?.ok_or("Organization is unavailable")?;
     Ok((graph, identity))
-}
-fn kind(node: &Node) -> &'static str {
-    if node.is_agent() {
-        "agent"
-    } else {
-        "user"
-    }
 }
 fn members(graph: &Graph, selected: Option<&str>) -> Vec<Value> {
     graph.definition.nodes.iter().filter(|n|selected.is_none_or(|id|id==n.id)).map(|n|{
-        let (receives,task,delivers)=match &n.config {NodeConfig::Agent(a)=>(a.receives.as_str(),a.task.as_str(),a.delivers.as_str()),NodeConfig::User{task}=>("",task.as_str(),"")};
-        let mut result=value!({"nodeId":n.id,"nodeName":n.name,"kind":kind(n),"conversationId":graph.bindings.get(&n.id),"receives":receives,"task":task,"delivers":delivers});
+        let NodeConfig::Agent(a) = &n.config; let (receives,task,delivers)=(a.receives.as_str(),a.task.as_str(),a.delivers.as_str());
+        let mut result=value!({"nodeId":n.id,"nodeName":n.name,"kind":"agent","conversationId":graph.bindings.get(&n.id),"rank":n.rank,"managementRole":n.management_role,"departmentId":n.department_id,"receives":receives,"task":task,"delivers":delivers});
         if selected.is_none(){let mut truncated=vec![];for key in ["receives","task","delivers"]{if let Some(text)=result[key].as_str(){if text.chars().count()>512{let preview:String=text.chars().take(512).collect();result[key]=value!(preview);truncated.push(key);}}}if !truncated.is_empty(){result["truncatedFields"]=value!(truncated);result["detailsQueryHint"]=value!("Query this nodeId for full responsibilities");}}
         result
     }).collect()
@@ -63,16 +58,12 @@ fn participant_runtime(c: &Connection, graph: &Graph, node: &Node) -> Result<Val
     {
         "running"
     } else if pending > 0 {
-        if node.is_agent() {
-            "queued"
-        } else {
-            "waiting_user"
-        }
+        "queued"
     } else {
         "idle"
     };
     Ok(
-        value!({"nodeId":node.id,"nodeName":node.name,"kind":kind(node),"conversationId":chat,"state":state,"paused":paused,"pendingCount":pending,"processingCount":processing,"queuedInputCount":pending,"currentInputCount":processing,"currentInputIds":current,"mailCounts":counts,"inputs":inputs,"inputsTruncated":pending+processing>128,"latestRun":latest_run}),
+        value!({"nodeId":node.id,"nodeName":node.name,"kind":"agent","conversationId":chat,"state":state,"paused":paused,"pendingCount":pending,"processingCount":processing,"queuedInputCount":pending,"currentInputCount":processing,"currentInputIds":current,"mailCounts":counts,"inputs":inputs,"inputsTruncated":pending+processing>128,"latestRun":latest_run}),
     )
 }
 fn runtime(c: &Connection, graph: &Graph, selected: Option<&str>) -> Result<Vec<Value>, String> {
@@ -96,9 +87,15 @@ pub fn state_for_run(
     if let Some(id) = &query.node_id {
         node(&graph, id)?;
     }
-    let mut result = value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"description":graph.definition.description,"executionVersion":identity.execution_version,"currentNodeId":identity.node_id,"observedAt":now_ms()});
+    let mut result = value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"description":graph.definition.description,"executionVersion":identity.execution_version,"organizationRevision":identity.organization_revision,"currentNodeId":identity.node_id,"observedAt":now_ms()});
+    if query.view == StateView::Configuration {
+        result["configuration"] =
+            configuration::members(&tx, &graph, &identity, query.node_id.as_deref())?;
+        return Ok(result);
+    }
     if query.view != StateView::Runtime {
         result["members"] = value!(members(&graph, query.node_id.as_deref()));
+        result["departments"] = value!(graph.definition.departments.iter().map(|department| value!({"id":department.id,"name":department.name,"parentId":department.parent_id})).collect::<Vec<_>>());
     }
     if query.view != StateView::Members {
         result["runtime"] = value!({"nodes":runtime(&tx,&graph,query.node_id.as_deref())?});
@@ -110,42 +107,11 @@ fn awareness(
     graph: &Graph,
     identity: &ConversationSnapshot,
 ) -> Result<Value, String> {
-    let all = runtime(c, graph, None)?;
-    let mut nodes = all.clone();
-    nodes.sort_by_key(|n| {
-        (
-            n["nodeId"] != identity.node_id,
-            n["nodeId"].as_str().unwrap_or_default().to_owned(),
-        )
-    });
-    nodes.truncate(16);
-    for n in &mut nodes {
-        if let Some(object) = n.as_object_mut() {
-            object.remove("inputs");
-            object.remove("mailCounts");
-            object.remove("inputsTruncated");
-            if let Some(last) = object.remove("latestRun") {
-                object.insert("lastRunStatus".into(), last["status"].clone());
-            }
-            if let Some(ids) = object
-                .get_mut("currentInputIds")
-                .and_then(Value::as_array_mut)
-            {
-                ids.truncate(8);
-            }
-        }
-    }
-    let mut current = all
+    let nodes = summary::nodes(c, graph, &identity.node_id)?;
+    let current = nodes
         .iter()
-        .find(|n| n["nodeId"] == identity.node_id)
-        .cloned()
-        .unwrap_or(value!({}));
-    if let Some(ids) = current
-        .get_mut("currentInputIds")
-        .and_then(Value::as_array_mut)
-    {
-        ids.truncate(8);
-    }
+        .find(|node| node["nodeId"] == identity.node_id)
+        .ok_or("Organization summary omitted the current member")?;
     let chat = graph.bindings.get(&identity.node_id);
     let (latest,received):(u64,u64)=c.query_row("SELECT COALESCE(MAX(sequence),0),COUNT(*) FROM workflow_mail_messages WHERE instance_id=?1 AND node_id=?2 AND recipient_conversation_id IS ?3",params![graph.instance_id,identity.node_id,chat],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db)?;
     let mut s=c.prepare("SELECT sequence,message_id,json_extract(message_json,'$.sourceNodeId'),json_extract(message_json,'$.sourceNodeName') FROM workflow_mail_messages WHERE instance_id=?1 AND node_id=?2 AND recipient_conversation_id IS ?3 ORDER BY sequence DESC LIMIT 5").map_err(db)?;
@@ -153,7 +119,7 @@ fn awareness(
     let mut s=c.prepare("SELECT message_id,node_id,mail_status FROM workflow_mail_messages WHERE instance_id=?1 AND json_extract(message_json,'$.sourceNodeId')=?2 AND json_extract(message_json,'$.sourceConversationId')=?3 ORDER BY sequence DESC LIMIT 3").map_err(db)?;
     let sent=s.query_map(params![graph.instance_id,identity.node_id,chat],|r|Ok(value!({"messageId":r.get::<_,String>(0)?,"targetNodeId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?}))).map_err(db)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?;
     Ok(
-        value!({"available":true,"instanceId":identity.instance_id,"executionVersion":identity.execution_version,"currentNodeId":identity.node_id,"currentInputIds":current["currentInputIds"],"currentInputCount":current["currentInputCount"],"nodes":nodes,"totalNodeCount":all.len(),"nodesTruncated":all.len()>16,"recentSent":sent,"mailbox":{"latestSequence":latest,"receivedCount":received,"pendingCount":current["pendingCount"],"processingCount":current["processingCount"],"recentArrivals":arrivals},"queryHint":"Use workflow_get_state for member responsibilities or current runtime details. Use workflow_get_mailbox to preview pending mail. Reading does not accept mail; workflow_accept assigns selected mail to this turn."}),
+        value!({"available":true,"instanceId":identity.instance_id,"executionVersion":identity.execution_version,"organizationRevision":identity.organization_revision,"currentNodeId":identity.node_id,"currentInputIds":current["currentInputIds"],"currentInputCount":current["currentInputCount"],"nodes":nodes,"totalNodeCount":graph.definition.nodes.len(),"nodesTruncated":graph.definition.nodes.len()>16,"recentSent":sent,"mailbox":{"latestSequence":latest,"receivedCount":received,"pendingCount":current["pendingCount"],"processingCount":current["processingCount"],"recentArrivals":arrivals},"queryHint":"Use organization_get_state for member responsibilities or current runtime details. Use organization_get_mailbox to preview pending mail. Reading does not accept mail; organization_accept assigns selected mail to this turn."}),
     )
 }
 pub fn awareness_for_run(
@@ -170,7 +136,7 @@ pub fn awareness_for_conversation(c: &Connection, conversation_id: &str) -> Resu
     let Some(identity) = snapshot_for_conversation(&tx, conversation_id)? else {
         return Ok(value!({"available":false,"reason":"not_active_or_unavailable"}));
     };
-    let graph = graph(&tx, &identity.instance_id)?.ok_or("Workflow is unavailable")?;
+    let graph = graph(&tx, &identity.instance_id)?.ok_or("Organization is unavailable")?;
     awareness(&tx, &graph, &identity)
 }
 pub fn mailbox_for_run(
@@ -241,7 +207,7 @@ pub fn mailbox_for_run(
     messages.truncate(query.limit);
     let next = more.then(|| messages.last().unwrap()["sequence"].clone());
     Ok(
-        value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"nodeId":identity.node_id,"direction":query.direction,"observedAt":now_ms(),"messages":messages,"nextCursor":next,"handlingRule":"Reading pending mail does not accept it. It remains eligible to wake a future turn; use workflow_accept to handle it now. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."}),
+        value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"nodeId":identity.node_id,"direction":query.direction,"observedAt":now_ms(),"messages":messages,"nextCursor":next,"handlingRule":"Reading pending mail does not accept it. It remains eligible to wake a future turn; use organization_accept to handle it now. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."}),
     )
 }
 #[cfg(test)]

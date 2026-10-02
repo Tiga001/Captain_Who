@@ -12,6 +12,24 @@ fn attach_message_guidance_timelines(
             .into_iter()
             .map(|record| (record.trace.assistant_message_id.clone(), record))
             .collect::<HashMap<_, _>>();
+        let workflow_origins =
+            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+                connection,
+                &conversation.id,
+            )?;
+        let workflow_deliveries = traces
+            .iter()
+            .map(|(message_id, record)| {
+                (
+                    message_id.clone(),
+                    crate::storage::workflow_execution_repository::delivery_presentations(
+                        conversation,
+                        &record.trace,
+                        &workflow_origins,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let command_sessions = agent_command_session_repository::list_sessions_for_conversation(
             connection,
             &conversation.id,
@@ -62,6 +80,7 @@ fn attach_message_guidance_timelines(
             let trace_record = traces.get(&message.id);
             let trace = trace_record.map(|record| &record.trace);
             if guidances.is_empty() && trace_record.is_none() {
+                discard_unproven_workflow_delivery_timeline(&mut message.agent_run_json)?;
                 continue;
             }
             let mcp_actions = trace
@@ -70,7 +89,7 @@ fn attach_message_guidance_timelines(
                 })
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            message.agent_run_json = Some(project_guidance_timeline(
+            let projected = project_guidance_timeline(
                 message.agent_run_json.as_deref(),
                 trace_record,
                 &guidances,
@@ -78,9 +97,98 @@ fn attach_message_guidance_timelines(
                 &guidance_attachments,
                 mcp_actions,
                 message.created_at,
+            )?;
+            message.agent_run_json = Some(insert_workflow_delivery_timeline(
+                projected,
+                workflow_deliveries
+                    .get(&message.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
             )?);
         }
     }
+    Ok(())
+}
+
+fn discard_unproven_workflow_delivery_timeline(raw: &mut Option<String>) -> Result<(), String> {
+    let Some(json) = raw.as_deref() else {
+        return Ok(());
+    };
+    let Ok(mut run) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Ok(());
+    };
+    let Some(timeline) = run
+        .get_mut("timeline")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    let previous_len = timeline.len();
+    timeline.retain(|item| {
+        item.get("type").and_then(serde_json::Value::as_str) != Some("workflow_delivery")
+    });
+    if previous_len != timeline.len() {
+        *raw = Some(serde_json::to_string(&run).map_err(|error| error.to_string())?);
+    }
+    Ok(())
+}
+
+fn insert_workflow_delivery_timeline(
+    projected: String,
+    deliveries: &[crate::workflow_execution::DeliveryPresentation],
+) -> Result<String, String> {
+    if deliveries.is_empty() {
+        return Ok(projected);
+    }
+    let mut run: serde_json::Value =
+        serde_json::from_str(&projected).map_err(|error| error.to_string())?;
+    let timeline = run["timeline"]
+        .as_array_mut()
+        .ok_or("Organization mail delivery projection has no timeline")?;
+    for delivery in deliveries {
+        let index = timeline
+            .iter()
+            .position(|item| {
+                item.get("traceSequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none_or(|sequence| sequence > delivery.sequence)
+            })
+            .unwrap_or(timeline.len());
+        timeline.insert(index, delivery.timeline_item());
+    }
+    serde_json::to_string(&run).map_err(|error| error.to_string())
+}
+
+/// Only renderer views hide proven in-turn duplicates. Plain conversation loading and model
+/// history retain the original message records and their existing exclusion/authority rules.
+fn retain_workflow_top_level_messages(
+    connection: &rusqlite::Connection,
+    conversation: &mut ChatConversationRecord,
+) -> Result<(), String> {
+    let origins = crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+        connection,
+        &conversation.id,
+    )?;
+    if origins.is_empty() {
+        return Ok(());
+    }
+    let traces =
+        conversation_trace_repository::list_traces_for_conversation(connection, &conversation.id)
+            .map_err(storage_error)?;
+    let hidden = traces
+        .iter()
+        .flat_map(|trace| {
+            crate::storage::workflow_execution_repository::delivery_presentations(
+                conversation,
+                trace,
+                &origins,
+            )
+        })
+        .map(|delivery| delivery.delivery_id)
+        .collect::<HashSet<_>>();
+    conversation
+        .messages
+        .retain(|message| !hidden.contains(&message.id));
     Ok(())
 }
 
@@ -710,6 +818,8 @@ fn timeline_item_is_rebuilt_from_durable_state(
         // Guidance can be queued in its journal before it receives a Trace sequence. Rebuild all
         // Guidance from that journal/Trace pair so an in-run user insertion cannot appear twice.
         Some("user_guidance") => guidance_is_authoritative,
+        // Mail is always rebuilt from trace + mailbox provenance, never renderer-persisted text.
+        Some("workflow_delivery") => true,
         // A terminal Trace error has one canonical projection. Host-only errors remain untouched
         // when the Trace has no terminal error of its own.
         Some("error") => trace_is_authoritative && has_terminal_trace_error,

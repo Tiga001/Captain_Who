@@ -4,6 +4,13 @@ use crate::workflow::{Request, Response};
 
 impl StorageService {
     pub fn workflow_request(&self, request: Request) -> Result<Response, Error> {
+        if matches!(
+            request,
+            Request::Manage(crate::workflow_management::Request::ListInstances {})
+        ) {
+            let mut connection = self.state.connection().map_err(Error::Storage)?;
+            return workflow_repository::request(&mut connection, request, &Default::default());
+        }
         // Use the same authoritative availability projection as model selectors. Resolve
         // credentials before taking the workflow transaction's SQLite lock.
         let available_models = self

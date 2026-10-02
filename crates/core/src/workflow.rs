@@ -1,8 +1,9 @@
-//! Workflow authoring contract for a freely communicating team of independent conversations.
+//! Organization authoring contract for a freely communicating team of independent conversations.
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const MAX_NODES: usize = 128;
+const MAX_DEPARTMENTS: usize = 64;
 const MAX_NAME_BYTES: usize = 512;
 const MAX_TEXT_BYTES: usize = 128_000;
 const MAX_POSITION: f64 = 100_000.0;
@@ -13,6 +14,23 @@ pub enum WorkflowPermissionMode {
     Default,
     Custom,
     Full,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagementRole {
+    #[default]
+    Member,
+    OrganizationAdmin,
+    DepartmentAdmin,
+}
+fn default_rank() -> u8 {
+    1
+}
+fn is_default_rank(rank: &u8) -> bool {
+    *rank == default_rank()
+}
+fn is_member(role: &ManagementRole) -> bool {
+    *role == ManagementRole::Member
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,17 +45,20 @@ pub struct AgentConfig {
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum NodeConfig {
     Agent(AgentConfig),
-    User {
-        #[serde(default)]
-        task: String,
-    },
 }
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: String,
     pub name: String,
     pub x: f64,
     pub y: f64,
+    #[serde(default = "default_rank", skip_serializing_if = "is_default_rank")]
+    pub rank: u8,
+    #[serde(default, skip_serializing_if = "is_member")]
+    pub management_role: ManagementRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub department_id: Option<String>,
     #[serde(flatten)]
     pub config: NodeConfig,
 }
@@ -55,6 +76,24 @@ impl<'de> Deserialize<'de> for Node {
         let name = serde_json::from_value(take("name")?).map_err(serde::de::Error::custom)?;
         let x = serde_json::from_value(take("x")?).map_err(serde::de::Error::custom)?;
         let y = serde_json::from_value(take("y")?).map_err(serde::de::Error::custom)?;
+        let rank = obj
+            .remove("rank")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_else(default_rank);
+        let management_role = obj
+            .remove("managementRole")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        let department_id = obj
+            .remove("departmentId")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .flatten();
         if obj.get("kind").and_then(|v| v.as_str()) == Some("agent")
             && (!obj.contains_key("permissionMode") || !obj.contains_key("modelConfigId"))
         {
@@ -66,22 +105,29 @@ impl<'de> Deserialize<'de> for Node {
             name,
             x,
             y,
+            rank,
+            management_role,
+            department_id,
             config,
         })
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Department {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 impl Node {
-    pub fn is_agent(&self) -> bool {
-        matches!(self.config, NodeConfig::Agent(_))
-    }
-    pub fn is_participant(&self) -> bool {
-        true
-    }
     #[cfg(test)]
     pub fn agent_mut(&mut self) -> &mut AgentConfig {
         match &mut self.config {
             NodeConfig::Agent(agent) => agent,
-            _ => panic!("Expected agent"),
         }
     }
 }
@@ -101,6 +147,8 @@ pub struct Definition {
     pub description: String,
     pub background: String,
     pub nodes: Vec<Node>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub departments: Vec<Department>,
     pub viewport: Viewport,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -122,10 +170,9 @@ pub struct Record {
 pub enum Request {
     List,
     Manage(crate::workflow_management::Request),
-    SaveWithUsage {
+    SaveWithDraft {
         definition: Definition,
         expected_revision: u64,
-        expected_usage_revision: Option<String>,
         expected_draft_revision: Option<u64>,
     },
     Validate {
@@ -168,8 +215,6 @@ impl<'de> Deserialize<'de> for Request {
             },
             Save {
                 definition: Definition,
-                #[serde(default, rename = "expectedUsageRevision")]
-                expected_usage_revision: Option<String>,
                 #[serde(default, rename = "expectedDraftRevision")]
                 expected_draft_revision: Option<u64>,
                 #[serde(rename = "expectedRevision")]
@@ -188,14 +233,12 @@ impl<'de> Deserialize<'de> for Request {
                 WireRequest::Save {
                     definition,
                     expected_revision,
-                    expected_usage_revision,
                     expected_draft_revision,
                 } => {
-                    if expected_usage_revision.is_some() || expected_draft_revision.is_some() {
-                        Self::SaveWithUsage {
+                    if expected_draft_revision.is_some() {
+                        Self::SaveWithDraft {
                             definition,
                             expected_revision,
-                            expected_usage_revision,
                             expected_draft_revision,
                         }
                     } else {
@@ -237,7 +280,6 @@ pub struct Response {
     pub records: Vec<Record>,
     pub issues: Vec<Issue>,
     pub instances: Vec<crate::workflow_management::Instance>,
-    pub usages: Vec<crate::workflow_management::Usage>,
     pub drafts: Vec<crate::workflow_management::EditingDraft>,
     pub affected_conversation_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -254,20 +296,55 @@ fn issue(out: &mut Vec<Issue>, code: &str, subject: &str) {
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.trim() == id && id.len() <= 256 && !id.chars().any(char::is_control)
 }
+/// Comparison only: preserve the member's display name and meaningful internal spaces.
+pub fn member_name_key(name: &str) -> String {
+    name.trim().chars().flat_map(char::to_lowercase).collect()
+}
 impl Definition {
+    /// Required for writes. Old duplicate names stay readable so the user can rename them.
+    pub fn validate_unique_member_names(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
+        for node in &self.nodes {
+            let key = member_name_key(&node.name);
+            if !key.is_empty() && !names.insert(key) {
+                return Err("organization_duplicate_member_name: Every member needs a distinct name; leading/trailing whitespace and letter case do not distinguish members".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Names form readable department paths. Siblings must remain unambiguous on writes.
+    pub fn validate_department_names(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
+        for department in &self.departments {
+            if department.name.contains('/') {
+                return Err("organization_department_name_separator: Department names cannot contain '/'; use nested departments instead".into());
+            }
+            let key = member_name_key(&department.name);
+            if !key.is_empty() && !names.insert((department.parent_id.as_deref(), key)) {
+                return Err("organization_duplicate_department_name: Departments with the same parent must have distinct names; leading/trailing whitespace and letter case do not distinguish departments".into());
+            }
+        }
+        Ok(())
+    }
+
     /// Reject malformed contracts while retaining incomplete authoring choices as issues.
     pub fn validate(&self, available_models: &HashSet<String>) -> Result<Vec<Issue>, String> {
-        if self.schema_version != 1 || !valid_id(&self.id) || self.nodes.len() > MAX_NODES {
-            return Err("Unsupported workflow version, identifier or team size".into());
+        if self.schema_version != 1
+            || !valid_id(&self.id)
+            || self.nodes.len() > MAX_NODES
+            || self.departments.len() > MAX_DEPARTMENTS
+        {
+            return Err("Unsupported organization version, identifier or team size".into());
         }
         if self.name.len() > MAX_NAME_BYTES
             || self.description.len() > 8_000
             || self.background.len() > MAX_TEXT_BYTES
         {
-            return Err("Workflow text exceeds its size limit".into());
+            return Err("Organization text exceeds its size limit".into());
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > 2_000_000 {
-            return Err("Workflow exceeds 2 MB".into());
+            return Err("Organization exceeds 2 MB".into());
         }
         if !self.viewport.x.is_finite()
             || !self.viewport.y.is_finite()
@@ -282,6 +359,86 @@ impl Definition {
             return Err("Duplicate or invalid node identifiers".into());
         }
         let mut issues = Vec::new();
+        let mut names = HashMap::<String, usize>::new();
+        for node in &self.nodes {
+            let key = member_name_key(&node.name);
+            if !key.is_empty() {
+                *names.entry(key).or_default() += 1;
+            }
+        }
+        for node in &self.nodes {
+            if names
+                .get(&member_name_key(&node.name))
+                .is_some_and(|count| *count > 1)
+            {
+                issue(&mut issues, "node_name_duplicate", &node.id);
+            }
+        }
+        let departments: HashMap<_, _> = self
+            .departments
+            .iter()
+            .map(|department| (department.id.as_str(), department))
+            .collect();
+        if departments.len() != self.departments.len()
+            || departments
+                .keys()
+                .any(|id| !valid_id(id) || ids.contains(id))
+        {
+            return Err("Duplicate or invalid department identifiers".into());
+        }
+        let mut department_names = HashMap::<(Option<&str>, String), usize>::new();
+        for department in &self.departments {
+            let key = member_name_key(&department.name);
+            if !key.is_empty() {
+                *department_names
+                    .entry((department.parent_id.as_deref(), key))
+                    .or_default() += 1;
+            }
+        }
+        for department in &self.departments {
+            if department.name.contains('/') {
+                issue(&mut issues, "department_name_separator", &department.id);
+            }
+            if department_names
+                .get(&(
+                    department.parent_id.as_deref(),
+                    member_name_key(&department.name),
+                ))
+                .is_some_and(|count| *count > 1)
+            {
+                issue(&mut issues, "department_name_duplicate", &department.id);
+            }
+        }
+        for department in &self.departments {
+            if department.name.len() > MAX_NAME_BYTES
+                || !department.x.is_finite()
+                || !department.y.is_finite()
+                || department.x.abs() > MAX_POSITION
+                || department.y.abs() > MAX_POSITION
+                || !department.width.is_finite()
+                || !department.height.is_finite()
+                || department.width < 80.0
+                || department.height < 64.0
+                || department.width > MAX_POSITION
+                || department.height > MAX_POSITION
+            {
+                return Err("Invalid department name or bounds".into());
+            }
+            let mut visited = HashSet::from([department.id.as_str()]);
+            let mut parent_id = department.parent_id.as_deref();
+            while let Some(id) = parent_id {
+                let Some(parent) = departments.get(id) else {
+                    return Err("Unknown parent department".into());
+                };
+                if !visited.insert(id) {
+                    return Err("Department hierarchy contains a cycle".into());
+                }
+                parent_id = parent.parent_id.as_deref();
+            }
+            if department.name.trim().is_empty() {
+                issue(&mut issues, "department_name", &department.id);
+            }
+        }
         if self.name.trim().is_empty() {
             issue(&mut issues, "name", &self.id);
         }
@@ -289,6 +446,21 @@ impl Definition {
             issue(&mut issues, "empty", &self.id);
         }
         for node in &self.nodes {
+            if !(1..=99).contains(&node.rank) {
+                return Err("Invalid member rank".into());
+            }
+            if node
+                .department_id
+                .as_deref()
+                .is_some_and(|id| !departments.contains_key(id))
+            {
+                return Err("Unknown member department".into());
+            }
+            if node.management_role == ManagementRole::DepartmentAdmin
+                && node.department_id.is_none()
+            {
+                issue(&mut issues, "department_admin_scope", &node.id);
+            }
             if !node.x.is_finite()
                 || !node.y.is_finite()
                 || node.x.abs() > MAX_POSITION
@@ -324,14 +496,6 @@ impl Definition {
                             issue(&mut issues, "node_model_unavailable", &node.id)
                         }
                         Some(_) => {}
-                    }
-                }
-                NodeConfig::User { task } => {
-                    if task.len() > MAX_TEXT_BYTES {
-                        return Err("User task exceeds its size limit".into());
-                    }
-                    if task.trim().is_empty() {
-                        issue(&mut issues, "userTask", &node.id);
                     }
                 }
             }

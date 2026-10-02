@@ -161,7 +161,7 @@ impl AgentService {
             .iter()
             .any(|(message_id, _)| message_id == &source_user_message_id)
         {
-            return Err("工作流来信不能编辑为用户消息。".to_string().into());
+            return Err("组织来信不能编辑为用户消息。".to_string().into());
         }
 
         let request_bytes =
@@ -306,7 +306,7 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
-            return Err("Workflow delivery is shutting down.".to_string().into());
+            return Err("Organization delivery is shutting down.".to_string().into());
         }
         if let Some(rewrite) = &rewrite {
             if let Some(existing) = self
@@ -536,7 +536,7 @@ impl AgentService {
                     &execution_access_check,
                 )
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
-                Ok(false) => Err("workflow input is no longer pending".to_string().into()),
+                Ok(false) => Err("organization input is no longer pending".to_string().into()),
                 Err(error) => Err(error.into()),
             }
         } else if let Some(response) = response.clone() {

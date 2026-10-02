@@ -5,7 +5,7 @@ mod automation_parent_deletion;
 mod running_summaries;
 
 #[test]
-fn workflow_instances_are_disabled_when_agent_tree_or_project_teardown_disables_triggers() {
+fn workflow_teardown_retires_bindings_without_disabling_other_members() {
     for delete_project in [false, true] {
         let fixture = StorageFixture::new();
         let service = fixture.service();
@@ -29,8 +29,9 @@ fn workflow_instances_are_disabled_when_agent_tree_or_project_teardown_disables_
         {
             let c = service.state.connection().unwrap();
             c.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at) VALUES ('template','{\"schemaVersion\":1,\"id\":\"template\"}',1,1)",[]).unwrap();
+            let definition = serde_json::json!({"schemaVersion":1,"id":"instance","name":"Team","description":"","background":"","nodes":[],"viewport":{"x":0,"y":0,"zoom":1}}).to_string();
             for (id, color) in [("workflow-root", "#AABBCC"), ("workflow-loose", "#001122")] {
-                c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled) VALUES (?1,'template',1,?1,?2,1,1,0,0,'{}',1)",rusqlite::params![id,color]).unwrap();
+                c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,definition_json) VALUES (?1,'template',1,?1,?2,1,1,0,0,'{}',1,json_set(?3,'$.id',?1))",rusqlite::params![id,color,definition]).unwrap();
                 c.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES (?1,'node',?1)",[id]).unwrap();
             }
         }
@@ -41,12 +42,12 @@ fn workflow_instances_are_disabled_when_agent_tree_or_project_teardown_disables_
         }
         let c = service.state.connection().unwrap();
         let root: (bool,bool,i64)=c.query_row("SELECT enabled,needs_review,revision FROM workflow_instances WHERE instance_id='workflow-root'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        assert_eq!(root, (false, true, 2));
+        assert_eq!(root, (true, false, 2));
         let loose: (bool,bool,i64)=c.query_row("SELECT enabled,needs_review,revision FROM workflow_instances WHERE instance_id='workflow-loose'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(
             loose,
             if delete_project {
-                (false, true, 2)
+                (true, false, 2)
             } else {
                 (true, false, 1)
             }
@@ -430,7 +431,7 @@ fn conversation_detail_projection_query_count_is_independent_of_history_length()
     );
     assert_eq!(
         many_selects.len(),
-        14,
+        15,
         "unexpected detail SQL: {many_selects:#?}"
     );
     for table in [
@@ -439,12 +440,22 @@ fn conversation_detail_projection_query_count_is_independent_of_history_length()
         "agent_run_guidance_attachments",
         "agent_pending_actions",
         "attachments",
+        "workflow_mail_message_origins",
     ] {
         assert!(
             many_selects.iter().any(|sql| sql.contains(table)),
             "missing batched {table} query: {many_selects:#?}"
         );
     }
+
+    assert_eq!(
+        many_selects
+            .iter()
+            .filter(|sql| sql.contains("FROM workflow_mail_message_origins"))
+            .count(),
+        1,
+        "mail origins must be loaded once for the whole conversation: {many_selects:#?}"
+    );
 
     assert_eq!(one.messages.len(), 2);
     assert_eq!(many.messages.len(), 13);
@@ -1367,6 +1378,7 @@ fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_
     let service = fixture.service();
     let previous = conversation("conversation-turn-rollback", None, "message-existing");
     service.save_conversation(previous.clone()).unwrap();
+    let previous = service.load_conversation(&previous.id).unwrap().unwrap();
     let mut prepared = previous.clone();
     prepared.model_id = Some("model-2".to_string());
     prepared.updated_at = 10;
@@ -1584,9 +1596,10 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
     let service = fixture.service();
     let base = conversation("conversation-stale-turn-admission", None, "message-base");
     service.save_conversation(base.clone()).unwrap();
-    let (_, initial_revision) = service
+    let (base, initial_revision) = service
         .load_conversation_for_turn("conversation-stale-turn-admission")
         .unwrap();
+    let base = base.unwrap();
 
     let mut candidate_a = base.clone();
     candidate_a.messages.extend([
@@ -1634,9 +1647,10 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             3,
         )
         .unwrap();
-    let (_, active_revision) = service
+    let (candidate_a, active_revision) = service
         .load_conversation_for_turn("conversation-stale-turn-admission")
         .unwrap();
+    let candidate_a = candidate_a.unwrap();
 
     // Candidate B was built from the same stale pre-A snapshot. A full-save implementation that
     // checks uniqueness only after replacing messages would cascade-delete A's trace and win.
@@ -4025,6 +4039,7 @@ fn renderer_message_insert_service_returns_authoritative_retries() {
     let service = fixture.service();
     let initial = conversation("insertion-retry", None, "message-first");
     service.save_conversation(initial.clone()).unwrap();
+    let initial = service.load_conversation(&initial.id).unwrap().unwrap();
     let mut stale = initial.messages[0].clone();
     stale.created_at = 9;
     stale.content = "late optimistic text".into();
@@ -4213,4 +4228,100 @@ fn history_timeline_projection_count(
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(projected, indexed);
     projected.len()
+}
+
+#[test]
+fn workflow_conversation_deletion_fails_only_removed_recipients_mail_and_keeps_peer_run() {
+    for with_agent_tree in [false, true] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        for id in ["source", "target"] {
+            service
+                .save_conversation(conversation(
+                    id,
+                    Some("project-1"),
+                    &format!("message-{id}"),
+                ))
+                .unwrap();
+        }
+        if with_agent_tree {
+            service
+                .ensure_root_agent(&EnsureRootAgentInput {
+                    agent_id: "target-agent".into(),
+                    conversation_id: "target".into(),
+                    creation_request_id: "target-create".into(),
+                    task_name: "Target".into(),
+                })
+                .unwrap();
+        }
+        let source_version;
+        let input_id;
+        {
+            let mut c = service.state.connection().unwrap();
+            let node = |id: &str| serde_json::json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model","receives":"","task":"Work","delivers":""});
+            let definition = serde_json::json!({"schemaVersion":1,"id":"instance","name":"Team","description":"","background":"","nodes":[node("source"),node("target")],"viewport":{"x":0,"y":0,"zoom":1}}).to_string();
+            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,last_request_json,definition_json) VALUES('instance','deleted-template',1,'Team','#123456',1,1,'{}',?1)",[definition]).unwrap();
+            c.execute_batch("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES('instance','source','source'),('instance','target','target');
+                INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES('source-answer','source','assistant','',2,1);").unwrap();
+            c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES('source-answer','source','source-run',?1,'in_progress',0,2,2)",[crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION]).unwrap();
+            source_version = crate::storage::workflow_execution_repository::bind_run(
+                &mut c,
+                "source",
+                "source-run",
+            )
+            .unwrap()
+            .unwrap()
+            .execution_version;
+            let receipt = crate::storage::workflow_execution_repository::send(
+                &mut c,
+                &crate::workflow_execution::SendRequest {
+                    model_input: None,
+                    recipient_versions: Default::default(),
+                    conversation_id: "source".into(),
+                    source_run_id: "source-run".into(),
+                    tool_call_id: "send".into(),
+                    execution_version: source_version.clone(),
+                    messages: vec![crate::workflow_execution::SendOutput {
+                        target_node_id: "target".into(),
+                        message: "Only target owns this".into(),
+                        reply_to_message_id: None,
+                    }],
+                },
+            )
+            .unwrap();
+            input_id = receipt.input_ids[0].clone();
+        }
+        service.delete_conversation("target").unwrap();
+        let c = service.state.connection().unwrap();
+        let peer = crate::storage::workflow_execution_repository::snapshot_for_run(
+            &c,
+            "source",
+            "source-run",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(peer.execution_version, source_version);
+        assert!(peer.enabled);
+        assert_eq!(peer.organization_revision, 2);
+        let input = crate::storage::workflow_execution_repository::load_input(&c, &input_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            input.status,
+            crate::workflow_execution::InputStatus::Invalidated
+        );
+        assert_eq!(
+            input.mail_status,
+            crate::workflow_execution::MailStatus::Failed
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM workflow_instance_bindings WHERE instance_id='instance'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
 }

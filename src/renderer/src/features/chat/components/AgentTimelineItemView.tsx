@@ -42,6 +42,7 @@ import { WebSearchToolActivityGroup } from './toolActivities/WebSearchToolActivi
 import { SkillLoadActivity, SkillResourceActivityGroup } from './toolActivities/SkillToolActivity'
 import type { WorkspaceReferenceTarget } from '../workspaceMentions'
 import { MessageAttachments } from './MessageAttachments'
+import { WorkflowDeliveryTimelineItemView } from './WorkflowDeliveryTimelineItemView'
 
 export function GuidanceTimelineItemView({
   assistantMessageId,
@@ -223,6 +224,16 @@ export function AgentTimelineItemView({
         assistantMessageId={assistantMessageId}
         item={item}
         mode={mode}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
+        projectId={projectId}
+      />
+    )
+  }
+
+  if (item.type === 'workflow_delivery') {
+    return (
+      <WorkflowDeliveryTimelineItemView
+        item={item}
         onOpenWorkspaceReference={onOpenWorkspaceReference}
         projectId={projectId}
       />

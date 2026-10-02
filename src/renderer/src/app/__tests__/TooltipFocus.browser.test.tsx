@@ -19,13 +19,13 @@ describe('tooltip focus timing', () => {
   it('transfers focus normally while delaying rich node details by one second', async () => {
     await render(
       <>
-        <input aria-label="Workflow name" />
+        <input aria-label="Organization name" />
         <Tooltip content="Node details" delayMs={1000} delayOnFocus>
           <button type="button">Node</button>
         </Tooltip>
       </>
     )
-    page.getByRole('textbox', { name: 'Workflow name' }).element().focus()
+    page.getByRole('textbox', { name: 'Organization name' }).element().focus()
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const node = page.getByRole('button', { name: 'Node', exact: true }).element()
     node.focus()

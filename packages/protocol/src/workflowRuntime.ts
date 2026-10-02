@@ -1,4 +1,4 @@
-/** Host-owned workflow delivery facts; notification cursors never grant execution authority. */
+/** Host-owned organization mail delivery facts; notification cursors never grant execution authority. */
 export const WORKFLOW_RUNTIME_CHANGED_METHOD = 'agent.workflows.runtime.changed'
 
 export interface WorkflowSourceMessage {
@@ -21,7 +21,6 @@ export type WorkflowInputStatus =
   | 'pending'
   | 'claimed'
   | 'applied'
-  | 'waiting_user'
   | 'completed'
   | 'paused'
   | 'failed'
@@ -62,6 +61,15 @@ export interface WorkflowRuntimeSnapshot {
   events: WorkflowRuntimeEvent[]
   pausedConversationIds?: string[]
   inputRuns?: { inputId: string; status: string }[]
+  /** Present only on a fresh edit notification, never on historical/replayed snapshots. */
+  preferenceUpdates?: WorkflowPreferenceUpdate[]
+}
+export interface WorkflowPreferenceUpdate {
+  nodeId: string
+  conversationId: string
+  organizationRevision: number
+  modelId?: string
+  permissionMode?: 'default' | 'custom' | 'full'
 }
 export interface WorkflowNodeMessage {
   sequence: number
@@ -97,18 +105,18 @@ function record(
   optionalKeys: readonly string[] = []
 ): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Invalid workflow runtime object')
+    throw new Error('Invalid organization runtime object')
   const item = value as Record<string, unknown>
   if (
     Object.keys(item).some((key) => !keys.includes(key) && !optionalKeys.includes(key)) ||
     keys.some((key) => !(key in item))
   )
-    throw new Error('Invalid workflow runtime fields')
+    throw new Error('Invalid organization runtime fields')
   return item
 }
 function text(value: unknown, max = 2_000_000): string {
   if (typeof value !== 'string' || value.length > max)
-    throw new Error('Invalid workflow runtime text')
+    throw new Error('Invalid organization runtime text')
   return value
 }
 function id(value: unknown): string {
@@ -117,17 +125,17 @@ function id(value: unknown): string {
     !result.trim() ||
     [...result].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
   )
-    throw new Error('Invalid workflow runtime ID')
+    throw new Error('Invalid organization runtime ID')
   return result
 }
 function integer(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
-    throw new Error('Invalid workflow runtime sequence or time')
+    throw new Error('Invalid organization runtime sequence or time')
   return value
 }
 function list<T>(value: unknown, parse: (item: unknown) => T, max = 1024): T[] {
   if (!Array.isArray(value) || value.length > max)
-    throw new Error('Invalid workflow runtime collection')
+    throw new Error('Invalid organization runtime collection')
   return value.map(parse)
 }
 function nullableId(value: unknown): string | null {
@@ -190,12 +198,11 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
       String(item.mailStatus)
     )
   )
-    throw new Error('Invalid workflow mail status')
+    throw new Error('Invalid organization mail status')
   const statuses: string[] = [
     'pending',
     'claimed',
     'applied',
-    'waiting_user',
     'completed',
     'paused',
     'failed',
@@ -204,7 +211,7 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
     'recalled'
   ]
   if (typeof item.status !== 'string' || !statuses.includes(item.status))
-    throw new Error('Invalid workflow input status')
+    throw new Error('Invalid organization input status')
   const input: WorkflowRuntimeInput = {
     id: id(item.id),
     instanceId: id(item.instanceId),
@@ -226,7 +233,7 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
       (message) => message.instanceId !== input.instanceId || message.targetNodeId !== input.nodeId
     )
   )
-    throw new Error('Workflow input source identity mismatch')
+    throw new Error('Organization input source identity mismatch')
   return input
 }
 export function parseWorkflowRuntimeEvent(value: unknown): WorkflowRuntimeEvent {
@@ -255,13 +262,16 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   const item = record(
     value,
     ['instanceId', 'sequence', 'inputs', 'events'],
-    ['pausedConversationIds', 'inputRuns']
+    ['pausedConversationIds', 'inputRuns', 'preferenceUpdates']
   )
   const result = {
     instanceId: id(item.instanceId),
     sequence: integer(item.sequence),
     inputs: list(item.inputs, parseWorkflowRuntimeInput, 4096),
     events: list(item.events, parseWorkflowRuntimeEvent, 4096),
+    ...(item.preferenceUpdates !== undefined
+      ? { preferenceUpdates: list(item.preferenceUpdates, parseWorkflowPreferenceUpdate, 128) }
+      : {}),
     ...(item.pausedConversationIds !== undefined
       ? { pausedConversationIds: list(item.pausedConversationIds, id, 128) }
       : {}),
@@ -279,6 +289,12 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
       : {})
   }
   if (
+    result.preferenceUpdates &&
+    new Set(result.preferenceUpdates.map((update) => update.nodeId)).size !==
+      result.preferenceUpdates.length
+  )
+    throw new Error('Duplicate organization preference update')
+  if (
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
     result.inputRuns?.some((run) => !result.inputs.some((input) => input.id === run.inputId)) ||
     result.events.some(
@@ -289,8 +305,33 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
       (event, index) => index > 0 && event.sequence <= result.events[index - 1].sequence
     )
   )
-    throw new Error('Invalid workflow runtime snapshot identity or cursor')
+    throw new Error('Invalid organization runtime snapshot identity or cursor')
   return result
+}
+
+function parseWorkflowPreferenceUpdate(value: unknown): WorkflowPreferenceUpdate {
+  const item = record(
+    value,
+    ['nodeId', 'conversationId', 'organizationRevision'],
+    ['modelId', 'permissionMode']
+  )
+  const revision = integer(item.organizationRevision)
+  if (
+    revision === 0 ||
+    (item.modelId === undefined && item.permissionMode === undefined) ||
+    (item.permissionMode !== undefined &&
+      item.permissionMode !== 'default' &&
+      item.permissionMode !== 'custom' &&
+      item.permissionMode !== 'full')
+  )
+    throw new Error('Invalid organization preference update')
+  return {
+    nodeId: id(item.nodeId),
+    conversationId: id(item.conversationId),
+    organizationRevision: revision,
+    ...(item.modelId !== undefined ? { modelId: id(item.modelId) } : {}),
+    ...(item.permissionMode !== undefined ? { permissionMode: item.permissionMode } : {})
+  }
 }
 export function parseWorkflowNodeMessages(value: unknown): WorkflowNodeMessages {
   const item = record(value, ['instanceId', 'nodeId', 'messages', 'nextBeforeSequence'])
@@ -331,7 +372,7 @@ export function parseWorkflowNodeMessages(value: unknown): WorkflowNodeMessages 
     (result.nextBeforeSequence !== null &&
       result.nextBeforeSequence !== result.messages.at(-1)?.sequence)
   )
-    throw new Error('Invalid workflow node message identity or cursor')
+    throw new Error('Invalid organization node message identity or cursor')
   return result
 }
 export function parseWorkflowMessageSource(value: unknown): WorkflowMessageSource {
@@ -354,7 +395,7 @@ export function parseWorkflowMessageSource(value: unknown): WorkflowMessageSourc
     },
     512
   )
-  if (!sources.length) throw new Error('Workflow message must identify its source')
+  if (!sources.length) throw new Error('Organization message must identify its source')
   return {
     inputId: id(item.inputId),
     instanceId: id(item.instanceId),

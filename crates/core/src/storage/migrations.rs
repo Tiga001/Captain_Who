@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 64;
+pub const STORAGE_SCHEMA_VERSION: i32 = 66;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -20,8 +20,12 @@ const V62_SCHEMA_FINGERPRINT: &str =
     "sha256:704ff3fdec03347fc91caa2adb18468e51180aecb91bf28010a4d88bb0bf4ece";
 const V63_SCHEMA_FINGERPRINT: &str =
     "sha256:787e81d73f2a814771846a8cf104152623200986c5b7c8e3c4c72d9818aa1ee0";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V64_SCHEMA_FINGERPRINT: &str =
     "sha256:5ee4d7a0c9c3e7a8ca588dbf76bb14d0353217143a3afe329d394c7c6d05e56f";
+const V65_SCHEMA_FINGERPRINT: &str =
+    "sha256:9e91f082fb82ceb7ed3af4ff5178dad656e0026a42b839c9af9cb79114b33568";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:d9790cf426f36f5b8288025472f4a66dd0766d74e3cae3c8899691525c8eb352";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -37,6 +41,8 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v61 adds trusted trace publication revisions; v62 adds a pending-only workflow sequence index.
 /// v63 adds optional long-paste source metadata without changing existing attachment contents.
 /// v64 installs independent workflow mailboxes; legacy workflow records are not converted.
+/// v65 snapshots organization instances and assigns durable member identities.
+/// v66 removes the retired graph execution tables; organization mail and chats stay intact.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -102,6 +108,14 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 63 {
         install_workflow_mail_v63(connection)?;
+    }
+
+    if read_schema_version(connection)? == 64 {
+        upgrade_organization_instances_v64(connection)?;
+    }
+
+    if read_schema_version(connection)? == 65 {
+        remove_retired_workflow_execution_v65(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -401,13 +415,56 @@ fn pasted_text_schema() -> &'static str {
 }
 
 fn workflow_mail_schema() -> &'static str {
-    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+    let start = CANONICAL_SCHEMA
         .find("-- Independent workflow mailboxes, schema v64.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Independent organization instances and member identities, schema v65.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+fn retired_workflow_cleanup_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Remove retired graph execution storage, schema v66.")
         .unwrap()..]
+}
+fn canonical_schema_v65() -> String {
+    CANONICAL_SCHEMA.replace(retired_workflow_cleanup_schema(), "")
+}
+fn organization_instances_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Independent organization instances and member identities, schema v65.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Remove retired graph execution storage, schema v66.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+fn canonical_schema_v64() -> String {
+    canonical_schema_v65().replace(organization_instances_schema(), "")
+}
+fn remove_retired_workflow_execution_v65(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V65_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(retired_workflow_cleanup_schema())?;
+    transaction.pragma_update(None, "user_version", 66)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 
 fn canonical_schema_v63() -> String {
-    CANONICAL_SCHEMA.replace(workflow_mail_schema(), "")
+    canonical_schema_v64().replace(workflow_mail_schema(), "")
+}
+fn upgrade_organization_instances_v64(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V64_SCHEMA_FINGERPRINT)?;
+    // The snapshot copy joins the source template. Reject orphaned instances before rebuilding
+    // tables rather than silently dropping them from that join.
+    ensure_foreign_keys_are_valid(&transaction)?;
+    transaction.execute_batch(organization_instances_schema())?;
+    transaction.pragma_update(None, "user_version", 65)?;
+    validate_schema_fingerprint(&transaction, V65_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
 }
 
 fn canonical_schema_v62() -> String {
@@ -428,7 +485,7 @@ fn install_workflow_mail_v63(connection: &Connection) -> rusqlite::Result<()> {
     validate_schema_fingerprint(&transaction, V63_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_mail_schema())?;
     transaction.pragma_update(None, "user_version", 64)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V64_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 
@@ -670,6 +727,154 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn v65_rejects_orphaned_instances_without_dropping_records() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(&super::canonical_schema_v64()).unwrap();
+        c.pragma_update(None, "user_version", 64).unwrap();
+        c.pragma_update(None, "foreign_keys", false).unwrap();
+        c.execute_batch("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,last_request_json) VALUES('orphan','missing',1,'Keep','#123456',1,1,'{}');").unwrap();
+        assert!(super::run_migrations(&c).is_err());
+        assert_eq!(super::read_schema_version(&c).unwrap(), 64);
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM workflow_instances WHERE instance_id='orphan'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        super::validate_schema_fingerprint(&c, super::V64_SCHEMA_FINGERPRINT).unwrap();
+    }
+
+    #[test]
+    fn v66_removes_only_retired_execution_tables_and_preserves_current_mail() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(&canonical_schema_v65()).unwrap();
+        c.pragma_update(None, "user_version", 65).unwrap();
+        validate_schema_fingerprint(&c, V65_SCHEMA_FINGERPRINT).unwrap();
+        c.execute_batch(r#"INSERT INTO conversations(id,title,created_at,updated_at) VALUES('chat','Keep',1,1);
+            INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('message','chat','user','History stays', 'sent',1,0);
+            INSERT INTO workflow_execution_pauses(conversation_id,created_at) VALUES('retired',1);
+            INSERT INTO workflow_mail_pauses(conversation_id,created_at) VALUES('chat',1);
+            INSERT INTO workflow_mail_inputs(input_id,instance_id,execution_version,node_id,input_json,status,created_at,updated_at) VALUES('live','team','epoch','node','{"body":"keep"}','pending',1,1);
+            INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,mail_status,message_json,input_id,created_at) VALUES('mail','team','epoch','node','pending','{"body":"keep"}','live',1);
+            INSERT INTO workflow_mail_events(instance_id,input_id,kind,created_at) VALUES('team','live','sent',1);
+            INSERT INTO organization_personnel_receipts(source_run_id,tool_call_id,request_json,receipt_json,created_at) VALUES('run','call','{}','{}',1);"#).unwrap();
+        c.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::DropTable {
+                    table_name: "workflow_execution_inputs",
+                    ..
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        }));
+        assert!(run_migrations(&c).is_err());
+        c.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        );
+        assert_eq!(read_schema_version(&c).unwrap(), 65);
+        validate_schema_fingerprint(&c, V65_SCHEMA_FINGERPRINT).unwrap();
+        run_migrations(&c).unwrap();
+        run_migrations(&c).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name GLOB 'workflow_execution_*'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row("SELECT content FROM messages WHERE id='message'", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "History stays"
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT input_json FROM workflow_mail_inputs WHERE input_id='live'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            r#"{"body":"keep"}"#
+        );
+        for table in [
+            "workflow_mail_messages",
+            "workflow_mail_events",
+            "workflow_mail_pauses",
+            "organization_personnel_receipts",
+        ] {
+            assert_eq!(
+                c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        validate_canonical_schema(&c).unwrap();
+    }
+
+    #[test]
+    fn v65_copies_instance_definitions_and_preserves_bindings_when_template_is_deleted() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(&super::canonical_schema_v64()).unwrap();
+        c.pragma_update(None, "user_version", 64).unwrap();
+        let definition =
+            include_str!("../../../../packages/protocol/fixtures/workflow-definition-v1.json");
+        let mut definition: serde_json::Value = serde_json::from_str(definition).unwrap();
+        definition["id"] = serde_json::json!("source");
+        let definition = definition.to_string();
+        c.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at,enabled) VALUES('source',?1,1,1,1)",[&definition]).unwrap();
+        c.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('chat','Keep',1,1);
+            INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('message','chat','user','history','sent',1,0);
+            INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,last_request_json) VALUES('instance','source',1,'Independent','#123456',7,1,'{}');
+            INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES('instance','worker','chat');").unwrap();
+        super::run_migrations(&c).unwrap();
+        super::run_migrations(&c).unwrap();
+        let (raw, revision, membership):(String,u64,String) = c.query_row("SELECT i.definition_json,i.revision,b.membership_id FROM workflow_instances i JOIN workflow_instance_bindings b USING(instance_id)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let mut expected: serde_json::Value = serde_json::from_str(&definition).unwrap();
+        expected["id"] = serde_json::json!("instance");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+            expected
+        );
+        assert_eq!(revision, 7);
+        assert!(!membership.is_empty());
+        c.execute(
+            "DELETE FROM workflow_definitions WHERE workflow_id='source'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM workflow_instance_bindings",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT content FROM messages WHERE id='message'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "history"
+        );
+        super::validate_canonical_schema(&c).unwrap();
+    }
+
+    #[test]
     fn v64_installs_empty_mailboxes_without_converting_workflows_or_losing_chat() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
@@ -795,7 +1000,16 @@ mod tests {
             "Keep message"
         );
         assert_eq!(connection.query_row("SELECT conversation_id FROM workflow_instance_bindings WHERE instance_id='instance'", [], |r| r.get::<_, String>(0)).unwrap(), "chat");
-        assert_eq!(connection.query_row("SELECT flow_ids_json FROM workflow_execution_events WHERE instance_id='instance'", [], |r| r.get::<_, String>(0)).unwrap(), "[\"flow\"]");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='workflow_execution_events'",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
         super::run_migrations(&connection).unwrap();
     }
     #[test]

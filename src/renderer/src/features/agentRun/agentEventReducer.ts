@@ -77,6 +77,7 @@ import {
   removeGuidanceFromChatMessage,
   upsertGuidanceTimelineItem
 } from './agentEventReducerGuidance'
+import { upsertWorkflowDeliveryTimelineItem } from './workflowDeliveryTimeline'
 import {
   addMcpApprovalViews,
   projectMcpInvocationEvent,
@@ -203,6 +204,7 @@ export function settleAgentRunToolActivities(
 }
 
 export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {
+  if (agentEvent.type === 'workflow_delivery_applied') return true
   if (agentEvent.type === 'done') return true
   if (agentEvent.type === 'approval_required') return true
   if (agentEvent.type === 'mcp_tool_invocation_state_changed') return true
@@ -242,6 +244,35 @@ export function applyAgentEventToChatMessage(
 ): ChatMessage {
   const runId = agentEvent.runId ?? message.agentRun?.runId ?? null
   const currentRun = ensureAgentRun(message.agentRun, runId)
+
+  if (agentEvent.type === 'workflow_delivery_applied') {
+    if (
+      message.role !== 'assistant' ||
+      message.id !== agentEvent.assistantMessageId ||
+      message.agentRun?.runId !== agentEvent.runId
+    )
+      return message
+    // This is durable presentation proof, not new work. Late replay may fill a settled run's
+    // history, but must never resume that run or change its completion state.
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        timeline: upsertWorkflowDeliveryTimelineItem(currentRun.timeline, {
+          id: `workflow-delivery-${agentEvent.inputId}`,
+          type: 'workflow_delivery',
+          inputId: agentEvent.inputId,
+          deliveryId: agentEvent.deliveryId,
+          instanceId: agentEvent.instanceId,
+          workflowName: agentEvent.workflowName,
+          content: agentEvent.content,
+          createdAt: agentEvent.createdAt,
+          traceSequence: agentEvent.sequence,
+          sources: agentEvent.sources
+        })
+      }
+    }
+  }
 
   // A durable terminal Run is a tombstone. Late buffered notifications must not resurrect it as
   // pending/running or append post-terminal model/tool activity. A handed-off command is an

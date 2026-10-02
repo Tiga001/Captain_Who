@@ -313,7 +313,33 @@ const formerlySupportedEvents = [
   { type: 'done', runId, success: true, status: 'completed', content: 'Done.' }
 ] satisfies AgentEvent[]
 
-const allEventFixtures = [...formerlyDroppedEvents, ...formerlySupportedEvents]
+const workflowDeliveryEvent = {
+  type: 'workflow_delivery_applied',
+  runId,
+  conversationId: 'conversation-child',
+  assistantMessageId: 'assistant-child',
+  inputId: 'input-mail',
+  deliveryId: 'delivery-mail',
+  instanceId: 'workflow-1',
+  workflowName: 'Review',
+  content: 'Host envelope',
+  sources: [
+    {
+      nodeId: 'writer',
+      nodeName: 'Writer',
+      conversationId: 'writer-chat',
+      conversationTitle: 'Draft',
+      content: 'The actual letter'
+    }
+  ],
+  createdAt: 10,
+  sequence: 7
+} satisfies AgentEvent
+const allEventFixtures = [
+  ...formerlyDroppedEvents,
+  ...formerlySupportedEvents,
+  workflowDeliveryEvent
+]
 const allEventTypes = [
   'started',
   'tool_set_changed',
@@ -329,6 +355,7 @@ const allEventTypes = [
   'message',
   'guidance_queued',
   'guidance_applied',
+  'workflow_delivery_applied',
   'guidance_rejected',
   'tool_call',
   'tool_result',
@@ -371,10 +398,33 @@ function envelope(event: AgentEvent): AgentObserverEventEnvelope {
 }
 
 describe('Agent observer event contract', () => {
-  it('locks the complete 32-variant AgentEvent set across compile-time and runtime fixtures', () => {
+  it('validates exact workflow delivery ownership, ordering, and source bodies', () => {
+    expect(parseAgentEventForHost(workflowDeliveryEvent)).toEqual(workflowDeliveryEvent)
+    for (const field of [
+      'conversationId',
+      'assistantMessageId',
+      'inputId',
+      'deliveryId',
+      'sequence'
+    ]) {
+      const incomplete: Record<string, unknown> = { ...workflowDeliveryEvent }
+      delete incomplete[field]
+      expect(() => parseAgentEventForHost(incomplete)).toThrow()
+    }
+    for (const patch of [
+      { sequence: -1 },
+      { sequence: 0.5 },
+      { sources: [] },
+      { sources: [{ ...workflowDeliveryEvent.sources[0], content: undefined }] },
+      { flowId: 'untrusted' }
+    ])
+      expect(() => parseAgentEventForHost({ ...workflowDeliveryEvent, ...patch })).toThrow()
+  })
+
+  it('locks the complete 33-variant AgentEvent set across compile-time and runtime fixtures', () => {
     expect(completeEventTypeCoverage).toBe(true)
-    expect(allEventTypes).toHaveLength(32)
-    expect(new Set(allEventTypes).size).toBe(32)
+    expect(allEventTypes).toHaveLength(33)
+    expect(new Set(allEventTypes).size).toBe(33)
     expect(new Set(allEventFixtures.map((event) => event.type))).toEqual(new Set(allEventTypes))
   })
 

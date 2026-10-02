@@ -1,5 +1,6 @@
-import { ChevronRight, LayoutDashboard, Users, MessageCircle, Network } from 'lucide-react'
+import { ChevronRight, LayoutDashboard, MessageCircle, Network } from 'lucide-react'
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { BotGroupIcon } from '../../components/BotGroupIcon'
 import { AnchoredPopover } from '../../components/overlay/AnchoredPopover'
 import { Tooltip } from '../../components/overlay/Tooltip'
 import type { Translate } from '../../config/translationFormat'
@@ -118,7 +119,7 @@ export function MainPanelWorkflowMenu({
               <LayoutDashboard aria-hidden="true" />
               <span>{t('workflows.openBoard')}</span>
             </button>
-            {submenuItem('members', <Users aria-hidden="true" />, t('workflows.members'))}
+            {submenuItem('members', <BotGroupIcon aria-hidden="true" />, t('workflows.members'))}
             {submenu ? (
               <div
                 className="main-panel__workflow-submenu"

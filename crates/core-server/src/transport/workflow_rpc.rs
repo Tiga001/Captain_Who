@@ -321,15 +321,10 @@ enum RuntimeRequest {
         instance_id: String,
         after_sequence: Option<u64>,
     },
-    CompleteUserInput {
-        instance_id: String,
-        input_id: String,
-    },
 }
 
 pub(crate) fn handle_workflow_runtime_request(
     service: &AgentService,
-    notifications: agent::CoreServerNotificationSender,
     request: JsonRpcRequest,
 ) -> Value {
     let input = match parse_params::<RuntimeRequest>(request.params) {
@@ -354,10 +349,6 @@ pub(crate) fn handle_workflow_runtime_request(
             instance_id,
             after_sequence,
         } => service.workflow_runtime_snapshot(&instance_id, after_sequence),
-        RuntimeRequest::CompleteUserInput {
-            instance_id,
-            input_id,
-        } => service.complete_workflow_user_input(&instance_id, &input_id, &notifications),
     };
     match result {
         Ok(runtime) => response_success(

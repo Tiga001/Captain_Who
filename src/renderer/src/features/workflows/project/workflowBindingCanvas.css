@@ -19,42 +19,12 @@
 .workflow-binding-canvas .workflow-node {
   cursor: default;
 }
-.workflow-binding-canvas .workflow-edge {
-  pointer-events: none;
-}
 .workflow-binding-node-anchor {
   position: absolute;
 }
 .workflow-binding-node-tooltip-anchor {
   width: 100%;
   height: 100%;
-}
-.workflow-binding-canvas button.workflow-binding-node {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  text-align: left;
-  cursor: pointer;
-  background: color-mix(in srgb, var(--mc-color-text-primary) 70%, var(--mc-color-surface-card));
-  border: 2px solid transparent;
-}
-.workflow-binding-canvas .workflow-binding-node:not(.is-bound) .workflow-node__avatar {
-  filter: grayscale(0.75);
-  opacity: 0.7;
-}
-.workflow-binding-canvas .workflow-binding-node.is-bound {
-  background: var(--mc-color-text-primary);
-  border-color: var(--workflow-instance-color);
-}
-.workflow-binding-canvas .workflow-binding-node.is-selected,
-.workflow-binding-canvas .workflow-binding-node:focus-visible {
-  outline: 2px solid var(--mc-color-focus-ring);
-  outline-offset: 2px;
-}
-.workflow-binding-canvas .workflow-binding-node.is-drop-target {
-  outline: 3px solid var(--mc-color-focus-ring);
-  outline-offset: 4px;
 }
 .workflow-binding-node-tooltip {
   min-width: 185px;

@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::unbounded_channel;
 
 mod awareness;
+mod personnel;
 
 async fn request_body(stream: &mut tokio::net::TcpStream) -> Value {
     let mut bytes = Vec::new();
@@ -37,7 +38,7 @@ async fn respond(stream: &mut tokio::net::TcpStream, delta: Value, reason: &str)
 }
 
 fn workflow_fixture(storage: &StorageService) -> (String, String) {
-    let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Receive artifacts","task":"Review quality","delivers":"Review report"});
+    let agent = |id: &str| json!({"kind":"agent","id":id,"name":if id == "a" { "Boss" } else { "人事负责人" },"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Receive artifacts","task":"Review quality","delivers":"Review report"});
     let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"Workflow shared background 38276","nodes":[agent("a"),agent("b")],"viewport":{"x":0,"y":0,"zoom":1}});
     let saved = storage
         .workflow_request(
@@ -90,7 +91,7 @@ fn root_input(conversation_id: &str, content: &str) -> AgentConversationTurnInpu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independent_root() {
+async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_independent_roots() {
     let directory = tempdir().unwrap();
     let storage =
         Arc::new(StorageService::open(&directory.path().join("workflow.sqlite")).unwrap());
@@ -107,6 +108,7 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     let provider = tokio::spawn(async move {
         let mut sent = false;
         let mut completed = false;
+        let mut replied = false;
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = request_body(&mut stream).await;
@@ -114,7 +116,7 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
             captured.send(request).unwrap();
             if raw.contains("Human trigger 79318") && !sent {
                 sent = true;
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-workflow-79318","type":"function","function":{"name":"workflow_send","arguments":"{\"messages\":[{\"targetNodeId\":\"b\",\"message\":\"Workflow artifact 51892\"}]}"}}]}),"tool_calls").await;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-workflow-79318","type":"function","function":{"name":"organization_send","arguments":"{\"messages\":[{\"to\":\"人事负责人\",\"message\":\"Workflow artifact 51892\"}]}"}}]}),"tool_calls").await;
             } else if raw.contains("Workflow artifact 51892")
                 && !raw.contains("Human trigger 79318")
                 && !completed
@@ -124,7 +126,22 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
                     .workflow_execution_runtime("instance")
                     .unwrap();
                 let message_id = &runtime.inputs[0].messages[0].id;
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"complete-startup","type":"function","function":{"name":"workflow_complete","arguments":json!({"messageIds":[message_id]}).to_string()}}]}),"tool_calls").await;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"complete-startup","type":"function","function":{"name":"organization_complete","arguments":json!({"messageIds":[message_id]}).to_string()}}]}),"tool_calls").await;
+            } else if raw.contains("Workflow artifact 51892")
+                && !raw.contains("Human trigger 79318")
+                && !replied
+            {
+                replied = true;
+                let runtime = provider_storage
+                    .workflow_execution_runtime("instance")
+                    .unwrap();
+                let incoming = runtime
+                    .inputs
+                    .iter()
+                    .find(|input| input.node_id == "b")
+                    .unwrap();
+                let message_id = &incoming.messages[0].id;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"reply-without-recipient","type":"function","function":{"name":"organization_send","arguments":json!({"messages":[{"replyTo":message_id,"message":"Semantic reply 51793"}]}).to_string()}}]}),"tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -189,9 +206,13 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
         );
     }
     let snapshot = storage.workflow_execution_runtime("instance").unwrap();
-    assert_eq!(snapshot.inputs.len(), 1);
+    let incoming = snapshot
+        .inputs
+        .iter()
+        .find(|input| input.node_id == "b")
+        .unwrap();
     let input = storage
-        .workflow_execution_load_input(&snapshot.inputs[0].id)
+        .workflow_execution_load_input(&incoming.id)
         .unwrap()
         .unwrap();
     assert_eq!(input.conversation_id.as_deref(), Some(target.as_str()));
@@ -201,13 +222,13 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     ));
     assert!(samples
         .iter()
-        .any(|sample| sample.to_string().contains("workflow_send")));
+        .any(|sample| sample.to_string().contains("organization_send")));
     for tool in [
-        "workflow_get_state",
-        "workflow_get_mailbox",
-        "workflow_accept",
-        "workflow_complete",
-        "workflow_recall",
+        "organization_get_state",
+        "organization_get_mailbox",
+        "organization_accept",
+        "organization_complete",
+        "organization_recall",
     ] {
         assert!(samples.iter().any(|sample| sample["tools"]
             .as_array()
@@ -225,7 +246,8 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     let raw = recipient.to_string();
     assert!(raw.contains("Workflow shared background 38276"));
     assert!(raw.contains("Review quality"));
-    assert!(raw.contains("workflow"));
+    assert!(raw.contains("Organization mail"));
+    assert!(raw.contains("organization.execution"));
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.unwrap();
@@ -238,6 +260,26 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
     })
     .await
     .unwrap();
+    let replied = storage.workflow_execution_runtime("instance").unwrap();
+    assert_eq!(replied.inputs.len(), 2);
+    let reply = replied
+        .inputs
+        .iter()
+        .find(|item| item.node_id == "a")
+        .unwrap();
+    // Runtime snapshots intentionally omit message bodies. Read the durable input to verify
+    // the real delivered reply, including its original-letter link and automatic recipient.
+    let reply = storage
+        .workflow_execution_load_input(&reply.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.conversation_id.as_deref(), Some(source.as_str()));
+    assert_eq!(reply.messages[0].source_node_name, "人事负责人");
+    assert_eq!(reply.messages[0].content, "Semantic reply 51793");
+    assert_eq!(
+        reply.messages[0].reply_to_message_id.as_deref(),
+        Some(input.messages[0].id.as_str())
+    );
     let chat = storage.load_conversation(&target).unwrap().unwrap();
     assert_eq!(chat.messages.iter().filter(|m| m.role == "user").count(), 1);
     assert!(chat
@@ -314,22 +356,22 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                         );
                         Some((
                             "inspect-pending",
-                            "workflow_get_mailbox",
+                            "organization_get_mailbox",
                             json!({"direction":"inbox"}),
                         ))
                     }
                     3 => {
-                        let mail = awareness::tool_result(&request, "workflow_get_mailbox");
+                        let mail = awareness::tool_result(&request, "organization_get_mailbox");
                         assert_eq!(mail["messages"][0]["content"], "Accepted payload 42931");
                         assert_eq!(mail["messages"][0]["status"], "pending");
                         Some((
                             "accept-pending",
-                            "workflow_accept",
+                            "organization_accept",
                             json!({"messageIds":[mail["messages"][0]["messageId"]]}),
                         ))
                     }
                     4 => {
-                        let receipt = awareness::tool_result(&request, "workflow_accept");
+                        let receipt = awareness::tool_result(&request, "organization_accept");
                         assert_eq!(receipt["messages"][0]["success"], true);
                         assert!(
                             receipt["messages"][0].get("content").is_none(),
@@ -337,12 +379,12 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                         );
                         Some((
                             "complete-accepted",
-                            "workflow_complete",
+                            "organization_complete",
                             json!({"messageIds":[receipt["messages"][0]["messageId"]]}),
                         ))
                     }
                     5 => {
-                        let receipt = awareness::tool_result(&request, "workflow_complete");
+                        let receipt = awareness::tool_result(&request, "organization_complete");
                         assert_eq!(receipt["messages"][0]["success"], true);
                         assert_eq!(receipt["messages"][0]["status"], "processed");
                         None
@@ -353,8 +395,8 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                 sent = true;
                 Some((
                     "send-to-waiting",
-                    "workflow_send",
-                    json!({"messages":[{"targetNodeId":"b","message":"Accepted payload 42931"}]}),
+                    "organization_send",
+                    json!({"messages":[{"to":"人事负责人","message":"Accepted payload 42931"}]}),
                 ))
             } else {
                 None
@@ -448,9 +490,22 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
             &notifications,
         )
         .unwrap();
+    let mut delivery_events = vec![];
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.unwrap();
+            if event["params"]["type"] == "workflow_delivery_applied" {
+                let delivery = &event["params"];
+                assert_eq!(delivery["runId"], target_turn.run_id);
+                assert_eq!(delivery["conversationId"], target);
+                assert_eq!(delivery["assistantMessageId"], target_turn.assistant_message_id);
+                // The live event is a committed consumption fact, not merely an accept receipt.
+                let trace = storage.get_conversation_turn_trace(&target_turn.assistant_message_id).unwrap().unwrap();
+                assert!(trace.items.iter().any(|item| matches!(item,
+                    ConversationTurnTraceItem::WorkflowDelivery {sequence,input_id,..}
+                        if Some(*sequence)==delivery["sequence"].as_u64() && *input_id==delivery["inputId"].as_str().unwrap())));
+                delivery_events.push(delivery.clone());
+            }
             if event["params"]["type"] == "done" && event["params"]["runId"] == target_turn.run_id {
                 break;
             }
@@ -487,6 +542,44 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
         "explicit acceptance delivers exactly once"
     );
     assert_eq!(after.inputs[0].mail_status, MailStatus::Processed);
+    assert_eq!(
+        delivery_events.len(),
+        1,
+        "same-turn mail is visible before the final Done exactly once"
+    );
+    assert_eq!(
+        delivery_events[0]["sources"][0]["content"],
+        "Accepted payload 42931"
+    );
+    assert_eq!(
+        delivery_events[0]["deliveryId"].as_str(),
+        after.inputs[0].delivery_id.as_deref()
+    );
+    let display = storage
+        .load_conversation_view(&target)
+        .unwrap()
+        .unwrap()
+        .conversation;
+    assert!(!display
+        .messages
+        .iter()
+        .any(|message| Some(message.id.as_str()) == after.inputs[0].delivery_id.as_deref()));
+    let assistant = display
+        .messages
+        .iter()
+        .find(|message| message.id == target_turn.assistant_message_id)
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(assistant.agent_run_json.as_ref().unwrap()).unwrap();
+    let mail = run["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "workflow_delivery")
+        .collect::<Vec<_>>();
+    assert_eq!(mail.len(), 1);
+    assert_eq!(mail[0]["traceSequence"], delivery_events[0]["sequence"]);
+
     assert_eq!(
         samples
             .iter()
@@ -543,6 +636,8 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
         .unwrap();
     let receipt = storage
         .workflow_execution_send(&mycopilot_core::workflow_execution::SendRequest {
+            model_input: None,
+            recipient_versions: Default::default(),
             conversation_id: source,
             source_run_id: "source-run".into(),
             tool_call_id: "send".into(),
@@ -648,7 +743,7 @@ async fn workflow_execution_sources_deliver_independent_letters_without_waiting_
                 None
             };
             if let Some((id, body)) = source.filter(|(id, _)| sent.insert(*id)) {
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("send-{id}"),"type":"function","function":{"name":"workflow_send","arguments":json!({"messages":[{"targetNodeId":"b","message":body}]}).to_string()}}]}),"tool_calls").await;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("send-{id}"),"type":"function","function":{"name":"organization_send","arguments":json!({"messages":[{"to":"b","message":body}]}).to_string()}}]}),"tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -757,7 +852,7 @@ async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_with
                 });
             } else if raw.contains("Queue trigger 76234") && !source_sent {
                 source_sent = true;
-                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":"queue-send","type":"function","function":{"name":"workflow_send","arguments":"{\"messages\":[{\"targetNodeId\":\"b\",\"message\":\"Queued artifact 92134\"}]}"}}]}), "tool_calls").await;
+                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":"queue-send","type":"function","function":{"name":"organization_send","arguments":"{\"messages\":[{\"to\":\"人事负责人\",\"message\":\"Queued artifact 92134\"}]}"}}]}), "tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -945,11 +1040,20 @@ async fn workflow_waiting_population_microbenchmark() {
         storage.save_model_settings(settings).unwrap();
         let mut last_target = String::new();
         workflow_fixture(&storage);
+        let definition = storage
+            .workflow_request(mycopilot_core::workflow::Request::List)
+            .unwrap()
+            .records
+            .into_iter()
+            .find(|record| record.definition.id == "template")
+            .unwrap()
+            .definition;
         let mut db = rusqlite::Connection::open(&path).unwrap();
         for index in 0..count {
             let result = storage.workflow_request(serde_json::from_value(json!({
                 "operation":"saveInstance", "id":if index == 0 { "instance".into() } else { format!("waiting-{index}") },
                 "templateId":"template", "name":"Waiting", "color":format!("#{:06x}", index + 1),
+                "definition":definition,
                 "bindings":[{"nodeId":"a","conversationId":null},{"nodeId":"b","conversationId":null}],
                 "expectedRevision":if index == 0 { 1 } else { 0 },"expectedTemplateRevision":1
             })).unwrap()).unwrap();

@@ -110,6 +110,7 @@ import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 import { hostClient } from '../host/hostClient'
 import { WorkflowSidebarPage } from '../features/workflows/project/WorkflowSidebarPage'
 import { useWorkflowWorkspace, type WorkflowDraftPreferences } from './useWorkflowWorkspace'
+import { mergeStoredWorkflowPreferences } from './workflowDraftPreferenceSync'
 import { ScheduledPageLayer } from '../features/automations/ScheduledPageLayer'
 import { AUTOMATION_DRAWER_DEFAULT_WIDTH } from '../features/automations/automationLayout'
 import { useAutomationAttention } from '../features/automations/useAutomationAttention'
@@ -779,7 +780,45 @@ export function AppShell() {
     [flushDraft, updateDraft]
   )
 
+  const hydrateWorkflowDraft = useCallback(
+    (id: string, storedDraft: ChatComposerDraft) => {
+      if (!draftsRef.current[id]) updateDraft(id, storedDraft)
+    },
+    [updateDraft]
+  )
+
+  const readWorkflowDraftPreferences = useCallback(
+    () =>
+      Object.fromEntries(
+        Object.entries(draftsRef.current).map(([id, draft]) => [
+          id,
+          { modelId: draft.modelId, permissionMode: draft.permissionMode }
+        ])
+      ),
+    []
+  )
+  const applyStoredWorkflowDraftPreferences = useCallback(
+    async (
+      id: string,
+      stored: Partial<WorkflowDraftPreferences>,
+      expected: Partial<WorkflowDraftPreferences>,
+      forcePersist = false
+    ) => {
+      const current = draftsRef.current[id]
+      if (!current) return
+      const next = mergeStoredWorkflowPreferences(current, stored, expected)
+      if (next === current && !forcePersist) return
+      updateDraft(id, { ...next, updatedAt: Math.max(Date.now(), current.updatedAt + 1) })
+      await flushDraft(id)
+    },
+    [updateDraft, flushDraft]
+  )
+
   const workflowWorkspace = useWorkflowWorkspace({
+    readDraftPreferences: readWorkflowDraftPreferences,
+    applyStoredDraftPreferences: applyStoredWorkflowDraftPreferences,
+    conversationsRef,
+    hydrateDraft: hydrateWorkflowDraft,
     flushDraft,
     waitForConversationSaves,
     setConversations: setConversationsWithRef,
@@ -806,8 +845,8 @@ export function AppShell() {
           .catch(() =>
             showToast(
               language.startsWith('zh')
-                ? '工作流已保存，但对话同步失败，请在工作流页面重试。'
-                : 'Workflow saved, but conversation sync failed. Retry from Workflows.'
+                ? '组织已保存，但对话同步失败，请在组织页面重试。'
+                : 'Organization saved, but conversation sync failed. Retry from Organizations.'
             )
           )
       }
@@ -1928,8 +1967,8 @@ export function AppShell() {
         <ConfirmationDialog
           title={
             language.startsWith('zh')
-              ? '放弃未保存的工作流绑定？'
-              : 'Discard unsaved workflow bindings?'
+              ? '放弃未保存的组织绑定？'
+              : 'Discard unsaved organization bindings?'
           }
           description={
             language.startsWith('zh')

@@ -6,14 +6,9 @@ export async function requestWorkflows(input: WorkflowRequest): Promise<Workflow
   const response = unwrapHostInvocation(await hostClient.agent.requestWorkflows(input))
   if (
     typeof window !== 'undefined' &&
-    ![
-      'list',
-      'listInstances',
-      'validate',
-      'runtimeSnapshot',
-      'nodeMessages',
-      'completeUserInput'
-    ].includes(input.operation)
+    !['list', 'listInstances', 'validate', 'runtimeSnapshot', 'nodeMessages'].includes(
+      input.operation
+    )
   ) {
     window.dispatchEvent(new Event('captain:workflows-changed'))
   }

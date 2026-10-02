@@ -9,11 +9,13 @@ import './workflowColorPicker.css'
 export function WorkflowColorPicker({
   color,
   disabled,
+  variant = 'toolbar',
   unavailableColors = [],
   onChange
 }: {
   color: string
   disabled: boolean
+  variant?: 'toolbar' | 'canvas'
   unavailableColors?: readonly string[]
   onChange: (color: string) => void
 }) {
@@ -54,12 +56,16 @@ export function WorkflowColorPicker({
 
   return (
     <>
-      <Tooltip content={t('工作流颜色', 'Workflow color')}>
+      <Tooltip content={t('组织颜色', 'Organization color')}>
         <button
           ref={anchorRef}
-          className="workflow-icon-button workflow-color-picker__trigger"
+          className={
+            variant === 'canvas'
+              ? 'workflow-color-picker__trigger workflow-color-picker__trigger--canvas'
+              : 'workflow-icon-button workflow-color-picker__trigger'
+          }
           type="button"
-          aria-label={t('工作流颜色', 'Workflow color')}
+          aria-label={t('组织颜色', 'Organization color')}
           aria-haspopup="dialog"
           aria-expanded={visible}
           aria-controls={visible ? menuId : undefined}
@@ -78,7 +84,7 @@ export function WorkflowColorPicker({
           anchorRef={anchorRef}
           popoverRef={popoverRef}
           enabled
-          placement="bottom"
+          placement={variant === 'canvas' ? 'top' : 'bottom'}
           className="workflow-color-picker__popover"
           onClose={() => setOpen(false)}
         >
@@ -86,7 +92,7 @@ export function WorkflowColorPicker({
             id={menuId}
             role="dialog"
             tabIndex={-1}
-            aria-label={t('工作流颜色', 'Workflow color')}
+            aria-label={t('组织颜色', 'Organization color')}
             className="workflow-color-picker__colors"
             onBlur={(event) => {
               if (
@@ -105,7 +111,7 @@ export function WorkflowColorPicker({
                 disabled={unavailable.has(option.toLowerCase())}
                 title={
                   unavailable.has(option.toLowerCase())
-                    ? t('已被其他工作流使用', 'Used by another workflow')
+                    ? t('已被其他组织使用', 'Used by another organization')
                     : undefined
                 }
                 style={{ backgroundColor: option }}

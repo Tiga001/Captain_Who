@@ -243,6 +243,20 @@ pub enum AgentEvent {
         created_at: i64,
         sequence: u64,
     },
+    /// A collaborator letter durably consumed inside this same assistant turn.
+    WorkflowDeliveryApplied {
+        conversation_id: String,
+        run_id: String,
+        assistant_message_id: String,
+        input_id: String,
+        delivery_id: String,
+        instance_id: String,
+        workflow_name: String,
+        content: String,
+        sources: Vec<crate::workflow_execution::DeliverySource>,
+        created_at: i64,
+        sequence: u64,
+    },
     GuidanceRejected {
         run_id: String,
         guidance_id: String,

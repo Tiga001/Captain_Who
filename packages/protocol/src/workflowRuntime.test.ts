@@ -59,6 +59,34 @@ const snapshot: WorkflowRuntimeSnapshot = {
   ]
 }
 describe('workflow runtime boundary', () => {
+  it('accepts only bounded, field-specific fresh organization preference notifications', () => {
+    const update = {
+      nodeId: 'reviewer',
+      conversationId: 'chat-review',
+      organizationRevision: 2,
+      modelId: 'model-next',
+      permissionMode: 'default'
+    }
+    const notification = { ...snapshot, preferenceUpdates: [update] }
+    expect(parseWorkflowRuntimeSnapshot(notification)).toEqual(notification)
+    expect(parseWorkflowRuntimeSnapshot(snapshot)).not.toHaveProperty('preferenceUpdates')
+    for (const bad of [
+      { ...update, organizationRevision: 0 },
+      { ...update, organizationRevision: 1.5 },
+      { ...update, permissionMode: 'unrestricted' },
+      { ...update, modelId: null },
+      { ...update, nodeId: '' },
+      { ...update, conversationId: '' },
+      { ...update, modelId: undefined, permissionMode: undefined },
+      { ...update, avatar: 'not-editable' }
+    ])
+      expect(() =>
+        parseWorkflowRuntimeSnapshot({ ...snapshot, preferenceUpdates: [bad] })
+      ).toThrow()
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({ ...snapshot, preferenceUpdates: [update, update] })
+    ).toThrow()
+  })
   it('validates queue metadata and node-scoped paginated message bodies', () => {
     const metadata = {
       ...snapshot,
@@ -113,8 +141,7 @@ describe('workflow runtime boundary', () => {
       snapshot
     )
     for (const request of [
-      { operation: 'runtimeSnapshot', instanceId: 'workflow', afterSequence: 4 },
-      { operation: 'completeUserInput', instanceId: 'workflow', inputId: 'input' }
+      { operation: 'runtimeSnapshot', instanceId: 'workflow', afterSequence: 4 }
     ])
       expect(parseWorkflowRequest(request)).toEqual(request)
   })

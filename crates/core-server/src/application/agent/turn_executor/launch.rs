@@ -487,11 +487,11 @@ impl AgentService {
                 let _admission = service.conversation_admission.lock()
                     .unwrap_or_else(|error| error.into_inner());
                 if let Err(error) = service.storage.workflow_execution_recover_claims() {
-                    eprintln!("failed to settle workflow input receipts: {error}");
+                    eprintln!("failed to settle organization input receipts: {error}");
                 }
             }
             if let Err(error) = service.storage.workflow_execution_mark_run_unread(&worker_run_id) {
-                eprintln!("failed to mark completed workflow input unread: {error}");
+                eprintln!("failed to mark completed organization input unread: {error}");
             }
             if let Ok(inputs) = service
                 .storage

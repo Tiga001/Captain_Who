@@ -1,4 +1,5 @@
 import { act } from 'react'
+import { createWorkflow } from '../../features/workflows/workflowAuthoring'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type {
@@ -40,6 +41,7 @@ const workflow = (patch: Partial<WorkflowInstance> = {}): WorkflowInstance => ({
   id: 'workflow-a',
   templateId: 'template-a',
   templateRevision: 1,
+  definition: createWorkflow(),
   name: 'Review',
   color: '#2478d4',
   revision: 1,
@@ -120,8 +122,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('workflow live activity', () => {
-  it('shows a local root run immediately, stops after settlement, and never lights disabled workflows', async () => {
+describe('organization live activity', () => {
+  it('shows a local root run immediately, stops after settlement, and never lights disabled organizations', async () => {
     const instances = [workflow(), workflow({ id: 'disabled', enabled: false, running: true })]
     const view = await render(
       <Harness instances={instances} conversations={[conversation(true)]} />

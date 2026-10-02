@@ -51,7 +51,7 @@ export function WorkflowMessageBox({
     const timer = window.setTimeout(() => setCopied(false), 1300)
     return () => window.clearTimeout(timer)
   }, [copied])
-  const copyLabel = copied ? (chinese ? '已复制' : 'Copied') : chinese ? '复制消息' : 'Copy message'
+  const copyLabel = copied ? (chinese ? '已复制' : 'Copied') : chinese ? '复制邮件' : 'Copy message'
   const jumpLabel = chinese ? '打开对话' : 'Open conversation'
   return (
     <section className="workflow-send-message" aria-label={name}>
@@ -100,27 +100,47 @@ export function WorkflowSendToolActivity({
   const chinese = language === 'zh-CN' || language === 'zh-TW'
   const args = object(call.args)
   // Receipts freeze display names at send time. Never resolve old messages against mutable graphs.
-  const metadata = (result?.ok ? object(result.result) : undefined) ?? object(args?._workflowSend)
-  const workflowName = text(metadata?.workflowName)
+  const metadata =
+    (result?.ok ? object(result.result) : undefined) ?? object(args?._organizationSend)
+  const workflowName = text(metadata?.organizationName)
   const destinations = outputs(metadata?.messages)
-  const messages = outputs(args?.messages).map((output, index) => {
-    const target = destinations.find((item) => item.targetNodeId === output.targetNodeId)
+  const requested = outputs(args?.messages)
+  const messages = requested.map((output, index) => {
+    // Receipts preserve request order, including replies whose recipient is resolved by the Host.
+    const target = destinations[index]
     return {
       name:
         text(target?.targetNodeName) ??
-        (chinese ? `接收节点 ${index + 1}` : `Recipient ${index + 1}`),
+        text(output.to) ??
+        (text(output.replyTo)
+          ? chinese
+            ? '原邮件发送者'
+            : 'Original sender'
+          : chinese
+            ? `接收成员 ${index + 1}`
+            : `Recipient ${index + 1}`),
       conversationId: text(target?.targetConversationId),
       message: typeof output.message === 'string' ? output.message : ''
     }
   })
-  const names = [...new Set(destinations.flatMap((item) => text(item.targetNodeName) ?? []))]
+  const names = [
+    ...new Set(
+      requested.flatMap(
+        (message, index) => text(destinations[index]?.targetNodeName) ?? text(message.to) ?? []
+      )
+    )
+  ]
   const target = workflowName
     ? chinese
-      ? `工作流【${workflowName}】${names.length ? `的节点【${names.join('、')}】` : ''}`
-      : `workflow “${workflowName}”${names.length ? `, nodes “${names.join('”, “')}”` : ''}`
-    : chinese
-      ? '工作流节点'
-      : 'workflow nodes'
+      ? `组织【${workflowName}】${names.length ? `的节点【${names.join('、')}】` : ''}`
+      : `organization “${workflowName}”${names.length ? `, nodes “${names.join('”, “')}”` : ''}`
+    : names.length
+      ? chinese
+        ? `组织成员【${names.join('、')}】`
+        : `organization members “${names.join('”, “')}”`
+      : chinese
+        ? '组织成员'
+        : 'organization members'
   // A later cancellation does not erase a committed receipt; a completed turn without a receipt
   // does not prove a message was sent.
   const status = result
@@ -136,11 +156,11 @@ export function WorkflowSendToolActivity({
           : 'sending'
   const label = chinese
     ? {
-        sending: `正在向${target}发送消息`,
-        sent: `已向${target}发送了消息`,
-        failed: `向${target}发送消息失败`,
-        cancelled: `已取消向${target}发送消息`,
-        unknown: `向${target}发送消息的结果待确认`
+        sending: `正在向${target}发送邮件`,
+        sent: `已向${target}发送了邮件`,
+        failed: `向${target}发送邮件失败`,
+        cancelled: `已取消向${target}发送邮件`,
+        unknown: `向${target}发送邮件的结果待确认`
       }[status]
     : {
         sending: `Sending a message to ${target}`,

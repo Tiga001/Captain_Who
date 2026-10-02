@@ -1,29 +1,109 @@
 import { describe, expect, it } from 'vitest'
 import fixture from '../fixtures/workflow-definition-v1.json'
-import { parseWorkflowDefinition, parseWorkflowRequest, parseWorkflowResponse } from './workflows'
+import hierarchy from '../fixtures/organization-hierarchy-v1.json'
+import memberNames from '../fixtures/organization-member-names-v1.json'
+import {
+  workflowMemberNameKey,
+  parseWorkflowDefinition,
+  parseWorkflowNode,
+  parseWorkflowRequest,
+  parseWorkflowResponse
+} from './workflows'
+
+describe('organization hierarchy authoring contract', () => {
+  it('round trips nested departments, independent rank and management identity', () => {
+    expect(parseWorkflowDefinition(hierarchy)).toEqual(hierarchy)
+    for (const operation of ['save', 'saveDraft']) {
+      const request = {
+        operation,
+        definition: hierarchy,
+        expectedRevision: 1,
+        ...(operation === 'saveDraft' ? { expectedDraftRevision: 0 } : {})
+      }
+      expect(parseWorkflowRequest(request)).toEqual(request)
+    }
+    expect(parseWorkflowNode(hierarchy.nodes[1])).toEqual(hierarchy.nodes[1])
+  })
+
+  it('rejects invalid rank and management role without accepting execution authority', () => {
+    for (const rank of [0, 100, -1, 1.5, null, '3'])
+      expect(() => parseWorkflowNode({ ...hierarchy.nodes[0], rank })).toThrow()
+    for (const managementRole of ['admin', 'owner', null, 1])
+      expect(() => parseWorkflowNode({ ...hierarchy.nodes[0], managementRole })).toThrow()
+    expect(() => parseWorkflowNode({ ...hierarchy.nodes[0], canManage: true })).toThrow()
+  })
+
+  it('rejects orphaned, cyclic or duplicated department identities and malformed frames', () => {
+    for (const patch of [
+      { id: hierarchy.nodes[0].id },
+      { id: ' review-team' },
+      { id: '' },
+      { parentId: 'missing' },
+      { parentId: 'review-team' },
+      { width: 0 },
+      { height: -1 },
+      { x: 100_001 },
+      { width: Infinity }
+    ]) {
+      expect(() =>
+        parseWorkflowDefinition({
+          ...hierarchy,
+          departments: [hierarchy.departments[0], { ...hierarchy.departments[1], ...patch }]
+        })
+      ).toThrow()
+    }
+    expect(() =>
+      parseWorkflowDefinition({
+        ...hierarchy,
+        departments: [hierarchy.departments[0], hierarchy.departments[0]]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowDefinition({
+        ...hierarchy,
+        departments: [
+          { ...hierarchy.departments[0], parentId: 'review-team' },
+          hierarchy.departments[1]
+        ]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowDefinition({
+        ...hierarchy,
+        nodes: [{ ...hierarchy.nodes[0], departmentId: 'missing' }]
+      })
+    ).toThrow()
+  })
+
+  it('allows incomplete department names and unassigned administrator drafts for readiness validation', () => {
+    const definition = {
+      ...hierarchy,
+      departments: [{ ...hierarchy.departments[0], name: '' }],
+      nodes: [{ ...hierarchy.nodes[1], departmentId: null }]
+    }
+    expect(parseWorkflowDefinition(definition)).toEqual(definition)
+  })
+})
 
 describe('workflow authoring contract', () => {
-  it('round-trips user tasks and rejects model or gate configuration on users', () => {
-    const node = {
-      kind: 'user',
-      id: 'user',
-      name: 'User',
-      task: 'Review the proposal',
-      x: 320,
-      y: 160
-    }
-    const graph = { ...fixture, nodes: [node] }
-    expect(parseWorkflowDefinition(graph)).toEqual(graph)
-    expect(
-      parseWorkflowDefinition({ ...graph, nodes: [{ ...node, task: undefined }] }).nodes[0]
-    ).toEqual({ ...node, task: '' })
-    for (const extra of [
-      { task: null },
-      { modelConfigId: 'model' },
-      { busyPolicy: 'queue' },
-      { selection: {} }
-    ])
-      expect(() => parseWorkflowDefinition({ ...graph, nodes: [{ ...node, ...extra }] })).toThrow()
+  it('rejects removed user nodes and legacy publication guards', () => {
+    expect(() =>
+      parseWorkflowDefinition({
+        ...fixture,
+        nodes: [{ kind: 'user', id: 'user', name: 'User', task: 'Review', x: 0, y: 0 }]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowRequest({
+        operation: 'save',
+        definition: fixture,
+        expectedRevision: 1,
+        expectedUsageRevision: 'old'
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowRequest({ operation: 'completeUserInput', instanceId: 'i', inputId: 'p' })
+    ).toThrow()
   })
   it('preserves independent conversation models and permissions', () => {
     const configured = structuredClone(fixture)
@@ -104,6 +184,7 @@ describe('workflow authoring contract', () => {
         id: fixture.id,
         templateId: fixture.id,
         templateRevision: 1,
+        definition: fixture,
         name: 'Review',
         color: '#4A82E8',
         bindings: [],
@@ -277,13 +358,33 @@ describe('global workflow instance contract', () => {
       expect(parseWorkflowRequest({ ...save, projectId })).toEqual({ ...save, projectId })
     }
   })
-  it('round-trips usage guards and isolated editing drafts', () => {
+  it('edits independent organizations without looking up their original template', () => {
+    const request = {
+      operation: 'saveInstance',
+      id: 'instance',
+      name: 'Independent team',
+      color: '#4A82E8',
+      definition: hierarchy,
+      bindings: [],
+      expectedRevision: 4
+    }
+    expect(parseWorkflowRequest(request)).toEqual(request)
+    expect(parseWorkflowRequest({ ...request, expectedRevision: 0 })).toEqual({
+      ...request,
+      expectedRevision: 0
+    })
+    expect(() => parseWorkflowRequest({ ...save, expectedRevision: 4 })).toThrow(
+      'independent definition'
+    )
+    expect(() => parseWorkflowRequest({ ...request, definition: undefined })).toThrow()
+    expect(() => parseWorkflowRequest({ ...request, templateId: 'template' })).toThrow()
+  })
+  it('round-trips independent instances and isolated editing drafts', () => {
     for (const request of [
       {
         operation: 'save',
         definition: fixture,
         expectedRevision: 2,
-        expectedUsageRevision: 'usage',
         expectedDraftRevision: 2
       },
       {
@@ -305,6 +406,7 @@ describe('global workflow instance contract', () => {
           id: 'instance',
           templateId: 'template',
           templateRevision: 2,
+          definition: fixture,
           name: 'Review',
           color: '#4A82E8',
           bindings: [{ nodeId: 'agent', conversationId: 'chat' }],
@@ -313,20 +415,6 @@ describe('global workflow instance contract', () => {
           needsReview: false,
           enabled: true,
           running: false
-        }
-      ],
-      usages: [
-        {
-          templateId: 'template',
-          usageRevision: 'usage',
-          instances: [
-            {
-              id: 'instance',
-              name: 'Review',
-              running: false,
-              projectNames: ['Project A', 'Project B']
-            }
-          ]
         }
       ],
       drafts: [{ definition: fixture, baseRevision: 2, revision: 1, updatedAt: 1 }],
@@ -409,5 +497,88 @@ describe('workflow catalog recovery contract', () => {
         boundaryPositions: { output: { x: 0, y: 0 } }
       })
     ).toThrow()
+  })
+})
+
+describe('organization member name uniqueness', () => {
+  it('uses the same Unicode name comparison fixtures as the host', () => {
+    for (const { name, key } of memberNames) expect(workflowMemberNameKey(name)).toBe(key)
+  })
+
+  it('rejects duplicate names across departments on every definition write', () => {
+    const definition = structuredClone(hierarchy)
+    definition.nodes[0].name = 'Boss'
+    definition.nodes[1].name = '　bOSS '
+    for (const request of [
+      { operation: 'save', definition, expectedRevision: 1 },
+      { operation: 'saveDraft', definition, expectedRevision: 1, expectedDraftRevision: 0 },
+      {
+        operation: 'saveInstance',
+        definition,
+        id: 'instance',
+        name: 'Team',
+        color: '#123456',
+        expectedRevision: 1,
+        bindings: []
+      }
+    ])
+      expect(() => parseWorkflowRequest(request)).toThrow('organization_duplicate_member_name')
+    // Reading and inspecting old data is still possible so users can rename duplicates.
+    expect(parseWorkflowDefinition(definition)).toEqual(definition)
+    expect(parseWorkflowRequest({ operation: 'validate', definition })).toEqual({
+      operation: 'validate',
+      definition
+    })
+    definition.nodes[1].name = 'HR Manager'
+    expect(
+      parseWorkflowRequest({ operation: 'save', definition, expectedRevision: 1 })
+    ).toHaveProperty('definition', definition)
+  })
+
+  it('leaves empty names under the existing incomplete-draft rule', () => {
+    const definition = structuredClone(hierarchy)
+    definition.nodes[0].name = ''
+    definition.nodes[1].name = '　 '
+    expect(() =>
+      parseWorkflowRequest({ operation: 'save', definition, expectedRevision: 1 })
+    ).not.toThrow()
+  })
+})
+
+describe('organization department path names', () => {
+  it('rejects ambiguous sibling names and path separators at every write boundary', () => {
+    for (const [name, sibling, code] of [
+      ['　RESEARCH ', true, 'organization_duplicate_department_name'],
+      ['HR/Payroll', false, 'organization_department_name_separator']
+    ] as const) {
+      const definition = structuredClone(hierarchy)
+      definition.departments[0].name = 'Research'
+      definition.departments[1].name = name
+      if (sibling) definition.departments[1].parentId = null
+      for (const request of [
+        { operation: 'save', definition, expectedRevision: 1 },
+        { operation: 'saveDraft', definition, expectedRevision: 1, expectedDraftRevision: 0 },
+        {
+          operation: 'saveInstance',
+          definition,
+          id: 'instance',
+          name: 'Team',
+          color: '#123456',
+          expectedRevision: 1,
+          bindings: []
+        }
+      ])
+        expect(() => parseWorkflowRequest(request)).toThrow(code)
+      expect(parseWorkflowDefinition(definition)).toEqual(definition)
+    }
+  })
+
+  it('allows a repeated department name at different hierarchy levels', () => {
+    const definition = structuredClone(hierarchy)
+    definition.departments[0].name = 'Research'
+    definition.departments[1].name = 'research'
+    expect(
+      parseWorkflowRequest({ operation: 'save', definition, expectedRevision: 1 })
+    ).toHaveProperty('definition', definition)
   })
 })

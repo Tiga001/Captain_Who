@@ -297,6 +297,10 @@ impl StorageService {
             })?;
         } else {
             let transaction = connection.transaction().map_err(storage_error)?;
+            invalidate_workflows_before_trigger_disabled_deletion(
+                &transaction,
+                &[conversation_id.to_string()],
+            )?;
             automation_repository::prepare_tombstoned_automations_for_conversation_delete(
                 &transaction,
                 &[conversation_id.to_string()],

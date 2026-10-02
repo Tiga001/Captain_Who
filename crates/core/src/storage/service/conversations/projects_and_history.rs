@@ -19,6 +19,7 @@ impl StorageService {
         let conversation_ids = project_conversation_ids(&connection, project_id)?;
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
+            invalidate_workflows_before_trigger_disabled_deletion(&transaction, &conversation_ids)?;
             automation_repository::prepare_tombstoned_automations_for_project_delete(
                 &transaction,
                 project_id,
@@ -164,6 +165,7 @@ impl StorageService {
                 let mut conversation = conversation;
                 chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
                     .map_err(storage_error)?;
+                retain_workflow_top_level_messages(&connection, &mut conversation)?;
                 let continuation_origin = conversation_fork_repository::get_continuation_origin(
                     &connection,
                     &conversation.id,
@@ -355,6 +357,7 @@ impl StorageService {
         let connection = self.state.connection()?;
         chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
             .map_err(storage_error)?;
+        retain_workflow_top_level_messages(&connection, &mut conversation)?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, conversation_id)
                 .map_err(storage_error)?;
@@ -557,6 +560,10 @@ impl StorageService {
         let connection = self.state.connection()?;
         chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
             .map_err(storage_error)?;
+        attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))
+            .map_err(conversation_fork_repository::ConversationForkError::Other)?;
+        retain_workflow_top_level_messages(&connection, &mut conversation)
+            .map_err(conversation_fork_repository::ConversationForkError::Other)?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
                 .map_err(storage_error)?;

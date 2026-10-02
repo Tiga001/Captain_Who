@@ -1,20 +1,31 @@
 use super::*;
 use crate::workflow::{NodeConfig, WorkflowPermissionMode};
 use crate::workflow_management::{
-    Binding, EditingDraft, Instance, InvalidEditingDraft, Request as ManagementRequest, Usage,
-    UsageInstance,
+    Binding, EditingDraft, Instance, InvalidEditingDraft, Request as ManagementRequest,
 };
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
-    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled, project_id FROM workflow_instances ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
+    instance_rows(c, None)
+}
+pub(super) fn get_instance(c: &Connection, id: &str) -> Result<Option<Instance>, Error> {
+    Ok(instance_rows(c, Some(id))?.pop())
+}
+fn instance_rows(c: &Connection, id: Option<&str>) -> Result<Vec<Instance>, Error> {
+    let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled, project_id, definition_json FROM workflow_instances WHERE (?1 IS NULL OR instance_id=?1) ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
     let rows = statement
-        .query_map([], |r| {
+        .query_map([id], |r| {
             Ok(Instance {
                 id: r.get(0)?,
                 template_id: r.get(1)?,
                 template_revision: r.get(2)?,
+                definition: serde_json::from_str(&r.get::<_, String>(11)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        11,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
                 name: r.get(3)?,
                 color: r.get(4)?,
                 revision: r.get(5)?,
@@ -46,28 +57,6 @@ pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
     Ok(result)
 }
 
-pub(super) fn list_usages(c: &Connection) -> Result<Vec<Usage>, Error> {
-    let mut grouped: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
-    for instance in list_instances(c)? {
-        grouped
-            .entry(instance.template_id.clone())
-            .or_default()
-            .push(instance);
-    }
-    grouped.into_iter().map(|(template_id, mut instances)| {
-        instances.sort_by(|a,b|a.id.cmp(&b.id));
-        let mut digest = Sha256::new();
-        let mut usage = vec![];
-        for instance in instances {
-            let mut statement = c.prepare("SELECT DISTINCT p.name FROM workflow_instance_bindings b JOIN conversations c ON c.id=b.conversation_id JOIN projects p ON p.id=c.project_id WHERE b.instance_id=?1 ORDER BY p.name").map_err(storage_error)?;
-            let project_names: Vec<String> = statement.query_map([&instance.id],|r|r.get(0)).map_err(storage_error)?.collect::<rusqlite::Result<_>>().map_err(storage_error)?;
-            digest.update(serde_json::to_vec(&(&instance, &project_names)).map_err(storage_error)?);
-            usage.push(UsageInstance {id:instance.id,name:instance.name,running:instance.running,project_names});
-        }
-        Ok(Usage {template_id,usage_revision:format!("{:x}",digest.finalize()),instances:usage})
-    }).collect()
-}
-
 pub(super) fn list_drafts(
     c: &Connection,
     models: &HashSet<String>,
@@ -93,7 +82,7 @@ pub(super) fn list_drafts(
             || updated_at < 0
         {
             return Err(Error::Storage(
-                "Invalid persisted workflow draft metadata".into(),
+                "Invalid persisted organization draft metadata".into(),
             ));
         }
         match parse_persisted_definition(&json, &id, models) {
@@ -116,35 +105,14 @@ pub(super) fn list_drafts(
     Ok((drafts, invalid_drafts))
 }
 
-pub(super) fn template_in_use(c: &Connection, id: &str) -> Result<bool, Error> {
-    c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE template_id=?1)",
-        [id],
-        |r| r.get(0),
-    )
-    .map_err(storage_error)
-}
-
 pub(super) fn publish(
     c: &Connection,
     definition: &Definition,
     expected_revision: u64,
-    expected_usage_revision: Option<&str>,
     expected_draft_revision: Option<u64>,
     models: &HashSet<String>,
 ) -> Result<(), Error> {
     let issues = definition.validate(models).map_err(Error::Invalid)?;
-    if let Some(usage) = list_usages(c)?
-        .into_iter()
-        .find(|usage| usage.template_id == definition.id)
-    {
-        if usage.instances.iter().any(|instance| instance.running) {
-            return Err(Error::Conflict("workflow_template_running".into()));
-        }
-        if expected_usage_revision != Some(usage.usage_revision.as_str()) {
-            return Err(Error::Conflict("workflow_usage_changed".into()));
-        }
-    }
     let current_draft: Option<u64> = c
         .query_row(
             "SELECT revision FROM workflow_editing_drafts WHERE template_id=?1",
@@ -157,36 +125,6 @@ pub(super) fn publish(
         return Err(Error::Conflict("workflow_draft_changed".into()));
     }
     save(c, definition, expected_revision, issues.is_empty())?;
-    let agent_ids: HashSet<_> = definition
-        .nodes
-        .iter()
-        .filter(|node| matches!(node.config, NodeConfig::Agent(_)))
-        .map(|node| node.id.as_str())
-        .collect();
-    for instance in list_instances(c)?
-        .into_iter()
-        .filter(|instance| instance.template_id == definition.id)
-    {
-        let previously_bound: HashSet<_> = instance
-            .bindings
-            .iter()
-            .map(|binding| binding.node_id.as_str())
-            .collect();
-        let needs_review =
-            !issues.is_empty() || agent_ids.iter().any(|id| !previously_bound.contains(id));
-        for binding in &instance.bindings {
-            if !agent_ids.contains(binding.node_id.as_str()) {
-                c.execute(
-                    "DELETE FROM workflow_instance_bindings WHERE instance_id=?1 AND node_id=?2",
-                    params![instance.id, binding.node_id],
-                )
-                .map_err(storage_error)?;
-            }
-        }
-        c.execute("UPDATE workflow_instances SET template_revision=?1, enabled=CASE WHEN ?2 THEN 0 ELSE enabled END, needs_review=?2, revision=revision+1, updated_at=MAX(updated_at+1,?3), last_request_json='{}' WHERE instance_id=?4",params![expected_revision+1,needs_review,now_ms(),instance.id]).map_err(storage_error)?;
-        crate::storage::workflow_execution_repository::reconcile_recipients(c, &instance.id)
-            .map_err(Error::Storage)?;
-    }
     c.execute(
         "DELETE FROM workflow_editing_drafts WHERE template_id=?1",
         [&definition.id],
@@ -257,7 +195,13 @@ pub(super) fn request(
                 if current.needs_review {
                     return Err(Error::Invalid("workflow_instance_needs_review".into()));
                 }
-                let definition = template(c, &current.template_id, current.template_revision)?;
+                let definition = &current.definition;
+                definition
+                    .validate_unique_member_names()
+                    .map_err(Error::Invalid)?;
+                definition
+                    .validate_department_names()
+                    .map_err(Error::Invalid)?;
                 if !definition
                     .validate(models)
                     .map_err(Error::Invalid)?
@@ -268,7 +212,6 @@ pub(super) fn request(
                 let agents: HashSet<_> = definition
                     .nodes
                     .iter()
-                    .filter(|node| matches!(node.config, NodeConfig::Agent(_)))
                     .map(|node| node.id.as_str())
                     .collect();
                 if current.bindings.len() != agents.len()
@@ -313,6 +256,12 @@ pub(super) fn request(
             expected_draft_revision,
         } => {
             template(c, &definition.id, expected_revision)?;
+            definition
+                .validate_unique_member_names()
+                .map_err(Error::Invalid)?;
+            definition
+                .validate_department_names()
+                .map_err(Error::Invalid)?;
             definition.validate(models).map_err(Error::Invalid)?;
             let current: Option<u64> = c
                 .query_row(
@@ -363,7 +312,7 @@ pub(super) fn request(
             crate::storage::workflow_execution_repository::invalidate_instance(
                 c,
                 &id,
-                "Workflow instance was deleted",
+                "Organization instance was deleted",
             )
             .map_err(Error::Storage)?;
             c.execute("DELETE FROM workflow_instances WHERE instance_id=?1", [id])
@@ -373,6 +322,7 @@ pub(super) fn request(
         ManagementRequest::SaveInstance {
             id,
             template_id,
+            definition,
             name,
             color,
             project_id,
@@ -382,13 +332,13 @@ pub(super) fn request(
         } => {
             validate_id(&id)?;
             if name.trim().is_empty() || name.len() > 512 || name.chars().any(char::is_control) {
-                return Err(Error::Invalid("Invalid workflow instance name".into()));
+                return Err(Error::Invalid("Invalid organization instance name".into()));
             }
             if color.len() != 7
                 || !color.starts_with('#')
                 || !color[1..].bytes().all(|b| b.is_ascii_hexdigit())
             {
-                return Err(Error::Invalid("Invalid workflow color".into()));
+                return Err(Error::Invalid("Invalid organization color".into()));
             }
             let expected = revision_to_sql(expected_revision)?;
             let current = list_instances(c)?
@@ -421,17 +371,6 @@ pub(super) fn request(
             {
                 return Err(revision_conflict());
             }
-            if current.as_ref().is_some_and(|instance| instance.running) {
-                return Err(Error::Conflict("workflow_instance_running".into()));
-            }
-            if current
-                .as_ref()
-                .is_some_and(|instance| instance.template_id != template_id)
-            {
-                return Err(Error::Invalid(
-                    "An instance cannot change its template".into(),
-                ));
-            }
             // A destination project only controls auto-created chats, never existing bindings.
             // Validate before creating any conversation; the transaction also serializes deletion.
             if let Some(project_id) = &project_id {
@@ -449,8 +388,11 @@ pub(super) fn request(
             }
             // The enclosing immediate transaction serializes competing confirmations. Check
             // every persisted instance before creating conversations or changing composer state.
-            // Confirming a new or edited binding activates the instance.
-            let enabled = true;
+            // New instances start enabled; editing preserves the user's explicit pause.
+            let enabled = current
+                .as_ref()
+                .map(|instance| instance.enabled)
+                .unwrap_or(true);
             let color_in_use: bool = c
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM workflow_instances WHERE instance_id<>?1 AND enabled=1 AND color=?2 COLLATE NOCASE)",
@@ -458,10 +400,44 @@ pub(super) fn request(
                     |row| row.get(0),
                 )
                 .map_err(storage_error)?;
-            if color_in_use {
+            if enabled && color_in_use {
                 return Err(Error::Conflict("workflow_color_in_use".into()));
             }
-            let definition = template(c, &template_id, expected_template_revision)?;
+            let (template_id, template_revision, mut definition) = match &current {
+                Some(instance) => (
+                    instance.template_id.clone(),
+                    instance.template_revision,
+                    definition.ok_or_else(|| {
+                        Error::Invalid("organization_instance_definition_required".into())
+                    })?,
+                ),
+                None => {
+                    let source = match (&template_id, expected_template_revision) {
+                        (Some(id), Some(revision)) => Some(template(c, id, revision)?),
+                        (None, None) => None,
+                        _ => {
+                            return Err(Error::Invalid(
+                                "organization_template_provenance_incomplete".into(),
+                            ))
+                        }
+                    };
+                    let definition = definition.or(source).ok_or_else(|| {
+                        Error::Invalid("organization_instance_definition_required".into())
+                    })?;
+                    (
+                        template_id.unwrap_or_else(|| id.clone()),
+                        expected_template_revision.unwrap_or(1),
+                        definition,
+                    )
+                }
+            };
+            definition.id = id.clone();
+            definition
+                .validate_unique_member_names()
+                .map_err(Error::Invalid)?;
+            definition
+                .validate_department_names()
+                .map_err(Error::Invalid)?;
             if !definition
                 .validate(models)
                 .map_err(Error::Invalid)?
@@ -472,12 +448,9 @@ pub(super) fn request(
             let agents: Vec<_> = definition
                 .nodes
                 .iter()
-                .filter_map(|node| {
-                    if let NodeConfig::Agent(config) = &node.config {
-                        Some((node, config))
-                    } else {
-                        None
-                    }
+                .map(|node| {
+                    let NodeConfig::Agent(config) = &node.config;
+                    (node, config)
                 })
                 .collect();
             let mut inputs = HashMap::new();
@@ -486,7 +459,7 @@ pub(super) fn request(
                 if !agents.iter().any(|(node, _)| node.id == binding.node_id)
                     || inputs.contains_key(&binding.node_id)
                 {
-                    return Err(Error::Invalid("Invalid workflow binding node".into()));
+                    return Err(Error::Invalid("Invalid organization binding node".into()));
                 }
                 if let Some(conversation_id) = &binding.conversation_id {
                     validate_id(conversation_id)?;
@@ -502,7 +475,7 @@ pub(super) fn request(
                     .map_err(storage_error)?;
                 if count >= 1000 {
                     return Err(Error::Invalid(
-                        "At most 1000 workflow instances can be saved".into(),
+                        "At most 1000 organization instances can be saved".into(),
                     ));
                 }
             }
@@ -521,7 +494,9 @@ pub(super) fn request(
             let mut resolved = vec![];
             let mut affected = vec![];
             for (node, config) in agents {
-                let input = inputs.remove(&node.id).flatten();
+                let input = inputs
+                    .remove(&node.id)
+                    .unwrap_or_else(|| previous.get(&node.id).cloned());
                 let conversation_id = if let Some(conversation_id) = input {
                     let row: Option<(Option<String>, Option<i64>)> = c
                         .query_row(
@@ -555,7 +530,22 @@ pub(super) fn request(
                     c.execute("INSERT INTO conversations(id,project_id,model_id,title,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)",params![conversation_id,project_id,config.model_config_id,node.name,now]).map_err(storage_error)?;
                     conversation_id
                 };
-                if previous.get(&node.id) != Some(&conversation_id) {
+                let configuration_changed = current
+                    .as_ref()
+                    .and_then(|instance| {
+                        instance
+                            .definition
+                            .nodes
+                            .iter()
+                            .find(|old| old.id == node.id)
+                    })
+                    .is_some_and(|old| match &old.config {
+                        NodeConfig::Agent(old) => {
+                            old.model_config_id != config.model_config_id
+                                || old.permission_mode != config.permission_mode
+                        }
+                    });
+                if previous.get(&node.id) != Some(&conversation_id) || configuration_changed {
                     let permission = match config.permission_mode {
                         WorkflowPermissionMode::Default => "default",
                         WorkflowPermissionMode::Custom => "custom",
@@ -576,17 +566,44 @@ pub(super) fn request(
                     conversation_id,
                 });
             }
-            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,project_id) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,enabled=excluded.enabled,project_id=excluded.project_id,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled,project_id]).map_err(storage_error)?;
+            let memberships: HashMap<String, String> = {
+                let mut statement = c.prepare("SELECT node_id,membership_id FROM workflow_instance_bindings WHERE instance_id=?1").map_err(storage_error)?;
+                let result = statement
+                    .query_map([&id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(storage_error)?
+                    .collect::<rusqlite::Result<_>>()
+                    .map_err(storage_error)?;
+                result
+            };
+            c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,project_id,definition_json) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10,?11) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,color=excluded.color,enabled=excluded.enabled,project_id=excluded.project_id,definition_json=excluded.definition_json,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled,project_id,serde_json::to_string(&definition).map_err(storage_error)?]).map_err(storage_error)?;
             c.execute(
                 "DELETE FROM workflow_instance_bindings WHERE instance_id=?1",
                 [&id],
             )
             .map_err(storage_error)?;
+            let bindings_changed = resolved.len() != previous.len()
+                || resolved.iter().any(|binding| {
+                    previous.get(&binding.node_id) != Some(&binding.conversation_id)
+                });
             for binding in resolved {
-                c.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES (?1,?2,?3)",params![id,binding.node_id,binding.conversation_id]).map_err(storage_error)?;
+                let membership = if previous.get(&binding.node_id) == Some(&binding.conversation_id)
+                {
+                    memberships
+                        .get(&binding.node_id)
+                        .cloned()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
+                c.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id,membership_id) VALUES (?1,?2,?3,?4)",params![id,binding.node_id,binding.conversation_id,membership]).map_err(storage_error)?;
             }
-            crate::storage::workflow_execution_repository::reconcile_recipients(c, &id)
-                .map_err(Error::Storage)?;
+            if bindings_changed {
+                crate::storage::workflow_execution_repository::reconcile_recipients(c, &id)
+                    .map_err(Error::Storage)?;
+            }
+            if current.is_some() {
+                c.execute("INSERT INTO workflow_mail_events(instance_id,kind,created_at) VALUES(?1,'members_changed',?2)", params![id,now]).map_err(storage_error)?;
+            }
             Ok(affected)
         }
     }

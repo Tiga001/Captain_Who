@@ -554,7 +554,7 @@ impl AgentService {
                     .lock()
                     .unwrap_or_else(|lock_error| lock_error.into_inner());
                 return RuntimeTurnSegmentOutcome {
-                    result: Err(error),
+                    result: settle_segment_cancellation(Err(error), &run_id, &terminal_event_gate),
                     terminal_event_gate,
                     final_response_collaboration_boundary,
                 };
@@ -620,9 +620,78 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         RuntimeTurnSegmentOutcome {
-            result,
+            result: settle_segment_cancellation(result, &run_id, &terminal_event_gate),
             terminal_event_gate,
             final_response_collaboration_boundary,
         }
+    }
+}
+
+/// Host callbacks can return typed cancellation at any sampling/preflight boundary, before the
+/// Runtime's ordinary cancellation branch emits a terminal output. Keep that control outcome on
+/// the same durable path as other cancellations, for initial turns and approval continuations.
+/// Never use the token alone here: a real failure racing Stop must remain a failure.
+fn settle_segment_cancellation(
+    result: AgentResult<AgentChatOutput>,
+    run_id: &str,
+    terminal_event_gate: &AgentTerminalEventGate,
+) -> AgentResult<AgentChatOutput> {
+    match result {
+        Err(error) if error.is_cancelled() => {
+            terminal_event_gate.discard();
+            Ok(AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Cancelled,
+                run_id: run_id.to_string(),
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: error.usage().cloned(),
+                finish_reason: None,
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: error.conversation_turn_trace().cloned(),
+            })
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod cancellation_result_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_settlement_preserves_usage_and_does_not_reclassify_real_errors() {
+        let gate = AgentTerminalEventGate::default();
+        let real_error = settle_segment_cancellation(
+            Err(AgentError::new("agent run 已取消。")),
+            "typed-cancellation",
+            &gate,
+        )
+        .unwrap_err();
+        assert!(!real_error.is_cancelled(), "message text is not a cancellation signal");
+
+        let usage = AgentUsage {
+            input_tokens: Some(24),
+            output_tokens: Some(6),
+            total_tokens: Some(30),
+            output_thinking_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: None,
+        };
+        let output = settle_segment_cancellation(
+            Err(AgentError::cancelled().with_usage(Some(usage))),
+            "typed-cancellation",
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(output.status, AgentRunStatus::Cancelled);
+        assert_eq!(output.usage.as_ref().unwrap().total_tokens, Some(30));
+        assert!(output.content.is_empty());
+        assert!(matches!(
+            gate.take_after_persistence(&output).as_slice(),
+            [AgentEvent::Done { status: Some(AgentRunStatus::Cancelled), content: None, .. }]
+        ));
     }
 }

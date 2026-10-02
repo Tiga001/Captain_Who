@@ -27,18 +27,9 @@ pub(crate) fn handle_request(
                 .as_ref()
                 .and_then(|params| params.get("operation"))
                 .and_then(Value::as_str)
-                .is_some_and(|operation| {
-                    matches!(
-                        operation,
-                        "runtimeSnapshot" | "completeUserInput" | "nodeMessages"
-                    )
-                })
+                .is_some_and(|operation| matches!(operation, "runtimeSnapshot" | "nodeMessages"))
             {
-                workflow_rpc::handle_workflow_runtime_request(
-                    agent_service,
-                    notification_tx,
-                    request,
-                )
+                workflow_rpc::handle_workflow_runtime_request(agent_service, request)
             } else {
                 handle_workflow_request(storage, Some(agent_service), request)
             }

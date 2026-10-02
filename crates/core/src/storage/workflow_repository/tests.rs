@@ -9,6 +9,7 @@ fn graph() -> Definition {
         name: "Review".into(),
         description: "Review a change".into(),
         background: "Reusable review process".into(),
+        departments: vec![],
         viewport: Viewport {
             x: 42.0,
             y: 12.0,
@@ -26,6 +27,9 @@ fn graph() -> Definition {
             }),
             x: 100.0,
             y: 200.0,
+            rank: 1,
+            management_role: crate::workflow::ManagementRole::Member,
+            department_id: None,
         }],
     }
 }
@@ -391,6 +395,7 @@ fn catalog_byte_quota_accounts_for_replacements_and_bounds_reads() {
     for index in 1..10 {
         let mut node = large.nodes[0].clone();
         node.id = format!("extra-{index}");
+        node.name = format!("Extra reviewer {index}");
         large.nodes.push(node);
     }
     let transaction = connection.transaction().unwrap();
@@ -413,6 +418,7 @@ fn catalog_byte_quota_accounts_for_replacements_and_bounds_reads() {
     for index in 10..15 {
         let mut node = larger.nodes[0].clone();
         node.id = format!("extra-{index}");
+        node.name = format!("Extra reviewer {index}");
         larger.nodes.push(node);
     }
     assert!(matches!(
@@ -441,6 +447,7 @@ fn independent_members_reopen_without_edges_or_routing_configuration() {
     let mut definition = graph();
     let mut second = definition.nodes[0].clone();
     second.id = "second".into();
+    second.name = "Second reviewer".into();
     definition.nodes.push(second);
     {
         let mut connection = Connection::open(&path).unwrap();
@@ -461,22 +468,9 @@ fn independent_members_reopen_without_edges_or_routing_configuration() {
 }
 
 #[test]
-fn visual_user_node_round_trips_without_agent_or_gate_configuration() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    run_migrations(&connection).unwrap();
-    let mut definition = graph();
-    definition.nodes[0].config = NodeConfig::User {
-        task: "Review the proposal".into(),
-    };
-    definition.nodes[0].name = "User".into();
-    let expected = serde_json::to_value(&definition).unwrap();
-    save(&mut connection, definition, 0).unwrap();
-    let reopened = request(&mut connection, Request::List).unwrap();
-    assert_eq!(
-        serde_json::to_value(&reopened.records[0].definition).unwrap(),
-        expected
-    );
-    let mut invalid = expected;
-    invalid["nodes"][0]["modelConfigId"] = serde_json::json!("Not an agent");
-    assert!(serde_json::from_value::<Definition>(invalid).is_err());
+fn removed_user_nodes_are_rejected() {
+    let mut definition = serde_json::to_value(graph()).unwrap();
+    definition["nodes"][0] =
+        serde_json::json!({"kind":"user","id":"user","name":"User","x":0,"y":0,"task":"Review"});
+    assert!(serde_json::from_value::<Definition>(definition).is_err());
 }

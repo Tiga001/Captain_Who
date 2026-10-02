@@ -19,13 +19,102 @@
 .workflow-canvas:focus-visible {
   box-shadow: inset 0 0 0 2px var(--mc-color-focus-ring);
 }
-.workflow-canvas.is-space-held,
-.workflow-canvas.is-space-held * {
-  cursor: grab !important;
-}
 .workflow-canvas.is-panning,
 .workflow-canvas.is-panning * {
   cursor: grabbing !important;
+}
+.workflow-canvas.is-drawing-department,
+.workflow-canvas.is-drawing-department * {
+  cursor: crosshair !important;
+}
+.workflow-department {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed var(--mc-color-text-muted);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--mc-color-surface-card) 18%, transparent);
+  pointer-events: none;
+}
+.workflow-department.is-selected {
+  border-color: var(--mc-color-focus-ring);
+  outline: 1px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+.workflow-department__heading {
+  position: absolute;
+  top: -13px;
+  left: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 28px);
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--mc-color-surface-muted);
+  color: var(--mc-color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.workflow-department__heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--mc-font-weight-strong);
+}
+.workflow-department__heading span {
+  flex-shrink: 0;
+  color: var(--mc-color-text-muted);
+  font-size: 10px;
+}
+.workflow-department__heading:hover {
+  color: var(--mc-color-text-primary);
+}
+.workflow-department__heading:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+}
+.workflow-department__resize {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid var(--mc-color-focus-ring);
+  border-radius: 3px;
+  background: var(--mc-color-surface-card);
+  pointer-events: auto;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.workflow-department--draft {
+  z-index: 2;
+  border-color: var(--mc-color-focus-ring);
+  background: color-mix(in srgb, var(--mc-color-focus-ring) 8%, transparent);
+}
+.workflow-department--draft.is-invalid {
+  border-color: var(--mc-color-text-danger);
+}
+.workflow-canvas-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  max-width: calc(100% - 48px);
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: 8px;
+  background: var(--mc-color-surface-card);
+  color: var(--mc-color-text-secondary);
+  box-shadow: 0 2px 7px rgb(0 0 0 / 6%);
+  font-size: 12px;
+  pointer-events: none;
 }
 .workflow-canvas__extent {
   position: relative;
@@ -107,6 +196,14 @@
   right: 17px;
   bottom: 15px;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  max-width: calc(100% - 34px);
+  gap: 8px;
+}
+.workflow-canvas-actions__tools {
+  display: flex;
   align-items: center;
   gap: 8px;
 }
@@ -136,6 +233,7 @@
 }
 .workflow-canvas-controls {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 1px;
   padding: 3px;
@@ -181,19 +279,8 @@
   background: var(--mc-color-text-primary);
 }
 
-.workflow-user-avatar {
-  display: inline-flex;
-  flex-shrink: 0;
-  overflow: hidden;
-  border-radius: 50%;
-}
-.workflow-user-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.workflow-node__mailbox {
+.workflow-node__mailbox,
+.workflow-node__rank {
   position: relative;
   display: inline-flex;
   flex-shrink: 0;
@@ -203,8 +290,23 @@
   margin-left: 10px;
   color: inherit;
 }
-.workflow-node__mailbox + .workflow-node__avatar {
+.workflow-node__mailbox + .workflow-node__avatar,
+.workflow-node__rank + .workflow-node__avatar {
   margin-left: 8px;
+}
+.workflow-node__rank {
+  height: 23px;
+  font-size: 10px;
+  font-weight: var(--mc-font-weight-strong);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.workflow-node__rank > svg {
+  position: absolute;
+  flex-shrink: 0;
+}
+.workflow-node__rank > span {
+  position: relative;
 }
 .workflow-node__mailbox-count {
   position: absolute;

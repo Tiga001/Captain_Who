@@ -411,6 +411,7 @@ pub use world_state::{
     WORLD_STATE_REVISION_PREFIX, WORLD_STATE_SCHEMA_VERSION,
 };
 
+pub mod organization_personnel;
 pub mod workflow;
 pub mod workflow_execution;
 pub mod workflow_management;

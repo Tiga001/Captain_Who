@@ -1,4 +1,4 @@
-/** Workflow definitions only. No execution capability is granted by saving a graph. */
+/** Organization definitions only. Saving member configuration grants no execution capability. */
 import {
   parseWorkflowRuntimeSnapshot,
   parseWorkflowNodeMessages,
@@ -10,6 +10,21 @@ interface WorkflowNodeBase {
   name: string
   x: number
   y: number
+  /** Higher values represent more senior ranks; omitted means rank 1. */
+  rank?: number
+  managementRole?: WorkflowManagementRole
+  /** Direct department; ancestors are inherited through the department tree. */
+  departmentId?: string | null
+}
+export type WorkflowManagementRole = 'member' | 'organization_admin' | 'department_admin'
+export interface WorkflowDepartment {
+  id: string
+  name: string
+  parentId: string | null
+  x: number
+  y: number
+  width: number
+  height: number
 }
 export interface WorkflowAgentNode extends WorkflowNodeBase {
   kind: 'agent'
@@ -19,11 +34,7 @@ export interface WorkflowAgentNode extends WorkflowNodeBase {
   task: string
   delivers: string
 }
-export interface WorkflowUserNode extends WorkflowNodeBase {
-  kind: 'user'
-  task: string
-}
-export type WorkflowNode = WorkflowAgentNode | WorkflowUserNode
+export type WorkflowNode = WorkflowAgentNode
 export interface WorkflowDefinition {
   schemaVersion: 1
   id: string
@@ -31,6 +42,7 @@ export interface WorkflowDefinition {
   description: string
   background: string
   nodes: WorkflowNode[]
+  departments?: WorkflowDepartment[]
   viewport: { x: number; y: number; zoom: number }
 }
 export interface WorkflowIssue {
@@ -48,14 +60,12 @@ export interface WorkflowRecord {
 export type WorkflowRequest =
   | { operation: 'runtimeSnapshot'; instanceId: string; afterSequence?: number }
   | { operation: 'nodeMessages'; instanceId: string; nodeId: string; beforeSequence?: number }
-  | { operation: 'completeUserInput'; instanceId: string; inputId: string }
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
   | {
       operation: 'save'
       definition: WorkflowDefinition
       expectedRevision: number
-      expectedUsageRevision?: string
       expectedDraftRevision?: number
     }
   | { operation: 'delete'; id: string; expectedRevision: number }
@@ -64,13 +74,15 @@ export type WorkflowRequest =
   | {
       operation: 'saveInstance'
       id: string
-      templateId: string
+      /** Creation provenance only. Existing organizations edit their own definition. */
+      templateId?: string
+      definition?: WorkflowDefinition
       name: string
       color: string
       projectId?: string | null
       bindings: { nodeId: string; conversationId: string | null }[]
       expectedRevision: number
-      expectedTemplateRevision: number
+      expectedTemplateRevision?: number
     }
   | { operation: 'deleteInstance'; id: string; expectedRevision: number }
   | {
@@ -87,6 +99,9 @@ export interface WorkflowInstanceBinding {
 }
 export interface WorkflowInstance {
   id: string
+  /** Independent, editable organization configuration. */
+  definition: WorkflowDefinition
+  /** Creation provenance; never a runtime dependency. */
   templateId: string
   templateRevision: number
   name: string
@@ -100,11 +115,6 @@ export interface WorkflowInstance {
   enabled: boolean
   /** Activity in an enabled instance; no client operation starts graph execution. */
   running: boolean
-}
-export interface WorkflowTemplateUsage {
-  templateId: string
-  usageRevision: string
-  instances: { id: string; name: string; running: boolean; projectNames: string[] }[]
 }
 export interface WorkflowEditingDraft {
   definition: WorkflowDefinition
@@ -129,7 +139,6 @@ export interface WorkflowResponse {
   records: WorkflowRecord[]
   issues: WorkflowIssue[]
   instances?: WorkflowInstance[]
-  usages?: WorkflowTemplateUsage[]
   drafts?: WorkflowEditingDraft[]
   invalidRecords?: WorkflowInvalidRecord[]
   invalidDrafts?: WorkflowInvalidDraft[]
@@ -143,86 +152,104 @@ function object(
   optionalKeys: string[] = []
 ): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Invalid workflow object')
+    throw new Error('Invalid organization object')
   const item = value as Record<string, unknown>
   if (
     Object.keys(item).some((key) => !keys.includes(key)) ||
     keys.some((key) => !optionalKeys.includes(key) && !(key in item))
   )
-    throw new Error('Invalid workflow fields')
+    throw new Error('Invalid organization fields')
   return item
 }
 function text(value: unknown): string {
-  if (typeof value !== 'string') throw new Error('Invalid workflow text')
+  if (typeof value !== 'string') throw new Error('Invalid organization text')
   return value
 }
 function boolean(value: unknown): boolean {
-  if (typeof value !== 'boolean') throw new Error('Invalid workflow boolean')
+  if (typeof value !== 'boolean') throw new Error('Invalid organization boolean')
   return value
 }
 function integer(value: unknown, minimum = 0): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum)
-    throw new Error('Invalid workflow integer')
+    throw new Error('Invalid organization integer')
   return value
 }
 function number(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value))
-    throw new Error('Invalid workflow coordinate')
+    throw new Error('Invalid organization coordinate')
   return value
 }
 function array<T>(value: unknown, parse: (item: unknown) => T, max = 512): T[] {
-  if (!Array.isArray(value) || value.length > max) throw new Error('Invalid workflow collection')
+  if (!Array.isArray(value) || value.length > max)
+    throw new Error('Invalid organization collection')
   return value.map(parse)
 }
+/** Parse one member independently, for editor clipboard operations. */
+export function parseWorkflowNode(value: unknown): WorkflowNode {
+  const kind = (value as { kind?: unknown } | null)?.kind
+  const common = ['kind', 'id', 'name', 'x', 'y', 'rank', 'managementRole', 'departmentId']
+  const fields =
+    kind === 'agent'
+      ? ['permissionMode', 'modelConfigId', 'receives', 'task', 'delivers']
+      : ['task']
+  const node = object(value, [...common, ...fields], ['rank', 'managementRole', 'departmentId'])
+  const rank = node.rank === undefined ? undefined : integer(node.rank, 1)
+  if (rank !== undefined && rank > 99) throw new Error('Invalid organization rank')
+  const managementRole = node.managementRole
+  if (
+    managementRole !== undefined &&
+    managementRole !== 'member' &&
+    managementRole !== 'organization_admin' &&
+    managementRole !== 'department_admin'
+  )
+    throw new Error('Invalid organization management role')
+  const base: WorkflowNodeBase = {
+    id: text(node.id),
+    name: text(node.name),
+    x: number(node.x),
+    y: number(node.y),
+    ...(rank !== undefined ? { rank } : {}),
+    ...(managementRole !== undefined ? { managementRole } : {}),
+    ...(node.departmentId !== undefined
+      ? { departmentId: node.departmentId === null ? null : text(node.departmentId) }
+      : {})
+  }
+  if (kind === 'agent') {
+    const modelConfigId = node.modelConfigId === null ? null : text(node.modelConfigId)
+    const permissionMode = node.permissionMode
+    if (permissionMode !== 'default' && permissionMode !== 'custom' && permissionMode !== 'full')
+      throw new Error('Invalid organization permission mode')
+    return {
+      ...base,
+      kind,
+      permissionMode,
+      modelConfigId,
+      receives: text(node.receives),
+      task: text(node.task),
+      delivers: text(node.delivers)
+    }
+  }
+  throw new Error('Invalid organization node kind')
+}
+
 export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
   const item = object(
     value,
-    ['schemaVersion', 'id', 'name', 'description', 'background', 'nodes', 'viewport'],
-    []
+    [
+      'schemaVersion',
+      'id',
+      'name',
+      'description',
+      'background',
+      'nodes',
+      'departments',
+      'viewport'
+    ],
+    ['departments']
   )
-  if (item.schemaVersion !== 1) throw new Error('Unsupported workflow version')
+  if (item.schemaVersion !== 1) throw new Error('Unsupported organization version')
   const viewport = object(item.viewport, ['x', 'y', 'zoom'])
-  const nodes = array(
-    item.nodes,
-    (value): WorkflowNode => {
-      const kind = (value as { kind?: unknown } | null)?.kind
-      const common = ['kind', 'id', 'name', 'x', 'y']
-      const fields =
-        kind === 'agent'
-          ? ['permissionMode', 'modelConfigId', 'receives', 'task', 'delivers']
-          : ['task']
-      const node = object(value, [...common, ...fields], kind === 'user' ? ['task'] : [])
-      const base = {
-        id: text(node.id),
-        name: text(node.name),
-        x: number(node.x),
-        y: number(node.y)
-      }
-      if (kind === 'agent') {
-        const modelConfigId = node.modelConfigId === null ? null : text(node.modelConfigId)
-        const permissionMode = node.permissionMode
-        if (
-          permissionMode !== 'default' &&
-          permissionMode !== 'custom' &&
-          permissionMode !== 'full'
-        )
-          throw new Error('Invalid workflow permission mode')
-        return {
-          ...base,
-          kind,
-          permissionMode,
-          modelConfigId,
-          receives: text(node.receives),
-          task: text(node.task),
-          delivers: text(node.delivers)
-        }
-      }
-      if (kind === 'user')
-        return { ...base, kind, task: node.task === undefined ? '' : text(node.task) }
-      throw new Error('Invalid workflow node kind')
-    },
-    128
-  )
+  const nodes = array(item.nodes, parseWorkflowNode, 128)
   const result: WorkflowDefinition = {
     schemaVersion: 1,
     id: text(item.id),
@@ -230,11 +257,118 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
     description: text(item.description),
     background: text(item.background),
     nodes,
+    ...(item.departments !== undefined
+      ? {
+          departments: array(
+            item.departments,
+            (value) => {
+              const department = object(value, [
+                'id',
+                'name',
+                'parentId',
+                'x',
+                'y',
+                'width',
+                'height'
+              ])
+              return {
+                id: text(department.id),
+                name: text(department.name),
+                parentId: department.parentId === null ? null : text(department.parentId),
+                x: number(department.x),
+                y: number(department.y),
+                width: number(department.width),
+                height: number(department.height)
+              }
+            },
+            64
+          )
+        }
+      : {}),
     viewport: { x: number(viewport.x), y: number(viewport.y), zoom: number(viewport.zoom) }
   }
+  validateWorkflowDepartments(result)
   if (new TextEncoder().encode(JSON.stringify(result)).length > 2_000_000)
-    throw new Error('Workflow exceeds 2 MB')
+    throw new Error('Organization exceeds 2 MB')
   return result
+}
+
+/** Match Rust str::trim (Unicode White_Space), then per-character Unicode lowercase; display text is preserved. */
+export function workflowMemberNameKey(name: string): string {
+  return Array.from(name.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, ''))
+    .map((character) => character.toLowerCase())
+    .join('')
+}
+
+/** Enforce names on writes, while keeping old definitions readable for correction. */
+export function validateWorkflowMemberNames(definition: WorkflowDefinition): void {
+  const names = new Set<string>()
+  for (const node of definition.nodes) {
+    const key = workflowMemberNameKey(node.name)
+    if (!key) continue // Empty names retain the existing incomplete-draft behavior.
+    if (names.has(key)) throw new Error('organization_duplicate_member_name')
+    names.add(key)
+  }
+}
+
+/** Department paths use '/' separators and unique names under each parent. */
+export function validateWorkflowDepartmentNames(definition: WorkflowDefinition): void {
+  const siblings = new Map<string | null, Set<string>>()
+  for (const department of definition.departments ?? []) {
+    if (department.name.includes('/')) throw new Error('organization_department_name_separator')
+    const key = workflowMemberNameKey(department.name)
+    if (!key) continue
+    const names = siblings.get(department.parentId) ?? new Set<string>()
+    if (names.has(key)) throw new Error('organization_duplicate_department_name')
+    names.add(key)
+    siblings.set(department.parentId, names)
+  }
+}
+
+function validateWorkflowDepartments(definition: WorkflowDefinition): void {
+  const departments = definition.departments ?? []
+  const byId = new Map(departments.map((department) => [department.id, department]))
+  const nodeIds = new Set(definition.nodes.map((node) => node.id))
+  if (byId.size !== departments.length) throw new Error('Duplicate organization department')
+  for (const department of departments) {
+    if (
+      !department.id ||
+      department.id.trim() !== department.id ||
+      department.id.length > 256 ||
+      [...department.id].some((character) => {
+        const code = character.charCodeAt(0)
+        return code <= 31 || (code >= 127 && code <= 159)
+      }) ||
+      nodeIds.has(department.id)
+    )
+      throw new Error('Invalid organization department identifier')
+    if (
+      new TextEncoder().encode(department.name).length > 512 ||
+      Math.abs(department.x) > 100_000 ||
+      Math.abs(department.y) > 100_000 ||
+      department.width < 80 ||
+      department.height < 64 ||
+      department.width > 100_000 ||
+      department.height > 100_000
+    )
+      throw new Error('Invalid organization department bounds or name')
+    const visited = new Set([department.id])
+    let parentId = department.parentId
+    while (parentId !== null) {
+      const parent = byId.get(parentId)
+      if (!parent || visited.has(parentId)) throw new Error('Invalid organization department tree')
+      visited.add(parentId)
+      parentId = parent.parentId
+    }
+  }
+  for (const node of definition.nodes) {
+    if (
+      node.departmentId !== undefined &&
+      node.departmentId !== null &&
+      !byId.has(node.departmentId)
+    )
+      throw new Error('Unknown organization department')
+  }
 }
 
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
@@ -260,10 +394,6 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
       ...(item.afterSequence !== undefined ? { afterSequence: integer(item.afterSequence) } : {})
     }
   }
-  if (op === 'completeUserInput') {
-    const item = object(value, ['operation', 'instanceId', 'inputId'])
-    return { operation: op, instanceId: text(item.instanceId), inputId: text(item.inputId) }
-  }
   if (op === 'list' || op === 'listInstances') {
     object(value, ['operation'])
     return { operation: op }
@@ -272,25 +402,20 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
     const item = object(
       value,
       op === 'save'
-        ? [
-            'operation',
-            'definition',
-            'expectedRevision',
-            'expectedUsageRevision',
-            'expectedDraftRevision'
-          ]
+        ? ['operation', 'definition', 'expectedRevision', 'expectedDraftRevision']
         : ['operation', 'definition'],
-      ['expectedUsageRevision', 'expectedDraftRevision']
+      ['expectedDraftRevision']
     )
     const definition = parseWorkflowDefinition(item.definition)
+    if (op === 'save') {
+      validateWorkflowMemberNames(definition)
+      validateWorkflowDepartmentNames(definition)
+    }
     return op === 'save'
       ? {
           operation: op,
           definition,
           expectedRevision: integer(item.expectedRevision),
-          ...(item.expectedUsageRevision !== undefined
-            ? { expectedUsageRevision: text(item.expectedUsageRevision) }
-            : {}),
           ...(item.expectedDraftRevision !== undefined
             ? { expectedDraftRevision: integer(item.expectedDraftRevision) }
             : {})
@@ -317,6 +442,7 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
         'operation',
         'id',
         'templateId',
+        'definition',
         'name',
         'color',
         'projectId',
@@ -324,19 +450,35 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
         'expectedRevision',
         'expectedTemplateRevision'
       ],
-      ['projectId']
+      ['projectId', 'templateId', 'expectedTemplateRevision', 'definition']
     )
+    const expectedRevision = integer(item.expectedRevision)
+    if (expectedRevision > 0 && item.definition === undefined)
+      throw new Error('Organization updates require an independent definition')
+    if (expectedRevision === 0 && item.definition === undefined && item.templateId === undefined)
+      throw new Error('Organization creation requires a definition or template')
+    if ((item.templateId === undefined) !== (item.expectedTemplateRevision === undefined))
+      throw new Error('Organization template provenance requires its revision')
+    const definition =
+      item.definition === undefined ? undefined : parseWorkflowDefinition(item.definition)
+    if (definition) {
+      validateWorkflowMemberNames(definition)
+      validateWorkflowDepartmentNames(definition)
+    }
     return {
       operation: op,
       id: text(item.id),
-      templateId: text(item.templateId),
+      ...(item.templateId !== undefined ? { templateId: text(item.templateId) } : {}),
+      ...(definition ? { definition } : {}),
       name: text(item.name),
       color: text(item.color),
       ...(item.projectId !== undefined
         ? { projectId: item.projectId === null ? null : text(item.projectId) }
         : {}),
-      expectedRevision: integer(item.expectedRevision),
-      expectedTemplateRevision: integer(item.expectedTemplateRevision, 1),
+      expectedRevision,
+      ...(item.expectedTemplateRevision !== undefined
+        ? { expectedTemplateRevision: integer(item.expectedTemplateRevision, 1) }
+        : {}),
       bindings: array(
         item.bindings,
         (value) => {
@@ -357,9 +499,12 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
       'expectedRevision',
       'expectedDraftRevision'
     ])
+    const definition = parseWorkflowDefinition(item.definition)
+    validateWorkflowMemberNames(definition)
+    validateWorkflowDepartmentNames(definition)
     return {
       operation: op,
-      definition: parseWorkflowDefinition(item.definition),
+      definition,
       expectedRevision: integer(item.expectedRevision, 1),
       expectedDraftRevision: integer(item.expectedDraftRevision)
     }
@@ -382,7 +527,7 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
       name: text(item.name)
     }
   }
-  throw new Error('Invalid workflow operation')
+  throw new Error('Invalid organization operation')
 }
 function issues(value: unknown): WorkflowIssue[] {
   return array(
@@ -401,7 +546,6 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       'records',
       'issues',
       'instances',
-      'usages',
       'drafts',
       'invalidRecords',
       'invalidDrafts',
@@ -411,7 +555,6 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     ],
     [
       'instances',
-      'usages',
       'drafts',
       'invalidRecords',
       'invalidDrafts',
@@ -433,7 +576,7 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       const enabled = Object.hasOwn(item, 'enabled') ? boolean(item.enabled) : false
       const recordIssues = issues(item.issues)
       if (enabled && recordIssues.length)
-        throw new Error('An enabled workflow cannot have validation issues')
+        throw new Error('An enabled organization cannot have validation issues')
       return {
         definition: parseWorkflowDefinition(item.definition),
         enabled,
@@ -445,7 +588,7 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     1000
   )
   if (new Set(records.map((record) => record.definition.id)).size !== records.length)
-    throw new Error('Duplicate workflow records')
+    throw new Error('Duplicate organization records')
   const invalidRecords =
     data.invalidRecords === undefined
       ? undefined
@@ -459,13 +602,13 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       ...records.map((record) => record.definition.id),
       ...invalidRecords.map((record) => record.id)
     ]
-    if (new Set(ids).size !== ids.length) throw new Error('Duplicate workflow records')
+    if (new Set(ids).size !== ids.length) throw new Error('Duplicate organization records')
   }
   if (
     invalidDrafts &&
     new Set(invalidDrafts.map((draft) => draft.id)).size !== invalidDrafts.length
   )
-    throw new Error('Duplicate invalid workflow drafts')
+    throw new Error('Duplicate invalid organization drafts')
   return {
     records,
     ...(data.nodeMessages !== undefined
@@ -477,34 +620,6 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     ...(invalidDrafts ? { invalidDrafts } : {}),
     ...(data.instances !== undefined
       ? { instances: array(data.instances, parseWorkflowInstance, 1000) }
-      : {}),
-    ...(data.usages !== undefined
-      ? {
-          usages: array(
-            data.usages,
-            (value) => {
-              const usage = object(value, ['templateId', 'usageRevision', 'instances'])
-              return {
-                templateId: text(usage.templateId),
-                usageRevision: text(usage.usageRevision),
-                instances: array(
-                  usage.instances,
-                  (value) => {
-                    const instance = object(value, ['id', 'name', 'running', 'projectNames'])
-                    return {
-                      id: text(instance.id),
-                      name: text(instance.name),
-                      running: boolean(instance.running),
-                      projectNames: array(instance.projectNames, text, 1000)
-                    }
-                  },
-                  1000
-                )
-              }
-            },
-            1000
-          )
-        }
       : {}),
     ...(data.drafts !== undefined
       ? {
@@ -544,7 +659,7 @@ function parseInvalidWorkflow(
     ...(draft ? ['baseRevision'] : [])
   ])
   if (item.reason !== 'incompatible_definition' && item.reason !== 'invalid_definition')
-    throw new Error('Invalid workflow recovery reason')
+    throw new Error('Invalid organization recovery reason')
   return {
     id: text(item.id),
     name: text(item.name),
@@ -560,6 +675,7 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
     value,
     [
       'id',
+      'definition',
       'templateId',
       'templateRevision',
       'name',
@@ -576,6 +692,7 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
   )
   return {
     id: text(item.id),
+    definition: parseWorkflowDefinition(item.definition),
     templateId: text(item.templateId),
     templateRevision: integer(item.templateRevision, 1),
     name: text(item.name),

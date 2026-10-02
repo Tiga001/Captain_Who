@@ -80,10 +80,10 @@ impl AgentService {
             .running
             .swap(true, Ordering::AcqRel)
         {
-            return Err("Workflow delivery scheduler is already running.".into());
+            return Err("Organization delivery scheduler is already running.".into());
         }
         if self.workflow_dispatch_stopped.load(Ordering::Acquire) {
-            return Err("Workflow delivery scheduler is shutting down.".into());
+            return Err("Organization delivery scheduler is shutting down.".into());
         }
         let service = self.clone();
         let task = spawn_worker(
@@ -117,12 +117,12 @@ impl WorkflowDeliveryScheduler {
         let service = self.service.clone();
         tokio::task::spawn_blocking(move || service.stop_workflow_delivery_admissions())
             .await
-            .map_err(|error| format!("Workflow scheduler shutdown fence failed: {error}"))?;
+            .map_err(|error| format!("Organization scheduler shutdown fence failed: {error}"))?;
         self.task
             .take()
             .expect("scheduler owns its worker")
             .await
-            .map_err(|error| format!("Workflow scheduler shutdown failed: {error}"))
+            .map_err(|error| format!("Organization scheduler shutdown failed: {error}"))
     }
 }
 
@@ -179,7 +179,7 @@ fn spawn_worker(
             })
             .await
             {
-                eprintln!("workflow scheduler scan failed; recovery will retry: {error}");
+                eprintln!("organization scheduler scan failed; recovery will retry: {error}");
                 if let Some(retries) = &retries {
                     retries
                         .lock()

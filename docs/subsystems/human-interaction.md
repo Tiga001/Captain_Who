@@ -118,22 +118,22 @@ Agent 发现需要用户参与
 
 ## 界面、可见性与通知
 
-具体对话使用 Host API 的完整请求快照；侧栏与工作流只读取全局待处理摘要。`requestChanged` 提供快速状态更新，`settingsChanged` 使策略快照失效；Core Server 重连、窗口重新获得焦点、网络恢复或页面重新可见时会重新查询。Renderer 不能自己创建问题、指定 Run、伪造回答证明或直接启动后续 Turn。
+具体对话使用 Host API 的完整请求快照；侧栏与组织只读取全局待处理摘要。`requestChanged` 提供快速状态更新，`settingsChanged` 使策略快照失效；Core Server 重连、窗口重新获得焦点、网络恢复或页面重新可见时会重新查询。Renderer 不能自己创建问题、指定 Run、伪造回答证明或直接启动后续 Turn。
 
 - 一批问题在聊天时间线中显示一个入口，而不是为每题创建入口；异步批次可以最小化后从该入口恢复。
 - 展示优先级固定为审批 > 阻塞问题 > 非阻塞问题。被抢占的未提交草稿和页码保留在当前 Renderer 内存。
-- 不在对应对话页面时，左侧栏为仍有 `open` 提问的对话显示「等待交互」，优先级低于「等待批准」。侧栏和工作流流程图共享提问状态；非阻塞问题在模型结束或面板最小化后仍保留提示，提交、忽略或取消后移除。状态从 Host 稀疏摘要及请求变化恢复，未加载聊天历史的对话也可显示，不把浏览流程图当作已读或回答。
+- 不在对应对话页面时，左侧栏为仍有 `open` 提问的对话显示「等待交互」，优先级低于「等待批准」。侧栏和组织流程图共享提问状态；非阻塞问题在模型结束或面板最小化后仍保留提示，提交、忽略或取消后移除。状态从 Host 稀疏摘要及请求变化恢复，未加载聊天历史的对话也可显示，不把浏览流程图当作已读或回答。
 - 提交后，问题和答案按题序显示为一个用户外观的问答气泡；忽略的异步批次不显示正式回答气泡。
 - 当前通用原生通知只覆盖任务终态和待审批等事实；人机提问本身不会额外创建系统原生通知。用户应在 Conversation 的面板或时间线入口处理问题。
 - 未提交的选项、文字和页码只保存在 Renderer 内存，关闭窗口或重载页面会丢失；已接纳的问题、已提交答案及 Delivery 回执会持久化并可在同版本重启后重新读取。
 
 前端状态与 UI 真源为[src/renderer/src/features/humanInteraction/](../../src/renderer/src/features/humanInteraction/)，跨进程通道为[src/main/ipc/humanInteractionIpc.ts](../../src/main/ipc/humanInteractionIpc.ts)和[src/preload/HumanInteractionIpcBridge.ts](../../src/preload/HumanInteractionIpcBridge.ts)。通用通知的当前事实类型见[通用通知](notifications.md)。
 
-侧栏与工作流监视使用 [`useConversationAttention`](../../src/renderer/src/features/chat/useConversationAttention.ts) 统一加载 `humanInteraction.getAttention({})`。同一个 SQLite 读事务以三次固定查询返回未归档根会话的 open 请求身份/sequence/revision、pending 批准所属会话，以及删除后仍保留的请求自增高水位；不装载问题、答案、批准正文或历史消息。partial covering index 驱动待处理查询，查询次数不随空会话数量增加。
+侧栏与组织监视使用 [`useConversationAttention`](../../src/renderer/src/features/chat/useConversationAttention.ts) 统一加载 `humanInteraction.getAttention({})`。同一个 SQLite 读事务以三次固定查询返回未归档根会话的 open 请求身份/sequence/revision、pending 批准所属会话，以及删除后仍保留的请求自增高水位；不装载问题、答案、批准正文或历史消息。partial covering index 驱动待处理查询，查询次数不随空会话数量增加。
 
-前端只保留待处理身份与恢复期间的最小终态信息。请求 revision、单调终态与快照高水位共同防止旧事件/旧响应复活已处理问题；重连清除旧代次水位并拒绝旧代次在途响应。焦点、网络和可见性恢复合并为一次逻辑读取；失败保留最近事实并以 250 ms 至 30 s 退避重试。批准生命周期事件使用固定合并窗口，连续并发失效时最多延迟一秒加请求耗时发布最近已完成快照，随后补读，避免刷新饥饿。退出 watch 时清理身份记录；批准的消息 fallback 只在摘要未知时使用，按未变化消息数组引用缓存。未读规则保持独立。工作流仍保留已有的子 Agent 树级批准提示。
+前端只保留待处理身份与恢复期间的最小终态信息。请求 revision、单调终态与快照高水位共同防止旧事件/旧响应复活已处理问题；重连清除旧代次水位并拒绝旧代次在途响应。焦点、网络和可见性恢复合并为一次逻辑读取；失败保留最近事实并以 250 ms 至 30 s 退避重试。批准生命周期事件使用固定合并窗口，连续并发失效时最多延迟一秒加请求耗时发布最近已完成快照，随后补读，避免刷新饥饿。退出 watch 时清理身份记录；批准的消息 fallback 只在摘要未知时使用，按未变化消息数组引用缓存。未读规则保持独立。组织仍保留已有的子 Agent 树级批准提示。
 
-聊天内交互展示按消息和请求 revision 建立索引，单次投影不再为每个请求重复扫描工具调用/结果。回答、忽略、投递变化与持久 ToolResult 恢复均重新选择正确投影；缓存不会因为只有对话 ID 相同而复用过期显示。工作流画布只消费 attention 状态，不自动提交、忽略问题或启动执行。回归见 [`useConversationAttention.browser.test.tsx`](../../src/renderer/src/app/__tests__/useConversationAttention.browser.test.tsx)。
+聊天内交互展示按消息和请求 revision 建立索引，单次投影不再为每个请求重复扫描工具调用/结果。回答、忽略、投递变化与持久 ToolResult 恢复均重新选择正确投影；缓存不会因为只有对话 ID 相同而复用过期显示。组织画布只消费 attention 状态，不自动提交、忽略问题或启动执行。回归见 [`useConversationAttention.browser.test.tsx`](../../src/renderer/src/app/__tests__/useConversationAttention.browser.test.tsx)。
 
 ## 数据、隐私与安全边界
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum StateView {
     Members,
     Runtime,
+    Configuration,
     #[default]
     All,
 }
@@ -70,7 +71,7 @@ fn validate_id(value: Option<&str>) -> Result<(), String> {
     if value.is_some_and(|value| {
         value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control)
     }) {
-        return Err("Invalid workflow query identifier".into());
+        return Err("Invalid organization query identifier".into());
     }
     Ok(())
 }
@@ -86,7 +87,7 @@ impl MailboxQuery {
         if !(1..=50).contains(&self.limit)
             || self.cursor.is_some_and(|value| value > i64::MAX as u64)
         {
-            return Err("Invalid workflow mailbox page".into());
+            return Err("Invalid organization mailbox page".into());
         }
         validate_id(self.message_id.as_deref())?;
         validate_id(self.input_id.as_deref())
@@ -96,6 +97,20 @@ impl MailboxQuery {
 /// Reduce only the model-facing result, after the Host has validated ownership and enriched live
 /// state. Storage/monitor projections and the automatic World State remain complete and unchanged.
 pub fn state_for_model(
+    result: serde_json::Value,
+    current_node_id: &str,
+    awareness: &serde_json::Value,
+    focused: bool,
+) -> serde_json::Value {
+    crate::world_state::workflow_projection::semantic_state(state_overview_for_model(
+        result,
+        current_node_id,
+        awareness,
+        focused,
+    ))
+}
+
+fn state_overview_for_model(
     mut result: serde_json::Value,
     current_node_id: &str,
     awareness: &serde_json::Value,
@@ -112,11 +127,13 @@ pub fn state_for_model(
         && result["instanceId"] == awareness["instanceId"]
         && result["executionVersion"].as_str().is_some()
         && result["executionVersion"] == awareness["executionVersion"]
+        && result["organizationRevision"] == awareness["organizationRevision"]
         && awareness["currentNodeId"].as_str() == Some(current_node_id)
         && result["currentNodeId"].as_str() == Some(current_node_id);
     if let Some(object) = result.as_object_mut() {
         for key in [
             "workflowName",
+            "organizationName",
             "currentNodeId",
             "executionVersion",
             "background",
@@ -145,6 +162,11 @@ pub fn state_for_model(
     let Some(runtime) = result.get_mut("runtime").and_then(Value::as_object_mut) else {
         return result;
     };
+    if let Some(nodes) = runtime.get_mut("nodes").and_then(Value::as_array_mut) {
+        for node in nodes {
+            crate::world_state::workflow_projection::remove_duplicate_mail_counts(node);
+        }
+    }
     runtime.insert(
         "summaryPolicy".into(),
         json!(if focused || !same_scope {
@@ -156,7 +178,7 @@ pub fn state_for_model(
     if focused || !same_scope {
         return result;
     }
-    runtime.insert("detailsQueryHint".into(), json!("Omitted overview fields are unchanged from workflow.awareness. Nodes absent from that summary and truncated lists remain complete. Use nodeId for a complete current node state."));
+    runtime.insert("detailsQueryHint".into(), json!("Omitted overview fields are unchanged from organization.awareness. Nodes absent from that summary and truncated lists remain complete. Query a member by name for its complete current state."));
     let Some(nodes) = runtime.get_mut("nodes").and_then(Value::as_array_mut) else {
         return result;
     };
@@ -196,7 +218,7 @@ pub fn state_for_model(
         if complete_and_unchanged {
             object.remove("currentInputIds");
         }
-        // Preserve per-message details and run associations.
+        // Keep per-message status; the semantic boundary removes internal run associations.
     }
     result
 }
@@ -208,16 +230,17 @@ mod tests {
     #[test]
     fn workflow_state_omits_observed_summary_but_preserves_new_state_and_mail_details() {
         let observed = json!({"available":true,"instanceId":"team","executionVersion":"v1","currentNodeId":"a","nodes":[{"nodeId":"b","state":"idle","pendingCount":1,"processingCount":0,"currentInputCount":0,"currentInputIds":[]}]});
-        let raw = json!({"available":true,"instanceId":"team","executionVersion":"v1","currentNodeId":"a","background":"already known","members":[{"nodeId":"a","task":"already known"},{"nodeId":"b","task":"new role"}],"runtime":{"nodes":[{"nodeId":"b","state":"idle","pendingCount":2,"processingCount":0,"currentInputCount":0,"currentInputIds":[],"inputs":[{"messageId":"m"}]}]}});
+        let raw = json!({"available":true,"instanceId":"team","executionVersion":"v1","currentNodeId":"a","background":"already known","members":[{"nodeId":"a","task":"already known"},{"nodeId":"b","task":"new role"}],"runtime":{"nodes":[{"nodeId":"b","state":"idle","pendingCount":2,"processingCount":0,"currentInputCount":0,"currentInputIds":[],"inputs":[{"messageId":"m"}],"inputsTruncated":true}]}});
         let result = state_for_model(raw.clone(), "a", &observed, false);
         assert!(result.get("background").is_none());
         assert!(result["members"][0].get("task").is_none());
         assert_eq!(result["members"][1]["task"], "new role");
-        assert!(result["runtime"]["nodes"][0].get("state").is_none());
-        assert_eq!(result["runtime"]["nodes"][0]["pendingCount"], 2);
-        assert_eq!(result["runtime"]["nodes"][0]["inputs"][0]["messageId"], "m");
+        assert!(result["runtime"]["members"][0].get("state").is_none());
+        assert_eq!(result["runtime"]["members"][0]["pendingCount"], 2);
+        assert_eq!(result["runtime"]["members"][0]["mail"][0]["messageId"], "m");
+        assert_eq!(result["runtime"]["members"][0]["mailTruncated"], true);
         let focused = state_for_model(raw, "a", &observed, true);
-        assert_eq!(focused["runtime"]["nodes"][0]["state"], "idle");
+        assert_eq!(focused["runtime"]["members"][0]["state"], "idle");
     }
     #[test]
     fn workflow_mailbox_query_rejects_removed_states_and_out_of_range_pages() {

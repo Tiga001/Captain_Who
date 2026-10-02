@@ -46,7 +46,7 @@ export function WorkflowQueryFrame({
         <div className="workflow-query">
           <div className="workflow-query__header">
             <span>
-              {text(data.workflowName) || l('工作流', 'Workflow')}
+              {text(data.organizationName) || l('组织', 'Organization')}
               <small>
                 {l('查询快照', 'Snapshot')}
                 {time && ` · ${time}`}
@@ -55,7 +55,7 @@ export function WorkflowQueryFrame({
             {text(data.instanceId) && openWorkflow && (
               <button type="button" onClick={() => openWorkflow(text(data.instanceId))}>
                 <ArrowUpRight aria-hidden="true" />
-                {l('打开工作流', 'Open workflow')}
+                {l('打开组织', 'Open organization')}
               </button>
             )}
           </div>

@@ -7,7 +7,7 @@ import type {
   WorkflowEditingDraft,
   WorkflowInvalidRecord,
   WorkflowInvalidDraft,
-  WorkflowTemplateUsage
+  WorkflowInstance
 } from '@mycopilot/protocol'
 import { parseWorkflowDefinition } from '@mycopilot/protocol'
 import fixture from '../../../../../packages/protocol/fixtures/workflow-definition-v1.json'
@@ -31,8 +31,7 @@ let records: WorkflowRecord[]
 let drafts: WorkflowEditingDraft[]
 let invalidRecords: WorkflowInvalidRecord[]
 let invalidDrafts: WorkflowInvalidDraft[]
-let usages: WorkflowTemplateUsage[]
-let startRunningOnSave: boolean
+let instances: WorkflowInstance[]
 beforeEach(async () => {
   const definition = parseWorkflowDefinition(fixture)
   definition.name = '发布验收'
@@ -40,24 +39,13 @@ beforeEach(async () => {
   drafts = []
   invalidRecords = []
   invalidDrafts = []
-  usages = []
-  startRunningOnSave = false
+  instances = []
   await page.viewport(1280, 900)
   for (const [key, value] of Object.entries(getFrontendCssVariables()))
     document.documentElement.style.setProperty(key, value)
   service.request.mockReset().mockImplementation(async (request: WorkflowRequest) => {
     if (request.operation === 'save') {
       const old = records.find((record) => record.definition.id === request.definition.id)
-      const usage = usages.find((item) => item.templateId === request.definition.id)
-      if (startRunningOnSave && usage) {
-        usage.instances[0].running = true
-        usage.usageRevision = 'running'
-        startRunningOnSave = false
-      }
-      if (usage?.instances.some((item) => item.running))
-        throw Object.assign(new Error('workflow_template_running'), { code: -32009 })
-      if (usage?.instances.length && request.expectedUsageRevision !== usage.usageRevision)
-        throw Object.assign(new Error('workflow_usage_changed'), { code: -32009 })
       if ((old?.revision ?? 0) !== request.expectedRevision)
         throw Object.assign(new Error('Revision conflict'), { code: -32009 })
       const storedDraft = drafts.find((item) => item.definition.id === request.definition.id)
@@ -89,9 +77,6 @@ beforeEach(async () => {
       ]
     }
     if (request.operation === 'delete') {
-      if (usages.some((item) => item.templateId === request.id && item.instances.length > 0)) {
-        throw Object.assign(new Error('workflow_template_in_use'), { code: -32009 })
-      }
       const stored =
         records.find((item) => item.definition.id === request.id) ??
         invalidRecords.find((item) => item.id === request.id)
@@ -120,35 +105,48 @@ beforeEach(async () => {
         enabled: original.issues.length === 0
       })
     }
-    return structuredClone({ records, drafts, usages, invalidRecords, invalidDrafts, issues: [] })
+    return structuredClone({
+      records,
+      drafts,
+      instances,
+      invalidRecords,
+      invalidDrafts,
+      issues: []
+    })
   })
 })
 
 function useTemplate(running = false) {
-  usages = [
+  instances = [
     {
+      id: 'instance-1',
+      name: '功能验收',
+      running,
       templateId: records[0].definition.id,
-      usageRevision: 'usage-1',
-      instances: [
-        { id: 'instance-1', name: '功能验收', running, projectNames: ['桌面端', '服务端'] },
-        { id: 'instance-2', name: '独立调研', running: false, projectNames: [] }
-      ]
+      templateRevision: 1,
+      definition: structuredClone(records[0].definition),
+      color: '#4A82E8',
+      revision: 1,
+      updatedAt: 1,
+      needsReview: false,
+      enabled: true,
+      bindings: []
     }
   ]
 }
 async function openEditor() {
-  await page.getByRole('button', { name: '编辑工作流模板 发布验收', exact: true }).click()
+  await page.getByRole('button', { name: '编辑组织模板 发布验收', exact: true }).click()
 }
 async function editAndSave(name = '改进后的验收') {
   await page.getByRole('textbox', { name: '名称', exact: true }).fill(name)
-  await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+  await page.getByRole('button', { name: '保存组织模板', exact: true }).click()
 }
 
 function view() {
   return render(<WorkflowSettingsSection />)
 }
 
-describe('workflow template lifecycle', () => {
+describe('organization template lifecycle', () => {
   it('isolates unavailable templates while valid templates and new saves remain usable', async () => {
     invalidRecords = [
       {
@@ -165,26 +163,26 @@ describe('workflow template lifecycle', () => {
     expect(unavailable.getByRole('button').all()).toHaveLength(1)
     expect(unavailable.getByRole('switch').query()).toBeNull()
     await expect
-      .element(page.getByRole('button', { name: '编辑工作流模板 发布验收', exact: true }))
+      .element(page.getByRole('button', { name: '编辑组织模板 发布验收', exact: true }))
       .toBeVisible()
     expect(page.getByRole('alert').query()).toBeNull()
-    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
+    await page.getByRole('button', { name: '新建组织模板', exact: true }).click()
     await editAndSave('新的有效模板')
     await expect.poll(() => records.length).toBe(2)
     expect(page.getByRole('alert').query()).toBeNull()
     expect(records[0].enabled).toBe(true)
-    await page.getByRole('button', { name: '返回工作流模板列表', exact: true }).click()
+    await page.getByRole('button', { name: '返回组织模板列表', exact: true }).click()
     await expect.element(unavailable).toBeVisible()
-    await unavailable.getByRole('button', { name: '删除工作流模板 1234', exact: true }).click()
-    const confirmation = page.getByRole('dialog', { name: '删除这个工作流？', exact: true })
+    await unavailable.getByRole('button', { name: '删除组织模板 1234', exact: true }).click()
+    const confirmation = page.getByRole('dialog', { name: '删除这个组织？', exact: true })
     await expect.element(confirmation).toHaveTextContent('1234')
     await confirmation.getByRole('button', { name: '取消', exact: true }).last().click()
     expect(invalidRecords).toHaveLength(1)
     expect(service.request.mock.calls.some(([request]) => request.operation === 'delete')).toBe(
       false
     )
-    await unavailable.getByRole('button', { name: '删除工作流模板 1234', exact: true }).click()
-    await confirmation.getByRole('button', { name: '删除工作流模板', exact: true }).click()
+    await unavailable.getByRole('button', { name: '删除组织模板 1234', exact: true }).click()
+    await confirmation.getByRole('button', { name: '删除组织模板', exact: true }).click()
     await expect.poll(() => invalidRecords.length).toBe(0)
     await expect.element(unavailable).not.toBeInTheDocument()
     expect(records).toHaveLength(2)
@@ -220,12 +218,12 @@ describe('workflow template lifecycle', () => {
       .toHaveValue('发布验收')
     await expect.element(page.getByRole('status')).toHaveTextContent('当前编辑的是正式模板')
     await expect
-      .element(page.getByRole('button', { name: '保存工作流模板', exact: true }))
+      .element(page.getByRole('button', { name: '保存组织模板', exact: true }))
       .toBeDisabled()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('保留当前编辑')
     await page.getByRole('button', { name: '删除暂存修改', exact: true }).click()
     const confirmation = page.getByRole('dialog', { name: '删除这份暂存修改？', exact: true })
-    await expect.element(confirmation).toHaveTextContent('正式模板及其工作流保持不变')
+    await expect.element(confirmation).toHaveTextContent('正式模板及其组织保持不变')
     await confirmation.getByRole('button', { name: '取消', exact: true }).last().click()
     expect(invalidDrafts).toHaveLength(1)
     await page.getByRole('button', { name: '删除暂存修改', exact: true }).click()
@@ -240,7 +238,7 @@ describe('workflow template lifecycle', () => {
     await expect
       .element(page.getByRole('textbox', { name: '名称', exact: true }))
       .toHaveValue('保留当前编辑')
-    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+    await page.getByRole('button', { name: '保存组织模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(records[0].definition.name).toBe('保留当前编辑')
     expect(page.getByRole('alert').query()).toBeNull()
@@ -264,36 +262,21 @@ describe('workflow template lifecycle', () => {
     await expect.element(unavailable).not.toBeInTheDocument()
   })
 
-  it('explains a template still in use with an acknowledgement dialog instead of a page error', async () => {
-    useTemplate()
+  it('deletes a template without blocking or altering organizations created from it', async () => {
+    useTemplate(true)
+    const originalInstances = structuredClone(instances)
     await view()
-    const title = page.getByRole('heading', { name: '工作流模板', exact: true })
-    expect(
-      getComputedStyle(title.element().closest('section')!).marginTop
-    ).toBe('0px')
-    await page.getByRole('button', { name: '删除工作流模板 发布验收', exact: true }).click()
+    await page.getByRole('button', { name: '删除组织模板 发布验收', exact: true }).click()
     await page
-      .getByRole('dialog', { name: '删除这个工作流？', exact: true })
-      .getByRole('button', { name: '删除工作流模板', exact: true })
+      .getByRole('dialog', { name: '删除这个组织？', exact: true })
+      .getByRole('button', { name: '删除组织模板', exact: true })
       .click()
-    const warning = page.getByRole('alertdialog', { name: '无法删除工作流模板', exact: true })
-    await expect.element(warning).toHaveTextContent('功能验收')
-    await expect.element(warning).toHaveTextContent('独立调研')
-    expect(page.getByRole('alert').query()).toBeNull()
-    expect(records).toHaveLength(1)
-    await page.screenshot({
-      element: warning.element() as HTMLElement,
-      path: '../../../../../.cache/workflow-authoring/template-in-use-warning.png'
-    })
-    await warning.getByRole('button', { name: '知道了', exact: true }).click()
-    await expect.element(warning).not.toBeInTheDocument()
-    await expect
-      .element(page.getByRole('button', { name: '编辑工作流模板 发布验收', exact: true }))
-      .toBeVisible()
-    expect(page.getByRole('alert').query()).toBeNull()
+    await expect.poll(() => records.length).toBe(0)
+    expect(instances).toEqual(originalInstances)
+    expect(page.getByRole('alertdialog').query()).toBeNull()
   })
 
-  it('shows returned load diagnostics and clears them after a successful retry', async () => {
+  it('explains load failure in a shared acknowledgement dialog and keeps retry available', async () => {
     service.request.mockRejectedValueOnce(
       Object.assign(new Error('storage_unavailable'), {
         code: -32000,
@@ -301,13 +284,19 @@ describe('workflow template lifecycle', () => {
       })
     )
     await view()
-    await expect.element(page.getByRole('alert')).toHaveTextContent('工作流加载或保存失败')
-    await page.getByText('错误详情', { exact: true }).click()
-    await expect.element(page.getByRole('alert')).toHaveTextContent('[-32000] storage_unavailable')
+    const warning = page.getByRole('alertdialog', { name: '组织模板暂时无法加载', exact: true })
+    await expect.element(warning).toHaveTextContent('请点击“重试”重新加载')
+    expect(document.body.textContent).not.toContain('storage_unavailable')
+    expect(document.body.textContent).not.toContain('-32000')
     expect(document.body.textContent).not.toContain('hidden detail')
+    expect(document.body.textContent).not.toContain('错误详情')
+    expect(page.getByRole('alert').query()).toBeNull()
+    await warning.getByRole('button', { name: '知道了', exact: true }).click()
+    await expect.element(warning).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('还没有组织模板')
     await page.getByRole('button', { name: '重试', exact: true }).click()
     await expect
-      .element(page.getByRole('button', { name: '编辑工作流模板 发布验收', exact: true }))
+      .element(page.getByRole('button', { name: '编辑组织模板 发布验收', exact: true }))
       .toBeVisible()
     expect(page.getByRole('alert').query()).toBeNull()
   })
@@ -317,17 +306,59 @@ describe('workflow template lifecycle', () => {
       Object.assign(new Error('storage_unavailable'), { code: -32000 })
     )
     await view()
-    await expect.element(page.getByRole('alert')).toHaveTextContent('工作流加载或保存失败')
-    await page.getByRole('button', { name: '新建工作流模板', exact: true }).click()
+    const warning = page.getByRole('alertdialog', { name: '组织模板暂时无法加载', exact: true })
+    await expect.element(warning).toBeVisible()
+    await warning.getByRole('button', { name: '知道了', exact: true }).click()
+    await page.getByRole('button', { name: '新建组织模板', exact: true }).click()
     await page.getByRole('textbox', { name: '名称', exact: true }).fill('重试时保留名称')
     await page.getByRole('button', { name: '重试', exact: true }).click()
     await expect.element(page.getByRole('alert')).not.toBeInTheDocument()
     await expect
       .element(page.getByRole('textbox', { name: '名称', exact: true }))
       .toHaveValue('重试时保留名称')
-    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
+    await page.getByRole('button', { name: '保存组织模板', exact: true }).click()
     await expect.poll(() => records.length).toBe(2)
     expect(records[0].definition.name).toBe('重试时保留名称')
+  })
+
+  it('keeps the edited configuration after a schema failure and lets the user retry saving', async () => {
+    await view()
+    await page.getByRole('button', { name: '新建组织模板', exact: true }).click()
+    const name = page.getByRole('textbox', { name: '名称', exact: true })
+    await name.fill('保留这份组织配置')
+    await page.getByRole('textbox', { name: '简短描述', exact: true }).fill('还没有保存的修改')
+    service.request.mockRejectedValueOnce(
+      Object.assign(new Error('Invalid organization fields'), {
+        code: -32602,
+        data: { definition: 'private configuration' }
+      })
+    )
+    const save = page.getByRole('button', { name: '保存组织模板', exact: true })
+    await save.click()
+    const warning = page.getByRole('alertdialog', { name: '当前配置暂时无法保存', exact: true })
+    await expect.element(warning).toHaveTextContent('当前修改仍保留在此页面')
+    expect(warning.element().classList.contains('app-confirm-dialog__card')).toBe(true)
+    expect(document.body.textContent).not.toContain('Invalid organization fields')
+    expect(document.body.textContent).not.toContain('private configuration')
+    expect(document.body.textContent).not.toContain('错误详情')
+    expect(page.getByRole('alert').query()).toBeNull()
+    expect(records).toHaveLength(1)
+    await page.screenshot({
+      path: '../../../../../.cache/organization-template/save-error-dialog.png'
+    })
+    await warning.getByRole('button', { name: '知道了', exact: true }).click()
+    await expect.element(warning).not.toBeInTheDocument()
+    await expect.element(save).toHaveFocus()
+    await expect.element(name).toHaveValue('保留这份组织配置')
+    await expect
+      .element(page.getByRole('textbox', { name: '简短描述', exact: true }))
+      .toHaveValue('还没有保存的修改')
+    await save.click()
+    await expect.poll(() => records.length).toBe(2)
+    expect(records[0].definition).toMatchObject({
+      name: '保留这份组织配置',
+      description: '还没有保存的修改'
+    })
   })
 
   it('duplicates the published template without touching its draft or instances', async () => {
@@ -349,95 +380,50 @@ describe('workflow template lifecycle', () => {
     expect(records[1].definition.id).not.toBe(original.definition.id)
     expect(records[1].enabled).toBe(true)
     expect(drafts[0].definition.name).toBe('未发布修改')
-    expect(usages[0].templateId).toBe(original.definition.id)
+    expect(instances[0].templateId).toBe(original.definition.id)
   })
 
-  it('lists instances and their projects and requires confirmation before publishing', async () => {
-    useTemplate()
-    await view()
-    await openEditor()
-    await editAndSave()
-    const dialog = page.getByRole('dialog', { name: '更新正在使用的模板？', exact: true })
-    await expect.element(dialog).toHaveTextContent('功能验收')
-    await expect.element(dialog).toHaveTextContent('桌面端 · 服务端')
-    await expect.element(dialog).toHaveTextContent('独立调研')
-    expect(records[0].definition.name).toBe('发布验收')
-    await dialog.getByRole('button', { name: '继续编辑', exact: true }).click()
-    expect(records[0].revision).toBe(1)
-    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
-    await dialog.getByRole('button', { name: '保存并要求重新确认', exact: true }).click()
-    await expect.poll(() => records[0].revision).toBe(2)
-    expect(service.request).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        operation: 'save',
-        expectedUsageRevision: 'usage-1'
-      })
-    )
-  })
+  it.each([false, true])(
+    'saves the template directly without modifying independent organizations (running=%s)',
+    async (running) => {
+      useTemplate(running)
+      const originalInstances = structuredClone(instances)
+      await view()
+      await openEditor()
+      await editAndSave()
+      await expect.poll(() => records[0].revision).toBe(2)
+      expect(records[0].definition.name).toBe('改进后的验收')
+      expect(instances).toEqual(originalInstances)
+      expect(page.getByRole('dialog').query()).toBeNull()
+      const saveRequest = service.request.mock.calls
+        .map(([request]) => request)
+        .find((request) => request.operation === 'save')
+      expect(saveRequest).not.toHaveProperty('expectedUsageRevision')
+      expect(
+        service.request.mock.calls.some(([request]) => request.operation === 'saveInstance')
+      ).toBe(false)
+    }
+  )
 
-  it('stashes changes while running and restores them after reopening without publishing', async () => {
+  it('restores and publishes an editing draft independently of running organizations', async () => {
     useTemplate(true)
-    const initial = structuredClone(records[0])
-    const current = await view()
-    await openEditor()
-    await editAndSave()
-    const dialog = page.getByRole('dialog', { name: '此模板有正在运行的工作流', exact: true })
-    await expect.element(dialog).toBeVisible()
-    expect(
-      dialog.getByRole('button', { name: '保存并要求重新确认', exact: true }).query()
-    ).toBeNull()
-    await page.screenshot({
-      path: '../../../../../.cache/workflow-authoring/template-running-guard.png'
-    })
-    await dialog.getByRole('button', { name: '暂存修改', exact: true }).click()
-    await expect.element(page.getByRole('status')).toHaveTextContent('修改已暂存')
-    expect(records[0]).toEqual(initial)
-    expect(drafts[0].definition.name).toBe('改进后的验收')
-    await current.unmount()
+    drafts = [
+      {
+        definition: { ...structuredClone(records[0].definition), name: '未发布修改' },
+        baseRevision: 1,
+        revision: 1,
+        updatedAt: 1
+      }
+    ]
     await view()
-    await expect.element(page.getByText('有暂存修改', { exact: true })).toBeVisible()
     await openEditor()
     await expect
       .element(page.getByRole('textbox', { name: '名称', exact: true }))
-      .toHaveValue('改进后的验收')
-    await expect.element(page.getByRole('status')).toHaveTextContent('已恢复暂存修改')
-    usages[0].instances[0].running = false
-    usages[0].usageRevision = 'stopped'
-    await page.getByRole('button', { name: '保存工作流模板', exact: true }).click()
-    await page.getByRole('button', { name: '保存并要求重新确认', exact: true }).click()
+      .toHaveValue('未发布修改')
+    await page.getByRole('button', { name: '保存组织模板', exact: true }).click()
     await expect.poll(() => records[0].revision).toBe(2)
     expect(drafts).toHaveLength(0)
-  })
-
-  it('saves edited content as an independent copy while the original is running', async () => {
-    useTemplate(true)
-    const original = structuredClone(records[0])
-    await view()
-    await openEditor()
-    await editAndSave()
-    await page.getByRole('button', { name: '保存为副本', exact: true }).click()
-    await expect.poll(() => records.length).toBe(2)
-    expect(records.find((item) => item.definition.id === original.definition.id)).toEqual(original)
-    expect(records[0].definition.name).toBe('改进后的验收 (副本)')
-    expect(usages[0].templateId).toBe(original.definition.id)
-    await expect
-      .element(page.getByRole('textbox', { name: '名称', exact: true }))
-      .toHaveValue('改进后的验收 (副本)')
-  })
-
-  it('rechecks server conflicts if an instance starts after the usage confirmation', async () => {
-    useTemplate()
-    await view()
-    await openEditor()
-    await editAndSave()
-    startRunningOnSave = true
-    await page.getByRole('button', { name: '保存并要求重新确认', exact: true }).click()
-    await expect
-      .element(page.getByRole('dialog', { name: '此模板有正在运行的工作流', exact: true }))
-      .toBeVisible()
-    expect(records[0].definition.name).toBe('发布验收')
-    await page.getByRole('button', { name: '暂存修改', exact: true }).click()
-    await expect.poll(() => drafts.length).toBe(1)
+    expect(instances[0].running).toBe(true)
   })
 
   it('opens a normal new editor from a settings navigation target', async () => {
@@ -450,7 +436,7 @@ describe('workflow template lifecycle', () => {
     )
     await expect.element(page.getByRole('textbox', { name: '名称', exact: true })).toHaveValue('')
     await expect
-      .element(page.getByRole('button', { name: '返回工作流模板列表', exact: true }))
+      .element(page.getByRole('button', { name: '返回组织模板列表', exact: true }))
       .toBeVisible()
     expect(document.body.textContent).not.toContain('返回项目')
   })
@@ -473,9 +459,11 @@ describe('workflow template lifecycle', () => {
       revision: 2
     }
     await editAndSave('当前窗口修改')
-    await expect.element(page.getByRole('alert')).toBeVisible()
+    const warning = page.getByRole('alertdialog', { name: '暂时无法保存', exact: true })
+    await expect.element(warning).toHaveTextContent('此组织已在其他窗口更改')
     expect(records[0]).toEqual(original)
     expect(drafts[0].definition.name).toBe('另一窗口的新修改')
+    await warning.getByRole('button', { name: '知道了', exact: true }).click()
     await page.getByRole('button', { name: '保存为副本', exact: true }).click()
     await expect.poll(() => records.length).toBe(2)
     expect(records[0].definition.name).toBe('当前窗口修改 (副本)')

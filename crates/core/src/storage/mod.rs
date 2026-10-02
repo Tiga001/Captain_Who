@@ -47,6 +47,7 @@ pub mod migrations;
 pub mod model_request_observation_repository;
 pub mod models;
 pub mod notification_repository;
+pub mod organization_personnel_repository;
 pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;

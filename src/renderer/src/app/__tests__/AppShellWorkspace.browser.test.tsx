@@ -106,14 +106,14 @@ describe('AppShellWorkspace', () => {
     expect(rightLifecycle.mock.calls).toEqual([['mount']])
   })
 
-  it('removes hidden workflow native hit regions while preserving settings controls and workspace state', async () => {
+  it('removes hidden organization native hit regions while preserving settings controls and workspace state', async () => {
     const lifecycleSpy = vi.fn()
     const renderShell = (settingsOpen: boolean) => (
       <>
         <AppShellWorkspace className="app-shell" settingsOpen={settingsOpen}>
           <header className="workflow-monitor__header" data-testid="workflow-drag-region">
             <button type="button" className="workflow-monitor__back">
-              workflow back
+              organization back
             </button>
           </header>
           <StatefulWorkspaceChild onLifecycle={lifecycleSpy} />
@@ -129,7 +129,7 @@ describe('AppShellWorkspace', () => {
     )
     const screen = await render(renderShell(false))
     const workflowHeader = screen.getByTestId('workflow-drag-region').element()
-    const workflowButton = screen.getByRole('button', { name: 'workflow back' }).element()
+    const workflowButton = screen.getByRole('button', { name: 'organization back' }).element()
     const appRegion = (element: Element) =>
       getComputedStyle(element).getPropertyValue('-webkit-app-region')
     expect(appRegion(workflowHeader)).toBe('drag')

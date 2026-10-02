@@ -67,7 +67,7 @@ FileChange/audit 快照按需读取。Run grant 又绑定 Run、Conversation/Pro
 但必须由 Command policy 识别、审批和审计，不能被描述为受 FileChange Observation/audit 契约保护；旧 writer
 alias 或手工修改 SQLite 也不能作为绕过正式副作用边界的入口。
 
-### 会话输入、工作区指令与工作流配置
+### 会话输入、工作区指令与组织配置
 
 大附件先通过 Main 导入为受管字节，输入/草稿/队列仅传递 opaque import 身份；使用前再次校验完整性和所属授权。
 文件夹引用只授予目录读取，不递归上传目录，也不扩大写入或命令权限。用户所选文件夹名称与绝对路径会提供给模型，
@@ -76,8 +76,14 @@ alias 或手工修改 SQLite 也不能作为绕过正式副作用边界的入口
 
 `workspace.instructions` 来自冻结根目录中的 `AGENTS.override.md`/`AGENTS.md`，每次请求与预览共用有界读取器，
 重新验证目录身份并拒绝 leaf symlink。指令内容仍是不可信项目数据，不授予 Tool 权限，也不等同于 Skill 激活。
-工作流图、模板可用性、实例启用和编辑草稿由 Rust Core 持久校验；可用模型、CAS 与绑定关系必须在 Host 重验。
+组织图、模板可用性、实例启用和编辑草稿由 Rust Core 持久校验；可用模型、CAS 与绑定关系必须在 Host 重验。
 配置保存/启用不能作为已执行节点、外部副作用成功或用户批准的证据。
+
+组织实例保存独立定义；模板修改不改变已有组织权限。人员管理采用独立动态能力 `organization.management`，
+仅当前组织/部门管理员挂载。每次写入在事务中复核成员 incarnation、有效 Run、组织版本、部门子树与调整前后的严格低职级，
+不可操作自己或凭高职级自行取得管理权。移除/重新加入产生不同身份，旧 checkpoint 不恢复资格；其他成员的变化不撤销未变成员身份。
+重放已提交人事回执只返回同 conversation/run/tool call 的原结果，不再执行副作用，也不恢复已撤销的管理权限。
+`organization_edit` 支持原地编辑成员与部门。授予管理身份、移动部门及成员均重新验证权限范围；部门管理员不能授予组织管理员身份。新建或编辑成员的权限逐项受调用者本轮实际有效权限限制，不信任模型输入、可变输入框选择或权限模式名称。权限不可表示或超限时拒绝，不静默改变请求。独立对话保持休眠直到收到任务邮件；成员原地编辑保留对话和邮箱，移除不删除聊天历史。
 
 ### 账号与新回合许可
 
@@ -179,7 +185,7 @@ SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS�
 fail closed。当前 schema v62 只接受明确的 exact v50–v61 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
 v59→v60 只按既有 FTS 顺序元数据回填历史顺序投影，不重排历史或改写正文。启动迁移与显式 reset 是不同边界：reset 当前可从 exact v60 提取 allowlist，旧源恢复仍受固定目标版本 gate
 拒绝。不得用手工改 `user_version`、删表或默默丢弃配置绕过。reset 不保留 notification facts、Browser history/download
-records、Agent templates、工作流模板/实例/草稿、本机 Token 统计和 FileChange 运行/审计状态。详见
+records、Agent templates、组织模板/实例/草稿、本机 Token 统计和 FileChange 运行/审计状态。详见
 [恢复 Runbook](../operations/recovery-runbook.md)。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管

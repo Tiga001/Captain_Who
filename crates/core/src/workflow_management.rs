@@ -20,6 +20,7 @@ pub struct Instance {
     pub id: String,
     pub template_id: String,
     pub template_revision: u64,
+    pub definition: Definition,
     pub name: String,
     pub color: String,
     /// Destination only for automatically created conversations; bindings remain cross-project.
@@ -31,21 +32,6 @@ pub struct Instance {
     pub needs_review: bool,
     pub running: bool,
     pub enabled: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UsageInstance {
-    pub id: String,
-    pub name: String,
-    pub running: bool,
-    pub project_names: Vec<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Usage {
-    pub template_id: String,
-    pub usage_revision: String,
-    pub instances: Vec<UsageInstance>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -76,14 +62,18 @@ pub enum Request {
     ListInstances {},
     SaveInstance {
         id: String,
-        template_id: String,
+        #[serde(default)]
+        template_id: Option<String>,
+        #[serde(default)]
+        definition: Option<Definition>,
         name: String,
         color: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
         bindings: Vec<BindingInput>,
         expected_revision: u64,
-        expected_template_revision: u64,
+        #[serde(default)]
+        expected_template_revision: Option<u64>,
     },
     SetInstanceEnabled {
         id: String,

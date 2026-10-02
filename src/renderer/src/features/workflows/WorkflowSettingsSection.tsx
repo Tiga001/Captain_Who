@@ -18,15 +18,17 @@ import type {
   WorkflowResponse,
   WorkflowEditingDraft,
   WorkflowInvalidRecord,
-  WorkflowInvalidDraft,
-  WorkflowTemplateUsage
+  WorkflowInvalidDraft
 } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { Tooltip } from '../../components/overlay/Tooltip'
-import { WorkflowTemplateSaveDialog } from './WorkflowTemplateSaveDialog'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { requestWorkflows } from './workflowClient'
-import { workflowErrorDetail } from './workflowErrors'
+import {
+  workflowOperationError,
+  type WorkflowErrorOperation,
+  type WorkflowOperationError
+} from './workflowErrors'
 import { createWorkflow } from './workflowAuthoring'
 import { workflowText } from './workflowText'
 import { WorkflowGraphEditor } from './WorkflowGraphEditor'
@@ -45,19 +47,6 @@ import {
   type WorkflowUpdate
 } from './workflowHistory'
 import './workflows.css'
-
-function templateUsageNames(
-  usages: WorkflowTemplateUsage[] | undefined,
-  templateId: string
-): string[] {
-  return [
-    ...new Set(
-      (usages?.find((item) => item.templateId === templateId)?.instances ?? [])
-        .map((instance) => instance.name.trim())
-        .filter(Boolean)
-    )
-  ]
-}
 
 type WorkflowDeleteTarget = {
   kind: 'template' | 'draft'
@@ -86,7 +75,6 @@ export function WorkflowSettingsSection({
   const [editingDrafts, setEditingDrafts] = useState<WorkflowEditingDraft[]>([])
   const [draftRevision, setDraftRevision] = useState(0)
   const [draftNotice, setDraftNotice] = useState<'stashed' | 'restoredDraft' | null>(null)
-  const [usagePrompt, setUsagePrompt] = useState<WorkflowTemplateUsage | null>(null)
   const [revision, setRevision] = useState(0)
   const [baseline, setBaseline] = useState('')
   const [tab, setTab] = useState<'details' | 'structure'>('details')
@@ -95,16 +83,13 @@ export function WorkflowSettingsSection({
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
-  const [error, setError] = useState(false)
-  const [errorDetail, setErrorDetail] = useState('')
+  const [error, setError] = useState<WorkflowOperationError | null>(null)
   const [loadFailure, setLoadFailure] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [saveIssues, setSaveIssues] = useState<WorkflowRecord | null>(null)
   const [editorHidden, setEditorHidden] = useState(false)
   const afterClose = useRef<(() => void) | undefined>(undefined)
   const [pendingDelete, setPendingDelete] = useState<WorkflowDeleteTarget | null>(null)
-  const [usages, setUsages] = useState<WorkflowTemplateUsage[]>([])
-  const [deleteBlockedNames, setDeleteBlockedNames] = useState<string[] | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const sequence = useRef(0)
   const tabId = useId()
@@ -128,9 +113,8 @@ export function WorkflowSettingsSection({
   const reload = useCallback(async () => {
     const request = ++sequence.current
     setLoading(true)
-    setError(false)
     setLoadFailure(false)
-    setErrorDetail('')
+    setError(null)
     setConflict(false)
     try {
       const result = await requestWorkflows({ operation: 'list' })
@@ -139,13 +123,11 @@ export function WorkflowSettingsSection({
         setEditingDrafts(result.drafts ?? [])
         setInvalidRecords(result.invalidRecords ?? [])
         setInvalidDrafts(result.invalidDrafts ?? [])
-        setUsages(result.usages ?? [])
       }
     } catch (loadError) {
       if (request === sequence.current) {
-        setError(true)
         setLoadFailure(true)
-        setErrorDetail(workflowErrorDetail(loadError))
+        setError(workflowOperationError(loadError, 'load'))
       }
     } finally {
       if (request === sequence.current) setLoading(false)
@@ -181,10 +163,8 @@ export function WorkflowSettingsSection({
       setRevision(storedDraft?.baseRevision ?? record?.revision ?? 0)
       setDraftRevision(storedDraft?.revision ?? 0)
       setDraftNotice(storedDraft ? 'restoredDraft' : null)
-      setUsagePrompt(null)
       if (!loadFailure) {
-        setError(false)
-        setErrorDetail('')
+        setError(null)
       }
       setConflict(false)
       setEditorHidden(false)
@@ -229,27 +209,11 @@ export function WorkflowSettingsSection({
     setEditingDrafts(response.drafts ?? [])
     setInvalidRecords(response.invalidRecords ?? [])
     setInvalidDrafts(response.invalidDrafts ?? [])
-    setUsages(response.usages ?? [])
   }
-  const handleSaveError = async (saveError: unknown) => {
-    const message =
-      saveError && typeof saveError === 'object' && 'message' in saveError
-        ? String(saveError.message)
-        : ''
-    if (draft && /workflow_template_running|workflow_usage_changed/.test(message)) {
-      try {
-        const response = await requestWorkflows({ operation: 'list' })
-        acceptResponse(response)
-        const usage = response.usages?.find((item) => item.templateId === draft.id)
-        if (usage?.instances.length) {
-          setUsagePrompt(usage)
-          return
-        }
-      } catch {
-        /* Keep the edited definition when a refresh also fails. */
-      }
-    }
-    setUsagePrompt(null)
+  const handleSaveError = async (
+    saveError: unknown,
+    operation: WorkflowErrorOperation = 'save'
+  ) => {
     setConflict(
       Boolean(
         saveError &&
@@ -258,29 +222,22 @@ export function WorkflowSettingsSection({
         saveError.code === -32009
       )
     )
-    setError(true)
-    setErrorDetail(workflowErrorDetail(saveError))
+    setError(workflowOperationError(saveError, operation))
   }
-  const publish = async (
-    saving: WorkflowDefinition,
-    expectedRevision: number,
-    expectedUsageRevision?: string
-  ) => {
+  const publish = async (saving: WorkflowDefinition, expectedRevision: number) => {
     if (busyRef.current) return
     setMutationBusy(true)
-    setError(false)
     setLoadFailure(false)
-    setErrorDetail('')
+    setError(null)
     try {
       const response = await requestWorkflows({
         operation: 'save',
         definition: saving,
         expectedRevision,
-        ...(expectedRevision > 0 ? { expectedDraftRevision: draftRevision } : {}),
-        ...(expectedUsageRevision ? { expectedUsageRevision } : {})
+        ...(expectedRevision > 0 ? { expectedDraftRevision: draftRevision } : {})
       })
       const saved = response.records.find((record) => record.definition.id === saving.id)
-      if (!saved) throw new Error('Saved workflow is missing from response')
+      if (!saved) throw new Error('Saved organization is missing from response')
       acceptResponse(response)
       if (saving.id !== draft?.id) reset(saving)
       else checkpoint()
@@ -289,7 +246,6 @@ export function WorkflowSettingsSection({
       setDraftRevision(0)
       setDraftNotice(null)
       setConflict(false)
-      setUsagePrompt(null)
       setSaveIssues(saved.issues.length ? saved : null)
     } catch (saveError) {
       await handleSaveError(saveError)
@@ -299,27 +255,7 @@ export function WorkflowSettingsSection({
   }
   const save = async () => {
     if (!draft || busyRef.current || conflict || invalidEditingDraft) return
-    if (revision === 0) {
-      await publish(draft, revision)
-      return
-    }
-    setMutationBusy(true)
-    setError(false)
-    setLoadFailure(false)
-    setErrorDetail('')
-    let usage: WorkflowTemplateUsage | undefined
-    try {
-      const response = await requestWorkflows({ operation: 'list' })
-      acceptResponse(response)
-      usage = response.usages?.find((item) => item.templateId === draft.id)
-    } catch (saveError) {
-      await handleSaveError(saveError)
-      return
-    } finally {
-      setMutationBusy(false)
-    }
-    if (usage?.instances.length) setUsagePrompt(usage)
-    else await publish(draft, revision, usage?.usageRevision)
+    await publish(draft, revision)
   }
   const copyName = (name: string) => {
     const base = name || text('create')
@@ -339,39 +275,11 @@ export function WorkflowSettingsSection({
       0
     )
   }
-  const stash = async () => {
-    if (!draft || busyRef.current) return
-    setMutationBusy(true)
-    setError(false)
-    setLoadFailure(false)
-    setErrorDetail('')
-    try {
-      const response = await requestWorkflows({
-        operation: 'saveDraft',
-        definition: draft,
-        expectedRevision: revision,
-        expectedDraftRevision: draftRevision
-      })
-      const savedDraft = response.drafts?.find((item) => item.definition.id === draft.id)
-      if (!savedDraft) throw new Error('Saved editing draft is missing from response')
-      acceptResponse(response)
-      checkpoint()
-      setDraftRevision(savedDraft.revision)
-      setBaseline(workflowContentKey(draft))
-      setDraftNotice('stashed')
-      setUsagePrompt(null)
-    } catch (saveError) {
-      await handleSaveError(saveError)
-    } finally {
-      setMutationBusy(false)
-    }
-  }
   const duplicate = async (record: WorkflowRecord) => {
     if (busyRef.current) return
     setMutationBusy(true)
-    setError(false)
     setLoadFailure(false)
-    setErrorDetail('')
+    setError(null)
     try {
       acceptResponse(
         await requestWorkflows({
@@ -383,7 +291,7 @@ export function WorkflowSettingsSection({
         })
       )
     } catch (saveError) {
-      await handleSaveError(saveError)
+      await handleSaveError(saveError, 'duplicate')
     } finally {
       setMutationBusy(false)
     }
@@ -396,9 +304,7 @@ export function WorkflowSettingsSection({
       redo,
       editing,
       busy,
-      modal: Boolean(
-        saveIssues || pendingDelete || confirmDiscard || usagePrompt || deleteBlockedNames
-      )
+      modal: Boolean(error || saveIssues || pendingDelete || confirmDiscard)
     }
   })
   useEffect(() => {
@@ -432,22 +338,44 @@ export function WorkflowSettingsSection({
     return () => window.removeEventListener('keydown', keydown)
   }, [])
 
+  const nameError =
+    error?.kind === 'duplicate_member_name'
+      ? 'duplicateMemberName'
+      : error?.kind === 'duplicate_department_name'
+        ? 'duplicateDepartmentName'
+        : error?.kind === 'department_name_separator'
+          ? 'departmentNameSeparator'
+          : null
+  const configurationError = error?.operation === 'save' && error.kind === 'configuration'
   const errorMessage = error ? (
-    <div className="workflow-error workflow-operation-error" role="alert">
-      {text(conflict ? (editing ? 'conflict' : 'conflictReload') : 'error')}
-      {!editing || loadFailure ? (
-        <button className="workflow-button" onClick={() => void reload()} type="button">
-          <RefreshCw aria-hidden="true" />
-          {text('retry')}
-        </button>
-      ) : null}
-      {errorDetail ? (
-        <details className="workflow-error-detail">
-          <summary>{text('errorDetails')}</summary>
-          <pre>{errorDetail}</pre>
-        </details>
-      ) : null}
-    </div>
+    <ConfirmationDialog
+      title={text(
+        nameError
+          ? `${nameError}Title`
+          : configurationError
+            ? 'configurationErrorTitle'
+            : `${error.operation}ErrorTitle`
+      )}
+      description={text(
+        conflict
+          ? editing
+            ? 'conflict'
+            : 'conflictReload'
+          : nameError
+            ? `${nameError}Hint`
+            : configurationError
+              ? 'configurationErrorHint'
+              : `${error.operation}ErrorHint`
+      )}
+      dialogRole="alertdialog"
+      cancelLabel={text('close')}
+      confirmLabel={text('acknowledge')}
+      confirmVariant="primary"
+      showCancelButton={false}
+      restoreFocusRef={editing && !conflict ? saveButtonRef : createButtonRef}
+      onCancel={() => setError(null)}
+      onConfirm={() => setError(null)}
+    />
   ) : null
 
   return (
@@ -507,6 +435,17 @@ export function WorkflowSettingsSection({
               </button>
             </div>
             <div className="workflow-page-header__actions">
+              {loadFailure ? (
+                <button
+                  className="workflow-button"
+                  type="button"
+                  disabled={loading || busy}
+                  onClick={() => void reload()}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  {text('retry')}
+                </button>
+              ) : null}
               <button
                 className="workflow-icon-button"
                 type="button"
@@ -549,7 +488,6 @@ export function WorkflowSettingsSection({
               </button>
             </div>
           </header>
-          {errorMessage}
           {invalidEditingDraft ? (
             <div className="workflow-draft-notice workflow-draft-notice--unavailable" role="status">
               <span>{text('unavailableDraftEditing')}</span>
@@ -665,25 +603,37 @@ export function WorkflowSettingsSection({
         </>
       ) : (
         <>
-          {errorMessage}
           {renderSettingsNodes(workflowLibrarySettings, () => (
             <section className="settings-list-section workflows-settings__library">
               <div className="workflows-settings__heading">
                 <h1>{text('title')}</h1>
-                <button
-                  ref={createButtonRef}
-                  className="workflow-button workflows-settings__create"
-                  type="button"
-                  onClick={() => open()}
-                  disabled={loading || busy}
-                >
-                  <Plus aria-hidden="true" />
-                  {text('create')}
-                </button>
+                <div className="workflow-actions">
+                  {loadFailure || conflict ? (
+                    <button
+                      className="workflow-button"
+                      type="button"
+                      disabled={loading || busy}
+                      onClick={() => void reload()}
+                    >
+                      <RefreshCw aria-hidden="true" />
+                      {text('retry')}
+                    </button>
+                  ) : null}
+                  <button
+                    ref={createButtonRef}
+                    className="workflow-button workflows-settings__create"
+                    type="button"
+                    onClick={() => open()}
+                    disabled={loading || busy}
+                  >
+                    <Plus aria-hidden="true" />
+                    {text('create')}
+                  </button>
+                </div>
               </div>
               {loading ? <p role="status">{text('loading')}</p> : null}
               {!loading &&
-              !error &&
+              !loadFailure &&
               records.length === 0 &&
               invalidRecords.length === 0 &&
               invalidDrafts.length === 0 ? (
@@ -795,21 +745,7 @@ export function WorkflowSettingsSection({
           ))}
         </>
       )}
-      {usagePrompt ? (
-        <WorkflowTemplateSaveDialog
-          usage={usagePrompt}
-          text={text}
-          busy={busy}
-          onCancel={() => {
-            if (!busyRef.current) setUsagePrompt(null)
-          }}
-          onPublish={() => {
-            if (draft) void publish(draft, revision, usagePrompt.usageRevision)
-          }}
-          onCopy={() => void saveCopy()}
-          onStash={() => void stash()}
-        />
-      ) : null}
+      {errorMessage}
       {saveIssues ? (
         <WorkflowIssues
           graph={saveIssues.definition}
@@ -835,24 +771,6 @@ export function WorkflowSettingsSection({
           }}
         />
       ) : null}
-      {deleteBlockedNames ? (
-        <ConfirmationDialog
-          title={text('deleteBlockedTitle')}
-          description={
-            deleteBlockedNames.length
-              ? `${text('deleteBlockedInUse')}\n${deleteBlockedNames.map((name) => `• ${name}`).join('\n')}`
-              : text('deleteBlockedInUseFallback')
-          }
-          descriptionClassName="workflow-save-issues-description"
-          dialogRole="alertdialog"
-          cancelLabel={text('close')}
-          confirmLabel={text('acknowledge')}
-          confirmVariant="primary"
-          showCancelButton={false}
-          onCancel={() => setDeleteBlockedNames(null)}
-          onConfirm={() => setDeleteBlockedNames(null)}
-        />
-      ) : null}
       {pendingDelete ? (
         <ConfirmationDialog
           title={text(pendingDelete.kind === 'draft' ? 'deleteDraftTitle' : 'deleteTitle')}
@@ -864,9 +782,8 @@ export function WorkflowSettingsSection({
             busyRef.current = true
             onSavingChange?.(true)
             setBusy(true)
-            setError(false)
             setLoadFailure(false)
-            setErrorDetail('')
+            setError(null)
             setConflict(false)
             try {
               const response = await requestWorkflows(
@@ -893,24 +810,7 @@ export function WorkflowSettingsSection({
                 }
               }
             } catch (deleteError) {
-              const message =
-                deleteError && typeof deleteError === 'object' && 'message' in deleteError
-                  ? String(deleteError.message)
-                  : ''
-              const templateId = pendingDelete.id
               setPendingDelete(null)
-              if (message.includes('workflow_template_in_use')) {
-                let names = templateUsageNames(usages, templateId)
-                try {
-                  const response = await requestWorkflows({ operation: 'list' })
-                  acceptResponse(response)
-                  names = templateUsageNames(response.usages, templateId)
-                } catch {
-                  // The conflict already proves the template is in use.
-                }
-                setDeleteBlockedNames(names)
-                return
-              }
               setConflict(
                 Boolean(
                   deleteError &&
@@ -919,8 +819,7 @@ export function WorkflowSettingsSection({
                   deleteError.code === -32009
                 )
               )
-              setError(true)
-              setErrorDetail(workflowErrorDetail(deleteError))
+              setError(workflowOperationError(deleteError, 'delete'))
             } finally {
               busyRef.current = false
               onSavingChange?.(false)

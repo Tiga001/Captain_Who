@@ -1,4 +1,4 @@
-//! Host coordinator for independent conversation workflow deliveries.
+//! Host coordinator for independent conversation organization mail deliveries.
 //! The existing root Turn owns execution; this module only claims durable inputs and supplies
 //! collaborator text at a safe sampling boundary. It never turns that text into human authority.
 use super::*;
@@ -8,8 +8,9 @@ use mycopilot_core::workflow_execution::{
     ConversationSnapshot, Input, MutationRequest, RuntimeSnapshot, SendReceipt, SendRequest,
 };
 use mycopilot_core::{
-    AgentWorkflowDelivery, AgentWorkflowInbox, WorkflowMutationInvocation, WorkflowRuntimeHost,
-    WorkflowSendInvocation,
+    AgentWorkflowDelivery, AgentWorkflowInbox, OrganizationEditInvocation,
+    OrganizationEditReceiptQuery, WorkflowMailReceipt, WorkflowMailReceiptQuery,
+    WorkflowMutationInvocation, WorkflowRuntimeHost, WorkflowSendInvocation,
 };
 use serde_json::json;
 
@@ -30,6 +31,8 @@ struct StoredWorkflowRuntime {
     cancellation: AgentCancellationToken,
     notifications: CoreServerNotificationSender,
     initial_input_id: Option<String>,
+    current_model_id: Option<String>,
+    effective_permissions: mycopilot_core::AgentPermissions,
 }
 impl StoredWorkflowRuntime {
     fn validate_owner(&self) -> AgentResult<()> {
@@ -43,7 +46,9 @@ impl StoredWorkflowRuntime {
             .get(&self.run_id)
             .is_some_and(|token| token.shares_state_with(&self.cancellation))
         {
-            return Err(AgentError::new("Workflow execution segment was retired."));
+            return Err(AgentError::new(
+                "Organization execution segment was retired.",
+            ));
         }
         let root = self
             .service
@@ -52,7 +57,7 @@ impl StoredWorkflowRuntime {
             .map_err(|e| AgentError::new(e.to_string()))?;
         if root.is_some_and(|root| root.parent_agent_id.is_some()) {
             return Err(AgentError::new(
-                "Workflow tools are only available to independent root conversations.",
+                "Organization tools are only available to independent root conversations.",
             ));
         }
         self.service
@@ -65,6 +70,166 @@ impl StoredWorkflowRuntime {
     }
 }
 impl WorkflowRuntimeHost for StoredWorkflowRuntime {
+    fn mail_receipt(
+        &self,
+        query: WorkflowMailReceiptQuery,
+    ) -> AgentResult<Option<WorkflowMailReceipt>> {
+        if query.conversation_id != self.conversation_id
+            || query.run_id != self.run_id
+            || query.assistant_message_id != self.assistant_message_id
+        {
+            return Err(AgentError::new(
+                "Organization mail receipt does not match its Host owner.",
+            ));
+        }
+        self.validate_owner()?;
+        let receipt = self
+            .service
+            .storage
+            .workflow_mail_receipt(
+                &self.conversation_id,
+                &self.run_id,
+                &query.tool_call_id,
+                &query.call,
+            )
+            .map_err(AgentError::new)?;
+        let instance = match &receipt {
+            Some(WorkflowMailReceipt::Send(receipt)) => Some(receipt.instance_id.as_str()),
+            Some(WorkflowMailReceipt::Mutation(receipt)) => receipt["instanceId"].as_str(),
+            None => None,
+        };
+        if let Some(instance) = instance {
+            self.service
+                .publish_workflow_runtime(instance, &self.notifications);
+        }
+        Ok(receipt)
+    }
+    fn organization_edit_receipt(
+        &self,
+        query: OrganizationEditReceiptQuery,
+    ) -> AgentResult<Option<mycopilot_core::organization_personnel::Receipt>> {
+        if query.conversation_id != self.conversation_id
+            || query.run_id != self.run_id
+            || query.assistant_message_id != self.assistant_message_id
+        {
+            return Err(AgentError::new(
+                "Organization receipt does not match its Host owner.",
+            ));
+        }
+        self.validate_owner()?;
+        let receipt = self
+            .service
+            .storage
+            .organization_edit_receipt(
+                &self.conversation_id,
+                &self.run_id,
+                &query.tool_call_id,
+                &query.input,
+            )
+            .map_err(AgentError::new)?;
+        if let Some(receipt) = &receipt {
+            // The original commit may have survived a crash before its UI notification.
+            self.service
+                .publish_workflow_runtime(&receipt.instance_id, &self.notifications);
+        }
+        Ok(receipt)
+    }
+    fn edit_organization(
+        &self,
+        invocation: OrganizationEditInvocation,
+    ) -> AgentResult<mycopilot_core::organization_personnel::Receipt> {
+        if invocation.conversation_id != self.conversation_id
+            || invocation.run_id != self.run_id
+            || invocation.assistant_message_id != self.assistant_message_id
+        {
+            return Err(AgentError::new(
+                "Organization edit does not match its Host owner.",
+            ));
+        }
+        self.validate_owner()?;
+        // Model/permission edits update the target's next-turn defaults. Share admission with
+        // provider transitions and manual compaction, but leave ordinary roster edits unblocked.
+        let admission = self
+            .service
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Two dispatches may both observe the first receipt lookup as empty. Serialize this
+        // second lookup with commit so only a genuinely new edit publishes preference updates.
+        if let Some(receipt) = self
+            .service
+            .storage
+            .organization_edit_receipt(
+                &self.conversation_id,
+                &self.run_id,
+                &invocation.tool_call_id,
+                &invocation.model_input.clone().unwrap_or(
+                    serde_json::to_value(&invocation.input)
+                        .map_err(|e| AgentError::new(e.to_string()))?,
+                ),
+            )
+            .map_err(AgentError::new)?
+        {
+            self.service
+                .publish_workflow_runtime(&receipt.instance_id, &self.notifications);
+            return Ok(receipt);
+        }
+        // These values belong to the admitted execution segment. Composer selections can change
+        // while the model is thinking and must never grant this call more authority.
+        let context = organization_edit_context(
+            self.current_model_id.as_deref(),
+            self.effective_permissions,
+            &self
+                .service
+                .storage
+                .load_ui_preferences()
+                .map_err(AgentError::new)?,
+        )?;
+        self.service.check_organization_edit_configuration(
+            &self.conversation_id,
+            &self.run_id,
+            &invocation.input,
+        )?;
+        // Serialize with stop through the same lock as mail mutations. The storage transaction
+        // independently checks current membership, administrator scope, rank and revision.
+        let tokens = self
+            .service
+            .cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.cancellation.check()?;
+        if !tokens
+            .get(&self.run_id)
+            .is_some_and(|token| token.shares_state_with(&self.cancellation))
+        {
+            return Err(AgentError::new(
+                "Organization execution segment was retired.",
+            ));
+        }
+        let receipt = self
+            .service
+            .storage
+            .organization_edit(&mycopilot_core::organization_personnel::Request {
+                conversation_id: self.conversation_id.clone(),
+                source_run_id: self.run_id.clone(),
+                tool_call_id: invocation.tool_call_id,
+                execution_version: invocation.execution_version,
+                expected_revision: invocation.expected_revision,
+                input: invocation.input,
+                model_input: invocation.model_input,
+                context,
+            })
+            .map_err(AgentError::new)?;
+        drop(tokens);
+        self.service.publish_workflow_runtime_with_preferences(
+            &receipt.instance_id,
+            organization_preference_updates(&receipt),
+            &self.notifications,
+        );
+        drop(admission);
+        self.service.workflow_readiness_changed(None);
+        Ok(receipt)
+    }
     fn snapshot(&self) -> AgentResult<Option<ConversationSnapshot>> {
         self.validate_owner()?;
         self.service
@@ -79,9 +244,38 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             .storage
             .workflow_execution_state_for_run(&self.conversation_id, &self.run_id, &query)
             .map_err(AgentError::new)?;
-        self.service
-            .enrich_workflow_awareness(&mut state)
-            .map_err(AgentError::new)?;
+        if query.view == mycopilot_core::workflow_awareness::StateView::Configuration {
+            // Storage has already authorized this explicit administrator query. Reuse the same
+            // executable-model projection as settings and organization edit, never expose keys.
+            let models = self
+                .service
+                .storage
+                .load_model_projection()
+                .map_err(AgentError::new)?;
+            state["configuration"]["availableModels"] = json!(models
+                .into_iter()
+                .flat_map(|projection| projection.models)
+                .filter(|entry| entry.execution.is_available())
+                .map(
+                    |entry| json!({"modelConfigId":entry.model.id,"name":entry.model.display_name})
+                )
+                .collect::<Vec<_>>());
+            let context = organization_edit_context(
+                self.current_model_id.as_deref(),
+                self.effective_permissions,
+                &self
+                    .service
+                    .storage
+                    .load_ui_preferences()
+                    .map_err(AgentError::new)?,
+            )?;
+            state["configuration"]["callerCurrentRun"] = json!({"modelConfigId":context.current_model_id,
+                "inheritedPermissionMode":context.default_permission_mode,"allowedPermissionModes":context.allowed_permission_modes});
+        } else {
+            self.service
+                .enrich_workflow_awareness(&mut state)
+                .map_err(AgentError::new)?;
+        }
         Ok(state)
     }
     fn mailbox(&self, query: MailboxQuery) -> AgentResult<Value> {
@@ -109,7 +303,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             || invocation.assistant_message_id != self.assistant_message_id
         {
             return Err(AgentError::new(
-                "Workflow mail operation does not match its Host owner.",
+                "Organization mail operation does not match its Host owner.",
             ));
         }
         self.validate_owner()?;
@@ -123,7 +317,9 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             .get(&self.run_id)
             .is_some_and(|token| token.shares_state_with(&self.cancellation))
         {
-            return Err(AgentError::new("Workflow execution segment was retired."));
+            return Err(AgentError::new(
+                "Organization execution segment was retired.",
+            ));
         }
         let receipt = self
             .service
@@ -153,7 +349,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             || invocation.assistant_message_id != self.assistant_message_id
         {
             return Err(AgentError::new(
-                "Workflow sender does not match the Host-bound conversation.",
+                "Organization sender does not match the Host-bound conversation.",
             ));
         }
         self.validate_owner()?;
@@ -168,7 +364,9 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             .get(&self.run_id)
             .is_some_and(|token| token.shares_state_with(&self.cancellation))
         {
-            return Err(AgentError::new("Workflow execution segment was retired."));
+            return Err(AgentError::new(
+                "Organization execution segment was retired.",
+            ));
         }
         let receipt = self
             .service
@@ -179,6 +377,8 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
                 tool_call_id: invocation.tool_call_id,
                 execution_version: invocation.execution_version,
                 messages: invocation.messages,
+                model_input: invocation.model_input,
+                recipient_versions: invocation.recipient_versions,
             })
             .map_err(AgentError::new)?;
         drop(tokens);
@@ -198,7 +398,7 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
             || request.assistant_message_id != self.assistant_message_id
         {
             return Err(AgentError::new(
-                "Workflow input boundary does not match its Host owner.",
+                "Organization input boundary does not match its Host owner.",
             ));
         }
         self.validate_owner()?;
@@ -224,7 +424,7 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
             }) && !inputs.iter().any(|input| &input.id == id)
             {
                 return Err(AgentError::new(
-                    "Workflow mail was stopped or recalled before the first model request.",
+                    "Organization mail was stopped or recalled before the first model request.",
                 ));
             }
         }
@@ -246,11 +446,13 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
                 .storage
                 .load_conversation(&self.conversation_id)
                 .map_err(AgentError::new)?
-                .ok_or_else(|| AgentError::new("Workflow recipient conversation was removed."))?;
+                .ok_or_else(|| {
+                    AgentError::new("Organization recipient conversation was removed.")
+                })?;
             let delivery_id = input
                 .delivery_id
                 .clone()
-                .ok_or_else(|| AgentError::new("Workflow input has no delivery identity."))?;
+                .ok_or_else(|| AgentError::new("Organization input has no delivery identity."))?;
             if !conversation
                 .messages
                 .iter()
@@ -293,7 +495,159 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
     }
 }
 
+fn organization_preference_updates(
+    receipt: &mycopilot_core::organization_personnel::Receipt,
+) -> Vec<mycopilot_core::workflow_execution::PreferenceUpdate> {
+    receipt
+        .changes
+        .iter()
+        .filter_map(|change| {
+            if change.action != "update_member" || change.entity_type != "member" {
+                return None;
+            }
+            let conversation_id = change.conversation_id.as_ref()?;
+            let model_id = change
+                .fields
+                .iter()
+                .find(|field| field.field == "modelConfigId" && field.before != field.after)
+                .and_then(|field| field.after.as_str())
+                .map(str::to_owned);
+            let permission_mode = change
+                .fields
+                .iter()
+                .find(|field| field.field == "permissionMode" && field.before != field.after)
+                .and_then(|field| serde_json::from_value(field.after.clone()).ok());
+            if model_id.is_none() && permission_mode.is_none() {
+                return None;
+            }
+            Some(mycopilot_core::workflow_execution::PreferenceUpdate {
+                node_id: change.entity_id.clone(),
+                conversation_id: conversation_id.clone(),
+                organization_revision: receipt.organization_revision,
+                model_id,
+                permission_mode,
+            })
+        })
+        .collect()
+}
+
+fn organization_edit_context(
+    model_id: Option<&str>,
+    effective_permissions: mycopilot_core::AgentPermissions,
+    preferences: &mycopilot_core::storage::models::UiPreferencesRecord,
+) -> AgentResult<mycopilot_core::organization_personnel::TrustedEditContext> {
+    use mycopilot_core::workflow::WorkflowPermissionMode;
+    use mycopilot_protocol_rs::AutomationPermissionModeDto;
+    let current_model_id = model_id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AgentError::new("organization_current_model_unavailable"))?
+        .to_owned();
+    let mut allowed_permission_modes = Vec::new();
+    let mut default_permission_mode = None;
+    for (mode, wire) in [
+        (
+            WorkflowPermissionMode::Default,
+            AutomationPermissionModeDto::Default,
+        ),
+        (
+            WorkflowPermissionMode::Custom,
+            AutomationPermissionModeDto::Custom,
+        ),
+        (
+            WorkflowPermissionMode::Full,
+            AutomationPermissionModeDto::Full,
+        ),
+    ] {
+        let Ok(resolved) =
+            crate::application::automation::permissions::resolve_automation_permissions(
+                wire,
+                mycopilot_protocol_rs::AUTOMATION_PERMISSION_MODE_VERSION,
+                preferences,
+            )
+        else {
+            continue;
+        };
+        if resolved.permissions.meet(effective_permissions) == resolved.permissions {
+            if default_permission_mode.is_none() && resolved.permissions == effective_permissions {
+                default_permission_mode = Some(mode.clone());
+            }
+            allowed_permission_modes.push(mode);
+        }
+    }
+    Ok(mycopilot_core::organization_personnel::TrustedEditContext {
+        current_model_id,
+        default_permission_mode,
+        allowed_permission_modes,
+        permission_settings_fingerprint: serde_json::to_string(&(
+            preferences.full_permission_enabled,
+            preferences.custom_permission_enabled,
+            preferences.custom_permissions,
+        ))
+        .map_err(|error| AgentError::new(error.to_string()))?,
+    })
+}
+
 impl AgentService {
+    // Caller holds conversation_admission until the organization transaction commits.
+    fn check_organization_edit_configuration(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        input: &mycopilot_core::organization_personnel::Input,
+    ) -> AgentResult<()> {
+        use mycopilot_core::organization_personnel::Action;
+        let targets: Vec<&str> = input
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                Action::UpdateMember {
+                    member_id,
+                    model_config_id,
+                    permission_mode,
+                    ..
+                } if model_config_id.is_some() || permission_mode.is_some() => {
+                    Some(member_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let snapshot = self
+            .storage
+            .workflow_execution_snapshot_for_run(conversation_id, run_id)
+            .map_err(AgentError::new)?
+            .ok_or_else(|| AgentError::new("organization_management_denied"))?;
+        let instance = self
+            .storage
+            .workflow_request(mycopilot_core::workflow::Request::Manage(
+                mycopilot_core::workflow_management::Request::ListInstances {},
+            ))
+            .map_err(|error| AgentError::new(error.to_string()))?
+            .instances
+            .into_iter()
+            .find(|instance| instance.id == snapshot.instance_id)
+            .ok_or_else(|| AgentError::new("organization_management_denied"))?;
+        for binding in instance
+            .bindings
+            .iter()
+            .filter(|binding| targets.contains(&binding.node_id.as_str()))
+        {
+            if self
+                .provider_transitions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(&binding.conversation_id)
+            {
+                return Err(AgentError::new("workflow_configuration_busy"));
+            }
+            self.ensure_no_manual_context_compaction(&binding.conversation_id)
+                .map_err(|_| AgentError::new("workflow_configuration_busy"))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn attach_workflow_runtime(
         &self,
         services: AgentRuntimeHostServices,
@@ -352,6 +706,8 @@ impl AgentService {
             cancellation: token.clone(),
             notifications,
             initial_input_id,
+            current_model_id: input.model_config_id.clone(),
+            effective_permissions: input.context.as_ref().expect("checked above").permissions,
         });
         services
             .with_workflow_runtime(host.clone())
@@ -375,39 +731,50 @@ impl AgentService {
         self.storage
             .workflow_execution_node_messages(instance_id, node_id, before)
     }
-    pub(crate) fn complete_workflow_user_input(
-        &self,
-        instance_id: &str,
-        input_id: &str,
-        notifications: &CoreServerNotificationSender,
-    ) -> Result<RuntimeSnapshot, String> {
-        let input = self
-            .storage
-            .workflow_execution_load_input(input_id)?
-            .ok_or_else(|| "Workflow input was removed.".to_string())?;
-        if input.instance_id != instance_id {
-            return Err("Workflow input belongs to another workflow.".into());
-        }
-        self.storage.workflow_execution_complete_user(input_id)?;
-        self.wake_workflow_deliveries();
-        let snapshot = self.storage.workflow_execution_runtime(instance_id)?;
-        let _ = notifications.send(
-            json!({"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":snapshot}),
-        );
-        Ok(snapshot)
-    }
     pub(super) fn publish_workflow_runtime(
         &self,
         instance_id: &str,
         notifications: &CoreServerNotificationSender,
     ) {
+        self.publish_workflow_runtime_with_preferences(instance_id, Vec::new(), notifications);
+    }
+    fn publish_workflow_runtime_with_preferences(
+        &self,
+        instance_id: &str,
+        preference_updates: Vec<mycopilot_core::workflow_execution::PreferenceUpdate>,
+        notifications: &CoreServerNotificationSender,
+    ) {
         match self.storage.workflow_execution_runtime(instance_id) {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                snapshot.preference_updates = preference_updates;
                 let _ = notifications.send(json!({"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":snapshot}));
             }
-            Err(error) => eprintln!("workflow runtime projection failed: {error}"),
+            Err(error) => eprintln!("organization runtime projection failed: {error}"),
         }
     }
+    pub(super) fn publish_workflow_delivery_timeline(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        after_sequence: Option<u64>,
+        notifications: &CoreServerNotificationSender,
+    ) {
+        match self
+            .storage
+            .workflow_execution_delivery_presentations(conversation_id, assistant_message_id)
+        {
+            Ok(deliveries) => {
+                for delivery in deliveries {
+                    if after_sequence.is_none_or(|sequence| delivery.sequence > sequence) {
+                        let _ = notifications.send(agent_event_notification(delivery.into_event()));
+                    }
+                }
+            }
+            // The durable trace still supports exact recovery on the next conversation reload.
+            Err(error) => eprintln!("organization delivery timeline projection failed: {error}"),
+        }
+    }
+
     pub(super) fn acknowledge_workflow_trace<'a>(
         &self,
         items: impl IntoIterator<Item = &'a mycopilot_core::ConversationTurnTraceItem>,
@@ -467,7 +834,7 @@ impl AgentService {
         {
             Ok(inputs) => inputs,
             Err(error) => {
-                eprintln!("workflow scan failed: {error}");
+                eprintln!("organization scan failed: {error}");
                 self.workflow_retry
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -525,7 +892,7 @@ impl AgentService {
                             .workflow_execution_load_input(&input.id)?
                             .is_some_and(|current| current.status != input.status)
                         {
-                            eprintln!("workflow delivery deferred: {error}");
+                            eprintln!("organization delivery deferred: {error}");
                             self.publish_workflow_runtime(&input.instance_id, &notifications);
                             Ok(None)
                         } else {
@@ -538,7 +905,7 @@ impl AgentService {
                 Ok(reason) => reason,
                 Err(error) => {
                     eprintln!(
-                        "workflow input {} deferred (transient): {error}",
+                        "organization input {} deferred (transient): {error}",
                         candidate.id
                     );
                     Some(RetryReason::Transient)
@@ -584,13 +951,13 @@ impl AgentService {
         let conversation_id = workflow
             .conversation_id
             .as_deref()
-            .ok_or_else(|| "Workflow recipient is not a conversation.".to_string())?;
+            .ok_or_else(|| "Organization recipient is not a conversation.".to_string())?;
         let conversation = self
             .storage
             .load_conversation_meta(conversation_id)?
-            .ok_or_else(|| "Workflow recipient was removed.".to_string())?;
+            .ok_or_else(|| "Organization recipient was removed.".to_string())?;
         if conversation.archived_at.is_some() {
-            return Err("Workflow recipient is archived.".to_string().into());
+            return Err("Organization recipient is archived.".to_string().into());
         }
         let Some(draft) = self.storage.load_composer_draft(conversation_id)? else {
             return Ok(Some(RetryReason::Configuration));
@@ -702,12 +1069,12 @@ impl WorkflowRuntimeHost for WorkflowPreview {
     }
     fn state(&self, _query: StateQuery) -> AgentResult<Value> {
         Err(AgentError::new(
-            "A workflow preview cannot execute model tools.",
+            "An organization preview cannot execute model tools.",
         ))
     }
     fn mailbox(&self, _query: MailboxQuery) -> AgentResult<Value> {
         Err(AgentError::new(
-            "A workflow preview cannot execute model tools.",
+            "An organization preview cannot execute model tools.",
         ))
     }
     fn awareness(&self) -> AgentResult<Value> {
@@ -729,7 +1096,7 @@ impl WorkflowRuntimeHost for WorkflowPreview {
     }
     fn send(&self, _invocation: WorkflowSendInvocation) -> AgentResult<SendReceipt> {
         Err(AgentError::new(
-            "A read-only workflow preview cannot send messages.",
+            "A read-only organization preview cannot send messages.",
         ))
     }
 }
@@ -744,5 +1111,59 @@ impl AgentService {
             conversation_id: conversation_id.into(),
             run_id: run_id.map(str::to_string),
         })
+    }
+}
+
+#[cfg(test)]
+mod organization_permission_tests {
+    use super::*;
+    use mycopilot_core::workflow::WorkflowPermissionMode;
+
+    #[test]
+    fn organization_edit_context_uses_exact_run_grant_and_rejects_unrepresentable_inheritance() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("permissions.sqlite")).unwrap();
+        let mut preferences = storage.load_ui_preferences().unwrap();
+        preferences.full_permission_enabled = true;
+        preferences.custom_permission_enabled = true;
+        preferences.custom_permissions = mycopilot_core::AgentPermissions {
+            read: mycopilot_core::AgentReadPermission::All,
+            write: mycopilot_core::AgentWritePermission::All,
+            ..mycopilot_core::AgentPermissions::default()
+        };
+        let actual = mycopilot_core::AgentPermissions {
+            write: mycopilot_core::AgentWritePermission::WorkspaceOnly,
+            ..mycopilot_core::AgentPermissions::default()
+        };
+        let context =
+            organization_edit_context(Some("actual-local-config"), actual, &preferences).unwrap();
+        assert_eq!(context.current_model_id, "actual-local-config");
+        assert_eq!(
+            context.default_permission_mode,
+            Some(WorkflowPermissionMode::Default)
+        );
+        assert_eq!(
+            context.allowed_permission_modes,
+            vec![WorkflowPermissionMode::Default]
+        );
+        let restricted = organization_edit_context(
+            Some("actual-local-config"),
+            mycopilot_core::AgentPermissions::default(),
+            &preferences,
+        )
+        .unwrap();
+        assert!(restricted.default_permission_mode.is_none());
+        assert!(restricted.allowed_permission_modes.is_empty());
+        preferences.custom_permissions = actual;
+        let same =
+            organization_edit_context(Some("actual-local-config"), actual, &preferences).unwrap();
+        assert!(same
+            .allowed_permission_modes
+            .contains(&WorkflowPermissionMode::Custom));
+        assert_ne!(
+            context.permission_settings_fingerprint,
+            same.permission_settings_fingerprint
+        );
+        assert!(organization_edit_context(None, actual, &preferences).is_err());
     }
 }

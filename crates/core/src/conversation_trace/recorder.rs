@@ -588,7 +588,7 @@ impl ConversationTraceRecorder {
             || delivery.content.trim().is_empty()
             || delivery.created_at < 0
         {
-            return Err("Workflow delivery identity is invalid".into());
+            return Err("Organization mail delivery identity is invalid".into());
         }
         let item = ConversationTurnTraceItem::WorkflowDelivery {
             sequence: delivery.trace_sequence,
@@ -601,7 +601,7 @@ impl ConversationTraceRecorder {
         };
         if let Some(existing) = self.items.iter().find(|item| matches!(item,
             ConversationTurnTraceItem::WorkflowDelivery { input_id, .. } if input_id == &delivery.input_id)) {
-            return if existing == &item { Ok(false) } else { Err("Workflow delivery conflicts with its durable trace".into()) };
+            return if existing == &item { Ok(false) } else { Err("Organization mail delivery conflicts with its durable trace".into()) };
         }
         if self.next_sequence != delivery.trace_sequence
             || matches!(
@@ -609,7 +609,7 @@ impl ConversationTraceRecorder {
                 Some(ConversationTurnTraceItem::ToolCall { .. })
             )
         {
-            return Err("Workflow delivery must follow the exact safe sampling boundary".into());
+            return Err("Organization mail delivery must follow the exact safe sampling boundary".into());
         }
         self.items.push(item);
         self.record_model_message(

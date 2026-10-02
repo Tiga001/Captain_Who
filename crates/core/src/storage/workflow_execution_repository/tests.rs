@@ -4,16 +4,11 @@ use crate::workflow_awareness::MailboxQuery;
 use serde_json::json;
 use std::collections::HashSet;
 
-pub(super) fn fixture(user: bool) -> Connection {
+pub(super) fn fixture() -> Connection {
     let mut c = Connection::open_in_memory().unwrap();
     run_migrations(&c).unwrap();
     let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model","receives":"Artifacts","task":"Review quality","delivers":"Review report"});
-    let mut nodes = vec![agent("a"), agent("b"), agent("c")];
-    if user {
-        nodes.push(
-            json!({"kind":"user","id":"human","name":"Human","x":0,"y":0,"task":"Inspect results"}),
-        );
-    }
+    let nodes = vec![agent("a"), agent("b"), agent("c")];
     let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"Team","background":"Shared background","nodes":nodes,"viewport":{"x":0,"y":0,"zoom":1}});
     let models = HashSet::from(["model".into()]);
     crate::storage::workflow_repository::request(
@@ -42,6 +37,8 @@ pub(super) fn request(c: &Connection, call: &str, messages: &[(&str, &str)]) -> 
     let chat = conversation(c, "a");
     let identity = snapshot_for_run(c, &chat, "run-a").unwrap().unwrap();
     SendRequest {
+        model_input: None,
+        recipient_versions: Default::default(),
         conversation_id: chat,
         source_run_id: "run-a".into(),
         tool_call_id: call.into(),
@@ -95,7 +92,7 @@ fn status(c: &Connection, receipt: &SendReceipt, index: usize) -> MailStatus {
 
 #[test]
 fn workflow_execution_any_member_sends_atomically_and_retry_is_idempotent() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let req = request(&c, "send", &[("b", "first"), ("c", "second")]);
     let receipt = send(&mut c, &req).unwrap();
     let retry = send(&mut c, &req).unwrap();
@@ -123,7 +120,7 @@ fn workflow_execution_any_member_sends_atomically_and_retry_is_idempotent() {
 }
 #[test]
 fn workflow_execution_idle_fifo_and_explicit_accept_are_separate() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(
         &mut c,
         "send",
@@ -159,7 +156,7 @@ fn workflow_execution_idle_fifo_and_explicit_accept_are_separate() {
 }
 #[test]
 fn workflow_execution_completion_requires_durable_context_and_never_regresses() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "work")]);
     start_run(&mut c, "b", "run-b");
     let accept = action(
@@ -213,7 +210,7 @@ fn workflow_execution_completion_requires_durable_context_and_never_regresses() 
 }
 #[test]
 fn workflow_execution_stop_pauses_pending_without_turning_it_into_stopped_mail() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "current"), ("b", "future")]);
     start_run(&mut c, "b", "run-b");
     bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
@@ -229,7 +226,7 @@ fn workflow_execution_stop_pauses_pending_without_turning_it_into_stopped_mail()
 }
 #[test]
 fn workflow_execution_terminal_failure_releases_fifo_and_normal_completion_is_durable() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "fails"), ("b", "next")]);
     start_run(&mut c, "b", "run-b");
     bind_input(&mut c, &receipt.input_ids[0], "run-b", "first").unwrap();
@@ -249,7 +246,7 @@ fn workflow_execution_terminal_failure_releases_fifo_and_normal_completion_is_du
 }
 #[test]
 fn workflow_execution_recall_is_sender_only_and_cannot_win_after_accept() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "retract"), ("b", "already taken")]);
     start_run(&mut c, "b", "run-b");
     start_run(&mut c, "c", "run-c");
@@ -303,7 +300,7 @@ fn workflow_execution_recall_is_sender_only_and_cannot_win_after_accept() {
 }
 #[test]
 fn workflow_execution_recovery_does_not_complete_unproven_claims() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "not received")]);
     start_run(&mut c, "b", "run-b");
     bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
@@ -316,21 +313,8 @@ fn workflow_execution_recovery_does_not_complete_unproven_claims() {
     assert_eq!(status(&c, &receipt, 0), MailStatus::Failed);
 }
 #[test]
-fn workflow_execution_user_completion_is_idempotent_and_does_not_send() {
-    let mut c = fixture(true);
-    let receipt = send_mail(&mut c, "send", &[("human", "Review this")]);
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    complete_user_input(&mut c, &receipt.input_ids[0]).unwrap();
-    complete_user_input(&mut c, &receipt.input_ids[0]).unwrap();
-    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
-    assert_eq!(
-        runtime_snapshot(&c, "instance", None).unwrap().inputs.len(),
-        1
-    );
-}
-#[test]
 fn workflow_execution_epoch_changes_keep_mail_but_rebinding_fences_original_recipient() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "keep me")]);
     c.execute("UPDATE workflow_instances SET template_revision=template_revision+1 WHERE instance_id='instance'",[]).unwrap();
     c.execute(
@@ -368,7 +352,7 @@ fn workflow_execution_epoch_changes_keep_mail_but_rebinding_fences_original_reci
 }
 #[test]
 fn workflow_execution_stop_rejects_new_mutation_but_retry_keeps_success_receipt() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let req = request(&c, "send", &[("b", "delivered")]);
     let receipt = send(&mut c, &req).unwrap();
     let chat = conversation(&c, "a");
@@ -379,7 +363,7 @@ fn workflow_execution_stop_rejects_new_mutation_but_retry_keeps_success_receipt(
 }
 #[test]
 fn workflow_execution_reply_reference_must_belong_to_both_participants() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "question")]);
     let mut req = request(&c, "reply", &[("c", "private reply")]);
     req.messages[0].reply_to_message_id = Some(receipt.messages[0].id.clone());
@@ -393,7 +377,7 @@ fn workflow_execution_terminal_trace_settlement_is_atomic_and_preserves_explicit
         commit_trace_in_connection, get_base_trace_for_message,
     };
     use crate::ConversationTurnTraceTerminalStatus;
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(
         &mut c,
         "send",
@@ -454,7 +438,7 @@ fn workflow_execution_terminal_trace_settlement_is_atomic_and_preserves_explicit
 }
 #[test]
 fn workflow_execution_claim_uses_current_context_without_rewriting_original_envelope() {
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(
         &mut c,
         "send",
@@ -462,7 +446,7 @@ fn workflow_execution_claim_uses_current_context_without_rewriting_original_enve
     );
     let mut definition: Value = serde_json::from_str(
         &c.query_row(
-            "SELECT definition_json FROM workflow_definitions WHERE workflow_id='template'",
+            "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
             [],
             |r| r.get::<_, String>(0),
         )
@@ -470,8 +454,12 @@ fn workflow_execution_claim_uses_current_context_without_rewriting_original_enve
     )
     .unwrap();
     definition["nodes"][1]["name"] = json!("New recipient");
-    c.execute("UPDATE workflow_definitions SET definition_json=?1,revision=revision+1 WHERE workflow_id='template'",[definition.to_string()]).unwrap();
-    c.execute("UPDATE workflow_instances SET name='Renamed workflow',template_revision=template_revision+1 WHERE instance_id='instance'",[]).unwrap();
+    c.execute("UPDATE workflow_instances SET definition_json=?1,revision=revision+1 WHERE instance_id='instance'",[definition.to_string()]).unwrap();
+    c.execute(
+        "UPDATE workflow_instances SET name='Renamed workflow' WHERE instance_id='instance'",
+        [],
+    )
+    .unwrap();
     start_run(&mut c, "b", "run-b");
     bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
     let accept = action(
@@ -486,7 +474,7 @@ fn workflow_execution_claim_uses_current_context_without_rewriting_original_enve
     for id in &receipt.input_ids {
         let input = load_input(&c, id).unwrap().unwrap();
         assert!(input.content.contains("Recipient: New recipient"));
-        assert!(input.content.contains("Workflow: Renamed workflow"));
+        assert!(input.content.contains("Organization: Renamed workflow"));
         assert_eq!(input.messages[0].workflow_name, "Review workflow");
         assert_eq!(input.messages[0].target_node_name, "b");
         prove(&c, id);
@@ -499,7 +487,7 @@ fn workflow_execution_manual_completion_gets_one_later_terminal_refresh_event() 
         get_base_trace_for_message, replace_trace,
     };
     use crate::ConversationTurnTraceTerminalStatus;
-    let mut c = fixture(false);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "send", &[("b", "work before final answer")]);
     start_run(&mut c, "b", "run-b");
     let accept = action(
@@ -566,7 +554,7 @@ fn workflow_execution_snapshot_includes_old_event_references_without_unbounded_h
         get_base_trace_for_message, replace_trace,
     };
     use crate::ConversationTurnTraceTerminalStatus;
-    let mut c = fixture(true);
+    let mut c = fixture();
     let receipt = send_mail(&mut c, "old-mail", &[("b", "private original body")]);
     start_run(&mut c, "b", "run-b");
     let accept = action(
@@ -589,10 +577,29 @@ fn workflow_execution_snapshot_includes_old_event_references_without_unbounded_h
     );
     mutate(&mut c, &complete).unwrap();
     // Completed history is deliberately larger than the normal 128-row monitor window.
+    start_run(&mut c, "c", "run-c");
     for call in ["newer-1", "newer-2"] {
-        let newer = send_mail(&mut c, call, &vec![("human", "other private body"); 80]);
-        for input in newer.input_ids {
-            complete_user_input(&mut c, &input).unwrap();
+        let newer = send_mail(&mut c, call, &vec![("c", "other private body"); 80]);
+        for (index, message) in newer.messages.iter().enumerate() {
+            let accept = action(
+                &c,
+                "c",
+                "run-c",
+                &format!("{call}-{index}-accept"),
+                MutationAction::Accept,
+                std::slice::from_ref(&message.id),
+            );
+            mutate(&mut c, &accept).unwrap();
+            prove(&c, &newer.input_ids[index]);
+            let complete = action(
+                &c,
+                "c",
+                "run-c",
+                &format!("{call}-{index}-complete"),
+                MutationAction::Complete,
+                std::slice::from_ref(&message.id),
+            );
+            mutate(&mut c, &complete).unwrap();
         }
     }
     let boundary = runtime_snapshot(&c, "instance", None).unwrap().sequence;
@@ -623,4 +630,161 @@ fn workflow_execution_snapshot_includes_old_event_references_without_unbounded_h
     let caught_up = runtime_snapshot(&c, "instance", Some(after.sequence)).unwrap();
     assert!(caught_up.events.is_empty());
     assert_eq!(caught_up.inputs.len(), 128);
+}
+
+#[test]
+fn live_instance_edits_refresh_existing_runs_and_isolate_removed_member_identity() {
+    use crate::storage::workflow_repository;
+    let mut c = fixture();
+    start_run(&mut c, "b", "run-b");
+    let a = conversation(&c, "a");
+    let b = conversation(&c, "b");
+    let a_before = snapshot_for_run(&c, &a, "run-a").unwrap().unwrap();
+    let b_before = snapshot_for_run(&c, &b, "run-b").unwrap().unwrap();
+    let pending = send_mail(&mut c, "pending-before-removal", &[("b", "owned by old b")]);
+    let original = workflow_repository::load_instance(&c, "instance")
+        .unwrap()
+        .unwrap();
+    let mut edited = original.definition.clone();
+    edited.nodes[0].rank = 99;
+    edited.nodes[0].management_role = crate::workflow::ManagementRole::OrganizationAdmin;
+    edited.departments.push(crate::workflow::Department {
+        id: "department".into(),
+        name: "Team".into(),
+        parent_id: None,
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    });
+    edited.nodes[0].department_id = Some("department".into());
+    edited.nodes[1].name = "Renamed member".into();
+    let save = |definition: &Definition, revision: u64, bindings: Value| json!({"operation":"saveInstance","id":"instance","name":"Live organization","color":"#123456","definition":definition,"bindings":bindings,"expectedRevision":revision});
+    let models = HashSet::from(["model".into()]);
+    let request = save(&edited, 1, json!([]));
+    let changed = workflow_repository::request(
+        &mut c,
+        serde_json::from_value(request.clone()).unwrap(),
+        &models,
+    )
+    .unwrap();
+    let a_live = snapshot_for_run(&c, &a, "run-a").unwrap().unwrap();
+    assert_eq!(a_live.execution_version, a_before.execution_version);
+    assert_eq!(a_live.organization_revision, 2);
+    assert_eq!(a_live.rank, 99);
+    assert_eq!(
+        a_live.management_role,
+        crate::workflow::ManagementRole::OrganizationAdmin
+    );
+    assert_eq!(a_live.departments.len(), 1);
+    assert_eq!(a_live.department_id.as_deref(), Some("department"));
+    assert_eq!(
+        snapshot_for_run(&c, &b, "run-b")
+            .unwrap()
+            .unwrap()
+            .node_name,
+        "Renamed member"
+    );
+    assert!(changed.affected_conversation_ids.is_empty());
+    // Idempotent UI retries preserve member incarnations and do not create duplicate chats.
+    workflow_repository::request(&mut c, serde_json::from_value(request).unwrap(), &models)
+        .unwrap();
+    assert_eq!(
+        snapshot_for_run(&c, &b, "run-b")
+            .unwrap()
+            .unwrap()
+            .execution_version,
+        b_before.execution_version
+    );
+    // Removing b fences its old run and inbox but preserves independent conversation history.
+    edited.nodes.retain(|node| node.id != "b");
+    workflow_repository::request(
+        &mut c,
+        serde_json::from_value(save(&edited, 2, json!([]))).unwrap(),
+        &models,
+    )
+    .unwrap();
+    assert!(snapshot_for_run(&c, &b, "run-b").unwrap().is_none());
+    assert_eq!(status(&c, &pending, 0), MailStatus::Failed);
+    assert!(snapshot_for_run(&c, &a, "run-a").unwrap().is_some());
+    assert!(crate::storage::chat_repository::get_conversation(&c, &b)
+        .unwrap()
+        .is_some());
+    // Readding the same node and same conversation is a new membership, never resurrection.
+    edited.nodes.push(original.definition.nodes[1].clone());
+    workflow_repository::request(
+        &mut c,
+        serde_json::from_value(save(&edited, 3, json!([{"nodeId":"b","conversationId":b}])))
+            .unwrap(),
+        &models,
+    )
+    .unwrap();
+    assert!(snapshot_for_run(&c, &b, "run-b").unwrap().is_none());
+    c.execute("UPDATE conversation_turn_traces SET terminal_status='completed',completed_at=2 WHERE run_id='run-b'",[]).unwrap();
+    start_run(&mut c, "b", "run-b-new");
+    assert_ne!(
+        snapshot_for_run(&c, &b, "run-b-new")
+            .unwrap()
+            .unwrap()
+            .execution_version,
+        b_before.execution_version
+    );
+    assert_eq!(
+        snapshot_for_run(&c, &a, "run-a")
+            .unwrap()
+            .unwrap()
+            .organization_revision,
+        4
+    );
+    send_mail(&mut c, "after-live-edit", &[("b", "new membership")]);
+    assert_eq!(pending_inputs(&c).unwrap().len(), 1);
+}
+
+#[test]
+fn live_instance_updates_require_a_definition_and_do_not_inherit_later_template_edits() {
+    use crate::storage::workflow_repository;
+    let mut c = fixture();
+    let a = conversation(&c, "a");
+    let before = snapshot_for_run(&c, &a, "run-a").unwrap().unwrap();
+    let models = HashSet::from(["model".into()]);
+    let request = json!({"operation":"saveInstance","id":"instance","name":"Missing definition","color":"#123456","bindings":[],"expectedRevision":1,"templateId":"template","expectedTemplateRevision":1});
+    assert!(workflow_repository::request(
+        &mut c,
+        serde_json::from_value(request).unwrap(),
+        &models
+    )
+    .is_err());
+    let mut template = workflow_repository::load_instance(&c, "instance")
+        .unwrap()
+        .unwrap()
+        .definition;
+    template.id = "template".into();
+    template.background = "Changed template".into();
+    template.nodes.clear();
+    workflow_repository::request(
+        &mut c,
+        serde_json::from_value(
+            json!({"operation":"save","definition":template,"expectedRevision":1}),
+        )
+        .unwrap(),
+        &models,
+    )
+    .unwrap();
+    workflow_repository::request(
+        &mut c,
+        serde_json::from_value(json!({"operation":"delete","id":"template","expectedRevision":2}))
+            .unwrap(),
+        &models,
+    )
+    .unwrap();
+    let after = snapshot_for_run(&c, &a, "run-a").unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    send_mail(
+        &mut c,
+        "after-template-delete",
+        &[("b", "still independent")],
+    );
 }

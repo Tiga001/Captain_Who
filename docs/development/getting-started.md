@@ -43,8 +43,8 @@ Automation 新回合都需要有效的在线验证结果。保存的登录会话
 
 项目可绑定一个主目录和多个辅助目录，Run 接纳时冻结本轮目录身份。工作区根目录的 `AGENTS.override.md` 或
 `AGENTS.md` 会作为 `workspace.instructions` 加入模型上下文；Composer 文件/目录引用的开发契约见
-[会话输入](../subsystems/conversation-inputs.md)。工作流模板与实例的配置入口见
-[工作流编排](../subsystems/workflow-authoring.md)，保存或启用工作流配置不等于已启动执行。
+[会话输入](../subsystems/conversation-inputs.md)。组织模板与实例的配置入口见
+[组织编排](../subsystems/workflow-authoring.md)，保存或启用组织配置不等于已启动执行。
 
 ## 常用命令
 

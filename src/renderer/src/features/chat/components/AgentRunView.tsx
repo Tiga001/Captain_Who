@@ -212,6 +212,8 @@ export function AgentRunView({
   const hasInteractionEntries = timeline.some(
     (item) => item.type === 'tool_call' && interactionCallIds.has(item.callId)
   )
+  const hasWorkflowDeliveries = timeline.some((item) => item.type === 'workflow_delivery')
+  const preserveInputSequence = hasInteractionEntries || hasWorkflowDeliveries
   const finalAnswerContent = getAssistantFinalContent(message)
   const finalAnswerTimelineItemIndex = useMemo(() => {
     if (!run || !isRunSettled(run) || !hasDisplayableContent(finalAnswerContent)) return -1
@@ -473,13 +475,15 @@ export function AgentRunView({
     (item): item is ChatGuidanceTimelineItem => item.type === 'user_guidance'
   )
   const timelineCollapsed = canToggleTimeline
-    ? (timelineCollapsedOverride ?? message.uiState?.timelineCollapsed ?? !hasGuidance)
+    ? (timelineCollapsedOverride ??
+      message.uiState?.timelineCollapsed ??
+      !(hasGuidance || hasWorkflowDeliveries))
     : false
   // Pending interaction entries and their surrounding narration stay in exact trace order even
   // when technical activity is collapsed. Appending a detached entry after the final answer would
   // erase the boundary between the question introduction and the model's subsequent work.
   const showTimeline =
-    hasTimeline && (!(canToggleTimeline && timelineCollapsed) || hasInteractionEntries)
+    hasTimeline && (!(canToggleTimeline && timelineCollapsed) || preserveInputSequence)
   const showFinalContent =
     hasDisplayableContent(finalAnswerContent) &&
     (runIsSettled || !hasTimeline) &&
@@ -514,7 +518,7 @@ export function AgentRunView({
           })
         }}
       />
-      {canToggleTimeline && timelineCollapsed && !hasInteractionEntries
+      {canToggleTimeline && timelineCollapsed && !preserveInputSequence
         ? guidanceItems.map((item) => (
             <GuidanceTimelineItemView
               assistantMessageId={message.id}
@@ -553,11 +557,12 @@ export function AgentRunView({
         // whenever a later Tool or collaboration event arrives, so they must never own React
         // identity. Keep every semantic item directly under the run with its durable item id.
         const visibleItems =
-          canToggleTimeline && timelineCollapsed && hasInteractionEntries
+          canToggleTimeline && timelineCollapsed && preserveInputSequence
             ? block.items.filter(
                 (item) =>
                   item.type === 'message' ||
                   item.type === 'user_guidance' ||
+                  item.type === 'workflow_delivery' ||
                   (item.type === 'tool_call' && interactionCallIds.has(item.callId))
               )
             : block.items

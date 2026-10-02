@@ -38,7 +38,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v62 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v61 可按连续迁移升级到当前版本。v51→v52 保留协作数据与回执，v52→v53 只为未来事件增加请求归属活动；v53→v54 新增工作流定义，v54→v55 将既有模板可用性初始化为禁用，v55→v56 新增独立实例与编辑草稿，v56→v57 新增实例启用和关联会话归档保护；v57→v58 增加工作流持久执行事实与 WorkflowDelivery Trace；v58→v59 增加工作流新建对话的默认项目；v61→v62 只新增工作流 pending sequence 部分索引，不改写记录或历史；v60→v61 仅添加 Trace/header/model-context 修订触发器、随机 epoch 与 revision 表和待处理交互摘要索引，保留全部历史正文；v59→v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影与索引，不重排历史或改写正文。旧活动不推测位置或回填；v50 含旧协作事件时保留原库并要求开发者先处理历史。v49 及更早版本不自动升级。真源：
+当前基线为 **schema v62 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v61 可按连续迁移升级到当前版本。v51→v52 保留协作数据与回执，v52→v53 只为未来事件增加请求归属活动；v53→v54 新增组织定义，v54→v55 将既有模板可用性初始化为禁用，v55→v56 新增独立实例与编辑草稿，v56→v57 新增实例启用和关联会话归档保护；v57→v58 增加组织持久执行事实与 WorkflowDelivery Trace；v58→v59 增加组织新建对话的默认项目；v61→v62 只新增组织 pending sequence 部分索引，不改写记录或历史；v60→v61 仅添加 Trace/header/model-context 修订触发器、随机 epoch 与 revision 表和待处理交互摘要索引，保留全部历史正文；v59→v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影与索引，不重排历史或改写正文。旧活动不推测位置或回填；v50 含旧协作事件时保留原库并要求开发者先处理历史。v49 及更早版本不自动升级。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
@@ -88,7 +88,7 @@ pnpm storage:reset-dev -- --confirm-reset
 
 不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent
 tree/Mailbox/Wake；Scheduled Automation task/Run/attention；notification event/batch；Browser history/download
-record；人机交互问题、回应、投递、忽略事件收据与挂起；全局 Agent 模板与 Project 分配；工作流模板、实例、绑定与编辑草稿；FileChange transaction/chunk/operation/run grant/history；本机 Token 统计与请求去重账本。Conversation 与上述 runtime 记录只计数并丢弃，不执行迁移。附件、附件导入、已安装
+record；人机交互问题、回应、投递、忽略事件收据与挂起；全局 Agent 模板与 Project 分配；组织模板、实例、绑定与编辑草稿；FileChange transaction/chunk/operation/run grant/history；本机 Token 统计与请求去重账本。Conversation 与上述 runtime 记录只计数并丢弃，不执行迁移。附件、附件导入、已安装
 Skill、生成图片和 credential 目录不在 reset 事务中移动；失去数据库引用的附件与导入会受后续正常启动的清理规则处理，不能把仍存在的文件当作已恢复数据。
 
 ### 备份处理
@@ -106,14 +106,14 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；失去�
 
 重建后验证 `PRAGMA user_version = 62`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
 
-### 附件、目录引用与工作流配置
+### 附件、目录引用与组织配置
 
 - Composer 附件以 durable import 身份落在 `attachment-imports/v1`，草稿、队列与挂起输入只保存引用。恢复时先核对原 import/存储附件身份，不重新提交 base64 或手工替换文件；import 清理只在启动接纳请求前处理超过 7 天且无存活引用的 staging 项，无法解析持久 JSON 时停止清理。
 - 用户选择的文件夹是只读目录授权，模型可以看到所选名称与绝对路径；它不是目录副本或项目成员变更。目录丢失、替换或 identity 不匹配时重新选择，不能通过改 JSON 把旧授权指向新目录。
 - 项目目录变更不会改写既有 Run 的冻结 workspace；历史文件打开沿用历史绑定，不能用当前目录替代不可用的旧根。
-- 工作流编辑失败先区分模板 revision、usage revision、实例 revision 与独立编辑草稿。CAS 冲突后刷新再编辑；模板变更可能使实例停用并标记 `needsReview`，不能手改状态解除。保存/启用配置没有执行节点的效果，关联会话受启用状态的归档保护。
+- 组织编辑失败先区分模板 revision、usage revision、实例 revision 与独立编辑草稿。CAS 冲突后刷新再编辑；模板变更可能使实例停用并标记 `needsReview`，不能手改状态解除。保存/启用配置没有执行节点的效果，关联会话受启用状态的归档保护。
 
-权威契约见[会话输入](../subsystems/conversation-inputs.md)、[工作区与文件](../subsystems/workspace-files.md)和[工作流编排](../subsystems/workflow-authoring.md)。
+权威契约见[会话输入](../subsystems/conversation-inputs.md)、[工作区与文件](../subsystems/workspace-files.md)和[组织编排](../subsystems/workflow-authoring.md)。
 
 ## 4. Multi-Agent 自动恢复
 

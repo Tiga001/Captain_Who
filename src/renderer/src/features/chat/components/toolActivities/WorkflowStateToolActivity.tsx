@@ -15,7 +15,7 @@ export function WorkflowStateToolActivity(props: WorkflowQueryProps) {
   const chinese = language === 'zh-CN' || language === 'zh-TW'
   const l: Localize = (zh, en) => (chinese ? zh : en)
   const reason = (text(record(props.call.args).reason) || text(props.call.reason)).trim()
-  const label = queryLabel(props, l('工作流', 'workflow'), l)
+  const label = queryLabel(props, l('组织', 'organization'), l)
   return (
     <AgentActivityDisclosure
       icon={Network}

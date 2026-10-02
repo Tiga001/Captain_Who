@@ -51,7 +51,6 @@ function Harness({ instanceId = 'workflow' }: { instanceId?: string }) {
       <output data-testid="transmissions">
         {execution.transmissions.map((event) => event.sequence).join(',') || 'none'}
       </output>
-      <button onClick={() => void execution.completeUserInput('input')}>Complete</button>
     </>
   )
 }
@@ -65,7 +64,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.restoreAllMocks())
 
-describe('workflow execution projection', () => {
+describe('organization execution projection', () => {
   it('never revives old transmissions when switching away and back to an instance', async () => {
     mocks.request.mockImplementation(async (request) => ({
       records: [],
@@ -97,18 +96,5 @@ describe('workflow execution projection', () => {
     await expect.element(view.getByTestId('transmissions')).toHaveTextContent('5')
     await view.unmount()
     expect(mocks.listeners.size).toBe(0)
-  })
-  it('confirms the exact input and accepts its saved state without initiating a conversation', async () => {
-    const view = await render(<Harness />)
-    await expect.element(view.getByTestId('sequence')).toHaveTextContent('4')
-    mocks.request.mockResolvedValue({ records: [], issues: [], runtime: snapshot(5, 'completed') })
-    await view.getByRole('button', { name: 'Complete' }).click()
-    expect(mocks.request).toHaveBeenLastCalledWith({
-      operation: 'completeUserInput',
-      instanceId: 'workflow',
-      inputId: 'input'
-    })
-    await expect.element(view.getByTestId('sequence')).toHaveTextContent('5')
-    await expect.element(view.getByTestId('transmissions')).toHaveTextContent('none')
   })
 })

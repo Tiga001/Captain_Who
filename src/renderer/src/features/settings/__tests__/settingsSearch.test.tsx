@@ -64,7 +64,7 @@ describe('settings definitions as the shared rendering and search source', () =>
     )
   })
 
-  it('places workflows beside subagents and targets its own library and editor', () => {
+  it('places organizations beside subagents and targets its own library and editor', () => {
     const pages = SETTINGS_GROUPS.flatMap((group) => group.items)
     const agentIndex = pages.findIndex((page) => page.id === 'agentTemplates')
     expect(pages[agentIndex + 1].id).toBe('workflows')
@@ -72,7 +72,7 @@ describe('settings definitions as the shared rendering and search source', () =>
     const workflows = index.filter((entry) => entry.page === 'workflows')
     expect(workflows.find((entry) => entry.id === 'workflows-list')).toMatchObject({
       view: 'workflows',
-      path: ['工作流']
+      path: ['组织模板']
     })
     expect(workflows.find((entry) => entry.id === 'workflow-background')).toMatchObject({
       view: 'editor',

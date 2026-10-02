@@ -29,7 +29,7 @@ fn setup() -> Connection {
     c
 }
 fn create(id: &str, conversation: Option<&str>) -> Value {
-    json!({"operation":"saveInstance","id":id,"templateId":"template","name":id,"color":"#4A82E8","bindings":[{"nodeId":"a","conversationId":conversation}],"expectedRevision":0,"expectedTemplateRevision":2})
+    json!({"operation":"saveInstance","id":id,"templateId":"template","definition":definition(),"name":id,"color":"#4A82E8","bindings":[{"nodeId":"a","conversationId":conversation}],"expectedRevision":0,"expectedTemplateRevision":2})
 }
 fn existing(c: &Connection, id: &str, project: &str) {
     c.execute(
@@ -52,7 +52,7 @@ fn toggle(c: &mut Connection, id: &str, enabled: bool, revision: u64) -> Result<
 }
 
 #[test]
-fn workflow_disable_preserves_busy_turns_and_confirmed_reconfiguration_reactivates() {
+fn workflow_disable_preserves_busy_turns_and_live_edits_preserve_disabled_state() {
     let mut c = setup();
     let first = call(&mut c, create("instance", None)).unwrap();
     assert!(first.instances[0].enabled);
@@ -79,7 +79,7 @@ fn workflow_disable_preserves_busy_turns_and_confirmed_reconfiguration_reactivat
     let mut configure = create("instance", Some(&chat));
     configure["expectedRevision"] = json!(2);
     let configured = call(&mut c, configure).unwrap();
-    assert!(configured.instances[0].enabled && configured.instances[0].running);
+    assert!(!configured.instances[0].enabled && !configured.instances[0].running);
     assert!(configured.affected_conversation_ids.is_empty());
 }
 
@@ -97,13 +97,19 @@ fn workflow_only_enabled_instances_reserve_colors_and_enabling_rechecks_occupanc
         Some(&first.instances[0].bindings[0].conversation_id),
     );
     configure["expectedRevision"] = json!(2);
+    let edited = call(&mut c, configure).unwrap();
     assert!(
-        matches!(call(&mut c, configure.clone()),Err(Error::Conflict(message)) if message=="workflow_color_in_use")
+        !edited
+            .instances
+            .iter()
+            .find(|instance| instance.id == "first")
+            .unwrap()
+            .enabled
     );
     toggle(&mut c, "second", false, 1).unwrap();
-    let confirmed = call(&mut c, configure).unwrap();
     assert!(
-        confirmed
+        toggle(&mut c, "first", true, 3)
+            .unwrap()
             .instances
             .iter()
             .find(|instance| instance.id == "first")
@@ -116,24 +122,30 @@ fn workflow_only_enabled_instances_reserve_colors_and_enabling_rechecks_occupanc
 fn workflow_template_metadata_updates_preserve_enabled_membership() {
     let mut c = setup();
     let first = call(&mut c, create("instance", None)).unwrap();
-    let published=call(&mut c,json!({"operation":"save","definition":definition(),"expectedRevision":2,"expectedUsageRevision":first.usages[0].usage_revision})).unwrap();
+    let published = call(
+        &mut c,
+        json!({"operation":"save","definition":definition(),"expectedRevision":2}),
+    )
+    .unwrap();
     assert!(published.instances[0].enabled && !published.instances[0].needs_review);
+    assert_eq!(published.instances[0].revision, 1);
+    assert_eq!(published.instances[0].template_revision, 2);
     let mut configure = create(
         "instance",
         Some(&first.instances[0].bindings[0].conversation_id),
     );
-    configure["expectedRevision"] = json!(2);
+    configure["expectedRevision"] = json!(1);
     configure["expectedTemplateRevision"] = json!(3);
     let reviewed = call(&mut c, configure).unwrap();
-    assert!(reviewed.instances[0].enabled && !reviewed.instances[0].needs_review);
-    toggle(&mut c, "instance", false, 3).unwrap();
+    assert_eq!(reviewed.instances[0].template_revision, 2);
+    toggle(&mut c, "instance", false, 2).unwrap();
     c.execute(
         "DELETE FROM workflow_instance_bindings WHERE instance_id='instance'",
         [],
     )
     .unwrap();
     assert!(
-        matches!(toggle(&mut c,"instance",true,4),Err(Error::Invalid(message)) if message=="workflow_bindings_incomplete")
+        matches!(toggle(&mut c,"instance",true,3),Err(Error::Invalid(message)) if message=="workflow_bindings_incomplete")
     );
 }
 
@@ -192,7 +204,7 @@ fn workflow_archive_guard_covers_metadata_full_save_and_atomic_multirow_updates(
     c.execute("UPDATE conversations SET archived_at=10", [])
         .unwrap();
     let after = call(&mut c, json!({"operation":"list"})).unwrap();
-    assert!(!after.instances[0].enabled && after.instances[0].needs_review);
+    assert!(!after.instances[0].enabled && !after.instances[0].needs_review);
     assert_eq!(count(&c, "conversations"), 2);
     assert_eq!(after.instances[0].bindings.len(), 1);
 }
@@ -248,8 +260,8 @@ fn workflow_instances_initialize_once_preserve_draft_and_allow_cross_project_rep
     let changed = call(&mut c, replace).unwrap();
     assert_eq!(changed.affected_conversation_ids, vec!["replacement"]);
     assert_eq!(
-        changed.usages[0].instances[0].project_names,
-        vec!["Project B"]
+        changed.instances[0].bindings[0].conversation_id,
+        "replacement"
     );
     assert_eq!(count(&c, "conversations"), 2);
 }
@@ -419,10 +431,14 @@ fn workflow_bindings_are_exclusive_and_fail_atomically() {
     let mut graph = definition();
     let mut other = graph["nodes"][0].clone();
     other["id"] = json!("b");
+    other["name"] = json!("Second worker");
     graph["nodes"].as_array_mut().unwrap().push(other);
 
-    let usages = call(&mut c, json!({"operation":"list"})).unwrap().usages;
-    call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":usages[0].usage_revision})).unwrap();
+    call(
+        &mut c,
+        json!({"operation":"save","definition":graph,"expectedRevision":2}),
+    )
+    .unwrap();
     let mut invalid = create("new", None);
     invalid["color"] = json!("#AA0000");
     invalid["expectedTemplateRevision"] = json!(3);
@@ -434,33 +450,40 @@ fn workflow_bindings_are_exclusive_and_fail_atomically() {
 }
 
 #[test]
-fn workflow_template_publish_requires_usage_confirmation_and_reconciles_stable_nodes() {
+fn workflow_template_publish_and_delete_leave_independent_instances_unchanged() {
     let mut c = setup();
     let created = call(&mut c, create("instance", None)).unwrap();
-    let original = created.instances[0].bindings[0].clone();
+    let original = serde_json::to_value(&created.instances[0]).unwrap();
     let mut graph = definition();
-    graph["nodes"][0]["name"] = json!("Renamed");
-    assert!(
-        matches!(call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2})),Err(Error::Conflict(message)) if message=="workflow_usage_changed")
-    );
-    let updated=call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":created.usages[0].usage_revision})).unwrap();
-    assert_eq!(updated.instances[0].bindings, vec![original]);
-    assert!(!updated.instances[0].needs_review);
-    assert!(call(
-        &mut c,
-        json!({"operation":"delete","id":"template","expectedRevision":3})
-    )
-    .is_err());
     graph["nodes"] = json!([]);
-    let removed=call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":3,"expectedUsageRevision":updated.usages[0].usage_revision})).unwrap();
-    assert!(removed.instances[0].bindings.is_empty());
+    let updated = call(
+        &mut c,
+        json!({"operation":"save","definition":graph,"expectedRevision":2}),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated.instances[0]).unwrap(),
+        original
+    );
+    let deleted = call(
+        &mut c,
+        json!({"operation":"delete","id":"template","expectedRevision":3}),
+    )
+    .unwrap();
+    assert!(deleted.records.is_empty());
+    assert_eq!(
+        serde_json::to_value(&deleted.instances[0]).unwrap(),
+        original
+    );
+    toggle(&mut c, "instance", false, 1).unwrap();
+    assert!(toggle(&mut c, "instance", true, 2).unwrap().instances[0].enabled);
     assert_eq!(count(&c, "conversations"), 1);
 }
 
 #[test]
 fn workflow_running_guard_preserves_original_and_supports_isolated_draft_and_copy() {
     let mut c = setup();
-    let created = call(&mut c, create("instance", None)).unwrap();
+    call(&mut c, create("instance", None)).unwrap();
     c.execute(
         "UPDATE workflow_instances SET running=1 WHERE instance_id='instance'",
         [],
@@ -468,9 +491,6 @@ fn workflow_running_guard_preserves_original_and_supports_isolated_draft_and_cop
     .unwrap();
     let mut graph = definition();
     graph["name"] = json!("Unsaved edit");
-    assert!(
-        matches!(call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":created.usages[0].usage_revision})),Err(Error::Conflict(message)) if message=="workflow_template_running")
-    );
     let stashed=call(&mut c,json!({"operation":"saveDraft","definition":graph,"expectedRevision":2,"expectedDraftRevision":0})).unwrap();
     assert_eq!(stashed.records[0].definition.name, "Template");
     assert_eq!(stashed.drafts[0].definition.name, "Unsaved edit");
@@ -500,7 +520,7 @@ fn workflow_conversation_deletion_marks_instance_for_repair_without_touching_oth
     c.execute("DELETE FROM conversations WHERE id=?1", [id])
         .unwrap();
     let result = call(&mut c, json!({"operation":"listInstances"})).unwrap();
-    assert!(result.instances[0].needs_review);
+    assert!(!result.instances[0].needs_review && result.instances[0].enabled);
     assert!(result.instances[0].bindings.is_empty());
     assert_eq!(result.instances[0].revision, 2);
 }
@@ -514,10 +534,11 @@ fn workflow_running_state_is_derived_from_active_bound_conversation_turns() {
     c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('assistant',?1,'run',1,'in_progress',0,1,1)",[conversation]).unwrap();
     let running = call(&mut c, json!({"operation":"list"})).unwrap();
     assert!(running.instances[0].running);
-    assert!(running.usages[0].instances[0].running);
-    assert!(
-        matches!(call(&mut c,json!({"operation":"save","definition":definition(),"expectedRevision":2,"expectedUsageRevision":running.usages[0].usage_revision})),Err(Error::Conflict(message)) if message=="workflow_template_running")
-    );
+    assert!(call(
+        &mut c,
+        json!({"operation":"save","definition":definition(),"expectedRevision":2})
+    )
+    .is_ok());
     c.execute("UPDATE conversation_turn_traces SET terminal_status='completed',completed_at=2,updated_at=2 WHERE run_id='run'",[]).unwrap();
     assert!(!call(&mut c, json!({"operation":"list"})).unwrap().instances[0].running);
 }
@@ -536,7 +557,7 @@ fn workflow_conversation_archive_and_restore_require_binding_review() {
     c.execute("UPDATE conversations SET archived_at=2 WHERE id=?1", [id])
         .unwrap();
     let archived = call(&mut c, json!({"operation":"listInstances"})).unwrap();
-    assert!(archived.instances[0].needs_review);
+    assert!(!archived.instances[0].needs_review);
     assert_eq!(archived.instances[0].revision, 3);
     assert_eq!(archived.instances[0].bindings.len(), 1);
     let mut update = create("instance", Some(id));
@@ -550,7 +571,7 @@ fn workflow_conversation_archive_and_restore_require_binding_review() {
     )
     .unwrap();
     let restored = call(&mut c, json!({"operation":"listInstances"})).unwrap();
-    assert!(restored.instances[0].needs_review);
+    assert!(!restored.instances[0].needs_review);
     assert_eq!(restored.instances[0].revision, 4);
 }
 
@@ -611,9 +632,11 @@ fn workflow_binding_busy_target_changes_next_input_preferences_without_mutating_
         .unwrap();
     assert_eq!(status, "in_progress");
     assert!(bound.instances[0].running);
-    assert!(
-        matches!(call(&mut c,json!({"operation":"save","definition":definition(),"expectedRevision":2,"expectedUsageRevision":bound.usages[0].usage_revision})),Err(Error::Conflict(message)) if message=="workflow_template_running")
-    );
+    assert!(call(
+        &mut c,
+        json!({"operation":"save","definition":definition(),"expectedRevision":2})
+    )
+    .is_ok());
 }
 
 #[test]
@@ -627,6 +650,11 @@ fn workflow_legacy_boundary_record_is_isolated_without_conversion_and_can_be_del
     c.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at,enabled) VALUES ('legacy',?1,7,9,0)",[&raw]).unwrap();
     for operation in ["list", "listInstances"] {
         let listed = call(&mut c, json!({"operation":operation})).unwrap();
+        if operation == "listInstances" {
+            assert!(listed.records.is_empty() && listed.invalid_records.is_empty());
+            assert!(listed.drafts.is_empty() && listed.invalid_drafts.is_empty());
+            continue;
+        }
         assert_eq!(listed.records.len(), 1);
         assert_eq!(listed.invalid_records.len(), 1);
         let recovery = &listed.invalid_records[0];
@@ -714,6 +742,11 @@ fn workflow_invalid_drafts_are_isolated_from_published_templates_and_deleted_exp
         c.execute("INSERT INTO workflow_editing_drafts(template_id,definition_json,base_revision,revision,updated_at) VALUES ('template',?1,2,3,9)",[&raw]).unwrap();
         for operation in ["list", "listInstances"] {
             let listed = call(&mut c, json!({"operation":operation})).unwrap();
+            if operation == "listInstances" {
+                assert!(listed.records.is_empty() && listed.invalid_records.is_empty());
+                assert!(listed.drafts.is_empty() && listed.invalid_drafts.is_empty());
+                continue;
+            }
             assert_eq!(listed.records.len(), 1);
             assert_eq!(listed.records[0].definition.name, "Template");
             assert!(listed.drafts.is_empty());
@@ -770,31 +803,36 @@ fn workflow_invalid_drafts_are_isolated_from_published_templates_and_deleted_exp
 }
 
 #[test]
-fn workflow_incompatible_template_remains_protected_while_used_by_an_instance() {
+fn workflow_incompatible_template_can_be_deleted_without_harming_its_instance() {
     let mut c = setup();
-    call(&mut c, create("instance", None)).unwrap();
+    let created = call(&mut c, create("instance", None)).unwrap();
     let mut old = definition();
     old["boundaryPositions"]["output"] = json!({"x":760,"y":220});
-    let raw = old.to_string();
     c.execute(
         "UPDATE workflow_definitions SET definition_json=?1 WHERE workflow_id='template'",
-        [&raw],
+        [old.to_string()],
     )
     .unwrap();
     let listed = call(&mut c, json!({"operation":"listInstances"})).unwrap();
-    assert_eq!(listed.invalid_records.len(), 1);
-    assert_eq!(listed.instances.len(), 1);
-    assert!(
-        matches!(call(&mut c,json!({"operation":"delete","id":"template","expectedRevision":2})),Err(Error::Conflict(message)) if message=="workflow_template_in_use")
+    assert!(listed.invalid_records.is_empty());
+    assert_eq!(listed.instances[0].bindings, created.instances[0].bindings);
+    assert_eq!(
+        call(&mut c, json!({"operation":"list"}))
+            .unwrap()
+            .invalid_records
+            .len(),
+        1
     );
-    let persisted: String = c
-        .query_row(
-            "SELECT definition_json FROM workflow_definitions WHERE workflow_id='template'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(persisted, raw);
+    let deleted = call(
+        &mut c,
+        json!({"operation":"delete","id":"template","expectedRevision":2}),
+    )
+    .unwrap();
+    assert!(deleted.invalid_records.is_empty());
+    assert_eq!(
+        serde_json::to_value(&deleted.instances[0]).unwrap(),
+        serde_json::to_value(&created.instances[0]).unwrap()
+    );
 }
 
 #[test]
@@ -883,4 +921,101 @@ fn workflow_missing_default_project_rejects_atomically_and_deleted_project_clear
         .unwrap(),
         Some("other".to_owned())
     );
+}
+
+#[test]
+fn workflow_instance_polling_reads_only_the_independent_instance_catalog() {
+    let mut c = setup();
+    let created = call(&mut c, create("instance", None)).unwrap();
+    // Instance polling must not depend on opening the template/draft catalogs. Organizations
+    // retain their own definitions even when the authoring catalog is unavailable.
+    c.execute("DROP TABLE workflow_editing_drafts", []).unwrap();
+    c.execute("DROP TABLE workflow_definitions", []).unwrap();
+    let response = call(&mut c, json!({"operation":"listInstances"})).unwrap();
+    assert_eq!(response.instances.len(), 1);
+    assert_eq!(
+        response.instances[0].bindings,
+        created.instances[0].bindings
+    );
+    assert!(response.records.is_empty() && response.drafts.is_empty());
+    assert!(response.issues.is_empty());
+}
+
+#[test]
+fn workflow_publication_rejects_removed_usage_guards_but_keeps_draft_cas() {
+    assert!(serde_json::from_value::<Request>(json!({"operation":"save", "definition":definition(), "expectedRevision":2, "expectedUsageRevision":"old"})).is_err());
+    let mut c = setup();
+    call(&mut c, json!({"operation":"saveDraft", "definition":definition(), "expectedRevision":2, "expectedDraftRevision":0})).unwrap();
+    assert!(matches!(
+        call(
+            &mut c,
+            json!({"operation":"save", "definition":definition(), "expectedRevision":2})
+        ),
+        Err(Error::Conflict(_))
+    ));
+    let published = call(&mut c, json!({"operation":"save", "definition":definition(), "expectedRevision":2, "expectedDraftRevision":1})).unwrap();
+    assert_eq!(published.records[0].revision, 3);
+    assert!(published.drafts.is_empty());
+}
+
+#[test]
+fn organization_member_names_block_instance_updates_and_activation_without_losing_existing_data() {
+    let mut c = setup();
+    let first = call(&mut c, create("instance", None)).unwrap();
+    let chat = first.instances[0].bindings[0].conversation_id.clone();
+    let mut duplicate = definition();
+    let mut second = duplicate["nodes"][0].clone();
+    second["id"] = json!("b");
+    second["name"] = json!("　WORKER ");
+    duplicate["nodes"].as_array_mut().unwrap().push(second);
+    let mut update = create("instance", Some(&chat));
+    update["definition"] = duplicate.clone();
+    update["expectedRevision"] = json!(1);
+    let before = count(&c, "conversations");
+    assert!(call(&mut c, update)
+        .unwrap_err()
+        .to_string()
+        .contains("organization_duplicate_member_name"));
+    assert_eq!(count(&c, "conversations"), before);
+    assert_eq!(
+        call(&mut c, json!({"operation":"listInstances"}))
+            .unwrap()
+            .instances[0]
+            .revision,
+        1
+    );
+    // Simulate a pre-upgrade template. Creating an organization must give the same actionable error.
+    c.execute(
+        "UPDATE workflow_definitions SET definition_json=?1",
+        [duplicate.to_string()],
+    )
+    .unwrap();
+    let activation = json!({"operation":"saveInstance","id":"other","templateId":"template","expectedTemplateRevision":2,"name":"Other","color":"#123456","bindings":[],"expectedRevision":0});
+    assert!(call(&mut c, activation)
+        .unwrap_err()
+        .to_string()
+        .contains("organization_duplicate_member_name"));
+    // A pre-upgrade disabled organization can be read and edited, but cannot be re-enabled unchanged.
+    duplicate["id"] = json!("instance");
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=?1, enabled=0 WHERE instance_id='instance'",
+        [duplicate.to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        call(&mut c, json!({"operation":"listInstances"}))
+            .unwrap()
+            .instances[0]
+            .definition
+            .nodes
+            .len(),
+        2
+    );
+    assert!(toggle(&mut c, "instance", true, 1)
+        .unwrap_err()
+        .to_string()
+        .contains("organization_duplicate_member_name"));
+    let mut fixed = create("instance", Some(&chat));
+    fixed["expectedRevision"] = json!(1);
+    assert!(call(&mut c, fixed).is_ok());
 }

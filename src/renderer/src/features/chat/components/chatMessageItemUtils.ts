@@ -561,7 +561,7 @@ export function groupTimelineItems(
       let existingIndex = -1
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const candidate = items[index]
-        if (candidate.type === 'message') break
+        if (candidate.type === 'message' || candidate.type === 'workflow_delivery') break
         if (candidate.type === 'file_change_group') {
           existingIndex = index
           break

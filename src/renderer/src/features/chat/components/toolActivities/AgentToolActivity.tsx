@@ -1,3 +1,5 @@
+import { OrganizationMembersToolActivity } from './OrganizationMembersToolActivity'
+import { OrganizationEditToolActivity } from './OrganizationEditToolActivity'
 import { WorkflowMailActionToolActivity } from './WorkflowMailActionToolActivity'
 import type {
   AgentFileChangeProposal,
@@ -131,9 +133,11 @@ export function AgentToolActivity({
     )
   }
 
-  if (call.tool === 'workflow_get_state' || call.tool === 'workflow_get_mailbox') {
+  if (call.tool === 'organization_get_state' || call.tool === 'organization_get_mailbox') {
     const Activity =
-      call.tool === 'workflow_get_state' ? WorkflowStateToolActivity : WorkflowMailboxToolActivity
+      call.tool === 'organization_get_state'
+        ? WorkflowStateToolActivity
+        : WorkflowMailboxToolActivity
     return (
       <Activity
         call={call}
@@ -144,7 +148,7 @@ export function AgentToolActivity({
     )
   }
 
-  if (['workflow_accept', 'workflow_complete', 'workflow_recall'].includes(call.tool))
+  if (['organization_accept', 'organization_complete', 'organization_recall'].includes(call.tool))
     return (
       <WorkflowMailActionToolActivity
         call={call}
@@ -154,7 +158,28 @@ export function AgentToolActivity({
       />
     )
 
-  if (call.tool === 'workflow_send') {
+  // Saved historical receipts keep a human-readable presentation only.
+  if (call.tool === 'organization_manage_members')
+    return (
+      <OrganizationMembersToolActivity
+        call={call}
+        result={result}
+        cancelled={cancelled && !result}
+        settledStatus={settledStatus}
+      />
+    )
+
+  if (call.tool === 'organization_edit')
+    return (
+      <OrganizationEditToolActivity
+        call={call}
+        result={result}
+        cancelled={cancelled && !result}
+        settledStatus={settledStatus}
+      />
+    )
+
+  if (call.tool === 'organization_send') {
     return (
       <WorkflowSendToolActivity
         call={call}

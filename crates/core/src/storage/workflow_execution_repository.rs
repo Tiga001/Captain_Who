@@ -1,4 +1,4 @@
-//! Transactional workflow mail ownership, delivery receipts and idempotent actions.
+//! Transactional organization mail ownership, delivery receipts and idempotent actions.
 use crate::storage::now_ms;
 use crate::workflow::{Definition, Node, NodeConfig};
 use crate::workflow_execution::*;
@@ -12,7 +12,7 @@ const MAX_DELIVERY_BYTES: usize = 1_000_000;
 const MAX_PENDING_MESSAGES: i64 = 1024;
 const MAX_PENDING_BYTES: i64 = 16 * 1024 * 1024;
 fn db(error: impl std::fmt::Display) -> String {
-    format!("Workflow mail storage: {error}")
+    format!("Organization mail storage: {error}")
 }
 fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(db)
@@ -27,46 +27,73 @@ fn id() -> String {
 struct Graph {
     instance_id: String,
     name: String,
+    template_id: String,
     template_revision: u64,
+    organization_revision: u64,
     definition: Definition,
     bindings: BTreeMap<String, String>,
-    execution_version: String,
+    memberships: BTreeMap<String, String>,
     enabled: bool,
 }
 fn graph(c: &Connection, instance_id: &str) -> Result<Option<Graph>, String> {
-    let row: Option<(String,String,u64,u64,bool,bool)> = c.query_row("SELECT i.name,d.definition_json,i.template_revision,d.revision,i.enabled,i.needs_review FROM workflow_instances i JOIN workflow_definitions d ON d.workflow_id=i.template_id WHERE i.instance_id=?1",[instance_id],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(db)?;
-    let Some((name, raw, template_revision, current_revision, enabled, needs_review)) = row else {
+    let row: Option<(String,String,String,u64,u64,bool)> = c.query_row("SELECT name,definition_json,template_id,template_revision,revision,enabled FROM workflow_instances WHERE instance_id=?1",[instance_id],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(db)?;
+    let Some((name, raw, template_id, template_revision, organization_revision, enabled)) = row
+    else {
         return Ok(None);
     };
     let definition: Definition = parse(&raw)?;
-    let mut statement=c.prepare("SELECT node_id,conversation_id FROM workflow_instance_bindings WHERE instance_id=?1 ORDER BY node_id").map_err(db)?;
-    let bindings: BTreeMap<String, String> = statement
-        .query_map([instance_id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(db)?
-        .collect::<rusqlite::Result<_>>()
+    let mut statement=c.prepare("SELECT node_id,conversation_id,membership_id FROM workflow_instance_bindings WHERE instance_id=?1 ORDER BY node_id").map_err(db)?;
+    let rows = statement
+        .query_map([instance_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
         .map_err(db)?;
-    let execution_version = format!(
-        "{:x}",
-        Sha256::digest(json(&(instance_id, template_revision, &bindings))?.as_bytes())
-    );
+    let mut bindings = BTreeMap::new();
+    let mut memberships = BTreeMap::new();
+    for row in rows {
+        let (node, conversation, membership) = row.map_err(db)?;
+        bindings.insert(node.clone(), conversation);
+        memberships.insert(node, membership);
+    }
     let models = definition
         .nodes
         .iter()
         .filter_map(|n| match &n.config {
             NodeConfig::Agent(a) => a.model_config_id.clone(),
-            _ => None,
         })
         .collect();
     let valid = definition.validate(&models)?.is_empty();
     Ok(Some(Graph {
         instance_id: instance_id.into(),
         name,
+        template_id,
         template_revision,
+        organization_revision,
         definition,
         bindings,
-        execution_version,
-        enabled: enabled && !needs_review && template_revision == current_revision && valid,
+        memberships,
+        enabled: enabled && valid,
     }))
+}
+/// Stable for this member incarnation. Other members, hierarchy and responsibilities can change
+/// while this run continues; removing or rebinding this member permanently retires its authority.
+fn membership_version(graph: &Graph, node_id: &str) -> Result<String, String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            json(&(
+                &graph.instance_id,
+                node_id,
+                graph.bindings.get(node_id),
+                graph.memberships.get(node_id)
+            ))?
+            .as_bytes()
+        )
+    ))
 }
 fn node<'a>(graph: &'a Graph, id: &str) -> Result<&'a Node, String> {
     graph
@@ -74,7 +101,7 @@ fn node<'a>(graph: &'a Graph, id: &str) -> Result<&'a Node, String> {
         .nodes
         .iter()
         .find(|n| n.id == id)
-        .ok_or_else(|| "Workflow node is unavailable".into())
+        .ok_or_else(|| "Organization node is unavailable".into())
 }
 fn independent(c: &Connection, conversation_id: &str) -> Result<bool, String> {
     c.query_row("SELECT EXISTS(SELECT 1 FROM conversations c WHERE c.id=?1 AND c.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM agent_nodes n WHERE n.conversation_id=c.id AND n.parent_agent_id IS NOT NULL))",[conversation_id],|r|r.get(0)).map_err(db)
@@ -91,28 +118,32 @@ fn snapshot(graph: &Graph, node_id: &str) -> Result<ConversationSnapshot, String
     let current = node(graph, node_id)?;
     let (receives, task, delivers) = match &current.config {
         NodeConfig::Agent(a) => (a.receives.clone(), a.task.clone(), a.delivers.clone()),
-        NodeConfig::User { task } => (String::new(), task.clone(), String::new()),
     };
     let members = graph
         .definition
         .nodes
         .iter()
-        .map(|n| RelatedNode {
-            node_id: n.id.clone(),
-            node_name: n.name.clone(),
-            conversation_id: graph.bindings.get(&n.id).cloned(),
-            task: match &n.config {
-                NodeConfig::Agent(a) => a.task.chars().take(512).collect(),
-                NodeConfig::User { task } => task.chars().take(512).collect(),
-            },
+        .map(|n| {
+            Ok(RelatedNode {
+                node_id: n.id.clone(),
+                node_name: n.name.clone(),
+                conversation_id: graph.bindings.get(&n.id).cloned(),
+                membership_version: Some(membership_version(graph, &n.id)?),
+                rank: n.rank,
+                management_role: n.management_role.clone(),
+                department_id: n.department_id.clone(),
+                task: match &n.config {
+                    NodeConfig::Agent(a) => a.task.chars().take(512).collect(),
+                },
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(ConversationSnapshot {
         instance_id: graph.instance_id.clone(),
         name: graph.name.clone(),
-        template_id: graph.definition.id.clone(),
+        template_id: graph.template_id.clone(),
         template_revision: graph.template_revision,
-        execution_version: graph.execution_version.clone(),
+        execution_version: membership_version(graph, node_id)?,
         node_id: node_id.into(),
         node_name: current.name.clone(),
         background: graph.definition.background.clone(),
@@ -121,6 +152,11 @@ fn snapshot(graph: &Graph, node_id: &str) -> Result<ConversationSnapshot, String
         delivers,
         members,
         enabled: graph.enabled,
+        organization_revision: graph.organization_revision,
+        rank: current.rank,
+        management_role: current.management_role.clone(),
+        department_id: current.department_id.clone(),
+        departments: graph.definition.departments.clone(),
     })
 }
 pub fn snapshot_for_conversation(
@@ -146,16 +182,18 @@ fn mutation_owner(
     version: &str,
 ) -> Result<ConversationSnapshot, String> {
     if is_paused(c, conversation_id)? {
-        return Err("This conversation was stopped; a new user turn is required before changing workflow mail".into());
+        return Err("This conversation was stopped; a new user turn is required before changing organization mail".into());
     }
     let identity = snapshot_for_run(c, conversation_id, run_id)?
-        .ok_or("The current run has no active workflow identity")?;
+        .ok_or("The current run has no active organization identity")?;
     if identity.execution_version != version {
-        return Err("Workflow membership changed; wait for updated workflow context".into());
+        return Err(
+            "Organization membership changed; wait for updated organization context".into(),
+        );
     }
     let active:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM conversation_turn_traces WHERE conversation_id=?1 AND run_id=?2 AND terminal_status='in_progress')",params![conversation_id,run_id],|r|r.get(0)).map_err(db)?;
     if !active {
-        return Err("Workflow mutations require the current active conversation run".into());
+        return Err("Organization mutations require the current active conversation run".into());
     }
     Ok(identity)
 }
@@ -185,7 +223,6 @@ fn status_name(status: &InputStatus) -> &'static str {
         InputStatus::Pending => "pending",
         InputStatus::Claimed => "claimed",
         InputStatus::Applied => "applied",
-        InputStatus::WaitingUser => "waiting_user",
         InputStatus::Completed => "completed",
         InputStatus::Paused => "paused",
         InputStatus::Failed => "failed",
@@ -207,7 +244,7 @@ fn current_mail_status(c: &Connection, input_id: &str) -> Result<MailStatus, Str
 fn write(c: &Connection, input: &Input) -> Result<(), String> {
     let current = current_mail_status(c, &input.id)?;
     if current.is_terminal() && current != input.mail_status {
-        return Err("A settled workflow message cannot change its result".into());
+        return Err("A settled organization message cannot change its result".into());
     }
     c.execute("UPDATE workflow_mail_inputs SET input_json=?1,status=?2,run_id=?3,delivery_id=?4,updated_at=?5,execution_version=?7 WHERE input_id=?6",params![json(input)?,status_name(&input.status),input.run_id,input.delivery_id,now_ms(),input.id,input.execution_version]).map_err(db)?;
     c.execute(
@@ -234,16 +271,30 @@ pub fn send(c: &mut Connection, request: &SendRequest) -> Result<SendReceipt, St
             .sum::<usize>()
             > MAX_DELIVERY_BYTES
     {
-        return Err("Workflow send requires 1 to 128 messages within the 128 KB per-message and 1 MB total limits".into());
+        return Err("Organization send requires 1 to 128 messages within the 128 KB per-message and 1 MB total limits".into());
     }
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
+    if let Some(input) = &request.model_input {
+        if let Some(crate::WorkflowMailReceipt::Send(mut receipt)) = mail_receipt_for_call(
+            &tx,
+            &request.conversation_id,
+            &request.source_run_id,
+            &request.tool_call_id,
+            &crate::WorkflowMailReceiptCall::SemanticSend {
+                input: input.clone(),
+            },
+        )? {
+            receipt.duplicate = true;
+            return Ok(receipt);
+        }
+    }
     let request_json = json(request)?;
     let existing:Option<(String,String)>=tx.query_row("SELECT request_json,receipt_json FROM workflow_mail_sends WHERE source_run_id=?1 AND tool_call_id=?2",params![request.source_run_id,request.tool_call_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db)?;
     if let Some((old, receipt)) = existing {
         if old != request_json {
-            return Err("Workflow call identity was reused with different arguments".into());
+            return Err("Organization call identity was reused with different arguments".into());
         }
         let mut receipt: SendReceipt = parse(&receipt)?;
         receipt.duplicate = true;
@@ -255,12 +306,12 @@ pub fn send(c: &mut Connection, request: &SendRequest) -> Result<SendReceipt, St
         &request.source_run_id,
         &request.execution_version,
     )?;
-    let graph = graph(&tx, &source.instance_id)?.ok_or("Workflow deleted")?;
+    let graph = graph(&tx, &source.instance_id)?.ok_or("Organization deleted")?;
     let (count,bytes):(i64,i64)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(message_json AS BLOB))),0) FROM workflow_mail_messages WHERE instance_id=?1 AND mail_status IN ('pending','processing')",[&source.instance_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db)?;
     if count + request.messages.len() as i64 > MAX_PENDING_MESSAGES
         || bytes + request_json.len() as i64 > MAX_PENDING_BYTES
     {
-        return Err("Workflow mailbox backlog is full".into());
+        return Err("Organization mailbox backlog is full".into());
     }
     let title: String = tx
         .query_row(
@@ -278,18 +329,23 @@ pub fn send(c: &mut Connection, request: &SendRequest) -> Result<SendReceipt, St
     };
     for output in &request.messages {
         if output.target_node_id == source.node_id {
-            return Err("Choose another member of this workflow".into());
+            return Err("Choose another member of this organization".into());
         }
         let target = node(&graph, &output.target_node_id)?;
-        let recipient = graph.bindings.get(&target.id).cloned();
-        if target.is_agent()
-            && !recipient
-                .as_deref()
-                .map(|chat| independent(&tx, chat))
-                .transpose()?
-                .unwrap_or(false)
+        if request.model_input.is_some()
+            && request.recipient_versions.get(&target.id)
+                != Some(&membership_version(&graph, &target.id)?)
         {
-            return Err("Workflow target is unbound or archived".into());
+            return Err("The recipient changed since your directory was read. Check the updated member directory before sending.".into());
+        }
+        let recipient = graph.bindings.get(&target.id).cloned();
+        if !recipient
+            .as_deref()
+            .map(|chat| independent(&tx, chat))
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Err("Organization target is unbound or archived".into());
         }
         if let Some(reply) = &output.reply_to_message_id {
             let related:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM workflow_mail_messages WHERE message_id=?1 AND instance_id=?2 AND ((recipient_conversation_id=?3 AND json_extract(message_json,'$.sourceNodeId')=?4) OR (json_extract(message_json,'$.sourceConversationId')=?3 AND node_id=?4)))",params![reply,source.instance_id,request.conversation_id,target.id],|r|r.get(0)).map_err(db)?;
@@ -327,25 +383,21 @@ pub fn send(c: &mut Connection, request: &SendRequest) -> Result<SendReceipt, St
             instance_id: source.instance_id.clone(),
             node_id: target.id.clone(),
             conversation_id: recipient,
-            execution_version: graph.execution_version.clone(),
+            execution_version: membership_version(&graph, &target.id)?,
             content: assemble_message(
                 &snapshot(&graph, &target.id)?,
                 std::slice::from_ref(&message),
             ),
             messages: vec![message.clone()],
             mail_status: MailStatus::Pending,
-            status: if target.is_agent() {
-                InputStatus::Pending
-            } else {
-                InputStatus::WaitingUser
-            },
+            status: InputStatus::Pending,
             run_id: None,
             delivery_id: None,
             created_at: message.created_at,
             error: None,
         };
         tx.execute("INSERT INTO workflow_mail_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)",params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,json(&input)?,status_name(&input.status),input.created_at]).map_err(db)?;
-        tx.execute("INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,recipient_conversation_id,mail_status,message_json,input_id,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6,?7,?8)",params![message.id,message.instance_id,graph.execution_version,message.target_node_id,message.target_conversation_id,json(&message)?,input.id,message.created_at]).map_err(db)?;
+        tx.execute("INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,recipient_conversation_id,mail_status,message_json,input_id,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6,?7,?8)",params![message.id,message.instance_id,input.execution_version,message.target_node_id,message.target_conversation_id,json(&message)?,input.id,message.created_at]).map_err(db)?;
         event(
             &tx,
             &source.instance_id,
@@ -376,7 +428,7 @@ pub fn mutate(c: &mut Connection, request: &MutationRequest) -> Result<Value, St
     let existing:Option<(String,String)>=tx.query_row("SELECT request_json,receipt_json FROM workflow_mail_mutations WHERE source_run_id=?1 AND tool_call_id=?2",params![request.source_run_id,request.tool_call_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db)?;
     if let Some((old, receipt)) = existing {
         if old != request_json {
-            return Err("Workflow call identity was reused with different arguments".into());
+            return Err("Organization call identity was reused with different arguments".into());
         }
         return parse(&receipt);
     }
@@ -501,9 +553,13 @@ pub fn mutate(c: &mut Connection, request: &MutationRequest) -> Result<Value, St
     Ok(receipt)
 }
 
+mod presentation;
+pub use presentation::*;
 mod delivery;
 pub use delivery::*;
 mod awareness;
 pub use awareness::*;
+mod receipts;
+pub use receipts::*;
 #[cfg(test)]
 mod tests;

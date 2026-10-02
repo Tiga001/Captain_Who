@@ -611,3 +611,74 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
         "later observations cannot rewrite the historical full"
     );
 }
+
+#[tokio::test]
+async fn stop_at_world_state_boundary_commits_cancelled_without_frontend_error() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("stopped-world-state.sqlite");
+    let storage = Arc::new(StorageService::open(&database).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    storage.save_model_settings(settings).unwrap();
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let conversation_id = "world-state-user-stop";
+    super::super::conversation_world_state::install_before_world_state_request_hook(
+        conversation_id,
+        Arc::new(|service, run_id| {
+            assert!(service.cancel_run_checked(run_id).unwrap());
+        }),
+    );
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
+    let mut input = turn_input(901);
+    input.conversation_id = Some(conversation_id.into());
+    let started = service
+        .start_conversation_turn(input, notifications)
+        .unwrap();
+    let done = wait_for_done(&mut receiver, &started.run_id, "cancelled").await;
+    assert_eq!(done["userInterrupted"], true);
+    assert!(done["content"].is_null());
+    let trace = storage
+        .get_conversation_turn_trace(&started.assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert!(trace.terminal_error.is_none());
+    assert!(trace.user_interrupted());
+    assert!(trace.validate().is_ok());
+    assert!(trace
+        .items
+        .iter()
+        .all(|item| !matches!(item, ConversationTurnTraceItem::RuntimeError { .. })));
+    let connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (status, content): (String, String) = connection
+        .query_row(
+            "SELECT status, content FROM messages WHERE id = ?1",
+            [&started.assistant_message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "sent");
+    assert!(
+        content.is_empty(),
+        "cancellation must not become assistant error text"
+    );
+    assert!(!service
+        .has_conversation_turn_occupancy(conversation_id)
+        .unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
+            .is_err()
+    );
+}

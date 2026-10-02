@@ -645,7 +645,9 @@ it('freezes live activity at its arrival boundary while later root narration kee
   initialRun.completedAt = undefined
   initialRun.timeline = initialRun.timeline
     .slice(0, 2)
-    .map((item) => ({ ...item, traceSequence: undefined }))
+    .map((item) =>
+      item.type === 'workflow_delivery' ? item : { ...item, traceSequence: undefined }
+    )
 
   const activityAtSpawn = activity('event-live-started', 'started', 2, 2_100, 'root-assistant-1')
   const screen = await render(

@@ -22,11 +22,11 @@ Tool / Provider / OS process
       +-> Exact Archive：安全捕获原文
       +-> Event / Trace / Checkpoint：独立有界投影
       `-> Model Projection
-            -> shared result gate (ordinary tools: 10K; collaboration/workflow reads: intact tool-owned results)
+            -> shared result gate (ordinary tools: 10K; collaboration/organization reads: intact tool-owned results)
             -> model context and usage accounting
 ```
 
-静态 Tool、Runtime Extension、审批后由 Core Server 执行的 Tool、外部 MCP Server 和内置 Capability 的文本模型结果使用同一个 Gate。普通工具采用 `MODEL_TOOL_RESULT_MAX_TOKENS = 10_000`。六个 Agent 协作工具承载完整通信消息，按可信工具身份保留全文；工作流只读工具 `workflow_get_mailbox` 与 `workflow_get_state` 同样保留工具自行构造的完整页和图引用，避免通用裁剪丢失消息却保留越过它们的 cursor，或删除拓扑节点/连线后留下悬空引用。此处按精确工具名称单独登记两个工作流工具，不改变六个协作工具的注册或权限范围。实时结果、预提交回执和历史恢复遵守相同政策；这些结果仍计入整轮上下文测量、压缩和发送容量检查。最终发送前的豁免必须匹配实际 Tool Call 的 ID 与名称，不能根据正文中的字段推断。
+静态 Tool、Runtime Extension、审批后由 Core Server 执行的 Tool、外部 MCP Server 和内置 Capability 的文本模型结果使用同一个 Gate。普通工具采用 `MODEL_TOOL_RESULT_MAX_TOKENS = 10_000`。六个 Agent 协作工具承载完整通信消息，按可信工具身份保留全文；组织只读工具 `organization_get_mailbox` 与 `organization_get_state` 同样保留工具自行构造的完整页和成员信息，避免通用裁剪丢失消息却保留越过它们的 cursor，或删除成员记录后留下无法解析的成员引用。此处按精确工具名称单独登记两个组织工具，不改变六个协作工具的注册或权限范围。实时结果、预提交回执和历史恢复遵守相同政策；这些结果仍计入整轮上下文测量、压缩和发送容量检查。最终发送前的豁免必须匹配实际 Tool Call 的 ID 与名称，不能根据正文中的字段推断。
 
 完整通信正文指显式发送的任务、消息和成果。子 Agent 的最终回复只保留在自身会话；自动 `Result` 是 Host 生成的结束通知，包含身份、终态、必要错误和产物引用，不复制或截取最终回复。详细成果由子 Agent 使用 `send_message` 汇报给直接父级，沿用上述全文交付规则。
 
@@ -75,8 +75,8 @@ Tool / Provider / OS process
 | `conversation_history`       | 仅当前有效摘要覆盖的安全持久模型上下文；按字符分页                                                           | 预算感知历史页 + 10K                     | 边界内 `open`/navigation；拒绝原始 Archive 路由          |
 | `automation_report`          | summary 2 KiB；Run result preview 8 KiB；error message 4 KiB                                                 | 小型确认 receipt + 10K                   | 无分页；首次报告持久化，终态 fallback 按 UTF-8 安全裁剪  |
 | 协作 Tool                    | 保留 Mailbox 总积压背压与单批条数限制；正文无固定业务字数上限                                                | 完整消息；使用整轮上下文预算             | 超整轮容量明确失败并保留原文；不进 Exact Archive         |
-| `workflow_get_mailbox`       | 默认 20/最多 50 条；单页正文最多 256,000 bytes；单消息沿用发送时 128,000 bytes 上限                            | 完整工具页；使用整轮上下文预算           | `nextCursor`；正文预算省略记录可按 `messageId` 查询       |
-| `workflow_get_state`         | 定义最多 128 节点/512 连线；全局职责文本预览 512 chars，简介/背景预览 4,096 chars                              | 完整图引用与工具预览；整轮上下文预算     | `nodeId` 聚焦取得完整节点和公共背景；明确 `truncatedFields` |
+| `organization_get_mailbox`   | 默认 20/最多 50 条；单页正文最多 256,000 bytes；单消息沿用发送时 128,000 bytes 上限                          | 完整工具页；使用整轮上下文预算           | `nextCursor`；正文预算省略记录可按 `messageId` 查询      |
+| `organization_get_state`     | 定义最多 128 个成员；全局职责文本预览 512 chars；不重复公共背景                                              | 完整成员引用与工具预览；整轮上下文预算   | `nodeId` 聚焦取得成员职责与状态；明确 `truncatedFields`  |
 
 表中数字是当前核验快照。修改任何一项时必须以常量和测试为准，并同步本文；不要从文档生成安全配置。
 
@@ -86,7 +86,7 @@ Composer 原始附件的导入、模型视觉输入与 Tool Result 是不同阶�
 
 Gate 使用当前模型/API style 的 `ContextTextBudget` 估算完整 Tool message，而不是简单按字符截断。处理顺序：
 
-协作消息及两个工作流只读工具的语义结果按工具提供的内容交付，完整计量。工作流工具先执行自身的页数、正文预算和可恢复字段预览，中央 Gate 不再次删减集合；超整轮容量仍按正常上下文策略处理，不允许静默丢弃正文或图引用。其余工具采用下列规则：
+协作消息及两个组织只读工具的语义结果按工具提供的内容交付，完整计量。组织工具先执行自身的页数、正文预算和可恢复字段预览，中央 Gate 不再次删减集合；超整轮容量仍按正常上下文策略处理，不允许静默丢弃正文或成员引用。其余工具采用下列规则：
 
 1. 如果结果在 10K 内且无需补充截断标记，原样交付模型投影。
 2. 若 Tool 提供语义分页，优先让 Tool 在预算内重新构造一页，保证 cursor 从模型实际看到的最后一项继续。
@@ -136,7 +136,7 @@ Archive 保留内部审计证据，不为普通截断结果生成公共续读引
 
 ## 不变量
 
-1. 所有 M Tool Result 使用共享 Gate；普通工具限制 10K，可信协作回执及指定工作流只读结果保持工具语义完整并受整轮上下文容量约束。
+1. 所有 M Tool Result 使用共享 Gate；普通工具限制 10K，可信协作回执及指定组织只读结果保持工具语义完整并受整轮上下文容量约束。
 2. 来源安全限先于 Archive；Archive 不能恢复上游未返回内容。
 3. E/T/C 限长不改变 A，M 限长不改变其他消费者。
 4. 可分页集合不得被通用字符裁剪后跳过条目。

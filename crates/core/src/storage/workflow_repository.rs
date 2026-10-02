@@ -1,4 +1,4 @@
-//! Workflow authoring only: graph definitions are persisted without creating executable Agents.
+//! Organization authoring only: member definitions are persisted without creating executable Agents.
 use crate::storage::now_ms;
 use crate::workflow::{Definition, InvalidRecord, InvalidRecordReason, Record, Request, Response};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -27,7 +27,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 fn storage_error(_: impl std::fmt::Display) -> Error {
-    Error::Storage("Workflow storage operation failed".into())
+    Error::Storage("Organization storage operation failed".into())
 }
 
 /// Validation and mutation share a transaction, without depending on subagent templates.
@@ -38,6 +38,20 @@ pub fn request(
     request: Request,
     available_models: &HashSet<String>,
 ) -> Result<Response, Error> {
+    if matches!(
+        request,
+        Request::Manage(crate::workflow_management::Request::ListInstances {})
+    ) {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(storage_error)?;
+        let instances = management::list_instances(&transaction)?;
+        transaction.commit().map_err(storage_error)?;
+        return Ok(Response {
+            instances,
+            ..Response::default()
+        });
+    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_error)?;
@@ -58,21 +72,18 @@ pub fn request(
                 &definition,
                 expected_revision,
                 None,
-                None,
                 available_models,
             )?;
         }
-        Request::SaveWithUsage {
+        Request::SaveWithDraft {
             definition,
             expected_revision,
-            expected_usage_revision,
             expected_draft_revision,
         } => {
             management::publish(
                 &transaction,
                 &definition,
                 expected_revision,
-                expected_usage_revision.as_deref(),
                 expected_draft_revision,
                 available_models,
             )?;
@@ -82,13 +93,10 @@ pub fn request(
             expected_revision,
         } => {
             validate_id(&id)?;
-            if management::template_in_use(&transaction, &id)? {
-                return Err(Error::Conflict("workflow_template_in_use".into()));
-            }
             let expected = revision_to_sql(expected_revision)?;
             if expected == 0 {
                 return Err(Error::Invalid(
-                    "Deleting a workflow requires its current revision".into(),
+                    "Deleting an organization requires its current revision".into(),
                 ));
             }
             let changed = transaction
@@ -108,11 +116,71 @@ pub fn request(
     }
     (response.records, response.invalid_records) = list(&transaction, available_models)?;
     response.instances = management::list_instances(&transaction)?;
-    response.usages = management::list_usages(&transaction)?;
     (response.drafts, response.invalid_drafts) =
         management::list_drafts(&transaction, available_models)?;
     transaction.commit().map_err(storage_error)?;
     Ok(response)
+}
+
+/// Called inside a Host-owned transaction; template provenance never participates in execution.
+pub fn load_instance(
+    c: &Connection,
+    id: &str,
+) -> Result<Option<crate::workflow_management::Instance>, Error> {
+    management::get_instance(c, id)
+}
+
+/// Persist a personnel change after the caller has checked current Host authority and changed
+/// bindings in this same transaction. A conflict must roll back the entire transaction.
+pub fn save_instance_definition(
+    c: &Connection,
+    id: &str,
+    definition: &Definition,
+    expected_revision: u64,
+) -> Result<(), Error> {
+    definition
+        .validate_unique_member_names()
+        .map_err(Error::Invalid)?;
+    definition
+        .validate_department_names()
+        .map_err(Error::Invalid)?;
+    let mut definition = definition.clone();
+    definition.id = id.into();
+    let models = definition
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let crate::workflow::NodeConfig::Agent(config) = &node.config;
+            config.model_config_id.clone()
+        })
+        .collect();
+    if !definition
+        .validate(&models)
+        .map_err(Error::Invalid)?
+        .is_empty()
+    {
+        return Err(Error::Invalid(
+            "organization_instance_definition_incomplete".into(),
+        ));
+    }
+    // Personnel edits cannot rebind conversations. Only removing an existing node can retire
+    // a recipient; prose, rank, model and department changes leave mail ownership intact.
+    let definition_json = serde_json::to_string(&definition).map_err(storage_error)?;
+    let recipients_removed: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workflow_instances i, json_each(i.definition_json,'$.nodes') old WHERE i.instance_id=?1 AND NOT EXISTS(SELECT 1 FROM json_each(?2,'$.nodes') new WHERE json_extract(new.value,'$.id')=json_extract(old.value,'$.id')))",
+        params![id, definition_json], |row| row.get(0),
+    ).map_err(storage_error)?;
+    let expected = revision_to_sql(expected_revision)?;
+    let changed = c.execute("UPDATE workflow_instances SET definition_json=?1,revision=?2,updated_at=MAX(updated_at+1,?3),needs_review=0,last_request_json='{}' WHERE instance_id=?4 AND revision=?5",
+        params![definition_json, next_revision(expected)?, now_ms(), id, expected]).map_err(storage_error)?;
+    if changed != 1 {
+        return Err(revision_conflict());
+    }
+    if recipients_removed {
+        crate::storage::workflow_execution_repository::reconcile_recipients(c, id)
+            .map_err(Error::Storage)?;
+    }
+    Ok(())
 }
 
 mod management;
@@ -124,7 +192,7 @@ fn list(
     let (count, bytes) = catalog_size(connection)?;
     if count > MAX_DEFINITIONS || bytes > MAX_CATALOG_BYTES {
         return Err(Error::Storage(
-            "Workflow catalog exceeds its storage limit".into(),
+            "Organization catalog exceeds its storage limit".into(),
         ));
     }
     let mut statement = connection
@@ -149,7 +217,7 @@ fn list(
         let (id, json, revision, updated_at) = row.map_err(storage_error)?;
         if !(1..=MAX_SAFE_REVISION).contains(&revision) || updated_at < 0 {
             return Err(Error::Storage(
-                "Invalid persisted workflow record metadata".into(),
+                "Invalid persisted organization record metadata".into(),
             ));
         }
         match parse_persisted_definition(&json, &id, available_models) {
@@ -212,6 +280,12 @@ fn save(
     expected_revision: u64,
     valid: bool,
 ) -> Result<(), Error> {
+    definition
+        .validate_unique_member_names()
+        .map_err(Error::Invalid)?;
+    definition
+        .validate_department_names()
+        .map_err(Error::Invalid)?;
     let expected = revision_to_sql(expected_revision)?;
     let current: Option<(i64, i64, i64)> = connection
         .query_row(
@@ -231,7 +305,8 @@ fn save(
     let replaced_bytes = current.as_ref().map(|row| row.2).unwrap_or(0);
     if bytes - replaced_bytes + json.len() as i64 > MAX_CATALOG_BYTES {
         return Err(Error::Invalid(
-            "Workflow catalog exceeds 16 MiB; shorten or delete a definition before saving".into(),
+            "Organization catalog exceeds 16 MiB; shorten or delete a definition before saving"
+                .into(),
         ));
     }
     let timestamp = now_ms().max(
@@ -253,7 +328,7 @@ fn save(
     } else {
         if count >= MAX_DEFINITIONS {
             return Err(Error::Invalid(
-                "At most 1000 workflow definitions can be saved".into(),
+                "At most 1000 organization definitions can be saved".into(),
             ));
         }
         connection.execute(
@@ -276,23 +351,23 @@ fn catalog_size(connection: &Connection) -> Result<(usize, i64), Error> {
 }
 
 fn revision_conflict() -> Error {
-    Error::Conflict("Workflow changed or was deleted; reload before changing it".into())
+    Error::Conflict("Organization changed or was deleted; reload before changing it".into())
 }
 fn next_revision(revision: i64) -> Result<i64, Error> {
     revision
         .checked_add(1)
         .filter(|next| *next <= MAX_SAFE_REVISION)
-        .ok_or_else(|| Error::Invalid("Workflow revision exhausted".into()))
+        .ok_or_else(|| Error::Invalid("Organization revision exhausted".into()))
 }
 fn revision_to_sql(revision: u64) -> Result<i64, Error> {
     i64::try_from(revision)
         .ok()
         .filter(|revision| *revision <= MAX_SAFE_REVISION)
-        .ok_or_else(|| Error::Invalid("Invalid workflow revision".into()))
+        .ok_or_else(|| Error::Invalid("Invalid organization revision".into()))
 }
 fn validate_id(id: &str) -> Result<(), Error> {
     if id.trim().is_empty() || id.len() > 256 {
-        return Err(Error::Invalid("Invalid workflow identifier".into()));
+        return Err(Error::Invalid("Invalid organization identifier".into()));
     }
     Ok(())
 }
@@ -302,3 +377,6 @@ mod tests;
 
 #[cfg(test)]
 mod management_tests;
+
+#[cfg(test)]
+mod hierarchy_tests;

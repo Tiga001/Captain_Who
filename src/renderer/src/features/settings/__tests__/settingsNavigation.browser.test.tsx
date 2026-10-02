@@ -233,12 +233,12 @@ vi.mock('../pages/WorkflowsSettingsPage', async () => {
                   .finally(() => onSavingChange?.(false))
               }}
             >
-              保存工作流导航测试
+              保存组织导航测试
             </button>
           </header>
-          <h1>工作流</h1>
+          <h1>组织</h1>
           {saveFailed ? <p role="alert">保存失败，草稿仍在</p> : null}
-          <textarea aria-label="工作流草稿内容" defaultValue="尚未保存的工作流" />
+          <textarea aria-label="组织草稿内容" defaultValue="尚未保存的组织" />
           <section data-setting-id="workflows-list" />
           <section data-setting-id="workflow-background">公共背景</section>
           <section data-setting-id="workflow-structure">结构</section>
@@ -320,7 +320,7 @@ beforeEach(async () => {
 })
 
 describe('settings sidebar search navigation', () => {
-  it('keeps a pending workflow save mounted across page, search and back navigation attempts', async () => {
+  it('keeps a pending organization save mounted across page, search and back navigation attempts', async () => {
     let rejectSave!: (reason: Error) => void
     const pendingSave = new Promise<void>((_resolve, reject) => {
       rejectSave = reject
@@ -328,14 +328,14 @@ describe('settings sidebar search navigation', () => {
     mocks.workflowSave.mockReturnValueOnce(pendingSave)
     const { back } = await setup('workflows')
     await act(async () => mocks.setWorkflowState?.(true, true))
-    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('保存中不能丢失')
-    await page.getByRole('button', { name: '保存工作流导航测试', exact: true }).click()
+    await page.getByRole('textbox', { name: '组织草稿内容' }).fill('保存中不能丢失')
+    await page.getByRole('button', { name: '保存组织导航测试', exact: true }).click()
     expect(content().getAttribute('aria-busy')).toBe('true')
     await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
     await page.getByRole('button', { name: t('settings.backToApp'), exact: true }).click()
     await search().fill(t('auth.email'))
     await click(result(t('auth.email'), t('settings.page.profile')))
-    expect(rightPage()).toBe('工作流')
+    expect(rightPage()).toBe('组织')
     expect(mocks.workflowMounts).toBe(1)
     expect(back).not.toHaveBeenCalled()
     expect(document.querySelector('[role="dialog"]')).toBeNull()
@@ -343,16 +343,16 @@ describe('settings sidebar search navigation', () => {
     await expect.element(page.getByRole('alert')).toHaveTextContent('保存失败，草稿仍在')
     expect(content().hasAttribute('aria-busy')).toBe(false)
     await expect
-      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .element(page.getByRole('textbox', { name: '组织草稿内容' }))
       .toHaveValue('保存中不能丢失')
     await click(result(t('auth.email'), t('settings.page.profile')))
     await expect.element(page.getByRole('dialog', { name: '放弃未保存的修改？' })).toBeVisible()
     await page.getByText('继续编辑', { exact: true }).click()
     await expect.element(page.getByRole('alert')).toHaveTextContent('保存失败，草稿仍在')
-    expect(rightPage()).toBe('工作流')
+    expect(rightPage()).toBe('组织')
   })
 
-  it('keeps native workflow header controls clickable beside the responsive sidebar drag region', async () => {
+  it('keeps native organization header controls clickable beside the responsive sidebar drag region', async () => {
     await setup('workflows')
     // The app installs this alias at its document root; this fixture scopes theme
     // tokens to a wrapper instead, so model the native titlebar explicitly.
@@ -368,7 +368,7 @@ describe('settings sidebar search navigation', () => {
       expect(
         Math.abs(drag.getBoundingClientRect().right - sidebar.getBoundingClientRect().right)
       ).toBeLessThan(1)
-      const save = page.getByRole('button', { name: '保存工作流导航测试', exact: true })
+      const save = page.getByRole('button', { name: '保存组织导航测试', exact: true })
       const buttonBounds = save.element().getBoundingClientRect()
       const center = {
         x: buttonBounds.left + buttonBounds.width / 2,
@@ -389,7 +389,7 @@ describe('settings sidebar search navigation', () => {
     ).toBe(700)
   })
 
-  it('uses the whole settings content only while the workflow editor is visible', async () => {
+  it('uses the whole settings content only while the organization editor is visible', async () => {
     await setup('workflows')
     const inner = content().querySelector<HTMLElement>('.settings-content__inner')!
     expect(getComputedStyle(inner).maxWidth).toBe('1220px')
@@ -407,23 +407,23 @@ describe('settings sidebar search navigation', () => {
     expect(getComputedStyle(inner).maxWidth).toBe('1220px')
   })
 
-  it('guards leaving a dirty workflow by sidebar page and back-to-app navigation', async () => {
+  it('guards leaving a dirty organization by sidebar page and back-to-app navigation', async () => {
     const { back } = await setup('workflows')
     await act(async () => mocks.setWorkflowState?.(true, true))
-    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('保留我的工作流')
+    await page.getByRole('textbox', { name: '组织草稿内容' }).fill('保留我的组织')
     await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
     await expect.element(page.getByRole('dialog', { name: '放弃未保存的修改？' })).toBeVisible()
     await page.getByText('继续编辑', { exact: true }).click()
-    expect(rightPage()).toBe('工作流')
+    expect(rightPage()).toBe('组织')
     await expect
-      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
-      .toHaveValue('保留我的工作流')
+      .element(page.getByRole('textbox', { name: '组织草稿内容' }))
+      .toHaveValue('保留我的组织')
     expect(content().classList.contains('settings-content--workflow-editor')).toBe(true)
     await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
     await page.getByRole('button', { name: '放弃修改', exact: true }).click()
     expect(rightPage()).toBe(t('settings.page.profile'))
     expect(content().classList.contains('settings-content--workflow-editor')).toBe(false)
-    await page.getByRole('button', { name: '工作流', exact: true }).click()
+    await page.getByRole('button', { name: t('settings.page.workflows'), exact: true }).click()
     await act(async () => mocks.setWorkflowState?.(true, true))
     await page.getByRole('button', { name: t('settings.backToApp'), exact: true }).click()
     expect(back).not.toHaveBeenCalled()
@@ -433,26 +433,26 @@ describe('settings sidebar search navigation', () => {
     expect(back).toHaveBeenCalledOnce()
   })
 
-  it('preserves a workflow draft for internal search targets and guards an external target', async () => {
+  it('preserves an organization draft for internal search targets and guards an external target', async () => {
     await setup('workflows')
     await act(async () => mocks.setWorkflowState?.(true, true))
-    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('不能丢失')
+    await page.getByRole('textbox', { name: '组织草稿内容' }).fill('不能丢失')
     await search().fill(t('workflows.structure'))
-    await click(result(t('workflows.structure'), '工作流'))
+    await click(result(t('workflows.structure'), t('settings.page.workflows')))
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     expect(mocks.workflowMounts).toBe(1)
     await expect
-      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .element(page.getByRole('textbox', { name: '组织草稿内容' }))
       .toHaveValue('不能丢失')
     await search().fill(t('workflows.background'))
-    await click(result(t('workflows.background'), '工作流'))
+    await click(result(t('workflows.background'), t('settings.page.workflows')))
     expect(document.querySelector('[role="dialog"]')).toBeNull()
     expect(mocks.workflowMounts).toBe(1)
     await search().fill(t('auth.email'))
     await click(result(t('auth.email'), t('settings.page.profile')))
     await page.getByText('继续编辑', { exact: true }).click()
     await expect
-      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .element(page.getByRole('textbox', { name: '组织草稿内容' }))
       .toHaveValue('不能丢失')
     await click(result(t('auth.email'), t('settings.page.profile')))
     await page.getByRole('button', { name: '放弃修改', exact: true }).click()
@@ -462,14 +462,18 @@ describe('settings sidebar search navigation', () => {
     )
   })
 
-  it('opens workflows as a separate peer page and routes its search result there', async () => {
+  it('opens organizations as a separate peer page and routes its search result there', async () => {
     await setup('profile')
-    await page.getByRole('button', { name: '工作流', exact: true }).click()
-    expect(rightPage()).toBe('工作流')
-    await search().fill('工作流')
-    await click(result('工作流', '工作流'))
-    expect(rightPage()).toBe('工作流')
-    expect(result('工作流', '工作流').getAttribute('aria-current')).toBe('location')
+    await page.getByRole('button', { name: t('settings.page.workflows'), exact: true }).click()
+    expect(rightPage()).toBe('组织')
+    await search().fill('组织')
+    await click(result(t('workflows.settingsTitle'), t('settings.page.workflows')))
+    expect(rightPage()).toBe('组织')
+    expect(
+      result(t('workflows.settingsTitle'), t('settings.page.workflows')).getAttribute(
+        'aria-current'
+      )
+    ).toBe('location')
   })
 
   it('finds a setting on an unvisited page without switching or saving while typing', async () => {

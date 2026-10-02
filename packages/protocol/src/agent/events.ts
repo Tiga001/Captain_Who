@@ -107,6 +107,26 @@ export type AgentEvent =
       sequence: number
     }
   | {
+      type: 'workflow_delivery_applied'
+      conversationId: string
+      runId: string
+      assistantMessageId: string
+      inputId: string
+      deliveryId: string
+      instanceId: string
+      workflowName: string
+      content: string
+      sources: {
+        nodeId: string
+        nodeName: string
+        conversationId: string
+        conversationTitle: string
+        content: string
+      }[]
+      createdAt: number
+      sequence: number
+    }
+  | {
       type: 'guidance_rejected'
       runId: string
       guidanceId: string

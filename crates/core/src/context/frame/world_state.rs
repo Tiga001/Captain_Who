@@ -939,7 +939,7 @@ mod tests {
 
     fn workflow_template_ledger() -> Vec<AnchoredWorldStateRecord> {
         let make = |sequence, revision, state: &str| {
-            let execution = serde_json::json!({"available":true,"workflow":{"instanceId":"team-id","templateId":"private-template-id","templateRevision":revision,"executionVersion":format!("private-version-{revision}"),"task":"Review artifacts","nodeId":"reviewer"}});
+            let execution = serde_json::json!({"available":true,"organization":{"instanceId":"team-id","templateId":"private-template-id","templateRevision":revision,"executionVersion":format!("private-version-{revision}"),"name":"Review team","task":"Review artifacts","nodeId":"reviewer","nodeName":"Reviewer"}});
             let awareness = serde_json::json!({"available":true,"instanceId":"team-id","executionVersion":format!("private-version-{revision}"),"state":state});
             let permissions = serde_json::json!({"mode":"review-only"});
             WorldStateSnapshot::new(
@@ -947,14 +947,14 @@ mod tests {
                 sequence,
                 vec![
                     WorldStateSectionEnvelope::model_visible(
-                        WorldStateSectionId::extension("workflow.execution").unwrap(),
+                        WorldStateSectionId::extension("organization.execution").unwrap(),
                         WorldStateLifetime::Conversation,
                         execution.clone(),
                         execution,
                     )
                     .unwrap(),
                     WorldStateSectionEnvelope::model_visible(
-                        WorldStateSectionId::extension("workflow.awareness").unwrap(),
+                        WorldStateSectionId::extension("organization.awareness").unwrap(),
                         WorldStateLifetime::Conversation,
                         awareness.clone(),
                         awareness,
@@ -1032,11 +1032,15 @@ mod tests {
                 && !visible.contains("executionVersion")
         );
         assert!(
-            visible.contains("team-id")
+            visible.contains("Review team")
+                && visible.contains("Reviewer")
                 && visible.contains("Review artifacts")
                 && visible.contains("review-only")
                 && visible.contains("running")
         );
+        assert!(!visible.contains("team-id") && !visible.contains("nodeId"));
+        assert!(serialized.to_string().contains("team-id"));
+        assert!(serialized.to_string().contains("private-template-id"));
         assert_eq!(
             serde_json::to_value(restored.conversation_world_state_records()).unwrap(),
             serialized

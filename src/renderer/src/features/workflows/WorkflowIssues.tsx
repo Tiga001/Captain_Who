@@ -10,25 +10,31 @@ export function WorkflowIssues({
   issues,
   text,
   onClose,
-  restoreFocusRef
+  restoreFocusRef,
+  title,
+  hint
 }: {
   graph: WorkflowDefinition
   issues: WorkflowIssue[]
   text: WorkflowText
   onClose: () => void
   restoreFocusRef: RefObject<HTMLButtonElement | null>
+  title?: string
+  hint?: string
 }) {
   if (issues.length === 0) return null
   const description = issues
     .map((issue) => {
       const node = graph.nodes.find((candidate) => candidate.id === issue.subject)
-      return `• ${node ? `${workflowNodeLabel(node, text)}: ` : ''}${workflowIssueText(issue.code, text)}`
+      const department = graph.departments?.find((candidate) => candidate.id === issue.subject)
+      const label = node ? workflowNodeLabel(node, text) : department?.name
+      return `• ${label ? `${label}: ` : ''}${workflowIssueText(issue.code, text)}`
     })
     .join('\n')
   return (
     <ConfirmationDialog
-      title={text('savedDraft')}
-      description={`${text('saveIssueHint')}\n${description}`}
+      title={title ?? text('savedDraft')}
+      description={`${hint ?? text('saveIssueHint')}\n${description}`}
       descriptionClassName="workflow-save-issues-description"
       dialogRole="alertdialog"
       cancelLabel={text('close')}

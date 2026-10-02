@@ -363,6 +363,10 @@ impl EffectiveToolSet {
         // Existing batches retain their exact schemas after live policy is disabled. The registry
         // still owns the implementations, and execution independently checks current Host policy.
         let live_policy_capabilities = [
+            ToolCapabilityId::application_owned("workflow.execution"),
+            ToolCapabilityId::application_owned(
+                crate::organization_personnel::MANAGEMENT_CAPABILITY,
+            ),
             ToolCapabilityId::application_owned(WEB_SEARCH_CAPABILITY),
             ToolCapabilityId::application_owned(
                 super::human_interaction::HUMAN_INTERACTION_CAPABILITY,

@@ -1,4 +1,5 @@
 .project-workflows {
+  container: organization-page / inline-size;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -219,18 +220,6 @@
   border-radius: 4px;
   flex-shrink: 0;
 }
-.project-workflows__status {
-  padding: 4px 9px;
-  border-radius: 20px;
-  background: var(--mc-color-surface-muted);
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-xs);
-  white-space: nowrap;
-}
-.project-workflows__status.needs-review {
-  color: var(--mc-color-text-primary);
-  box-shadow: inset 0 0 0 1px var(--mc-color-border-subtle);
-}
 .project-workflows__empty {
   display: flex;
   flex: 1;
@@ -257,40 +246,23 @@
   color: var(--mc-color-text-muted);
   line-height: 1.6;
 }
-.project-workflows__notice {
+.project-workflows__recovery {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 12px;
-  padding: 10px 24px;
-  background: var(--mc-color-surface-muted);
+  padding: 8px 20px;
+  color: var(--mc-color-text-muted);
   border-bottom: 1px solid var(--mc-color-border-subtle);
-  line-height: 1.6;
 }
-.project-workflows__notice.is-error {
-  color: var(--mc-color-text-danger);
-}
-.project-workflows__error-copy {
-  min-width: 0;
-}
-.project-workflows__error-detail {
-  margin-top: 3px;
-  font-size: var(--mc-font-size-xs);
-}
-.project-workflows__error-detail summary {
-  width: fit-content;
-  cursor: pointer;
-}
-.project-workflows__error-detail p {
-  max-height: 130px;
-  overflow: auto;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  margin: 7px 0 0;
+.project-workflows__recovery > span {
+  flex: 1;
 }
 .project-workflows__binding-toolbar {
   min-height: 56px;
   flex-shrink: 0;
+  flex-wrap: nowrap;
   padding: 8px 16px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
   gap: 10px;
@@ -352,11 +324,12 @@
   height: 34px;
   box-sizing: border-box;
 }
-.project-workflows__binding-actions {
+.project-workflows__editing-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 .project-workflows__commit-actions {
   margin-left: auto;
@@ -390,9 +363,6 @@
   .project-workflows__binding-toolbar > label {
     flex: 0 1 150px;
   }
-  .project-workflows__binding-actions {
-    gap: 4px;
-  }
 }
 
 /* The sidebar can be narrow even when the application window is wide. */
@@ -419,41 +389,33 @@
   padding-top: 0;
 }
 .workflow-sidebar-page .project-workflows__binding-toolbar {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   -webkit-app-region: no-drag;
 }
 .workflow-sidebar-page .project-workflows__template-select,
 .workflow-sidebar-page .project-workflows__project-select {
   flex: 1;
 }
-.workflow-sidebar-page .project-workflows__notice {
-  flex-wrap: wrap;
-  padding-inline: 16px;
-  overflow-wrap: anywhere;
-}
-@container workflow-sidebar (max-width: 760px) {
-  .workflow-sidebar-page .project-workflows__header {
+@container organization-page (max-width: 760px) {
+  .project-workflows__header {
     align-items: flex-start;
   }
-  .workflow-sidebar-page .project-workflows__actions {
+  .project-workflows__actions {
     flex: 1 1 100%;
     flex-wrap: wrap;
   }
-  .workflow-sidebar-page .project-workflows__actions > button {
+  .project-workflows__actions > button {
     flex: 1 1 150px;
     min-width: 0;
   }
-  .workflow-sidebar-page .project-workflows__binding-toolbar {
+  .project-workflows__binding-toolbar {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 12px;
   }
-  .workflow-sidebar-page .project-workflows__binding-actions {
-    justify-content: flex-end;
-  }
-  .workflow-sidebar-page .project-workflows__commit-actions {
+  .project-workflows__editing-actions {
     grid-column: 1 / -1;
-    justify-content: flex-end;
+    justify-content: space-between;
     margin-left: 0;
   }
 }
@@ -475,29 +437,56 @@
     grid-column: 2;
     grid-row: 1;
   }
-  .workflow-sidebar-page .project-workflows__status {
-    grid-column: 2 / -1;
-    grid-row: 2;
-    justify-self: start;
-  }
   .workflow-sidebar-page .project-workflows__empty {
     min-height: 0;
     padding: 24px 16px;
   }
 }
-@container workflow-sidebar (max-width: 420px) {
-  .workflow-sidebar-page .project-workflows__binding-toolbar {
+@container organization-page (max-width: 420px) {
+  .project-workflows__binding-toolbar {
     grid-template-columns: minmax(0, 1fr) auto;
   }
-  .workflow-sidebar-page .project-workflows__template-field,
-  .workflow-sidebar-page .project-workflows__binding-toolbar > label,
-  .workflow-sidebar-page .project-workflows__project-field {
+  .project-workflows__template-field,
+  .project-workflows__binding-toolbar > label,
+  .project-workflows__project-field {
     grid-column: 1 / -1;
   }
-  .workflow-sidebar-page .project-workflows__binding-actions {
-    justify-content: flex-start;
+  .project-workflows__editor-controls {
+    gap: 2px;
   }
-  .workflow-sidebar-page .project-workflows__commit-actions {
-    grid-column: 2;
+  .project-workflows__editing-actions,
+  .project-workflows__commit-actions {
+    gap: 4px;
   }
+  .project-workflows__editor-controls .workflow-tab {
+    padding-inline: 6px;
+  }
+  .project-workflows__editor-controls .workflow-graph-icon-button {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+  }
+  .project-workflows__commit-actions .workflow-button {
+    padding-inline: 10px;
+  }
+}
+
+.project-workflows__editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.project-workflows__editor-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.project-workflows__editor .workflow-details-panel {
+  box-sizing: border-box;
+}
+.project-workflows__editor [hidden] {
+  display: none;
 }

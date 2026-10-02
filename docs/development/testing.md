@@ -132,7 +132,7 @@ cargo test --locked --workspace
 4. Core Server transport tests；
 5. 必要时 Preload/Renderer allowlist 与 UI scenario。
 
-当前 `packages/protocol/fixtures` 包含 Agent、Automation、Notification、Collaboration、MCP、Skill、Workflow 与持久 Agent Run projection 等版本化 JSON
+当前 `packages/protocol/fixtures` 包含 Agent、Automation、Notification、Collaboration、MCP、Skill、Organization 与持久 Agent Run projection 等版本化 JSON
 fixture。fixture 是代表性 wire contract，不替代所有 DTO 的双端生成；新增字段必须遵守
 required/nullable/default 和 unknown-field 策略。
 
@@ -144,7 +144,7 @@ required/nullable/default 和 unknown-field 策略。
 
 账号错误分类、验证码成功后才开始冷却、会话恢复与进程内许可要使用 fake driver/clock 测试；不得为本地回归发送真实
 邮件、修改线上许可或收集用户凭据。模型设置的 `execution` 投影同时约束 Renderer、Automation、模板、spawn 和
-工作流，测试应断言这些消费者对同一配置/凭据失败给出一致判断，并保留不可用模型在设置页的修复入口。
+组织，测试应断言这些消费者对同一配置/凭据失败给出一致判断，并保留不可用模型在设置页的修复入口。
 
 ```bash
 pnpm exec vitest run --project unit src/main/core/accountAuth.test.ts src/main/core/accountAuthDriver.test.ts src/main/core/accountAuthIpc.test.ts src/main/core/accountLicense.test.ts src/main/core/coreServer.modelSettings.test.ts
@@ -169,11 +169,11 @@ cargo test --locked -p mycopilot-core folder_input
 cargo test --locked -p mycopilot-core-server workspace_instructions --bin core-server
 ```
 
-### 工作流配置
+### 组织配置
 
-工作流测试分图契约/校验、SQLite CAS 与生命周期、Main transport、Renderer 编辑和实例管理；配置测试不得把保存、
+组织测试分图契约/校验、SQLite CAS 与生命周期、Main transport、Renderer 编辑和实例管理；配置测试不得把保存、
 启用或监控投影当成图执行通过。现有工作区中新增的实例启用/归档保护还需覆盖 root/child Conversation、绑定冲突、
-模板变更导致停用与 `needsReview`，详见[工作流编排](../subsystems/workflow-authoring.md)。
+模板变更导致停用与 `needsReview`，详见[组织编排](../subsystems/workflow-authoring.md)。
 
 ```bash
 pnpm exec vitest run --project unit packages/protocol/src/workflows.test.ts src/main/core/coreServer.workflows.test.ts

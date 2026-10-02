@@ -57,6 +57,23 @@ function isTimelineFolderReference(record: Record<string, unknown>): boolean {
   )
 }
 
+function isWorkflowSource(record: Record<string, unknown>): boolean {
+  return (
+    hasExactKeys(record, [
+      'nodeId',
+      'nodeName',
+      'conversationId',
+      'conversationTitle',
+      'content'
+    ]) &&
+    isBoundedString(record.nodeId, 1024) &&
+    isBoundedString(record.nodeName, 512, true) &&
+    isBoundedString(record.conversationId, 1024) &&
+    isBoundedString(record.conversationTitle, 4096, true) &&
+    isBoundedString(record.content, 4 * 1024 * 1024, true)
+  )
+}
+
 export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undefined {
   if (!isRecord(value) || !isBoundedString(value.id, 1024) || typeof value.type !== 'string') {
     return undefined
@@ -111,6 +128,34 @@ export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undef
     hasExactKeys(value, ['id', 'type', 'message'], ['traceSequence']) &&
     isBoundedString(value.message, 128 * 1024, true) &&
     isOptionalSafeInteger(value, 'traceSequence')
+  ) {
+    return value as unknown as ChatAgentTimelineItem
+  }
+  if (
+    value.type === 'workflow_delivery' &&
+    hasExactKeys(value, [
+      'id',
+      'type',
+      'inputId',
+      'deliveryId',
+      'instanceId',
+      'workflowName',
+      'content',
+      'createdAt',
+      'traceSequence',
+      'sources'
+    ]) &&
+    isBoundedString(value.inputId, 1024) &&
+    isBoundedString(value.deliveryId, 1024) &&
+    isBoundedString(value.instanceId, 1024) &&
+    isBoundedString(value.workflowName, 512, true) &&
+    isBoundedString(value.content, 4 * 1024 * 1024, true) &&
+    isSafeInteger(value.createdAt) &&
+    isSafeInteger(value.traceSequence) &&
+    Array.isArray(value.sources) &&
+    value.sources.length > 0 &&
+    value.sources.length <= 512 &&
+    isRecordArray(value.sources, isWorkflowSource)
   ) {
     return value as unknown as ChatAgentTimelineItem
   }

@@ -133,7 +133,7 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks())
 
-describe('conversation workflow archive protection', () => {
+describe('conversation organization archive protection', () => {
   it('releases a focused history search before programmatic conversation navigation', async () => {
     await render(<Harness />)
     const input = page.getByRole('textbox', { name: '搜索历史' }).element() as HTMLInputElement
@@ -145,7 +145,7 @@ describe('conversation workflow archive protection', () => {
     expect(focusOut).toHaveBeenCalledOnce()
     expect(document.activeElement).not.toBe(input)
   })
-  it('blocks a single enabled workflow member before writing or changing navigation', async () => {
+  it('blocks a single enabled organization member before writing or changing navigation', async () => {
     await render(<Harness memberships={{ 'chat-a': { instanceId: 'enabled-workflow' } }} />)
     await page.getByRole('button', { name: '归档当前对话', exact: true }).click()
     await expect.poll(() => state().completed).toBe(true)
@@ -171,7 +171,7 @@ describe('conversation workflow archive protection', () => {
     expect(showToast).toHaveBeenCalledExactlyOnceWith('archiveWorkflowActive')
   })
 
-  it('archives normally when disabled workflows produce no active memberships', async () => {
+  it('archives normally when disabled organizations produce no active memberships', async () => {
     await render(<Harness memberships={{}} />)
     await page.getByRole('button', { name: '归档当前对话', exact: true }).click()
     await expect.poll(() => state().completed).toBe(true)
@@ -185,7 +185,7 @@ describe('conversation workflow archive protection', () => {
     expect(showToast).not.toHaveBeenCalled()
   })
 
-  it('rolls back a stale-membership archive intent after one authoritative workflow rejection', async () => {
+  it('rolls back a stale-membership archive intent after one authoritative organization rejection', async () => {
     let rejectWrite!: (reason: Error) => void
     storage.save.mockImplementationOnce(
       () =>

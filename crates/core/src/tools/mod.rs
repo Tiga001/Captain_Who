@@ -171,7 +171,12 @@ pub(crate) fn model_projection_for_persisted_continuation(
     result: &AgentToolResult,
 ) -> AgentToolResult {
     match result.tool.as_str() {
-        "workflow_accept" | "workflow_complete" | "workflow_recall" => {
+        "organization_send" | "organization_get_mailbox" => {
+            crate::organization_mail_model_projection(result)
+        }
+        "organization_get_state" => crate::organization_state_model_projection(result),
+        "organization_edit" => crate::organization_edit_model_projection(result),
+        "organization_accept" | "organization_complete" | "organization_recall" => {
             crate::workflow_mutation_model_projection(result)
         }
         "run_command" => run_command::run_command_model_projection(result),

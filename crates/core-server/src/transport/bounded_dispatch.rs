@@ -596,7 +596,6 @@ mod tests {
             "saveDraft",
             "deleteDraft",
             "duplicate",
-            "completeUserInput",
             "unknown",
         ] {
             assert_eq!(

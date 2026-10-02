@@ -230,6 +230,7 @@ const AGENT_OBSERVER_EVENT_TYPES = {
   message: true,
   guidance_queued: true,
   guidance_applied: true,
+  workflow_delivery_applied: true,
   guidance_rejected: true,
   tool_call: true,
   tool_result: true,
@@ -284,7 +285,7 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
       try {
         snapshot = parseWorkflowRuntimeSnapshot(params)
       } catch {
-        console.warn('Ignored invalid workflow runtime notification')
+        console.warn('Ignored invalid organization runtime notification')
         return
       }
       handler(snapshot)

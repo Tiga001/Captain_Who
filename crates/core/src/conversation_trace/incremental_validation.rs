@@ -157,9 +157,9 @@ impl ConversationTraceValidationState {
                         || content.trim().is_empty()
                         || *created_at < 0
                     {
-                        return Err("conversation workflow delivery has invalid identity or splits a tool exchange".into());
+                        return Err("conversation organization mail delivery has invalid identity or splits a tool exchange".into());
                     }
-                    ensure_no_binary_text("workflow delivery", content)?;
+                    ensure_no_binary_text("organization mail delivery", content)?;
                 }
                 ConversationTurnTraceItem::AgentMailboxDelivery {
                     receipt_id,
