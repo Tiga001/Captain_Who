@@ -1,193 +1,188 @@
 # Captain Who
 
-简体中文 | [English](README.en.md)
+**让 AI 在你的项目里读资料、做文档、改代码，并把执行过程留给你检查。**
 
-Captain Who 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
+Captain Who 是一款本地优先的桌面 AI 工作助手。选择本地文件夹，接入你自己的模型 API，用自然语言说明目标；Agent 可以读取文件、搜索资料、调用工具、运行命令，也可以把独立任务交给多个子 Agent 并行处理。
 
-## 下载与源码
+文档、表格、演示文稿和代码改动都可以成为实际输出。你可以查看工具活动、核对文件差异，并按任务选择权限范围。
 
-想直接使用，请到 [Captain Who 官网](https://captainwhoagent.com/) 下载 macOS 安装包。当前正式版支持 macOS 12 及更高版本的 Apple Silicon Mac；安装包、校验信息和升级说明见[版本与发布](public-docs/releases/README.md)。
+[快速开始](#快速开始) · [看看工作界面](#看看工作界面) · [从源码运行](#从源码运行) · [文档](public-docs/README.md) · [Releases](https://github.com/Tiga001/Captain_Who/releases) · [English](README.en.md)
 
-目前没有 Windows 安装包。项目由个人开发，现阶段没有足够时间完成 Windows 版本，也没有确定的发布时间。
+![Captain Who in dark mode with a presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
 
-本 [GitHub 仓库](https://github.com/Tiga001/Captain_Who)是 Captain Who 的实际开发仓库。项目已按 [Apache License 2.0](LICENSE) 开源，仓库会持续更新。开发版本可能领先于官网已发布的安装包；直接使用软件时请以官网和[发行说明](public-docs/releases/release-notes/README.md)为准。
+*Track a presentation task while four research sub-agents work in parallel.*
 
-目前已实现：
+> **开始前请确认：**当前正式安装包面向 macOS 12+、Apple Silicon。启动新的 Agent 任务需要 Captain Who 账户、可用的软件许可，以及你自行配置的模型 API。项目采用 Apache-2.0 开源许可证；模型调用额度不包含在内。
 
-- 本地项目、对话、草稿、归档与全文搜索
-- Provider Profile、OpenAI-compatible、Anthropic-compatible 与 DeepSeek 模型接入和安全切换
-- 文件、图片、PDF、Word、演示文稿和表格附件读取
-- 工作区搜索、统一 FileChange 创建/更新/删除、Git diff、受管命令与持久 Command Session
-- 可审批的文件/命令操作，以及默认、完全、自定义三种权限模式
-- Tavily 联网搜索与网页读取
-- 内置终端、手动浏览器、Managed Playwright、持久浏览/下载历史、下载中心和浏览器设置
-- 用户配置的 stdio MCP Server、内部 HostBridge Capability、bundled/installed/workspace Skill
-- 多智能体协作、项目可分配 Agent 模板、树内附件/Artifact 共享、只读观察和崩溃恢复
-- Scheduled Automation：按结构化计划启动 Agent Run、保留历史与 attention，并通过原生通知提醒
-- 普通任务与 Automation 共用的持久系统通知、声音/内容预览和按状态通知策略
-- Word、表格、演示文稿、PDF 与图片生成的受管 Artifact 工作流
-- 跨轮 Agent 工具轨迹、上下文压缩、Exact Archive 与长期使用量提示
-- 简体/繁体中文、英式/美式英语、日语、韩语、法语、意大利语和俄语界面
+## 你可以用它做什么
 
-## 架构
+| 你手上的工作 | Captain Who 可以参与的步骤 | 可检查的结果 |
+| --- | --- | --- |
+| 把零散资料整理成文档 | 读取项目文件或附件，使用文档 Skill 组织内容、生成文件并渲染检查 | Word 文档、PDF，以及引用和待确认事项 |
+| 处理一份数据表 | 读取 XLSX、CSV 或 TSV，整理数据、补充公式、生成汇总 | 可继续编辑的工作簿；重要公式仍需复核 |
+| 准备一次演示 | 拆分资料检索，整理大纲，使用演示文稿 Skill 生成并检查版式 | PPTX 文件和逐页内容 |
+| 接手或修改一个代码项目 | 搜索代码、理解目录，按授权运行测试，通过 FileChange 提交修改 | 文件差异、命令结果和测试结论 |
+| 搜索资料或操作网页 | 使用 Tavily 搜索和读取网页，或操作应用内受管浏览器 | 来源链接、页面信息、下载文件 |
+| 定期检查同一件事 | 在“已安排”中设置周期任务，保留每次运行记录 | 检查报告、执行历史和需处理的审批 |
+
+以上概述当前仓库记录的能力；开发分支可能领先于安装包。实际结果取决于模型、权限、运行组件和外部服务，生成内容需要人工复核。
+
+## 看看工作界面
+
+### 项目、文件差异和终端放在一起
+
+围绕本地文件夹工作，在同一窗口查看文件、Git 差异与终端。Agent 的命令活动和文件变更也会留在对话时间线中，方便追踪。
+
+![Light-mode workspace with a Python code diff and an integrated terminal.](assets/screenshots/code-review-terminal.png)
+
+*Review code changes beside the conversation and an integrated workspace terminal.*
+
+### 用 Skill 复用做事方法
+
+内置文档、表格、演示文稿、PDF 等 Skill，也支持从公开 GitHub 仓库或本地文件夹安装。项目可以在 `.agents/skills/` 中保留自己的任务说明、模板和资源。
+
+![Skills settings with GitHub and local-folder installation options.](assets/screenshots/install-skills.png)
+
+*Install skills from GitHub or a local folder and manage built-in capabilities.*
+
+### 按任务选择权限
+
+提供默认、完全和自定义三种模式。可以控制文件范围、命令和变更审批，先从只读理解开始，再开放完成任务所需的能力。
+
+![General settings with workspace access and approval controls.](assets/screenshots/permissions.png)
+
+*Configure workspace access and approval rules for file edits, commands, and built-in tools.*
+
+[查看完整截图画廊与英文说明](GALLERY.md)。截图中的配置仅用于展示，具体界面以安装版本为准；首次使用建议保留默认权限。
+
+## 快速开始
+
+### 1. 配置自己的模型
+
+登录后，打开 **设置 → 配置**：
+
+1. 填写模型服务的 **API URL** 和 **API Token**。
+2. 进入 **管理模型**，添加服务商实际接受的 **模型 ID**，填写显示名称与上下文窗口。
+3. 选择匹配的 Provider 配置，再在 **可用模型**中启用它。
+4. 返回应用，新建对话，选择该模型，先发一个简短问题确认连接。
+
+新安装的模型列表为空，需要手动添加并启用。当前支持 OpenAI-compatible、Anthropic-compatible，以及 DeepSeek、Moonshot 的专用配置。具体兼容要求见[连接模型 Provider](public-docs/integrations/model-provider-integration.md)。
+
+**API Token 只应填入设置，不要粘贴到聊天、Issue 或截图中。**
+
+### 2. 选一个文件夹，完成第一份文档
+
+不用准备素材，先用下面这组虚构会议记录练习：
+
+1. 在本机新建一个空文件夹，用作练习项目。
+2. 在 Captain Who 点击 **新对话 → 项目选择器 → 新建项目**，选择这个文件夹。
+3. 选择已配置的模型，保留 **默认权限**。
+4. 点击输入框 **“+” → 技能**，选择内置 **文档（Documents）** Skill。
+5. 复制下面的任务。出现审批时，核对目标文件、命令或变更内容后再决定是否批准。
 
 ```text
-src/main/                 Electron 主进程、分域 IPC、浏览器/终端桥接
-src/preload/              隔离的 Renderer Host API
-src/renderer/             React 界面
-packages/protocol/        TypeScript 跨进程数据类型
-packages/host-api/        Renderer 可调用的 Host API 类型
-crates/protocol-rs/       Rust JSON-RPC 协议
-crates/core/              Agent、工具、权限与 SQLite 存储
-crates/core-server/       Core Server 应用边界（application / transport / adapters）
-crates/mcp-client/        MCP 协议、Catalog、连接和 stdio transport
-packages/artifact-runtime-node/ 受管 Artifact Runtime 的 Node 入口
-scripts/                  组件准备、测试、打包、签名和发布验证
-public-docs/              面向用户、集成开发者和支持场景的公开文档
+请使用文档 Skill，把下面的虚构会议记录整理成一份会议纪要。
+
+项目：示例团队的季度分享会。
+已确定：采用线上形式，内容包括产品演示和问题讨论。
+行动项：小林整理演示提纲，小陈收集问题；截止日期尚未确定。
+待确认：活动日期、时长和主持人。
+
+分别列出已确定事项、行动项和待确认问题。
+不要补写原文没有的负责人、日期或结论。
+保存为 output/meeting-summary.docx，不要覆盖现有文件。
+生成后渲染检查标题、分页和表格，并告诉我保存在哪里。
 ```
 
-开发模式下，Electron 通过 Cargo 启动 `core-server`；生产包会把 release 二进制复制到 `process.resourcesPath`。Electron 与 Rust 之间使用逐行 JSON-RPC 通信。
+**完成后检查三件事：**输出文件是否实际存在，内容是否忠于原文，排版是否可用。DOCX、XLSX 和 PPTX 可以交给 Agent 处理，但不能在右侧“文件”预览器中直接渲染；请用对应应用打开成品复核。
 
-完整的架构、子系统、开发、测试、发布和安全文档统一从
-[开发文档索引](docs/README.md)进入。新成员建议先阅读[开发环境](docs/development/getting-started.md)、
-[仓库结构](docs/development/repository-layout.md)和[系统架构总览](docs/architecture/overview.md)。
-产品使用、集成、发布状态和自助排查从[公开文档索引](public-docs/README.md)进入。
+不想先处理文件，也可以选择“不使用项目”，用普通对话确认模型连接。[第一个任务](public-docs/user/getting-started/first-task.md)和[第一个项目](public-docs/user/getting-started/first-project.md)提供更细的操作说明。
 
-## 许可证
+### 3. 逐步扩展工作方式
 
-Captain Who 的自研代码以 [Apache License 2.0](LICENSE) 发布。仓库与安装包中包含的第三方软件、
-资源与语法文件继续适用其原有许可证；完整归属与声明见
-[第三方软件声明](THIRD_PARTY_NOTICES.txt)和
-[语法文件第三方声明](THIRD_PARTY_GRAMMAR_NOTICES.txt)。
+- **联网搜索与图片：**按需配置 Tavily 或图片生成服务的 API。它们不包含在聊天模型配置中。
+- **浏览器：**开启应用内浏览器自动化，说明目标站点与允许动作。
+- **Skills 与 MCP：**复用任务方法，或连接你信任的本机 stdio MCP Server。
+- **多 Agent：**让独立的检索、实现或审查任务并行推进。
+- **已安排：**为重复工作设置周期任务，查看执行历史与通知。
 
-## 环境要求
+具体设置见[能力指南](public-docs/user/capabilities/README.md)。
 
-- Node.js 22（见 `.node-version`）
-- pnpm 11.10.0（见 `package.json#packageManager`）
-- Rust stable，包含 `rustfmt` 与 `clippy`
-- 当前平台的原生编译工具链；`node-pty` 和 Rust sidecar 都需要本机编译
+## 本地优先，数据去向清楚
 
-安装依赖：
+项目、对话、设置和执行记录主要保存在本机；添加项目或登录账户不会自动把本地工作内容同步到 Captain Who 的账户服务。
+
+使用网络能力时，相关输入会发送给对应服务：模型接收任务上下文和必要的文件/工具内容，Tavily 接收搜索查询或目标网址，图片服务、目标网站和 MCP 接收完成操作所需的数据。账户登录与许可校验也需要连接账户服务。
+
+模型等 API 密钥与普通配置分开保存。处理敏感资料前，请确认所选服务的数据政策；不要公开整个应用数据目录或历史数据库备份。详见[数据与权限](public-docs/security/data-and-permissions.md)。
+
+## 使用时的几个边界
+
+- **先用默认权限。**完全权限可以扩大文件访问并自动批准部分命令和变更；这些应用层策略不是操作系统沙箱，默认模式也不是只读模式。
+- **检查实际结果。**停止任务不会撤销已经完成的写入或外部请求；文档、代码和表格结论仍需复核。
+- **定时任务需要应用运行。**退出应用或关机后不会由系统后台唤醒任务。
+- **能力取决于环境。**模型需支持相应输入和工具调用；浏览器自动化只控制应用内页面；Office 处理依赖对应 Skill。
+
+<details>
+<summary>文件格式、平台与其他限制</summary>
+
+- 当前正式安装包面向 macOS 12+ Apple Silicon；Windows、Intel Mac 和 Linux 尚无正式支持的安装包。
+- DOCX、XLSX 和 PPTX 可以通过对应 Skill 处理，但不能在右侧“文件”预览器直接渲染；请用原生应用打开成品。
+- 旧版 `.doc` 的文本读取仅支持 macOS；`.ppt`、`.xls` 需要先转换。
+- 扫描 PDF 不能保证直接提取文字，图片理解需要模型实际支持图像输入。
+- 当前没有跨设备的项目、对话或模型密钥同步服务。
+- 不同 API 网关的兼容性与第三方服务的费用由实际配置决定。
+
+更多说明：[权限与审批](public-docs/user/everyday-use/permissions-and-approvals.md) · [Office 与 Artifact](public-docs/user/capabilities/artifacts-and-office.md) · [已知问题](public-docs/support/known-issues.md)
+
+</details>
+
+## 从源码运行
+
+界面使用 Electron、React 和 TypeScript；Rust Core 负责 Agent、工具执行、权限与 SQLite 存储。这个仓库是实际开发仓库，源码版本与已发布安装包可能不同。
+
+需要 Node.js **22**、pnpm **11.10.0**、Rust **stable**（含 `rustfmt`、`clippy`），以及当前平台的原生编译工具链。
 
 ```bash
+git clone https://github.com/Tiga001/Captain_Who.git
+cd Captain_Who
 pnpm install --frozen-lockfile
-```
-
-首次开发启动会编译 Rust，耗时会比后续启动长：
-
-```bash
 pnpm dev
 ```
 
-应用启动后，在“设置 → 配置”中填写模型 API URL、Token、模型标识与可选的 Tavily API Key。仓库不再内置机构地址或占位搜索 Key。
+首次启动会准备受管组件并编译 Rust。具体步骤见[开发环境](docs/development/getting-started.md)。
 
-## 常用命令
+<details>
+<summary>开发检查、构建与架构</summary>
 
-| 命令                            | 用途                                            |
-| ------------------------------- | ----------------------------------------------- |
-| `pnpm dev`                      | 启动 Electron 开发环境与 Core Server            |
-| `pnpm format`                   | 格式化 TypeScript、CSS、文档与 Rust             |
-| `pnpm check:docs`               | 检查文档元数据、链接、路径、命令与版本真源      |
-| `pnpm check:public-docs`        | 检查公开文档结构、索引和边界                    |
-| `pnpm check:test-layout`        | 检查测试文件归属和 ignored Rust 测试登记        |
-| `pnpm lint`                     | 运行 ESLint                                     |
-| `pnpm typecheck`                | 检查 Main、Preload 与 Renderer 类型             |
-| `pnpm lint:rust`                | 对整个 Rust workspace 运行严格 Clippy           |
-| `pnpm test:unit`                | 运行 Node Vitest unit project                   |
-| `pnpm test:browser`             | 使用锁定 Chromium 运行 Vitest browser project   |
-| `pnpm test:electron`            | 运行真实 Electron fixture 与 Managed Playwright |
-| `pnpm test:web`                 | 聚合 unit、browser 与 Electron 测试             |
-| `pnpm test:automation-core-e2e` | Automation Host API 与真实 Core Server 专项 E2E |
-| `pnpm test:rust`                | 运行 Rust workspace 测试                        |
-| `pnpm test`                     | 运行脚本、Web/Browser 与 Rust 常规测试          |
-| `pnpm check`                    | 执行格式、文档、lint、类型、Clippy 和测试       |
-| `pnpm build`                    | 类型检查并生成 Electron 的 `out/` 产物          |
-| `pnpm build:core`               | 构建并校验 release Core Server binary           |
-| `pnpm build:unpack`             | 生成当前平台的未封装应用，用于打包冒烟测试      |
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm check` | 格式、文档、lint、类型、Clippy 和常规测试 |
+| `pnpm test:unit` / `pnpm test:rust` | Node / Rust 测试 |
+| `pnpm build` / `pnpm build:core` | Electron 输出 / release Core Server |
+| `pnpm build:unpack` | 当前平台的未封装应用，供本地诊断 |
 
-## 打包
+正式安装包必须在目标操作系统上构建。`pnpm build:mac` 还要求更新源配置和真实 Developer ID 签名；构建成功不代表完成 Apple 公证。Windows/Linux 构建入口不等于正式支持。开发启动同样需要满足当前账户、许可和模型配置要求。
 
-安装包必须在对应操作系统的原生 runner 上构建；脚本会拒绝从 macOS 直接生成 Windows/Linux 包，避免把错误格式的 Rust 二进制带入安装包。
+主要目录：`src/main/`（Electron 主进程）、`src/renderer/`（React）、`crates/core/`（Agent、权限与存储）、`crates/core-server/`（Rust 服务）、`crates/mcp-client/`（MCP）和 `packages/`（协议、Host API、运行时）。Electron 与 Rust 通过逐行 JSON-RPC 通信。
 
-```bash
-# Windows
-pnpm build:win
+[构建与发布](docs/development/build-and-release.md) · [测试体系](docs/development/testing.md) · [系统架构](docs/architecture/overview.md) · [仓库结构](docs/development/repository-layout.md)
 
-# macOS
-pnpm build:mac
+</details>
 
-# Linux
-pnpm build:linux
-```
+## 文档与反馈
 
-`electron-builder.yml` 只把 `out/`、运行时资源、生产依赖和当前平台的 `core-server` 放入应用，不会再把源码或 Cargo `target/` 缓存打进 ASAR。
+- [用户指南](public-docs/user/README.md)：首次配置与日常使用
+- [能力指南](public-docs/user/capabilities/README.md)：Skill、MCP、多 Agent、浏览器与定时任务
+- [Office 与 Artifact](public-docs/user/capabilities/artifacts-and-office.md)：文档、表格、演示、PDF 与图片
+- [扩展与集成](public-docs/integrations/README.md)：模型接入、Skill 开发与 MCP
+- [自助排查](public-docs/support/README.md)：常见故障、诊断与已知问题
+- [开发文档](docs/README.md)：实现细节与贡献前的阅读入口
 
-macOS `build:mac` 已强制 Developer ID 签名、hardened runtime、受管原生组件与隐私门禁验签，DMG
-容器也会签名。官网提供的 1.0.5 正式 DMG 已通过 Apple 公证并装订公证凭据，公开更新源也已启用；
-应用会在有新版本时提供由用户发起的下载和安装。仓库的构建命令本身不执行 Apple 公证，`pnpm check`
-也不包含全部专项发布门禁。自行构建的产物不能直接视为正式安装包，发布流程见
-[构建与发布](docs/development/build-and-release.md)。
+发现问题，可以在 [GitHub Issues](https://github.com/Tiga001/Captain_Who/issues) 描述系统与芯片、应用版本、复现步骤、预期结果和实际结果。截图与日志请先移除 Token、邮箱、私有路径和项目内容。
 
-## 本地数据与隐私
+欢迎通过 Issue 或 Pull Request 改进文档、修复问题和完善功能。提交代码前请阅读开发文档，并运行与改动相关的检查和测试。
 
-Electron 应用以 `app.getPath('userData')` 返回的位置作为唯一权威数据根目录，并在启动
-Core Server 时显式传入该目录。数据库位于数据根的 `storage.sqlite`，附件、已安装 Skill、
-生成图片和未签名 macOS 开发环境凭据分别保存在同级的受管子目录中；启动时会清理无数据库引用的孤立
-附件文件。具体路径由 Electron 按当前操作系统和应用身份解析，业务代码不再分别猜测
-macOS、Windows 或 Linux 的目录。
+## 许可证
 
-直接运行独立 `core-server` 时仍可通过 `MYCOPILOT_STORAGE_DB` 指定数据库路径；该变量是
-测试和独立诊断接口，Electron 启动的正式应用会使用 Host 传入的数据根覆盖它。
-
-开发期需要重建 SQLite 基线时，先完全退出 Captain Who，再运行非破坏性预检：
-
-```bash
-pnpm storage:reset-dev
-```
-
-确认预检摘要后，显式执行重建：
-
-```bash
-pnpm storage:reset-dev -- --confirm-reset
-```
-
-命令通过 Electron 解析同一个权威数据根；应用或 Core Server 仍持有数据库时会拒绝执行。确认
-重建会先在数据根的 `storage-backups/` 中创建权限受限、经过 SQLite 校验的时间戳备份，
-再原子发布 fresh canonical database。模型与搜索配置、UI/Prompt 偏好、Skill 启用状态、
-MCP Server 配置、通知设置、浏览器下载/链接偏好和有效的图片生成 Profile 会通过当前严格写入路径恢复；
-对话、项目、Agent 模板、草稿、浏览/下载历史、通用通知事实、Automation 任务/Run/event/outbox、
-Usage、审批、Continuation、Compaction、Fork 等状态不会恢复。
-附件、已安装 Skill、
-生成图片和凭据目录不会在重建事务中被删除或搬移；与已清理对话绑定的附件记录不会恢复，
-其文件会在应用后续正常启动时按现有孤立附件策略清理。命令只输出路径和计数，不输出 Token
-或配置值。
-
-内置浏览器使用独立的持久会话，并在 Rust Core 中保存浏览历史、下载记录和打开偏好；“清除浏览数据”
-可按类别和时间范围清理历史、Cookie/站点数据、缓存或下载记录。站点图标由 Main 通过受管会话获取，
-缓存最多保留 256 项和 30 天。
-
-请注意：
-
-- 模型 Token、Tavily Key 与图片生成 API Key 都与普通配置分离；当前 v33 SQLite 只保存
-  credential reference、配置状态和非秘密元数据。Renderer 只取得凭据状态和用户本次新输入的值，
-  不会读回已有密钥或 reference。
-- 具备稳定签名身份的发行构建使用操作系统凭据存储；未签名 macOS 开发构建使用数据根内
-  目录权限 `0700`、文件权限 `0600` 的私有文件 backend。完整数据根仍应视为敏感数据。
-- 当前 SQLite 备份不包含当前模型/搜索 secret，但旧 schema 的历史备份可能仍含明文凭据；
-  只恢复 SQLite 不会恢复操作系统凭据。清除/删除不承诺对 SSD、系统备份或系统凭据后端安全擦除，
-  怀疑泄露时应在 Provider 侧撤销或轮换密钥。
-- 模型请求会发送到你配置的 API URL；启用联网搜索后，查询或目标 URL 会发送给 Tavily。
-- 内置浏览器默认拒绝网页申请摄像头、麦克风、定位、通知等系统权限。
-- “移除项目”会永久删除 Captain Who 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。
-- 费用只是按模型设置中的每 1k token 单价计算的本地估算，不代表服务商账单，也不区分币种。
-
-## 文档与 Artifact 支持
-
-- Agent 附件读取支持 `.docx`、`.pptx`、`.xlsx`、`.csv`、`.tsv` 等格式；右侧栏文件预览的支持范围
-  与附件读取不同，见[工作区文件](docs/subsystems/workspace-files.md)。
-- 旧版 `.doc`：仅在 macOS 上通过系统 `textutil` 解析
-- 旧版 `.ppt`、`.xls`：暂不支持，请先转换为 `.pptx`、`.xlsx` 或文本格式
-- PDF 附件可提取文本；扫描件是否可读取取决于 PDF 是否包含文本层。复杂 PDF 处理由受管 PDF Skill
-  和命令工作流提供。
-- Word、表格和演示文稿创建/编辑通过受管 Builder、Editor、Renderer 和 Artifact 发布门禁完成，详见
-  [Office 与 Artifact](docs/subsystems/office-and-artifacts.md)。
+Captain Who 的自研代码以 [Apache License 2.0](LICENSE) 发布。第三方软件和资源保留各自许可证，详见[第三方软件声明](THIRD_PARTY_NOTICES.txt)与[语法文件第三方声明](THIRD_PARTY_GRAMMAR_NOTICES.txt)。
