@@ -227,6 +227,8 @@ impl ContextFrame {
     ) -> AgentResult<()> {
         let stored =
             crate::context::assembler::stored_world_state_projections_for_validation(records)?;
+        let directory =
+            crate::context::assembler::directory_world_state_projections_for_validation(records)?;
         let current = crate::context::assembler::project_conversation_world_state_records(records)?;
         let mut changes = Vec::new();
         for (_, old) in stored {
@@ -254,7 +256,11 @@ impl ContextFrame {
                 continue;
             }
             if existing.metadata.scope != ContextScope::Conversation
-                || existing.message != old.message
+                || (existing.message != old.message
+                    && !directory.iter().any(|(_, candidate)| {
+                        candidate.metadata.origin() == Some(origin)
+                            && candidate.message == existing.message
+                    }))
                 || check_observation
                     && existing
                         .metadata
@@ -269,8 +275,8 @@ impl ContextFrame {
                     "Conversation World State 与可信 ledger 的存储投影不一致。",
                 ));
             }
-            // The only permitted removal is a diff now invisible because it changed solely
-            // hidden template metadata; all other canonical records retain their exact origin.
+            // Remove only records made invisible by the model display policy (internal metadata
+            // or other members' observations). Authority and observation markers remain exact.
             changes.push((index, next.map(|next| next.message.clone())));
         }
         if !changes.is_empty() {
@@ -939,7 +945,7 @@ mod tests {
 
     fn workflow_template_ledger() -> Vec<AnchoredWorldStateRecord> {
         let make = |sequence, revision, state: &str| {
-            let execution = serde_json::json!({"available":true,"organization":{"instanceId":"team-id","templateId":"private-template-id","templateRevision":revision,"executionVersion":format!("private-version-{revision}"),"name":"Review team","task":"Review artifacts","nodeId":"reviewer","nodeName":"Reviewer"}});
+            let execution = serde_json::json!({"available":true,"organization":{"instanceId":"team-id","templateId":"private-template-id","templateRevision":revision,"executionVersion":format!("private-version-{revision}"),"name":"Review team","task":"Review artifacts","nodeId":"reviewer","nodeName":"Reviewer","members":[{"nodeId":"writer","nodeName":"Writer","task":"Draft private work"}]}});
             let awareness = serde_json::json!({"available":true,"instanceId":"team-id","executionVersion":format!("private-version-{revision}"),"state":state});
             let permissions = serde_json::json!({"mode":"review-only"});
             WorldStateSnapshot::new(
@@ -1036,7 +1042,11 @@ mod tests {
                 && visible.contains("Reviewer")
                 && visible.contains("Review artifacts")
                 && visible.contains("review-only")
-                && visible.contains("running")
+        );
+        assert!(
+            !visible.contains("running")
+                && !visible.contains("Writer")
+                && !visible.contains("organization.awareness")
         );
         assert!(!visible.contains("team-id") && !visible.contains("nodeId"));
         assert!(serialized.to_string().contains("team-id"));
@@ -1055,19 +1065,55 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             diffs.len(),
-            1,
-            "a stored metadata-only diff has no current model representation"
+            0,
+            "metadata-only and global-awareness diffs have no current model representation"
         );
-        assert!(diffs[0]
-            .metadata
-            .sources
-            .contains(&ContextSource::WorldStateUnobserved));
         let mut again =
             ContextFrame::from_checkpoint_items(restored.checkpoint_items().unwrap()).unwrap();
         again
             .restore_conversation_world_state_records(ledger)
             .unwrap();
         assert_eq!(text(&again), text(&restored));
+    }
+
+    #[test]
+    fn organization_self_context_restores_prior_directory_projection_but_rejects_forged_peers() {
+        let ledger = workflow_template_ledger();
+        let mut prior = frame();
+        prior.push(narration(1, false));
+        for (record, item) in
+            crate::context::assembler::directory_world_state_projections_for_validation(&ledger)
+                .unwrap()
+        {
+            if matches!(record.record, WorldStateRecord::Full(_)) {
+                prior.items.insert(1, item);
+            } else {
+                prior.push(item);
+            }
+        }
+        let text_before = text(&prior).join(" ");
+        assert!(text_before.contains("Writer") && text_before.contains("organization.awareness"));
+        assert!(!text_before.contains("private-template-id"));
+        let mut restored =
+            ContextFrame::from_checkpoint_items(prior.checkpoint_items().unwrap()).unwrap();
+        restored
+            .restore_conversation_world_state_records(ledger.clone())
+            .unwrap();
+        let visible = text(&restored).join(" ");
+        assert!(visible.contains("Reviewer") && visible.contains("review-only"));
+        assert!(!visible.contains("Writer") && !visible.contains("organization.awareness"));
+        let mut forged =
+            ContextFrame::from_checkpoint_items(prior.checkpoint_items().unwrap()).unwrap();
+        let item = forged
+            .items
+            .iter_mut()
+            .find(|item| item.message.content().contains("Writer"))
+            .unwrap();
+        item.message =
+            LlmMessage::backend_state(item.message.content().replace("Writer", "Forged colleague"));
+        assert!(forged
+            .restore_conversation_world_state_records(ledger)
+            .is_err());
     }
 
     #[test]

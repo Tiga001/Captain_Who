@@ -159,7 +159,7 @@ fn department_key(path: &str) -> String {
         .join("/")
 }
 
-fn department_id(snapshot: &ConversationSnapshot, path: &str) -> AgentResult<String> {
+pub(super) fn department_id(snapshot: &ConversationSnapshot, path: &str) -> AgentResult<String> {
     let key = department_key(path);
     let matches: Vec<_> = snapshot
         .departments
@@ -297,7 +297,7 @@ pub(super) fn resolve_edit_input(
     let model_state = if needs_models {
         Some(host.state(StateQuery {
             view: StateView::Configuration,
-            node_id: None,
+            ..Default::default()
         })?)
     } else {
         None
@@ -381,4 +381,26 @@ pub(super) struct StateInput {
     pub view: StateView,
     #[serde(default, deserialize_with = "present_string")]
     pub member: Option<String>,
+    #[serde(default, deserialize_with = "present_string")]
+    pub department: Option<String>,
+    #[serde(default = "default_include_descendants")]
+    pub include_descendants: bool,
+    #[serde(default, deserialize_with = "present_string")]
+    pub search: Option<String>,
+    #[serde(default, deserialize_with = "present_string")]
+    pub status: Option<String>,
+    pub cursor: Option<usize>,
+    #[serde(default = "default_state_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub include_mail: bool,
+    pub mail_cursor: Option<u64>,
+}
+
+fn default_include_descendants() -> bool {
+    true
+}
+
+fn default_state_limit() -> usize {
+    StateQuery::default().limit
 }

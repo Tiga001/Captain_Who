@@ -488,7 +488,7 @@ fn assemble_world_state_timeline(
 pub(crate) fn project_conversation_world_state_records(
     records: &[AnchoredWorldStateRecord],
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
-    project_world_state_records(records, false)
+    project_world_state_records(records, WorldStateDisplay::Current)
 }
 
 /// The only consumer of this stored-text view is exact checkpoint/context validation before
@@ -496,12 +496,27 @@ pub(crate) fn project_conversation_world_state_records(
 pub(crate) fn stored_world_state_projections_for_validation(
     records: &[AnchoredWorldStateRecord],
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
-    project_world_state_records(records, true)
+    project_world_state_records(records, WorldStateDisplay::Stored)
+}
+
+/// Exact prior automatic organization view. This is accepted only against its trusted ledger
+/// when restoring a checkpoint made before automatic context was narrowed to the caller.
+pub(crate) fn directory_world_state_projections_for_validation(
+    records: &[AnchoredWorldStateRecord],
+) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    project_world_state_records(records, WorldStateDisplay::OrganizationDirectory)
+}
+
+#[derive(Clone, Copy)]
+enum WorldStateDisplay {
+    Current,
+    Stored,
+    OrganizationDirectory,
 }
 
 fn project_world_state_records(
     records: &[AnchoredWorldStateRecord],
-    stored_text_for_validation: bool,
+    display: WorldStateDisplay,
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
     let Some(initial) = records.first() else {
         return Ok(Vec::new());
@@ -517,10 +532,14 @@ fn project_world_state_records(
             "Conversation World State 的初始 full snapshot sequence 必须为 0。",
         ));
     }
-    let projection = if stored_text_for_validation {
-        snapshot.stored_model_projection_for_validation(WorldStateLifetime::Conversation)
-    } else {
-        snapshot.model_projection(WorldStateLifetime::Conversation)
+    let projection = match display {
+        WorldStateDisplay::Stored => {
+            snapshot.stored_model_projection_for_validation(WorldStateLifetime::Conversation)
+        }
+        WorldStateDisplay::OrganizationDirectory => {
+            snapshot.directory_model_projection_for_validation(WorldStateLifetime::Conversation)
+        }
+        WorldStateDisplay::Current => snapshot.model_projection(WorldStateLifetime::Conversation),
     }
     .map_err(world_state_assembly_error)?;
     let mut full = world_state_context_item(
@@ -542,13 +561,19 @@ fn project_world_state_records(
                 "Conversation World State 活跃 epoch 只能包含一个初始 full snapshot。",
             ));
         };
-        let projection = if stored_text_for_validation {
-            diff.stored_model_projection_against_for_validation(
+        let projection = match display {
+            WorldStateDisplay::Stored => diff.stored_model_projection_against_for_validation(
                 reducer.snapshot(),
                 WorldStateLifetime::Conversation,
-            )
-        } else {
-            diff.model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
+            ),
+            WorldStateDisplay::OrganizationDirectory => diff
+                .directory_model_projection_against_for_validation(
+                    reducer.snapshot(),
+                    WorldStateLifetime::Conversation,
+                ),
+            WorldStateDisplay::Current => {
+                diff.model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
+            }
         }
         .map_err(world_state_assembly_error)?;
         reducer.apply(diff).map_err(world_state_assembly_error)?;

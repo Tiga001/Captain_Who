@@ -270,7 +270,7 @@ async fn workflow_read_tools_return_scoped_results_without_replaying_input() {
         let (mut stream, _) = listener.accept().await.unwrap();
         let first = read_runtime_test_json_request(&mut stream).await;
         write_runtime_test_json_response(&mut stream, json!({"choices":[{"message":{"role":"assistant","tool_calls":[
-            {"id":"read-state","type":"function","function":{"name":"organization_get_state","arguments":"{\"reason\":\"Check current activity\",\"view\":\"all\"}"}},
+            {"id":"read-state","type":"function","function":{"name":"organization_get_state","arguments":"{\"reason\":\"Check current activity\",\"view\":\"runtime\"}"}},
             {"id":"read-mailbox","type":"function","function":{"name":"organization_get_mailbox","arguments":"{}"}}
         ]},"finish_reason":"tool_calls"}]})).await;
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -294,7 +294,12 @@ async fn workflow_read_tools_return_scoped_results_without_replaying_input() {
         .unwrap();
     assert_eq!(output.content, "Workflow checked");
     let (first, second) = server.await.unwrap();
-    assert!(first["messages"].to_string().contains("awareness"));
+    assert!(!first["messages"]
+        .to_string()
+        .contains("organization.awareness"));
+    assert!(first["messages"]
+        .to_string()
+        .contains("organization.mailbox"));
     let results = second["messages"].as_array().unwrap();
     let result = |tool: &str| {
         let call = results

@@ -3,7 +3,65 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Only the model boundary uses readable names. Authoritative snapshots, renderer projections,
 /// journal identities and permission checks retain their stable IDs.
-pub(crate) fn for_model(section_id: &str, mut projection: Value) -> Value {
+pub(crate) fn for_model(section_id: &str, projection: Value) -> Value {
+    match section_id {
+        // Retained historical awareness sections have no automatic model representation.
+        // Runtime status belongs to explicit queries; inbox counts have their own section.
+        "organization.awareness" => Value::Object(Map::new()),
+        "organization.execution" => {
+            // Resolve the caller's department using the complete authoritative directory before
+            // removing it. Moving another member must never repeat the caller's World State.
+            let mut projection = semantic_state(projection);
+            if let Some(fields) = projection.as_object_mut() {
+                fields.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "available" | "reason" | "organization" | "management"
+                    )
+                });
+                if let Some(organization) = fields
+                    .get_mut("organization")
+                    .and_then(Value::as_object_mut)
+                {
+                    organization.retain(|key, _| {
+                        matches!(
+                            key.as_str(),
+                            "name"
+                                | "background"
+                                | "enabled"
+                                | "member"
+                                | "department"
+                                | "rank"
+                                | "managementRole"
+                                | "receives"
+                                | "task"
+                                | "delivers"
+                        )
+                    });
+                }
+                if let Some(management) =
+                    fields.get_mut("management").and_then(Value::as_object_mut)
+                {
+                    management.retain(|key, _| {
+                        matches!(
+                            key.as_str(),
+                            "available" | "allowedActions" | "scope" | "department" | "rankRule"
+                        )
+                    });
+                }
+            }
+            projection
+        }
+        _ => projection,
+    }
+}
+
+/// Reproduce the former directory-bearing display solely for exact checkpoint validation.
+/// Never use this projection for new requests or reconstruct authority from its text.
+pub(crate) fn directory_projection_for_validation(
+    section_id: &str,
+    mut projection: Value,
+) -> Value {
     if !matches!(
         section_id,
         "organization.execution" | "organization.awareness"
@@ -12,7 +70,6 @@ pub(crate) fn for_model(section_id: &str, mut projection: Value) -> Value {
     }
     if section_id == "organization.awareness" {
         if let Some(fields) = projection.as_object_mut() {
-            // Mail arrivals have their own small section; outgoing history belongs to the mailbox.
             fields.remove("recentSent");
             fields.remove("mailbox");
             fields.remove("currentInputCount");
@@ -242,18 +299,6 @@ fn semantic_fields(value: &mut Value, directory: &Directory) {
         .for_each(|value| semantic_fields(value, directory));
 }
 
-pub(crate) fn remove_duplicate_mail_counts(node: &mut Value) {
-    let Some(fields) = node.as_object_mut() else {
-        return;
-    };
-    if fields.contains_key("pendingCount") {
-        fields.remove("queuedInputCount");
-    }
-    if fields.contains_key("processingCount") {
-        fields.remove("currentInputCount");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -345,12 +390,20 @@ mod tests {
                 "Changes",
                 "Review changes",
                 "Review results",
-                "Writer",
-                "running",
+                "Reviewer",
             ] {
                 assert!(text.contains(useful), "working context lost {useful}");
             }
             assert!(snapshot.canonical_json().contains("templateId"));
+            for hidden in [
+                "Writer",
+                "running",
+                "organization.awareness",
+                "members",
+                "departments",
+            ] {
+                assert!(!text.contains(hidden), "automatic context exposed {hidden}");
+            }
             snapshot.validate().unwrap();
         }
         assert_eq!(stored.canonical_json(), canonical);
@@ -465,10 +518,9 @@ mod tests {
     }
 
     #[test]
-    fn organization_mail_summary_uses_one_count_per_lifecycle_state() {
-        let projected = super::for_model(
-            "organization.awareness",
-            json!({"currentInputCount":2,"nodes":[{
+    fn explicit_state_mail_summary_uses_one_count_per_lifecycle_state() {
+        let projected = super::semantic_state(
+            json!({"currentInputCount":2,"processingCount":2,"nodes":[{
             "pendingCount":3,"queuedInputCount":3,"processingCount":2,"currentInputCount":2,"currentInputIds":["one","two"]}]}),
         );
         assert!(projected.get("currentInputCount").is_none());
@@ -479,7 +531,7 @@ mod tests {
         assert!(projected["members"][0].get("currentInputIds").is_none());
     }
     #[test]
-    fn readable_directory_survives_replay_without_routing_ids_or_duplicate_mail_summaries() {
+    fn explicit_state_keeps_readable_directory_while_automatic_context_only_keeps_self() {
         let raw = json!({"available":true,"organization":{
             "instanceId":"internal-org","nodeId":"internal-boss","nodeName":"Boss",
             "departmentId":"internal-payroll","managementRole":"department_admin",
@@ -490,7 +542,7 @@ mod tests {
                 "membershipVersion":"internal-incarnation","departmentId":"internal-payroll",
                 "task":"Read the literal word nodeId in documents"}]},
             "management":{"scopeDepartmentId":"internal-payroll"}});
-        let projected = super::for_model("organization.execution", raw.clone());
+        let projected = super::semantic_state(raw.clone());
         assert_eq!(projected["organization"]["member"], "Boss");
         assert_eq!(projected["organization"]["members"][0]["member"], "周宁");
         assert_eq!(
@@ -507,11 +559,19 @@ mod tests {
             projected["organization"]["members"][0]["task"],
             raw["organization"]["members"][0]["task"]
         );
-        assert_eq!(
-            super::for_model("organization.execution", projected.clone()),
-            projected
-        );
+        assert_eq!(super::semantic_state(projected.clone()), projected);
         assert!(raw.to_string().contains("internal-incarnation"));
+        let automatic = super::for_model("organization.execution", raw);
+        assert_eq!(automatic["organization"]["member"], "Boss");
+        assert_eq!(automatic["organization"]["department"], "人事部/薪酬组");
+        assert_eq!(automatic["management"]["department"], "人事部/薪酬组");
+        assert!(automatic["organization"].get("members").is_none());
+        assert!(automatic["organization"].get("departments").is_none());
+        assert!(!automatic.to_string().contains("周宁"));
+        assert_eq!(
+            super::for_model("organization.execution", automatic.clone()),
+            automatic
+        );
 
         let awareness = super::for_model(
             "organization.awareness",
@@ -520,11 +580,163 @@ mod tests {
             "recentSent":[{"messageId":"m","targetNodeId":"internal-peer"}],
             "mailbox":{"recentArrivals":[{"sourceNodeId":"internal-peer"}]}}),
         );
-        assert_eq!(awareness["currentMember"], "Boss");
-        assert_eq!(awareness["members"][0]["state"], "running");
-        assert!(!awareness.to_string().contains("internal-"));
-        assert!(awareness.get("recentSent").is_none());
-        assert!(awareness.get("mailbox").is_none());
+        assert_eq!(awareness, json!({}));
+    }
+
+    #[test]
+    fn organization_self_context_ignores_peer_changes_but_tracks_own_department_and_scope() {
+        let snapshot = |sequence,
+                        parent: &str,
+                        peer: &str,
+                        peer_status: &str,
+                        scope: &str,
+                        pending| {
+            let execution = json!({"available":true,"organization":{
+                "name":"Review team","background":"Shared objective","nodeId":"self","nodeName":"Reviewer",
+                "departmentId":"child","rank":10,"managementRole":"department_admin",
+                "receives":"Drafts","task":"Review the literal word members","delivers":"Review report","enabled":true,
+                "departments":[{"id":"parent","name":parent,"parentId":null},
+                    {"id":"child","name":"Reviews","parentId":"parent"},
+                    {"id":"unrelated","name":peer,"parentId":null}],
+                "members":[{"nodeId":"peer","nodeName":peer,"task":peer,"rank":sequence,"departmentId":"unrelated"}]},
+                "management":{"available":true,"allowedActions":["update_member"],"scope":scope,"scopeDepartmentId":"child","rankRule":"strictly lower"}});
+            let awareness = json!({"available":true,"nodes":[{"nodeId":"peer","nodeName":peer,"state":peer_status,"waitingForApproval":true}],"totalNodeCount":sequence+1});
+            let mailbox = json!({"available":true,"pendingCount":pending,"processingCount":1,"newMessageCount":0});
+            WorldStateSnapshot::new(
+                "self-context",
+                sequence,
+                [
+                    ("organization.execution", execution),
+                    ("organization.awareness", awareness),
+                    ("organization.mailbox", mailbox),
+                ]
+                .into_iter()
+                .map(|(id, value)| {
+                    WorldStateSectionEnvelope::model_visible(
+                        WorldStateSectionId::extension(id).unwrap(),
+                        WorldStateLifetime::Conversation,
+                        value.clone(),
+                        value,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            )
+            .unwrap()
+        };
+        let original = snapshot(
+            0,
+            "Engineering",
+            "Writer",
+            "running",
+            "department_and_descendants",
+            2,
+        );
+        let peers_changed = snapshot(
+            1,
+            "Engineering",
+            "Different colleague",
+            "waiting_interaction",
+            "department_and_descendants",
+            2,
+        );
+        assert_ne!(original.revision, peers_changed.revision);
+        assert_eq!(
+            original
+                .model_projection_revision(WorldStateLifetime::Conversation)
+                .unwrap(),
+            peers_changed
+                .model_projection_revision(WorldStateLifetime::Conversation)
+                .unwrap()
+        );
+        assert!(WorldStateDiff::between(&original, &peers_changed)
+            .unwrap()
+            .model_projection_against(&original, WorldStateLifetime::Conversation)
+            .unwrap()
+            .is_none());
+        let renamed_parent = snapshot(
+            2,
+            "Quality",
+            "Different colleague",
+            "running",
+            "department_and_descendants",
+            2,
+        );
+        let diff = WorldStateDiff::between(&peers_changed, &renamed_parent).unwrap();
+        let visible = diff
+            .model_projection_against(&peers_changed, WorldStateLifetime::Conversation)
+            .unwrap()
+            .unwrap()
+            .render_sanitized_text();
+        assert!(
+            visible.contains("Quality/Reviews")
+                && visible.contains("Review the literal word members")
+        );
+        assert!(
+            !visible.contains("Different colleague")
+                && !visible.contains("waiting_interaction")
+                && !visible.contains("organization.awareness")
+        );
+        let new_scope = snapshot(
+            3,
+            "Quality",
+            "Different colleague",
+            "running",
+            "organization",
+            2,
+        );
+        assert!(WorldStateDiff::between(&renamed_parent, &new_scope)
+            .unwrap()
+            .model_projection_against(&renamed_parent, WorldStateLifetime::Conversation)
+            .unwrap()
+            .is_some());
+        let mail = snapshot(
+            4,
+            "Quality",
+            "Different colleague",
+            "running",
+            "organization",
+            3,
+        );
+        let visible = WorldStateDiff::between(&new_scope, &mail)
+            .unwrap()
+            .model_projection_against(&new_scope, WorldStateLifetime::Conversation)
+            .unwrap()
+            .unwrap()
+            .render_sanitized_text();
+        assert!(visible.contains("organization.mailbox"));
+        assert!(
+            !visible.contains("organization.execution") && !visible.contains("Shared objective")
+        );
+    }
+
+    #[test]
+    fn historical_organization_awareness_add_remove_and_rebase_never_enter_model_context() {
+        let original = stored_snapshot(0, 1, "Review changes");
+        let mut sections = original.sections.clone();
+        sections.retain(|section| section.id.as_str() != "organization.awareness");
+        let without = WorldStateSnapshot::new("epoch", 1, sections).unwrap();
+        let diff = WorldStateDiff::between(&original, &without).unwrap();
+        assert!(diff
+            .model_projection_against(&original, WorldStateLifetime::Conversation)
+            .unwrap()
+            .is_none());
+        let restored = WorldStateSnapshot::new("epoch", 2, original.sections.clone()).unwrap();
+        let diff = WorldStateDiff::between(&without, &restored).unwrap();
+        assert!(diff
+            .model_projection_against(&without, WorldStateLifetime::Conversation)
+            .unwrap()
+            .is_none());
+        let rebased = WorldStateReducer::fold(without, &[diff])
+            .unwrap()
+            .rebase("compacted")
+            .unwrap();
+        let visible = rebased
+            .model_projection(WorldStateLifetime::Conversation)
+            .unwrap()
+            .render_sanitized_text();
+        assert!(!visible.contains("organization.awareness") && !visible.contains("Writer"));
+        assert!(rebased.canonical_json().contains("Writer"));
     }
 
     #[test]

@@ -167,7 +167,16 @@ fn workflow_awareness_member_snapshot_is_small_but_focused_query_has_complete_ro
     let chat = conversation(&c, "a");
     let snapshot = snapshot_for_conversation(&c, &chat).unwrap().unwrap();
     assert_eq!(snapshot.members[1].task.len(), 512);
-    let all = state_for_run(&c, &chat, "run-a", &StateQuery::default()).unwrap();
+    let all = state_for_run(
+        &c,
+        &chat,
+        "run-a",
+        &StateQuery {
+            view: StateView::Members,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(all["members"][1]["task"].as_str().unwrap().len(), 512);
     assert!(all.get("background").is_none());
     assert!(all.get("topology").is_none());
@@ -178,6 +187,7 @@ fn workflow_awareness_member_snapshot_is_small_but_focused_query_has_complete_ro
         &StateQuery {
             node_id: Some("b".into()),
             view: StateView::Members,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -246,6 +256,7 @@ fn configuration_is_explicit_scoped_and_distinguishes_defaults_from_next_turn() 
     let query = StateQuery {
         view: StateView::Configuration,
         node_id: Some("b".into()),
+        ..Default::default()
     };
     assert!(state_for_run(&c, &chat, "run-a", &query).is_err());
     let mut definition: Value = serde_json::from_str(
@@ -380,4 +391,322 @@ fn automatic_summary_scales_without_loading_every_members_mail_details() {
     assert!(!statements
         .iter()
         .any(|sql| sql.contains("SELECT i.input_id,m.message_id")));
+}
+
+fn organized_fixture() -> Connection {
+    let c = fixture();
+    let mut definition: Value = serde_json::from_str(
+        &c.query_row(
+            "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    definition["departments"] = value!([
+        {"id":"research","name":"Research","parentId":null,"x":0,"y":0,"width":400,"height":300},
+        {"id":"applied","name":"Applied","parentId":"research","x":0,"y":0,"width":400,"height":300},
+        {"id":"outside","name":"Operations","parentId":null,"x":0,"y":0,"width":400,"height":300}
+    ]);
+    definition["nodes"][0]["name"] = value!("Alice");
+    definition["nodes"][0]["departmentId"] = value!("research");
+    definition["nodes"][1]["name"] = value!("Bob");
+    definition["nodes"][1]["task"] = value!("Extract catalyst mechanisms from literature");
+    definition["nodes"][1]["departmentId"] = value!("applied");
+    definition["nodes"][2]["name"] = value!("Cara");
+    definition["nodes"][2]["departmentId"] = value!("outside");
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=?1 WHERE instance_id='instance'",
+        [definition.to_string()],
+    )
+    .unwrap();
+    c
+}
+
+fn modeled_state(c: &Connection, query: &StateQuery) -> Value {
+    crate::workflow_awareness::state_for_model(
+        state_for_run(c, &conversation(c, "a"), "run-a", query).unwrap(),
+        query,
+    )
+}
+
+#[test]
+fn organization_state_members_search_department_descendants_and_full_own_contract_are_explicit() {
+    let c = organized_fixture();
+    let query = StateQuery {
+        view: StateView::Members,
+        department_id: Some("research".into()),
+        limit: 1,
+        ..Default::default()
+    };
+    let first = modeled_state(&c, &query);
+    assert_eq!(first["page"]["total"], 2);
+    assert_eq!(first["page"]["nextCursor"], 1);
+    assert_eq!(first["members"][0]["member"], "Alice");
+    assert_eq!(first["scope"]["department"], "Research");
+    assert_eq!(
+        first["members"][0]["responsibilitiesAvailability"],
+        "summary"
+    );
+    assert!(first["members"][0].get("receives").is_none());
+    let next = modeled_state(
+        &c,
+        &StateQuery {
+            cursor: Some(1),
+            ..query.clone()
+        },
+    );
+    assert_eq!(next["members"][0]["member"], "Bob");
+    assert_eq!(next["members"][0]["department"], "Research/Applied");
+    let direct = modeled_state(
+        &c,
+        &StateQuery {
+            include_descendants: false,
+            ..query.clone()
+        },
+    );
+    assert_eq!(direct["page"]["total"], 1);
+    let keyword = modeled_state(
+        &c,
+        &StateQuery {
+            search: Some("CATALYST".into()),
+            ..query.clone()
+        },
+    );
+    assert_eq!(keyword["page"]["total"], 1);
+    assert_eq!(keyword["members"][0]["member"], "Bob");
+    let missing = modeled_state(
+        &c,
+        &StateQuery {
+            search: Some("Not found".into()),
+            ..query.clone()
+        },
+    );
+    assert_eq!(missing["members"], value!([]));
+    assert_eq!(missing["page"]["total"], 0);
+    let own = modeled_state(
+        &c,
+        &StateQuery {
+            node_id: Some("a".into()),
+            ..query
+        },
+    );
+    assert_eq!(own["members"][0]["receives"], "Artifacts");
+    assert_eq!(own["members"][0]["task"], "Review quality");
+    assert_eq!(own["members"][0]["delivers"], "Review report");
+    assert_eq!(
+        own["members"][0]["responsibilitiesAvailability"],
+        "complete"
+    );
+    assert!(!own.to_string().contains("conversationId"));
+}
+
+#[test]
+fn organization_state_structure_pages_keep_parent_paths_and_subtree_counts() {
+    let c = organized_fixture();
+    let query = StateQuery {
+        view: StateView::Structure,
+        department_id: Some("research".into()),
+        limit: 1,
+        ..Default::default()
+    };
+    let first = modeled_state(&c, &query);
+    assert_eq!(first["page"]["total"], 2);
+    assert_eq!(
+        first["structure"]["departments"][0]["department"],
+        "Research"
+    );
+    assert_eq!(first["structure"]["departments"][0]["directMemberCount"], 1);
+    assert_eq!(first["structure"]["departments"][0]["memberCount"], 2);
+    assert_eq!(
+        first["structure"]["departments"][0]["childDepartments"],
+        value!(["Research/Applied"])
+    );
+    let second = modeled_state(
+        &c,
+        &StateQuery {
+            cursor: Some(1),
+            ..query
+        },
+    );
+    assert_eq!(
+        second["structure"]["departments"][0]["department"],
+        "Research/Applied"
+    );
+    assert_eq!(
+        second["structure"]["departments"][0]["parentDepartment"],
+        "Research"
+    );
+    assert_eq!(second["structure"]["departments"][0]["depth"], 1);
+    assert_eq!(second["structure"]["departments"][0]["memberCount"], 1);
+    assert!(second["page"]["nextCursor"].is_null());
+    assert!(second.get("_directory").is_none());
+    assert!(state_for_run(
+        &c,
+        &conversation(&c, "a"),
+        "run-a",
+        &StateQuery {
+            department_id: Some("not-a-department".into()),
+            ..Default::default()
+        }
+    )
+    .is_err());
+}
+
+#[test]
+fn organization_state_runtime_candidates_are_not_paged_before_host_and_mail_is_opt_in_with_stable_cursor(
+) {
+    let mut c = organized_fixture();
+    let receipt = send_mail(
+        &mut c,
+        "three-letters",
+        &[("b", "first"), ("b", "second"), ("b", "third")],
+    );
+    start_run(&mut c, "b", "run-b");
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept-second",
+        MutationAction::Accept,
+        &[receipt.messages[1].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    let query = StateQuery {
+        view: StateView::Runtime,
+        limit: 1,
+        ..Default::default()
+    };
+    let mut raw = state_for_run(&c, &conversation(&c, "a"), "run-a", &query).unwrap();
+    assert_eq!(raw["runtime"]["nodes"].as_array().unwrap().len(), 3);
+    assert!(raw["runtime"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node.get("inputs").is_none()));
+    raw["runtime"]["nodes"][1]["state"] = value!("waiting_interaction");
+    raw["runtime"]["nodes"][1]["waitingForInteraction"] = value!(true);
+    raw["runtime"]["nodes"][1]["hasPendingInteraction"] = value!(true);
+    let filtered = crate::workflow_awareness::state_for_model(
+        raw,
+        &StateQuery {
+            status: Some("waiting_interaction".into()),
+            ..query.clone()
+        },
+    );
+    assert_eq!(filtered["page"]["total"], 1);
+    assert_eq!(filtered["runtime"]["members"][0]["member"], "Bob");
+    assert_eq!(
+        filtered["runtime"]["members"][0]["waitingForInteraction"],
+        true
+    );
+    assert_eq!(
+        filtered["runtime"]["members"][0]["hasPendingInteraction"],
+        true
+    );
+    assert_eq!(filtered["runtime"]["members"][0]["pendingCount"], 2);
+    assert_eq!(filtered["runtime"]["members"][0]["processingCount"], 1);
+    assert_eq!(
+        filtered["runtime"]["members"][0]["mailCounts"]["processed"],
+        0
+    );
+    assert_eq!(
+        filtered["runtime"]["members"][0]["mailAvailability"],
+        "not_requested"
+    );
+    let focused = StateQuery {
+        node_id: Some("b".into()),
+        include_mail: true,
+        ..query
+    };
+    let first = modeled_state(&c, &focused);
+    let member = &first["runtime"]["members"][0];
+    assert_eq!(member["mailPage"]["total"], 3);
+    assert_eq!(member["mailPage"]["returned"], 1);
+    assert_eq!(member["mailPage"]["truncated"], true);
+    assert_eq!(member["mail"][0]["messageId"], receipt.messages[0].id);
+    let second = modeled_state(
+        &c,
+        &StateQuery {
+            mail_cursor: member["mailPage"]["nextCursor"].as_u64(),
+            ..focused.clone()
+        },
+    );
+    let member = &second["runtime"]["members"][0];
+    assert_eq!(member["mail"][0]["messageId"], receipt.messages[1].id);
+    assert_eq!(member["mail"][0]["status"], "processing");
+    assert!(member["mail"][0].get("content").is_none());
+    let third = modeled_state(
+        &c,
+        &StateQuery {
+            mail_cursor: member["mailPage"]["nextCursor"].as_u64(),
+            ..focused
+        },
+    );
+    assert_eq!(
+        third["runtime"]["members"][0]["mail"][0]["messageId"],
+        receipt.messages[2].id
+    );
+    assert!(third["runtime"]["members"][0]["mailPage"]["nextCursor"].is_null());
+}
+
+#[test]
+fn organization_state_configuration_pages_only_authorized_filtered_members() {
+    let c = organized_fixture();
+    c.execute("UPDATE workflow_instances SET definition_json=json_set(definition_json,'$.nodes[0].rank',99,'$.nodes[0].managementRole','department_admin') WHERE instance_id='instance'",[]).unwrap();
+    let query = StateQuery {
+        view: StateView::Configuration,
+        limit: 1,
+        ..Default::default()
+    };
+    let first = modeled_state(&c, &query);
+    assert_eq!(
+        first["configuration"]["access"]["scope"],
+        "authorized_members_only"
+    );
+    assert_eq!(first["configuration"]["access"]["excludedMemberCount"], 1);
+    assert_eq!(first["page"]["total"], 2);
+    assert_eq!(first["page"]["nextCursor"], 1);
+    let next = modeled_state(
+        &c,
+        &StateQuery {
+            cursor: Some(1),
+            ..query.clone()
+        },
+    );
+    assert_eq!(next["configuration"]["members"][0]["member"], "Bob");
+    assert_eq!(
+        next["configuration"]["members"][0]["department"],
+        "Research/Applied"
+    );
+    let search = modeled_state(
+        &c,
+        &StateQuery {
+            search: Some("catalyst".into()),
+            ..query.clone()
+        },
+    );
+    assert_eq!(search["page"]["total"], 1);
+    assert_eq!(search["configuration"]["members"][0]["member"], "Bob");
+    let empty = modeled_state(
+        &c,
+        &StateQuery {
+            department_id: Some("outside".into()),
+            ..query.clone()
+        },
+    );
+    assert_eq!(empty["page"]["total"], 0);
+    assert_eq!(empty["configuration"]["access"]["excludedMemberCount"], 1);
+    let denied = state_for_run(
+        &c,
+        &conversation(&c, "a"),
+        "run-a",
+        &StateQuery {
+            node_id: Some("c".into()),
+            ..query
+        },
+    )
+    .unwrap_err();
+    assert!(denied.contains("organization_configuration_forbidden"));
 }

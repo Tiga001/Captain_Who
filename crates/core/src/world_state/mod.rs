@@ -681,6 +681,22 @@ impl WorldStateSnapshot {
         })
     }
 
+    pub(crate) fn directory_model_projection_for_validation(
+        &self,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<WorldStateModelRecord, WorldStateError> {
+        self.validate()?;
+        validate_snapshot_lifetime(self, expected_lifetime)?;
+        Ok(WorldStateModelRecord::Full {
+            schema_version: self.schema_version,
+            lifetime: expected_lifetime,
+            sections: directory_model_section_map(self)
+                .into_iter()
+                .map(|(id, value)| WorldStateModelSection { id, value })
+                .collect(),
+        })
+    }
+
     /// Starts a new cache/compaction epoch without changing the exact state revision.
     pub fn rebase(
         &self,
@@ -913,7 +929,7 @@ impl WorldStateDiff {
         base: &WorldStateSnapshot,
         expected_lifetime: WorldStateLifetime,
     ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
-        self.project_model_changes(base, expected_lifetime, true)
+        self.project_model_changes(base, expected_lifetime, model_section_map)
     }
 
     /// Validation-only counterpart of the stored full projection. It preserves the exact
@@ -923,23 +939,26 @@ impl WorldStateDiff {
         base: &WorldStateSnapshot,
         expected_lifetime: WorldStateLifetime,
     ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
-        self.project_model_changes(base, expected_lifetime, false)
+        self.project_model_changes(base, expected_lifetime, stored_model_section_map)
+    }
+
+    pub(crate) fn directory_model_projection_against_for_validation(
+        &self,
+        base: &WorldStateSnapshot,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
+        self.project_model_changes(base, expected_lifetime, directory_model_section_map)
     }
 
     fn project_model_changes(
         &self,
         base: &WorldStateSnapshot,
         expected_lifetime: WorldStateLifetime,
-        apply_display_policy: bool,
+        project: fn(&WorldStateSnapshot) -> BTreeMap<WorldStateSectionId, Value>,
     ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
         validate_snapshot_lifetime(base, expected_lifetime)?;
         let result = WorldStateReducer::fold(base.clone(), std::slice::from_ref(self))?;
         validate_snapshot_lifetime(&result, expected_lifetime)?;
-        let project = if apply_display_policy {
-            model_section_map
-        } else {
-            stored_model_section_map
-        };
         let before = project(base);
         let after = project(&result);
         let section_ids = before
@@ -1600,6 +1619,9 @@ fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectio
     snapshot
         .sections
         .iter()
+        // Old ledgers can contain global organization observations. Automatic context now only
+        // contains caller identity and inbox changes, including full/diff/rebase replay.
+        .filter(|section| section.id.as_str() != "organization.awareness")
         .filter_map(|section| {
             section.model_projection.as_ref().map(|projection| {
                 (
@@ -1607,6 +1629,19 @@ fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectio
                     workflow_projection::for_model(section.id.as_str(), projection.clone()),
                 )
             })
+        })
+        .collect()
+}
+
+fn directory_model_section_map(
+    snapshot: &WorldStateSnapshot,
+) -> BTreeMap<WorldStateSectionId, Value> {
+    stored_model_section_map(snapshot)
+        .into_iter()
+        .map(|(id, projection)| {
+            let projection =
+                workflow_projection::directory_projection_for_validation(id.as_str(), projection);
+            (id, projection)
         })
         .collect()
 }

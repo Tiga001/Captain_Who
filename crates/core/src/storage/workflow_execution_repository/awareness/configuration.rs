@@ -7,12 +7,12 @@ pub(super) fn members(
     c: &Connection,
     graph: &Graph,
     identity: &ConversationSnapshot,
-    selected: Option<&str>,
+    query: &StateQuery,
 ) -> Result<Value, String> {
     let actor = node(graph, &identity.node_id)?;
     if !can_manage(&actor.management_role, actor.department_id.as_deref()) {
         return Err(
-            "Only organization or department administrators can inspect member configuration"
+            "organization_configuration_forbidden: Only organization or department administrators can inspect member configuration"
                 .into(),
         );
     }
@@ -27,22 +27,19 @@ pub(super) fn members(
             )
             .is_ok()
     };
-    if selected.is_some_and(|id| {
+    if query.node_id.as_deref().is_some_and(|id| {
         graph
             .definition
             .nodes
             .iter()
             .any(|node| node.id == id && !readable(node))
     }) {
-        return Err("Member configuration is outside your administrator scope".into());
+        return Err("organization_configuration_forbidden: Member configuration is outside your administrator scope".into());
     }
+    let candidates = selected_nodes(graph, query)?;
+    let excluded = candidates.iter().filter(|node| !readable(node)).count();
     let mut members = Vec::new();
-    for node in graph
-        .definition
-        .nodes
-        .iter()
-        .filter(|node| readable(node) && selected.is_none_or(|id| id == node.id))
-    {
+    for node in candidates.into_iter().filter(|node| readable(node)) {
         let NodeConfig::Agent(config) = &node.config;
         let chat = graph.bindings.get(&node.id);
         let mut next_turn = Value::Null;
@@ -72,11 +69,11 @@ pub(super) fn members(
                 active_run = value!({"runId":turn.run_id,"configuration":"frozen_for_this_turn_not_reported_here"});
             }
         }
-        members.push(value!({"nodeId":node.id,"nodeName":node.name,"editable":node.id!=actor.id,
+        members.push(value!({"nodeId":node.id,"nodeName":node.name,"departmentId":node.department_id,"editable":node.id!=actor.id,
             "memberDefaults":{"modelConfigId":config.model_config_id,"permissionMode":config.permission_mode},
             "nextTurn":next_turn,"activeRun":active_run}));
     }
     Ok(
-        value!({"members":members,"configurationRule":"memberDefaults are the saved organization settings. nextTurn is the conversation's current composer selection used by the next automatic mail wake (null means not configured). Existing manually queued messages retain their own settings. These are not the running turn's frozen configuration; editing does not change an active turn. Use nextTurn.modelConfigId to copy another member's next-turn model, and only choose IDs from availableModels."}),
+        value!({"members":members,"access":{"scope":"authorized_members_only","excludedMemberCount":excluded},"configurationRule":"memberDefaults are the saved organization settings. nextTurn is the conversation's current composer selection used by the next automatic mail wake (null means not configured). Existing manually queued messages retain their own settings. These are not the running turn's frozen configuration; editing does not change an active turn. Use nextTurn.modelConfigId to copy another member's next-turn model, and only choose IDs from availableModels."}),
     )
 }

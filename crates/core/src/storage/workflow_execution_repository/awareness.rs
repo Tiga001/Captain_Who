@@ -14,21 +14,159 @@ fn scope(
     let graph = graph(c, &identity.instance_id)?.ok_or("Organization is unavailable")?;
     Ok((graph, identity))
 }
-fn members(graph: &Graph, selected: Option<&str>) -> Vec<Value> {
-    graph.definition.nodes.iter().filter(|n|selected.is_none_or(|id|id==n.id)).map(|n|{
-        let NodeConfig::Agent(a) = &n.config; let (receives,task,delivers)=(a.receives.as_str(),a.task.as_str(),a.delivers.as_str());
-        let mut result=value!({"nodeId":n.id,"nodeName":n.name,"kind":"agent","conversationId":graph.bindings.get(&n.id),"rank":n.rank,"managementRole":n.management_role,"departmentId":n.department_id,"receives":receives,"task":task,"delivers":delivers});
-        if selected.is_none(){let mut truncated=vec![];for key in ["receives","task","delivers"]{if let Some(text)=result[key].as_str(){if text.chars().count()>512{let preview:String=text.chars().take(512).collect();result[key]=value!(preview);truncated.push(key);}}}if !truncated.is_empty(){result["truncatedFields"]=value!(truncated);result["detailsQueryHint"]=value!("Query this nodeId for full responsibilities");}}
+fn department_ids(graph: &Graph, query: &StateQuery) -> Result<BTreeSet<String>, String> {
+    let Some(selected) = query.department_id.as_deref() else {
+        return Ok(graph
+            .definition
+            .departments
+            .iter()
+            .map(|d| d.id.clone())
+            .collect());
+    };
+    if !graph
+        .definition
+        .departments
+        .iter()
+        .any(|d| d.id == selected)
+    {
+        return Err("Unknown organization department".into());
+    }
+    let mut ids = BTreeSet::from([selected.to_owned()]);
+    if query.include_descendants {
+        loop {
+            let before = ids.len();
+            for department in &graph.definition.departments {
+                if department
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|id| ids.contains(id))
+                {
+                    ids.insert(department.id.clone());
+                }
+            }
+            if before == ids.len() {
+                break;
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn selected_nodes<'a>(graph: &'a Graph, query: &StateQuery) -> Result<Vec<&'a Node>, String> {
+    let departments = department_ids(graph, query)?;
+    let search = query.search.as_deref().map(|s| s.trim().to_lowercase());
+    let mut nodes = graph
+        .definition
+        .nodes
+        .iter()
+        .filter(|node| {
+            let NodeConfig::Agent(config) = &node.config;
+            query.node_id.as_deref().is_none_or(|id| id == node.id)
+                && (query.department_id.is_none()
+                    || node
+                        .department_id
+                        .as_ref()
+                        .is_some_and(|id| departments.contains(id)))
+                && search.as_ref().is_none_or(|text| {
+                    [&node.name, &config.task, &config.receives, &config.delivers]
+                        .iter()
+                        .any(|field| field.to_lowercase().contains(text))
+                })
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(nodes)
+}
+
+fn members(nodes: &[&Node], graph: &Graph, focused: bool) -> Vec<Value> {
+    nodes.iter().map(|n| {
+        let NodeConfig::Agent(config) = &n.config;
+        let mut result=value!({"nodeId":n.id,"nodeName":n.name,"conversationId":graph.bindings.get(&n.id),
+            "rank":n.rank,"managementRole":n.management_role,"departmentId":n.department_id});
+        if focused {
+            result["receives"] = value!(config.receives);
+            result["task"] = value!(config.task);
+            result["delivers"] = value!(config.delivers);
+            result["responsibilitiesAvailability"] = value!("complete");
+        } else {
+            let truncated = config.task.chars().count() > 512;
+            result["task"] = value!(config.task.chars().take(512).collect::<String>());
+            result["responsibilitiesAvailability"] = value!("summary");
+            result["truncatedFields"] = value!(if truncated { vec!["task"] } else { vec![] });
+            result["detailsQueryHint"] = value!("Query this member by name for full receives, task and delivers");
+        }
         result
     }).collect()
 }
-fn participant_runtime(c: &Connection, graph: &Graph, node: &Node) -> Result<Value, String> {
+
+fn department_path(graph: &Graph, id: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cursor = Some(id);
+    let mut visited = BTreeSet::new();
+    while let Some(id) = cursor {
+        if !visited.insert(id) {
+            break;
+        }
+        let Some(department) = graph.definition.departments.iter().find(|d| d.id == id) else {
+            break;
+        };
+        names.push(department.name.clone());
+        cursor = department.parent_id.as_deref();
+    }
+    names.reverse();
+    names
+}
+
+fn structure(graph: &Graph, query: &StateQuery) -> Result<Value, String> {
+    let ids = department_ids(graph, query)?;
+    let mut departments = graph
+        .definition
+        .departments
+        .iter()
+        .filter(|d| ids.contains(&d.id))
+        .collect::<Vec<_>>();
+    departments.sort_by_key(|d| (department_path(graph, &d.id).join("/"), d.id.clone()));
+    let departments=departments.into_iter().map(|department| {
+        let descendants=department_ids(graph,&StateQuery {department_id:Some(department.id.clone()),..Default::default()})?;
+        let children=graph.definition.departments.iter().filter(|d| d.parent_id.as_deref()==Some(department.id.as_str()))
+            .map(|d| department_path(graph,&d.id).join("/")).collect::<Vec<_>>();
+        Ok(value!({"id":department.id,"name":department.name,"parentId":department.parent_id,
+            "depth":department_path(graph,&department.id).len().saturating_sub(1),"childDepartments":children,
+            "directMemberCount":graph.definition.nodes.iter().filter(|n| n.department_id.as_deref()==Some(department.id.as_str())).count(),
+            "memberCount":graph.definition.nodes.iter().filter(|n| n.department_id.as_ref().is_some_and(|id| descendants.contains(id))).count()}))
+    }).collect::<Result<Vec<_>,String>>()?;
+    Ok(value!({"departments":departments,
+        "rootMemberCount":if query.department_id.is_none() {graph.definition.nodes.iter().filter(|n| n.department_id.is_none()).count()} else {0},
+        "countPolicy":"directMemberCount counts direct members; memberCount includes every descendant department"}))
+}
+
+fn participant_runtime(
+    c: &Connection,
+    graph: &Graph,
+    node: &Node,
+    query: &StateQuery,
+) -> Result<Value, String> {
     let chat = graph.bindings.get(&node.id);
     let paused = chat
         .map(|id| is_paused(c, id))
         .transpose()?
         .unwrap_or(false);
-    let mut counts = BTreeMap::<String, u64>::new();
+    let mut counts = BTreeMap::<String, u64>::from_iter(
+        [
+            "pending",
+            "processing",
+            "processed",
+            "stopped",
+            "failed",
+            "recalled",
+        ]
+        .map(|s| (s.into(), 0)),
+    );
     let mut s=c.prepare("SELECT mail_status,COUNT(*) FROM workflow_mail_messages WHERE instance_id=?1 AND node_id=?2 AND recipient_conversation_id IS ?3 GROUP BY mail_status").map_err(db)?;
     for row in s
         .query_map(params![graph.instance_id, node.id, chat], |r| {
@@ -36,20 +174,15 @@ fn participant_runtime(c: &Connection, graph: &Graph, node: &Node) -> Result<Val
         })
         .map_err(db)?
     {
-        let (k, v) = row.map_err(db)?;
-        counts.insert(k, v);
+        let (status, count) = row.map_err(db)?;
+        counts.insert(status, count);
     }
-    let mut s=c.prepare("SELECT i.input_id,m.message_id,m.mail_status,i.run_id,t.terminal_status,i.delivery_id,json_extract(i.input_json,'$.error') FROM workflow_mail_messages m JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND m.recipient_conversation_id IS ?3 AND m.mail_status IN('pending','processing') ORDER BY (m.mail_status='processing') DESC,m.sequence LIMIT 128").map_err(db)?;
-    let inputs=s.query_map(params![graph.instance_id,node.id,chat],|r|Ok(value!({"inputId":r.get::<_,String>(0)?,"messageId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"runId":r.get::<_,Option<String>>(3)?,"runStatus":r.get::<_,Option<String>>(4)?,"deliveryId":r.get::<_,Option<String>>(5)?,"error":r.get::<_,Option<String>>(6)?}))).map_err(db)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?;
-    let latest_run=c.query_row("SELECT t.run_id,t.terminal_status FROM conversation_turn_traces t JOIN workflow_mail_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id WHERE t.conversation_id=?1 AND json_extract(r.snapshot_json,'$.instanceId')=?2 AND json_extract(r.snapshot_json,'$.nodeId')=?3 ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1",params![chat,graph.instance_id,node.id],|r|Ok(value!({"runId":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?}))).optional().map_err(db)?;
-    let pending = counts.get("pending").copied().unwrap_or(0);
-    let processing = counts.get("processing").copied().unwrap_or(0);
-    let current: Vec<_> = inputs
-        .iter()
-        .filter(|i| i["status"] == "processing")
-        .map(|i| i["inputId"].clone())
-        .collect();
-    let state = if paused {
+    let latest_run=c.query_row("SELECT t.run_id,t.terminal_status,t.created_at,t.updated_at,t.completed_at FROM conversation_turn_traces t JOIN workflow_mail_runs r ON r.run_id=t.run_id AND r.conversation_id=t.conversation_id WHERE t.conversation_id=?1 AND json_extract(r.snapshot_json,'$.instanceId')=?2 AND json_extract(r.snapshot_json,'$.nodeId')=?3 ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1",params![chat,graph.instance_id,node.id],|r|Ok(value!({"runId":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"startedAt":r.get::<_,i64>(2)?,"updatedAt":r.get::<_,i64>(3)?,"completedAt":r.get::<_,Option<i64>>(4)?}))).optional().map_err(db)?;
+    let pending = counts["pending"];
+    let processing = counts["processing"];
+    let state = if chat.is_none() {
+        "unknown"
+    } else if paused {
         "stopped"
     } else if processing > 0
         || latest_run
@@ -62,19 +195,27 @@ fn participant_runtime(c: &Connection, graph: &Graph, node: &Node) -> Result<Val
     } else {
         "idle"
     };
-    Ok(
-        value!({"nodeId":node.id,"nodeName":node.name,"kind":"agent","conversationId":chat,"state":state,"paused":paused,"pendingCount":pending,"processingCount":processing,"queuedInputCount":pending,"currentInputCount":processing,"currentInputIds":current,"mailCounts":counts,"inputs":inputs,"inputsTruncated":pending+processing>128,"latestRun":latest_run}),
-    )
+    let mut result = value!({"nodeId":node.id,"nodeName":node.name,"conversationId":chat,
+        "rank":node.rank,"managementRole":node.management_role,"departmentId":node.department_id,
+        "bindingAvailable":chat.is_some(),"state":state,"paused":paused,"waitingForApproval":false,
+        "waitingForInteraction":false,"hasPendingInteraction":false,"activeRunId":null,
+        "pendingCount":pending,"processingCount":processing,"mailCounts":counts,"latestRun":latest_run,
+        "mailAvailability":if query.include_mail {"requested"} else {"not_requested"}});
+    if query.include_mail {
+        let mut s=c.prepare("SELECT m.sequence,i.input_id,m.message_id,m.mail_status,i.run_id,t.terminal_status,i.delivery_id,json_extract(i.input_json,'$.error'),json_extract(m.message_json,'$.sourceNodeName'),m.created_at FROM workflow_mail_messages m JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND m.recipient_conversation_id IS ?3 AND m.mail_status IN('pending','processing') AND (?4 IS NULL OR m.sequence>?4) ORDER BY m.sequence LIMIT ?5").map_err(db)?;
+        let mut mail=s.query_map(params![graph.instance_id,node.id,chat,query.mail_cursor,query.limit+1],|r|Ok(value!({"sequence":r.get::<_,u64>(0)?,"inputId":r.get::<_,String>(1)?,"messageId":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?,"runId":r.get::<_,Option<String>>(4)?,"runStatus":r.get::<_,Option<String>>(5)?,"deliveryId":r.get::<_,Option<String>>(6)?,"error":r.get::<_,Option<String>>(7)?,"sourceNodeName":r.get::<_,Option<String>>(8)?,"createdAt":r.get::<_,i64>(9)?}))).map_err(db)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?;
+        let more = mail.len() > query.limit;
+        mail.truncate(query.limit);
+        let next = more.then(|| mail.last().unwrap()["sequence"].clone());
+        result["mailPage"] = value!({"total":pending+processing,"returned":mail.len(),"limit":query.limit,
+            "nextCursor":next,"truncated":more,"availability":if more {"truncated"} else {"complete"},
+            "order":"arrival_sequence_ascending","followUp":"Use mailCursor=nextCursor with the same member, runtime view and includeMail=true. Message bodies are available only for letters in your own inbox or outbox via organization_get_mailbox."});
+        result["inputs"] = value!(mail);
+        result["inputsTruncated"] = value!(more);
+    }
+    Ok(result)
 }
-fn runtime(c: &Connection, graph: &Graph, selected: Option<&str>) -> Result<Vec<Value>, String> {
-    graph
-        .definition
-        .nodes
-        .iter()
-        .filter(|n| selected.is_none_or(|id| id == n.id))
-        .map(|n| participant_runtime(c, graph, n))
-        .collect()
-}
+
 pub fn state_for_run(
     c: &Connection,
     conversation_id: &str,
@@ -87,18 +228,29 @@ pub fn state_for_run(
     if let Some(id) = &query.node_id {
         node(&graph, id)?;
     }
-    let mut result = value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"description":graph.definition.description,"executionVersion":identity.execution_version,"organizationRevision":identity.organization_revision,"currentNodeId":identity.node_id,"observedAt":now_ms()});
-    if query.view == StateView::Configuration {
-        result["configuration"] =
-            configuration::members(&tx, &graph, &identity, query.node_id.as_deref())?;
-        return Ok(result);
-    }
-    if query.view != StateView::Runtime {
-        result["members"] = value!(members(&graph, query.node_id.as_deref()));
-        result["departments"] = value!(graph.definition.departments.iter().map(|department| value!({"id":department.id,"name":department.name,"parentId":department.parent_id})).collect::<Vec<_>>());
-    }
-    if query.view != StateView::Members {
-        result["runtime"] = value!({"nodes":runtime(&tx,&graph,query.node_id.as_deref())?});
+    let departments = department_ids(&graph, query)?;
+    let selected = selected_nodes(&graph, query)?;
+    let mut result = value!({"available":true,"view":query.view,"instanceId":identity.instance_id,
+        "workflowName":identity.name,"executionVersion":identity.execution_version,"organizationRevision":identity.organization_revision,
+        "currentNodeId":identity.node_id,"observedAt":now_ms(),
+        "scope":{"nodeId":query.node_id,"nodeName":query.node_id.as_deref().and_then(|id| graph.definition.nodes.iter().find(|n| n.id==id).map(|n| &n.name)),
+            "departmentId":query.department_id,"includeDescendants":query.include_descendants,
+            "search":query.search,"status":query.status,"departmentCount":departments.len()},
+        "_directory":{"members":graph.definition.nodes.iter().map(|n| value!({"nodeId":n.id,"nodeName":n.name})).collect::<Vec<_>>(),
+            "departments":graph.definition.departments.iter().map(|d| value!({"id":d.id,"name":d.name,"parentId":d.parent_id})).collect::<Vec<_>>()}});
+    match query.view {
+        StateView::Configuration => {
+            result["configuration"] = configuration::members(&tx, &graph, &identity, query)?
+        }
+        StateView::Members => {
+            result["members"] = value!(members(&selected, &graph, query.node_id.is_some()))
+        }
+        StateView::Structure => result["structure"] = structure(&graph, query)?,
+        StateView::Overview | StateView::Runtime => {
+            // Intentionally unpaged: Host waiting/approval/compaction enrichment is authoritative
+            // for state filters and overview aggregation at the final model boundary.
+            result["runtime"] = value!({"nodes":selected.iter().map(|node| participant_runtime(&tx,&graph,node,query)).collect::<Result<Vec<_>,_>>()?});
+        }
     }
     Ok(result)
 }

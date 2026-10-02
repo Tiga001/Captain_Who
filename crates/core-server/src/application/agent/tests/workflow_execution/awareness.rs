@@ -249,12 +249,17 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
             (
                 "inspect-state",
                 "organization_get_state",
-                json!({"view":"all","reason":"Check workflow progress"}),
+                json!({"view":"runtime","reason":"Check current member activity"}),
+            ),
+            (
+                "inspect-members",
+                "organization_get_state",
+                json!({"view":"members","search":"Review","reason":"Find a reviewer by responsibilities"}),
             ),
             (
                 "inspect-node",
                 "organization_get_state",
-                json!({"view":"runtime","member":"人事负责人","reason":"Inspect stopped receiver details"}),
+                json!({"view":"runtime","member":"人事负责人","includeMail":true,"reason":"Inspect stopped receiver details"}),
             ),
             (
                 "inspect-outbox",
@@ -304,7 +309,7 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
     while let Ok(sample) = requests.try_recv() {
         samples.push(sample);
     }
-    assert_eq!(samples.len(), 5);
+    assert_eq!(samples.len(), 6);
     for name in [
         "organization_send",
         "organization_get_state",
@@ -328,41 +333,48 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
             .unwrap()
             .starts_with("workflow_")));
     let state = tool_result(&samples[1], "organization_get_state");
-    let members = &state["members"];
-    assert_eq!(members.as_array().unwrap().len(), 2);
+    assert!(state.get("members").is_none());
     assert!(state.get("topology").is_none());
     let nodes = state["runtime"]["members"].as_array().unwrap();
     let current = nodes.iter().find(|node| node["member"] == "Boss").unwrap();
-    assert_eq!(
-        state["runtime"]["summaryPolicy"],
-        "unchanged_from_world_state_omitted"
-    );
-    for key in ["state", "activeRunId", "currentInputIds"] {
+    assert!(state["runtime"].get("summaryPolicy").is_none());
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(current["state"], "running");
+    assert_eq!(current["waitingForApproval"], false);
+    assert_eq!(current["waitingForInteraction"], false);
+    assert_eq!(current["bindingAvailable"], true);
+    for key in ["activeRunId", "currentInputIds"] {
         assert!(
             current.get(key).is_none(),
-            "unchanged {key} must come from World State"
+            "internal identity must remain hidden: {key}"
         );
     }
     let model_context = samples[0]["messages"].to_string();
     assert!(!model_context.contains(&turn.run_id));
     assert!(model_context.contains("Boss"));
-    assert!(model_context.contains("人事负责人"));
+    assert!(
+        !model_context.contains("人事负责人"),
+        "peer identities require an explicit query"
+    );
+    assert!(!model_context.contains("organization.awareness"));
     for key in [
         "workflowName",
-        "organizationName",
         "executionVersion",
         "currentNodeId",
         "background",
     ] {
         assert!(state.get(key).is_none(), "redundant {key}");
     }
+    let directory = tool_result(&samples[2], "organization_get_state");
+    let members = &directory["members"];
+    assert_eq!(members.as_array().unwrap().len(), 2);
     let own = members
         .as_array()
         .unwrap()
         .iter()
         .find(|node| node["member"] == "Boss")
         .unwrap();
-    assert!(own.get("task").is_none());
+    assert_eq!(own["task"], "Review quality");
     assert!(own.get("outputs").is_none());
     let other = members
         .as_array()
@@ -375,14 +387,24 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         .iter()
         .find(|node| node["member"] == "人事负责人")
         .unwrap();
-    assert!(stopped.get("state").is_none());
-    assert_eq!(stopped["mail"].as_array().unwrap().len(), 1);
-    let focused = tool_result(&samples[2], "organization_get_state");
-    assert_eq!(focused["runtime"]["summaryPolicy"], "complete");
+    assert_eq!(stopped["state"], "stopped");
+    assert!(
+        stopped.get("mail").is_none(),
+        "runtime mail details are opt-in"
+    );
+    let focused = tool_result(&samples[3], "organization_get_state");
+    assert!(focused["runtime"].get("summaryPolicy").is_none());
     assert_eq!(focused["runtime"]["members"].as_array().unwrap().len(), 1);
     assert_eq!(focused["runtime"]["members"][0]["state"], "stopped");
+    assert_eq!(
+        focused["runtime"]["members"][0]["mail"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(focused.get("members").is_none());
-    let outbox = tool_result(&samples[3], "organization_get_mailbox");
+    let outbox = tool_result(&samples[4], "organization_get_mailbox");
     assert!(outbox.get("workflowName").is_none());
     assert!(outbox["organizationName"].is_string());
     let messages = outbox["messages"].as_array().unwrap();
@@ -407,7 +429,7 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
             "internal identity leaked: {field}"
         );
     }
-    let inbox = tool_result(&samples[4], "organization_get_mailbox");
+    let inbox = tool_result(&samples[5], "organization_get_mailbox");
     assert!(inbox["messages"].as_array().unwrap().is_empty());
     let runtime = storage.workflow_execution_runtime("instance").unwrap();
     assert_eq!(runtime.inputs.len(), 1);
