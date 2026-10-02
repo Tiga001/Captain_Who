@@ -25,8 +25,7 @@ export const enUSTranslations = {
   'workflows.settingsTitle': 'Workflow templates',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': 'View workflow board',
-  'workflows.upstreamNodes': 'Upstream nodes',
-  'workflows.downstreamNodes': 'Downstream nodes',
+  'workflows.members': 'Members',
   'workflows.noNodes': 'No nodes',
   'configuration.invalidContextCapacityTitle': 'Context window is too small',
   'configuration.invalidContextCapacity':

@@ -1,6 +1,6 @@
 //! End-to-end workflow delivery through the real Host, independent root Turn and local provider.
 use super::*;
-use mycopilot_core::workflow_execution::InputStatus;
+use mycopilot_core::workflow_execution::{InputStatus, MailStatus};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::unbounded_channel;
@@ -36,10 +36,9 @@ async fn respond(stream: &mut tokio::net::TcpStream, delta: Value, reason: &str)
     stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {content}\n\ndata: {end}\n\ndata: [DONE]\n\n").as_bytes()).await.unwrap();
 }
 
-fn workflow_fixture(storage: &StorageService, busy: &str) -> (String, String) {
+fn workflow_fixture(storage: &StorageService) -> (String, String) {
     let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Receive artifacts","task":"Review quality","delivers":"Review report"});
-    let flow = |id: &str, source: Option<&str>, target: &str| json!({"id":id,"name":id,"source":source.map(|v|json!({"kind":"node","nodeId":v})).unwrap_or(json!({"kind":"boundary"})),"target":{"kind":"node","nodeId":target}});
-    let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"Workflow shared background 38276","nodes":[agent("a"),agent("b"),{"kind":"inputGate","id":"in","name":"Input","x":0,"y":0,"processingMode":"individual","busyPolicy":busy}],"flows":[flow("entry",None,"a"),flow("direct",Some("a"),"in"),flow("in-bind",Some("in"),"b")],"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":0}}});
+    let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"Workflow shared background 38276","nodes":[agent("a"),agent("b")],"viewport":{"x":0,"y":0,"zoom":1}});
     let saved = storage
         .workflow_request(
             serde_json::from_value(
@@ -102,10 +101,12 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let (source, target) = workflow_fixture(&storage, "queue");
+    let (source, target) = workflow_fixture(&storage);
     let (captured, mut requests) = unbounded_channel();
+    let provider_storage = storage.clone();
     let provider = tokio::spawn(async move {
         let mut sent = false;
+        let mut completed = false;
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = request_body(&mut stream).await;
@@ -113,7 +114,17 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
             captured.send(request).unwrap();
             if raw.contains("Human trigger 79318") && !sent {
                 sent = true;
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-workflow-79318","type":"function","function":{"name":"workflow_send","arguments":"{\"outputs\":[{\"flowId\":\"direct\",\"message\":\"Workflow artifact 51892\"}]}"}}]}),"tool_calls").await;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-workflow-79318","type":"function","function":{"name":"workflow_send","arguments":"{\"messages\":[{\"targetNodeId\":\"b\",\"message\":\"Workflow artifact 51892\"}]}"}}]}),"tool_calls").await;
+            } else if raw.contains("Workflow artifact 51892")
+                && !raw.contains("Human trigger 79318")
+                && !completed
+            {
+                completed = true;
+                let runtime = provider_storage
+                    .workflow_execution_runtime("instance")
+                    .unwrap();
+                let message_id = &runtime.inputs[0].messages[0].id;
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"complete-startup","type":"function","function":{"name":"workflow_complete","arguments":json!({"messageIds":[message_id]}).to_string()}}]}),"tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -144,11 +155,9 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
             let request = requests.recv().await.unwrap();
             samples.push(request);
             let snapshot = storage.workflow_execution_runtime("instance").unwrap();
-            if snapshot
-                .inputs
-                .first()
-                .is_some_and(|input| input.status == InputStatus::Applied)
-                && samples.len() >= 3
+            if snapshot.inputs.first().is_some_and(|input| {
+                matches!(input.status, InputStatus::Applied | InputStatus::Completed)
+            }) && samples.len() >= 3
             {
                 break;
             }
@@ -186,11 +195,20 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
         .unwrap()
         .unwrap();
     assert_eq!(input.conversation_id.as_deref(), Some(target.as_str()));
-    assert_eq!(input.status, InputStatus::Applied);
+    assert!(matches!(
+        input.status,
+        InputStatus::Applied | InputStatus::Completed
+    ));
     assert!(samples
         .iter()
         .any(|sample| sample.to_string().contains("workflow_send")));
-    for tool in ["workflow_get_state", "workflow_get_mailbox"] {
+    for tool in [
+        "workflow_get_state",
+        "workflow_get_mailbox",
+        "workflow_accept",
+        "workflow_complete",
+        "workflow_recall",
+    ] {
         assert!(samples.iter().any(|sample| sample["tools"]
             .as_array()
             .unwrap()
@@ -254,12 +272,12 @@ async fn workflow_execution_tool_delivers_one_trusted_input_and_starts_independe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same_turn() {
+async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_turn() {
     use mycopilot_core::human_interaction::{
         HumanInteractionAnswer, HumanInteractionListInput, HumanInteractionSubmitInput,
     };
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("inject.sqlite")).unwrap());
+    let storage = Arc::new(StorageService::open(&directory.path().join("accept.sqlite")).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -267,22 +285,82 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let (source, target) = workflow_fixture(&storage, "inject");
+    let (source, target) = workflow_fixture(&storage);
     let (captured, mut requests) = unbounded_channel();
     let provider = tokio::spawn(async move {
-        let mut asked = false;
+        let mut target_stage = 0;
         let mut sent = false;
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = request_body(&mut stream).await;
             let raw = request.to_string();
-            captured.send(request).unwrap();
-            if raw.contains("Target waiting 81762") && !asked {
-                asked = true;
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"ask-target","type":"function","function":{"name":"request_user_input","arguments":"{\"questions\":[{\"title\":\"Proceed?\"}]}"}}]}),"tool_calls").await;
+            captured.send(request.clone()).unwrap();
+            let call = if raw.contains("Target waiting 81762") {
+                target_stage += 1;
+                match target_stage {
+                    1 => Some((
+                        "ask-target",
+                        "request_user_input",
+                        json!({"questions":[{"title":"Proceed?"}]}),
+                    )),
+                    2 => {
+                        assert!(
+                            !raw.contains("Accepted payload 42931"),
+                            "pending mail must never auto-inject into an active turn"
+                        );
+                        assert!(
+                            raw.contains("newMessageCount"),
+                            "next sampling must observe a compact arrival hint"
+                        );
+                        Some((
+                            "inspect-pending",
+                            "workflow_get_mailbox",
+                            json!({"direction":"inbox"}),
+                        ))
+                    }
+                    3 => {
+                        let mail = awareness::tool_result(&request, "workflow_get_mailbox");
+                        assert_eq!(mail["messages"][0]["content"], "Accepted payload 42931");
+                        assert_eq!(mail["messages"][0]["status"], "pending");
+                        Some((
+                            "accept-pending",
+                            "workflow_accept",
+                            json!({"messageIds":[mail["messages"][0]["messageId"]]}),
+                        ))
+                    }
+                    4 => {
+                        let receipt = awareness::tool_result(&request, "workflow_accept");
+                        assert_eq!(receipt["messages"][0]["success"], true);
+                        assert!(
+                            receipt["messages"][0].get("content").is_none(),
+                            "the receipt must not duplicate the trusted delivery body"
+                        );
+                        Some((
+                            "complete-accepted",
+                            "workflow_complete",
+                            json!({"messageIds":[receipt["messages"][0]["messageId"]]}),
+                        ))
+                    }
+                    5 => {
+                        let receipt = awareness::tool_result(&request, "workflow_complete");
+                        assert_eq!(receipt["messages"][0]["success"], true);
+                        assert_eq!(receipt["messages"][0]["status"], "processed");
+                        None
+                    }
+                    _ => panic!("recipient unexpectedly started another turn"),
+                }
             } else if raw.contains("Source trigger 86213") && !sent {
                 sent = true;
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":"send-to-waiting","type":"function","function":{"name":"workflow_send","arguments":"{\"outputs\":[{\"flowId\":\"direct\",\"message\":\"Injection payload 42931\"}]}"}}]}),"tool_calls").await;
+                Some((
+                    "send-to-waiting",
+                    "workflow_send",
+                    json!({"messages":[{"targetNodeId":"b","message":"Accepted payload 42931"}]}),
+                ))
+            } else {
+                None
+            };
+            if let Some((id, tool, args)) = call {
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":tool,"arguments":args.to_string()}}]}),"tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -381,7 +459,7 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
     .await
     .unwrap();
     let after = storage.workflow_execution_runtime("instance").unwrap();
-    assert_eq!(after.inputs[0].status, InputStatus::Applied);
+    assert_eq!(after.inputs[0].status, InputStatus::Completed);
     assert_eq!(
         after.inputs[0].run_id.as_deref(),
         Some(target_turn.run_id.as_str())
@@ -397,20 +475,24 @@ async fn workflow_execution_inject_respects_blocking_user_wait_and_uses_the_same
         }),
         "workflow awareness must include another root's pending human interaction"
     );
-    let incoming = samples
-        .iter()
-        .filter(|sample| {
-            sample.to_string().contains("Target waiting 81762")
-                && sample.to_string().contains("Injection payload 42931")
-        })
-        .count();
-    assert_eq!(incoming, 1);
+    let traces = storage.list_conversation_turn_traces(&target).unwrap();
+    assert_eq!(traces.len(), 1);
     assert_eq!(
-        storage
-            .list_conversation_turn_traces(&target)
-            .unwrap()
-            .len(),
-        1
+        traces[0]
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationTurnTraceItem::WorkflowDelivery { .. }))
+            .count(),
+        1,
+        "explicit acceptance delivers exactly once"
+    );
+    assert_eq!(after.inputs[0].mail_status, MailStatus::Processed);
+    assert_eq!(
+        samples
+            .iter()
+            .filter(|sample| sample.to_string().contains("Target waiting 81762"))
+            .count(),
+        5
     );
     scheduler.shutdown().await.unwrap();
     provider.abort();
@@ -421,7 +503,7 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
     let directory = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("stop.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
-    let (source, target) = workflow_fixture(&storage, "queue");
+    let (source, target) = workflow_fixture(&storage);
     let service = AgentService::new_authorized_for_test(storage.clone());
     for (chat, run, assistant) in [
         (&source, "source-run", "source-assistant"),
@@ -465,8 +547,9 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
             source_run_id: "source-run".into(),
             tool_call_id: "send".into(),
             execution_version: snapshot.execution_version,
-            outputs: vec![mycopilot_core::workflow_execution::SendOutput {
-                flow_id: "direct".into(),
+            messages: vec![mycopilot_core::workflow_execution::SendOutput {
+                target_node_id: "b".into(),
+                reply_to_message_id: None,
                 message: "Queued before stop".into(),
             }],
         })
@@ -510,7 +593,7 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
             .unwrap()
             .unwrap()
             .status,
-        InputStatus::Paused
+        InputStatus::Pending
     );
     assert!(storage
         .workflow_execution_pending_inputs()
@@ -519,9 +602,10 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
+async fn workflow_execution_sources_deliver_independent_letters_without_waiting_for_peers() {
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("batch.sqlite")).unwrap());
+    let storage =
+        Arc::new(StorageService::open(&directory.path().join("independent.sqlite")).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -529,9 +613,8 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Both source artifacts","task":"Compare both","delivers":"One review"});
-    let flow = |id: &str, source: Option<&str>, target: &str| json!({"id":id,"name":id,"source":source.map(|v|json!({"kind":"node","nodeId":v})).unwrap_or(json!({"kind":"boundary"})),"target":{"kind":"node","nodeId":target}});
-    let definition = json!({"schemaVersion":1,"id":"template","name":"Batch template","description":"","background":"Shared batch background","nodes":[agent("a"),agent("c"),agent("b"),{"kind":"inputGate","id":"in","name":"Batch","x":0,"y":0,"processingMode":"batch","busyPolicy":"queue"}],"flows":[flow("entry-a",None,"a"),flow("entry-c",None,"c"),flow("from-a",Some("a"),"in"),flow("from-c",Some("c"),"in"),flow("in-bind",Some("in"),"b")],"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":0}}});
+    let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Artifacts","task":"Review received work","delivers":"Review"});
+    let definition = json!({"schemaVersion":1,"id":"template","name":"Mail template","description":"","background":"Independent correspondence","nodes":[agent("a"),agent("c"),agent("b")],"viewport":{"x":0,"y":0,"zoom":1}});
     let saved = storage
         .workflow_request(
             serde_json::from_value(
@@ -540,12 +623,8 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
             .unwrap(),
         )
         .unwrap();
-    assert!(
-        saved.records[0].issues.is_empty(),
-        "{:?}",
-        saved.records[0].issues
-    );
-    let saved=storage.workflow_request(serde_json::from_value(json!({"operation":"saveInstance","id":"instance","templateId":"template","name":"Batch workflow","color":"#123456","bindings":[{"nodeId":"a","conversationId":null},{"nodeId":"c","conversationId":null},{"nodeId":"b","conversationId":null}],"expectedRevision":0,"expectedTemplateRevision":1})).unwrap()).unwrap();
+    assert!(saved.records[0].issues.is_empty());
+    let saved=storage.workflow_request(serde_json::from_value(json!({"operation":"saveInstance","id":"instance","templateId":"template","name":"Mail workflow","color":"#123456","bindings":[{"nodeId":"a","conversationId":null},{"nodeId":"c","conversationId":null},{"nodeId":"b","conversationId":null}],"expectedRevision":0,"expectedTemplateRevision":1})).unwrap()).unwrap();
     let chat = |node: &str| {
         saved.instances[0]
             .bindings
@@ -555,29 +634,21 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
             .conversation_id
             .clone()
     };
-    let a = chat("a");
-    let c = chat("c");
-    let b = chat("b");
-    let (captured, mut requests) = unbounded_channel();
+    let (a, c, b) = (chat("a"), chat("c"), chat("b"));
     let provider = tokio::spawn(async move {
-        let mut sent_a = false;
-        let mut sent_c = false;
+        let mut sent = HashSet::new();
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let request = request_body(&mut stream).await;
-            let raw = request.to_string();
-            captured.send(request).unwrap();
-            let delivery = if raw.contains("A trigger 5412") && !sent_a {
-                sent_a = true;
-                Some(("from-a", "Artifact A 61374"))
-            } else if raw.contains("C trigger 6543") && !sent_c {
-                sent_c = true;
-                Some(("from-c", "Artifact C 92417"))
+            let raw = request_body(&mut stream).await.to_string();
+            let source = if raw.contains("A trigger 5412") {
+                Some(("a", "Artifact A 61374"))
+            } else if raw.contains("C trigger 6543") {
+                Some(("c", "Artifact C 92417"))
             } else {
                 None
             };
-            if let Some((flow, body)) = delivery {
-                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("batch-{flow}"),"type":"function","function":{"name":"workflow_send","arguments":json!({"outputs":[{"flowId":flow,"message":body}]}).to_string()}}]}),"tool_calls").await;
+            if let Some((id, body)) = source.filter(|(id, _)| sent.insert(*id)) {
+                respond(&mut stream,json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("send-{id}"),"type":"function","function":{"name":"workflow_send","arguments":json!({"messages":[{"targetNodeId":"b","message":body}]}).to_string()}}]}),"tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -596,105 +667,55 @@ async fn workflow_execution_two_sources_form_one_batch_message_and_one_turn() {
             Duration::from_secs(60),
         )
         .unwrap();
-    let first = service
-        .start_conversation_turn(root_input(&a, "A trigger 5412"), notifications.clone())
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let event = events.recv().await.unwrap();
-            if event["params"]["type"] == "done" && event["params"]["runId"] == first.run_id {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(storage
-        .workflow_execution_runtime("instance")
-        .unwrap()
-        .inputs
-        .is_empty());
-    assert!(storage
-        .list_conversation_turn_traces(&b)
-        .unwrap()
-        .is_empty());
-    service
-        .start_conversation_turn(root_input(&c, "C trigger 6543"), notifications)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let event = events.recv().await.unwrap();
-            let ready = storage.workflow_execution_runtime("instance").unwrap();
-            if let Some(input) = ready.inputs.first() {
+    for (index, (source, trigger)) in [(&a, "A trigger 5412"), (&c, "C trigger 6543")]
+        .into_iter()
+        .enumerate()
+    {
+        service
+            .start_conversation_turn(root_input(source, trigger), notifications.clone())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                let ready = storage.workflow_execution_runtime("instance").unwrap();
                 if event["params"]["type"] == "done"
-                    && event["params"]["runId"].as_str() == input.run_id.as_deref()
+                    && ready.inputs.len() == index + 1
+                    && ready
+                        .inputs
+                        .iter()
+                        .all(|input| input.mail_status == MailStatus::Processed)
                 {
                     break;
                 }
             }
-        }
-    })
-    .await
-    .unwrap();
-    let snapshot = storage.workflow_execution_runtime("instance").unwrap();
-    assert_eq!(snapshot.inputs.len(), 1);
-    let input = storage
-        .workflow_execution_load_input(&snapshot.inputs[0].id)
-        .unwrap()
+        })
+        .await
         .unwrap();
-    assert_eq!(input.status, InputStatus::Applied);
-    assert_eq!(input.messages.len(), 2);
-    assert_eq!(
-        input
-            .messages
-            .iter()
-            .map(|message| message.source_node_id.as_str())
-            .collect::<HashSet<_>>(),
-        HashSet::from(["a", "c"])
-    );
-    assert_eq!(
-        input
-            .content
-            .matches("[Workflow collaboration message]")
-            .count(),
-        1
-    );
-    assert_eq!(
-        input
-            .content
-            .matches("[Shared workflow background]")
-            .count(),
-        1
-    );
+        assert_eq!(
+            storage.list_conversation_turn_traces(&b).unwrap().len(),
+            index + 1,
+            "a recipient starts with the available letter; it never waits for another sender"
+        );
+    }
+    let runtime = storage.workflow_execution_runtime("instance").unwrap();
+    assert_eq!(runtime.inputs.len(), 2);
+    assert!(runtime.inputs.iter().all(|input| input.messages.len() == 1));
+    assert_ne!(runtime.inputs[0].run_id, runtime.inputs[1].run_id);
     let chat = storage.load_conversation(&b).unwrap().unwrap();
     let bubbles = chat
         .messages
         .iter()
         .filter(|message| message.role == "user")
         .collect::<Vec<_>>();
-    assert_eq!(bubbles.len(), 1);
+    assert_eq!(bubbles.len(), 2);
     assert!(
         bubbles[0].content.contains("Artifact A 61374")
-            && bubbles[0].content.contains("Artifact C 92417")
+            && !bubbles[0].content.contains("Artifact C 92417")
     );
-    let traces = storage.list_conversation_turn_traces(&b).unwrap();
-    assert_eq!(traces.len(), 1);
-    assert_eq!(
-        traces[0]
-            .items
-            .iter()
-            .filter(|item| matches!(item, ConversationTurnTraceItem::WorkflowDelivery { .. }))
-            .count(),
-        1
+    assert!(
+        bubbles[1].content.contains("Artifact C 92417")
+            && !bubbles[1].content.contains("Artifact A 61374")
     );
-    let mut target_samples = Vec::new();
-    while let Ok(request) = requests.try_recv() {
-        let raw = request.to_string();
-        if raw.contains("Artifact A 61374") && raw.contains("Artifact C 92417") {
-            target_samples.push(raw);
-        }
-    }
-    assert_eq!(target_samples.len(), 1);
     scheduler.shutdown().await.unwrap();
     provider.abort();
 }
@@ -711,7 +732,7 @@ async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_with
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let (source, target) = workflow_fixture(&storage, "queue");
+    let (source, target) = workflow_fixture(&storage);
     let (captured, mut requests) = unbounded_channel();
     let (finish_busy, busy_finished) = tokio::sync::oneshot::channel();
     let provider = tokio::spawn(async move {
@@ -736,7 +757,7 @@ async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_with
                 });
             } else if raw.contains("Queue trigger 76234") && !source_sent {
                 source_sent = true;
-                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":"queue-send","type":"function","function":{"name":"workflow_send","arguments":"{\"outputs\":[{\"flowId\":\"direct\",\"message\":\"Queued artifact 92134\"}]}"}}]}), "tool_calls").await;
+                respond(&mut stream, json!({"role":"assistant","tool_calls":[{"index":0,"id":"queue-send","type":"function","function":{"name":"workflow_send","arguments":"{\"messages\":[{\"targetNodeId\":\"b\",\"message\":\"Queued artifact 92134\"}]}"}}]}), "tool_calls").await;
             } else {
                 respond(
                     &mut stream,
@@ -802,7 +823,7 @@ async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_with
                     .unwrap()
                     .inputs[0]
                     .status
-                    == InputStatus::Applied
+                    == InputStatus::Completed
             {
                 break;
             }
@@ -831,7 +852,7 @@ fn workflow_scheduler_read_microbenchmark() {
     let directory = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("reads.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
-    let (_source, _) = workflow_fixture(&storage, "queue");
+    let (_source, _) = workflow_fixture(&storage);
     let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, _) = crate::transport::outbound_channel();
     let read = || {
@@ -923,7 +944,7 @@ async fn workflow_waiting_population_microbenchmark() {
         );
         storage.save_model_settings(settings).unwrap();
         let mut last_target = String::new();
-        workflow_fixture(&storage, "queue");
+        workflow_fixture(&storage);
         let mut db = rusqlite::Connection::open(&path).unwrap();
         for index in 0..count {
             let result = storage.workflow_request(serde_json::from_value(json!({
@@ -956,7 +977,7 @@ async fn workflow_waiting_population_microbenchmark() {
             for message in 0..40 {
                 tx.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES(?1,?2,'user',?3,1,?4)",rusqlite::params![format!("history-{index}-{message}"),target,"x".repeat(256),message]).unwrap();
             }
-            tx.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",rusqlite::params![input.id,input.instance_id,input.execution_version,input.node_id,target,serde_json::to_string(&input).unwrap()]).unwrap();
+            insert_workflow_test_input(&tx, &input);
             tx.commit().unwrap();
         }
 
@@ -1044,7 +1065,11 @@ fn synthetic_workflow_input(
         .workflow_execution_snapshot(target)
         .unwrap()
         .unwrap();
-    let source = &snapshot.predecessors[0];
+    let source = snapshot
+        .members
+        .iter()
+        .find(|member| member.node_id != snapshot.node_id && member.conversation_id.is_some())
+        .unwrap();
     let message = mycopilot_core::workflow_execution::SourceMessage {
         id: format!("source-{id}"),
         instance_id: snapshot.instance_id.clone(),
@@ -1054,8 +1079,10 @@ fn synthetic_workflow_input(
         source_conversation_id: source.conversation_id.clone().unwrap(),
         source_conversation_title: source.node_name.clone(),
         target_node_id: snapshot.node_id.clone(),
-        flow_id: "direct".into(),
-        path_flow_ids: vec!["direct".into()],
+        target_node_name: snapshot.node_name.clone(),
+        target_conversation_id: Some(target.into()),
+        target_conversation_title: Some(snapshot.node_name.clone()),
+        reply_to_message_id: None,
         content: "Authoritative workflow delivery 61391".into(),
         created_at: 1,
     };
@@ -1067,7 +1094,7 @@ fn synthetic_workflow_input(
         execution_version: snapshot.execution_version,
         content: "Authoritative workflow delivery 61391".into(),
         messages: vec![message],
-        busy_policy: mycopilot_core::workflow::BusyPolicy::Queue,
+        mail_status: MailStatus::Pending,
         status: InputStatus::Pending,
         run_id: None,
         delivery_id: None,
@@ -1079,7 +1106,12 @@ fn insert_workflow_test_input(
     db: &rusqlite::Connection,
     input: &mycopilot_core::workflow_execution::Input,
 ) {
-    db.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",rusqlite::params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,serde_json::to_string(input).unwrap()]).unwrap();
+    let mut input = input.clone();
+    input.messages[0].id = format!("source-{}", input.id);
+    input.messages[0].target_conversation_id = input.conversation_id.clone();
+    let message = &input.messages[0];
+    db.execute("INSERT INTO workflow_mail_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",rusqlite::params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,serde_json::to_string(&input).unwrap()]).unwrap();
+    db.execute("INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,recipient_conversation_id,mail_status,message_json,input_id,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6,?7,1)",rusqlite::params![message.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,serde_json::to_string(message).unwrap(),input.id]).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1099,7 +1131,7 @@ async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_onc
     second.display_name = "Repaired".into();
     settings.models.push(second);
     storage.save_model_settings(settings).unwrap();
-    let (_, target) = workflow_fixture(&storage, "queue");
+    let (_, target) = workflow_fixture(&storage);
     let db = rusqlite::Connection::open(&path).unwrap();
     insert_workflow_test_input(
         &db,
@@ -1186,7 +1218,7 @@ async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_onc
             .unwrap()
             .unwrap()
             .status,
-        InputStatus::Applied
+        InputStatus::Completed
     );
     assert_eq!(
         storage
@@ -1220,7 +1252,7 @@ async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads(
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let (_, target) = workflow_fixture(&storage, "queue");
+    let (_, target) = workflow_fixture(&storage);
     let db = rusqlite::Connection::open(&path).unwrap();
     let input = synthetic_workflow_input(&storage, &target, "fair-ready");
     for index in 0..1000 {
@@ -1273,7 +1305,7 @@ async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads(
             .unwrap()
             .unwrap()
             .status,
-        InputStatus::Applied
+        InputStatus::Completed
     );
     assert!(service.workflow_retry.lock().unwrap().attempts >= 1001);
     scheduler.shutdown().await.unwrap();
@@ -1285,7 +1317,7 @@ fn workflow_capacity_release_retries_waiting_owner_without_clearing_configuratio
     let path = directory.path().join("capacity.sqlite");
     let storage = Arc::new(StorageService::open(&path).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
-    let (_, target) = workflow_fixture(&storage, "queue");
+    let (_, target) = workflow_fixture(&storage);
     let db = rusqlite::Connection::open(&path).unwrap();
     insert_workflow_test_input(
         &db,

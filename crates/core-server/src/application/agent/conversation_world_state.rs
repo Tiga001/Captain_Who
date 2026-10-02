@@ -64,6 +64,8 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
             "human.interaction",
             "agent.collaboration",
             "workflow.execution",
+            "workflow.awareness",
+            "workflow.mailbox",
             "builtin.capabilities.policy",
         ]
         .into_iter()
@@ -95,7 +97,15 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
                 .map(|section| section.id.clone())
                 .filter(|section_id| section_id != &WorldStateSectionId::WorkspaceInstructions),
         );
-        sections.extend(request.sections);
+        let observed_records = crate::application::agent_support::load_conversation_world_state(
+            &self.service.storage,
+            &self.conversation_id,
+        )
+        .map_err(AgentError::new)?;
+        sections.extend(mycopilot_core::workflow_mailbox_sections_for_request(
+            request.sections,
+            &observed_records,
+        )?);
         let expected = self
             .service
             .storage

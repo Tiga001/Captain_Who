@@ -24,15 +24,5 @@ export function duplicateWorkflowNode(
   position: { x: number; y: number }
 ): WorkflowNode {
   const node = { ...structuredClone(source), x: position.x, y: position.y, id: crypto.randomUUID() }
-  if (node.kind === 'outputGate') {
-    // Connections belong to the original graph. Keep the constraints, but require
-    // users to choose the new gate's exits after wiring it up.
-    node.selection.required = []
-    node.selection.groups = node.selection.groups.map((group) => ({
-      ...group,
-      id: crypto.randomUUID(),
-      flowIds: []
-    }))
-  }
   return node
 }

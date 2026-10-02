@@ -171,6 +171,9 @@ pub(crate) fn model_projection_for_persisted_continuation(
     result: &AgentToolResult,
 ) -> AgentToolResult {
     match result.tool.as_str() {
+        "workflow_accept" | "workflow_complete" | "workflow_recall" => {
+            crate::workflow_mutation_model_projection(result)
+        }
         "run_command" => run_command::run_command_model_projection(result),
         "office_document" | "office_spreadsheet" | "office_presentation" => {
             office::office_model_projection(result)

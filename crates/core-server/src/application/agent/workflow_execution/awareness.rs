@@ -12,7 +12,7 @@ impl AgentService {
             projection.get_mut("nodes")
         })
         .and_then(Value::as_array_mut) else {
-            // A topology-only query has no runtime section to enrich.
+            // A members-only query has no runtime section to enrich.
             return Ok(());
         };
         let attention = self
@@ -51,7 +51,6 @@ impl AgentService {
         for node in nodes {
             let Some(conversation_id) = node
                 .get("conversationId")
-                .or_else(|| node.get("participantConversationId"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
             else {
@@ -85,15 +84,7 @@ impl AgentService {
                 None
             };
             if let Some(state) = live_state {
-                let field = if matches!(
-                    node.get("kind").and_then(Value::as_str),
-                    Some("inputGate" | "outputGate")
-                ) {
-                    "participantState"
-                } else {
-                    "state"
-                };
-                node[field] = json!(state);
+                node["state"] = json!(state);
             }
         }
         Ok(())

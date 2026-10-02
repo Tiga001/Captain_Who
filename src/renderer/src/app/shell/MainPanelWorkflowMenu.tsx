@@ -1,11 +1,4 @@
-import {
-  ChevronRight,
-  LayoutDashboard,
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  MessageCircle,
-  Network
-} from 'lucide-react'
+import { ChevronRight, LayoutDashboard, Users, MessageCircle, Network } from 'lucide-react'
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { AnchoredPopover } from '../../components/overlay/AnchoredPopover'
 import { Tooltip } from '../../components/overlay/Tooltip'
@@ -17,13 +10,12 @@ import './MainPanelWorkflowMenu.css'
 export interface MainPanelWorkflow {
   name: string
   color: string
-  upstream: WorkflowNeighborNode[]
-  downstream: WorkflowNeighborNode[]
+  members: WorkflowNeighborNode[]
   onOpen: () => void
   onOpenConversation: (conversationId: string) => void
 }
 
-type Submenu = 'upstream' | 'downstream'
+type Submenu = 'members'
 
 /** Submenu width plus its gap and viewport margin. */
 const SUBMENU_SPACE = 240
@@ -79,7 +71,7 @@ export function MainPanelWorkflowMenu({
       <ChevronRight aria-hidden="true" />
     </button>
   )
-  const nodes = submenu === 'upstream' ? workflow.upstream : workflow.downstream
+  const nodes = workflow.members
 
   return (
     <div className="main-panel__workflow" ref={rootRef}>
@@ -126,25 +118,14 @@ export function MainPanelWorkflowMenu({
               <LayoutDashboard aria-hidden="true" />
               <span>{t('workflows.openBoard')}</span>
             </button>
-            {submenuItem(
-              'upstream',
-              <ArrowUpFromLine aria-hidden="true" />,
-              t('workflows.upstreamNodes')
-            )}
-            {submenuItem(
-              'downstream',
-              <ArrowDownToLine aria-hidden="true" />,
-              t('workflows.downstreamNodes')
-            )}
+            {submenuItem('members', <Users aria-hidden="true" />, t('workflows.members'))}
             {submenu ? (
               <div
                 className="main-panel__workflow-submenu"
                 data-kind={submenu}
                 data-side={submenuSide}
                 role="menu"
-                aria-label={t(
-                  submenu === 'upstream' ? 'workflows.upstreamNodes' : 'workflows.downstreamNodes'
-                )}
+                aria-label={t('workflows.members')}
               >
                 {nodes.length ? (
                   nodes.map((node) => (

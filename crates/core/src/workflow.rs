@@ -1,41 +1,12 @@
-//! Versioned workflow authoring contract. Runtime state is deliberately separate.
+//! Workflow authoring contract for a freely communicating team of independent conversations.
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 const MAX_NODES: usize = 128;
-const MAX_FLOWS: usize = 512;
 const MAX_NAME_BYTES: usize = 512;
 const MAX_TEXT_BYTES: usize = 128_000;
 const MAX_POSITION: f64 = 100_000.0;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Group {
-    pub id: String,
-    pub flow_ids: Vec<String>,
-    pub min: usize,
-    pub max: usize,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rule {
-    pub mode: Mode,
-    pub min: usize,
-    pub max: usize,
-    pub required: Vec<String>,
-    pub groups: Vec<Group>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum Mode {
-    All,
-    One,
-    Any,
-    Exact,
-    Range,
-    Custom,
-}
-/// Default permission choice for the conversation created from this template node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkflowPermissionMode {
@@ -52,18 +23,6 @@ pub struct AgentConfig {
     pub task: String,
     pub delivers: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum InputProcessingMode {
-    Individual,
-    Batch,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum BusyPolicy {
-    Queue,
-    Inject,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum NodeConfig {
@@ -71,15 +30,6 @@ pub enum NodeConfig {
     User {
         #[serde(default)]
         task: String,
-    },
-    InputGate {
-        #[serde(rename = "processingMode")]
-        processing_mode: InputProcessingMode,
-        #[serde(rename = "busyPolicy")]
-        busy_policy: BusyPolicy,
-    },
-    OutputGate {
-        selection: Rule,
     },
 }
 #[derive(Debug, Clone, Serialize)]
@@ -93,8 +43,6 @@ pub struct Node {
 }
 impl<'de> Deserialize<'de> for Node {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Separate the common fields before parsing the strict tagged configuration:
-        // unknown/agent-only fields must never be accepted on a logic gate.
         let mut value = serde_json::Value::deserialize(deserializer)?;
         let obj = value
             .as_object_mut()
@@ -127,7 +75,7 @@ impl Node {
         matches!(self.config, NodeConfig::Agent(_))
     }
     pub fn is_participant(&self) -> bool {
-        matches!(self.config, NodeConfig::Agent(_) | NodeConfig::User { .. })
+        true
     }
     #[cfg(test)]
     pub fn agent_mut(&mut self) -> &mut AgentConfig {
@@ -137,108 +85,12 @@ impl Node {
         }
     }
 }
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum Endpoint {
-    Boundary,
-    Node {
-        #[serde(rename = "nodeId")]
-        node_id: String,
-    },
-}
-impl<'de> Deserialize<'de> for Endpoint {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Serde's internally tagged unit variants ignore remaining map fields even
-        // with deny_unknown_fields. Use an empty struct to reject ambiguous boundary
-        // objects such as {"kind":"boundary","nodeId":"deleted-node"}.
-        #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-        enum WireEndpoint {
-            Boundary {},
-            Node {
-                #[serde(rename = "nodeId")]
-                node_id: String,
-            },
-        }
-        Ok(match WireEndpoint::deserialize(deserializer)? {
-            WireEndpoint::Boundary {} => Self::Boundary,
-            WireEndpoint::Node { node_id } => Self::Node { node_id },
-        })
-    }
-}
-impl Endpoint {
-    pub fn node(&self) -> Option<&str> {
-        match self {
-            Self::Boundary => None,
-            Self::Node { node_id } => Some(node_id),
-        }
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AnchorSide {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Anchor {
-    pub side: AnchorSide,
-    pub offset: f64,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Flow {
-    pub id: String,
-    pub name: String,
-    pub source: Endpoint,
-    pub target: Endpoint,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_anchor: Option<Anchor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_anchor: Option<Anchor>,
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Viewport {
     pub x: f64,
     pub y: f64,
     pub zoom: f64,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BoundaryPoint {
-    pub x: f64,
-    pub y: f64,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BoundaryPositions {
-    pub input: BoundaryPoint,
-}
-impl BoundaryPositions {
-    pub fn for_nodes(nodes: &[Node]) -> Self {
-        let Some(first) = nodes.first() else {
-            return Self {
-                input: BoundaryPoint { x: 80.0, y: 220.0 },
-            };
-        };
-        let (mut min_x, mut min_y, mut max_y) = (first.x, first.y, first.y);
-        for node in nodes.iter().skip(1) {
-            min_x = min_x.min(node.x);
-            min_y = min_y.min(node.y);
-            max_y = max_y.max(node.y);
-        }
-        let y = ((min_y + max_y) / 2.0).clamp(-MAX_POSITION, MAX_POSITION);
-        Self {
-            input: BoundaryPoint {
-                x: (min_x - 280.0).clamp(-MAX_POSITION, MAX_POSITION),
-                y,
-            },
-        }
-    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -249,11 +101,7 @@ pub struct Definition {
     pub description: String,
     pub background: String,
     pub nodes: Vec<Node>,
-    pub flows: Vec<Flow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_flow_sequence: Option<u64>,
     pub viewport: Viewport,
-    pub boundary_positions: BoundaryPositions,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Issue {
@@ -407,20 +255,10 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.trim() == id && id.len() <= 256 && !id.chars().any(char::is_control)
 }
 impl Definition {
-    /// Malformed or oversized definitions are rejected. Incomplete authoring choices
-    /// are returned as issues so a user can save and reopen an unfinished draft.
-    /// This checks structural reachability, not whether an eventual agent will select
-    /// an exit or whether concurrent inputs can satisfy a runtime join.
+    /// Reject malformed contracts while retaining incomplete authoring choices as issues.
     pub fn validate(&self, available_models: &HashSet<String>) -> Result<Vec<Issue>, String> {
-        if self.schema_version != 1
-            || !valid_id(&self.id)
-            || self.nodes.len() > MAX_NODES
-            || self.flows.len() > MAX_FLOWS
-            || self
-                .next_flow_sequence
-                .is_some_and(|value| value == 0 || value > 9_007_199_254_740_991)
-        {
-            return Err("Unsupported workflow version, identifier or graph size".into());
+        if self.schema_version != 1 || !valid_id(&self.id) || self.nodes.len() > MAX_NODES {
+            return Err("Unsupported workflow version, identifier or team size".into());
         }
         if self.name.len() > MAX_NAME_BYTES
             || self.description.len() > 8_000
@@ -439,38 +277,32 @@ impl Definition {
         {
             return Err("Invalid viewport".into());
         }
-        for point in [&self.boundary_positions.input] {
-            if !point.x.is_finite()
-                || !point.y.is_finite()
-                || point.x.abs() > MAX_POSITION
-                || point.y.abs() > MAX_POSITION
-            {
-                return Err("Invalid workflow boundary position".into());
-            }
+        let ids: HashSet<_> = self.nodes.iter().map(|node| node.id.as_str()).collect();
+        if ids.len() != self.nodes.len() || ids.iter().any(|id| !valid_id(id)) {
+            return Err("Duplicate or invalid node identifiers".into());
         }
-        let ids: HashSet<_> = self.nodes.iter().map(|n| n.id.as_str()).collect();
-        let flow_ids: HashSet<_> = self.flows.iter().map(|f| f.id.as_str()).collect();
-        if ids.len() != self.nodes.len()
-            || flow_ids.len() != self.flows.len()
-            || ids.iter().chain(flow_ids.iter()).any(|id| !valid_id(id))
-        {
-            return Err("Duplicate or invalid graph identifiers".into());
+        let mut issues = Vec::new();
+        if self.name.trim().is_empty() {
+            issue(&mut issues, "name", &self.id);
         }
-        for n in &self.nodes {
-            if !n.x.is_finite()
-                || !n.y.is_finite()
-                || n.x.abs() > MAX_POSITION
-                || n.y.abs() > MAX_POSITION
+        if self.nodes.is_empty() {
+            issue(&mut issues, "empty", &self.id);
+        }
+        for node in &self.nodes {
+            if !node.x.is_finite()
+                || !node.y.is_finite()
+                || node.x.abs() > MAX_POSITION
+                || node.y.abs() > MAX_POSITION
             {
                 return Err("Invalid node position".into());
             }
-            if n.name.len() > MAX_NAME_BYTES {
+            if node.name.len() > MAX_NAME_BYTES {
                 return Err("Node name exceeds its size limit".into());
             }
-            match &n.config {
+            match &node.config {
                 NodeConfig::Agent(agent) => {
                     if agent.model_config_id.as_ref().is_some_and(|id| {
-                        id.is_empty()
+                        id.trim().is_empty()
                             || id.trim() != id
                             || id.len() > 512
                             || id.chars().any(char::is_control)
@@ -478,952 +310,32 @@ impl Definition {
                         return Err("Invalid model configuration identifier".into());
                     }
                     if [&agent.receives, &agent.task, &agent.delivers]
-                        .into_iter()
+                        .iter()
                         .any(|v| v.len() > MAX_TEXT_BYTES)
                     {
                         return Err("Node text exceeds its size limit".into());
+                    }
+                    if node.name.trim().is_empty() || agent.task.trim().is_empty() {
+                        issue(&mut issues, "task", &node.id);
+                    }
+                    match &agent.model_config_id {
+                        None => issue(&mut issues, "node_model", &node.id),
+                        Some(id) if !available_models.contains(id) => {
+                            issue(&mut issues, "node_model_unavailable", &node.id)
+                        }
+                        Some(_) => {}
                     }
                 }
                 NodeConfig::User { task } => {
                     if task.len() > MAX_TEXT_BYTES {
                         return Err("User task exceeds its size limit".into());
                     }
-                }
-                NodeConfig::InputGate { .. } => {}
-                NodeConfig::OutputGate { selection } => selection.validate_shape()?,
-            }
-        }
-        for f in &self.flows {
-            for anchor in [&f.source_anchor, &f.target_anchor].into_iter().flatten() {
-                if !anchor.offset.is_finite() || !(0.0..=1.0).contains(&anchor.offset) {
-                    return Err("Invalid flow anchor offset".into());
-                }
-            }
-            if f.name.len() > MAX_NAME_BYTES {
-                return Err("Flow name exceeds its size limit".into());
-            }
-            if f.target.node().is_none() {
-                return Err("The user entry cannot receive flows".into());
-            }
-            if f.source.node().is_some() && f.source.node() == f.target.node() {
-                return Err("A flow cannot connect a node to itself".into());
-            }
-            for id in [f.source.node(), f.target.node()].into_iter().flatten() {
-                if !ids.contains(id) {
-                    return Err("Flow references a missing node".into());
-                }
-            }
-        }
-        let mut out = Vec::new();
-        if self.name.trim().is_empty() {
-            issue(&mut out, "name", &self.id);
-        }
-        if !self.nodes.iter().any(Node::is_participant) {
-            issue(&mut out, "empty", &self.id);
-        }
-        let entries: HashSet<_> = self
-            .flows
-            .iter()
-            .filter(|f| f.source.node().is_none())
-            .filter_map(|f| f.target.node())
-            .collect();
-        if entries.is_empty() {
-            issue(&mut out, "entry", &self.id);
-        }
-        let reachable = self.reachable(entries, false);
-        for n in &self.nodes {
-            let incoming: Vec<_> = self
-                .flows
-                .iter()
-                .filter(|f| f.target.node() == Some(n.id.as_str()))
-                .collect();
-            let outgoing: Vec<_> = self
-                .flows
-                .iter()
-                .filter(|f| f.source.node() == Some(n.id.as_str()))
-                .collect();
-            let is_agent = |id: Option<&str>| {
-                id.is_some_and(|id| self.nodes.iter().any(|n| n.id == id && n.is_agent()))
-            };
-            match &n.config {
-                NodeConfig::Agent(agent) => {
-                    if n.name.trim().is_empty() || agent.task.trim().is_empty() {
-                        issue(&mut out, "task", &n.id)
-                    }
-                    match &agent.model_config_id {
-                        None => issue(&mut out, "node_model", &n.id),
-                        Some(id) if !available_models.contains(id) => {
-                            issue(&mut out, "node_model_unavailable", &n.id)
-                        }
-                        Some(_) => {}
-                    }
-                    if incoming.len() > 1 {
-                        issue(&mut out, "inputGateRequired", &n.id)
-                    }
-                    if outgoing.len() > 1 {
-                        issue(&mut out, "outputGateRequired", &n.id)
-                    }
-                }
-                NodeConfig::User { task } => {
                     if task.trim().is_empty() {
-                        issue(&mut out, "userTask", &n.id)
-                    }
-                    if incoming.len() > 1 {
-                        issue(&mut out, "inputGateRequired", &n.id)
-                    }
-                }
-                NodeConfig::InputGate { .. } => {
-                    if outgoing.len() != 1
-                        || !outgoing.iter().all(|f| {
-                            f.target.node().is_some_and(|id| {
-                                self.nodes
-                                    .iter()
-                                    .any(|node| node.id == id && node.is_participant())
-                            })
-                        })
-                    {
-                        issue(&mut out, "inputGateBinding", &n.id);
-                    }
-                    if incoming.is_empty() {
-                        issue(&mut out, "inputRule", &n.id)
-                    }
-                }
-                NodeConfig::OutputGate { selection } => {
-                    if incoming.len() != 1 || !incoming.iter().all(|f| is_agent(f.source.node())) {
-                        issue(&mut out, "outputGateBinding", &n.id);
-                    }
-                    let flows: HashSet<_> = outgoing.iter().map(|f| f.id.as_str()).collect();
-                    if flows.is_empty() || !selection.valid(&flows) {
-                        issue(&mut out, "outputRule", &n.id)
+                        issue(&mut issues, "userTask", &node.id);
                     }
                 }
             }
-            if !reachable.contains(n.id.as_str()) {
-                issue(&mut out, "unreachable", &n.id)
-            }
         }
-        // Inputs accumulate across executions. An exclusive upstream output can
-        // populate different batch queues on successive executions, so output
-        // cardinality alone cannot prove that a batch will never become ready.
-        Ok(out)
-    }
-
-    fn reachable<'a>(&'a self, mut seen: HashSet<&'a str>, reverse: bool) -> HashSet<&'a str> {
-        loop {
-            let count = seen.len();
-            for flow in &self.flows {
-                let (source, target) = if reverse {
-                    (flow.target.node(), flow.source.node())
-                } else {
-                    (flow.source.node(), flow.target.node())
-                };
-                if let (Some(source), Some(target)) = (source, target) {
-                    if seen.contains(source) {
-                        seen.insert(target);
-                    }
-                }
-            }
-            if seen.len() == count {
-                return seen;
-            }
-        }
-    }
-}
-impl Rule {
-    /// Presets may retain inactive custom settings while the user edits. Bound all
-    /// fields, but only enforce selection semantics for the active mode in `valid`.
-    fn validate_shape(&self) -> Result<(), String> {
-        if self.min > MAX_FLOWS
-            || self.max > MAX_FLOWS
-            || self.required.len() > MAX_FLOWS
-            || self.groups.len() > MAX_FLOWS
-            || self.required.iter().any(|id| !valid_id(id))
-        {
-            return Err("Invalid or oversized flow rule".into());
-        }
-        let mut membership_count = self.required.len();
-        for group in &self.groups {
-            if !valid_id(&group.id)
-                || group.min > MAX_FLOWS
-                || group.max > MAX_FLOWS
-                || group.flow_ids.len() > MAX_FLOWS
-                || group.flow_ids.iter().any(|id| !valid_id(id))
-            {
-                return Err("Invalid or oversized flow rule group".into());
-            }
-            membership_count += group.flow_ids.len();
-        }
-        if membership_count > MAX_FLOWS {
-            return Err("Flow rule exceeds its membership limit".into());
-        }
-        Ok(())
-    }
-
-    fn valid(&self, flows: &HashSet<&str>) -> bool {
-        let n = flows.len();
-        match self.mode {
-            Mode::All => n > 0,
-            Mode::One | Mode::Any => n > 0,
-            Mode::Exact => self.min > 0 && self.min <= n,
-            Mode::Range => self.min <= self.max && self.max <= n && self.min > 0,
-            Mode::Custom => {
-                let mut used = HashSet::new();
-                for id in &self.required {
-                    if !flows.contains(id.as_str()) || !used.insert(id.as_str()) {
-                        return false;
-                    }
-                }
-                let mut group_ids = HashSet::new();
-                for g in &self.groups {
-                    if !valid_id(&g.id)
-                        || !group_ids.insert(&g.id)
-                        || g.flow_ids.is_empty()
-                        || g.min > g.max
-                        || g.max > g.flow_ids.len()
-                    {
-                        return false;
-                    }
-                    for id in &g.flow_ids {
-                        if !flows.contains(id.as_str()) || !used.insert(id.as_str()) {
-                            return false;
-                        }
-                    }
-                }
-                // Unmentioned flows are optional. Groups are disjoint to keep authoring unambiguous.
-                // At least one positive requirement prevents a zero-input trigger.
-                !self.required.is_empty() || self.groups.iter().any(|g| g.min > 0)
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn rule(mode: Mode) -> Rule {
-        Rule {
-            mode,
-            min: 1,
-            max: 1,
-            required: Vec::new(),
-            groups: Vec::new(),
-        }
-    }
-
-    fn node(id: &str) -> Node {
-        Node {
-            id: id.into(),
-            name: format!("Node {id}"),
-            x: 100.0,
-            y: 200.0,
-            config: NodeConfig::Agent(AgentConfig {
-                permission_mode: WorkflowPermissionMode::Default,
-                model_config_id: Some("model-review".into()),
-                receives: "Receive the preceding result".into(),
-                task: "Review the change".into(),
-                delivers: "Deliver a review report".into(),
-            }),
-        }
-    }
-
-    fn endpoint(node_id: Option<&str>) -> Endpoint {
-        match node_id {
-            Some(id) => Endpoint::Node { node_id: id.into() },
-            None => Endpoint::Boundary,
-        }
-    }
-
-    fn flow(id: &str, source: Option<&str>, target: Option<&str>) -> Flow {
-        Flow {
-            source_anchor: None,
-            target_anchor: None,
-            id: id.into(),
-            name: format!("Named flow {id}"),
-            source: endpoint(source),
-            target: endpoint(target),
-        }
-    }
-
-    fn definition() -> Definition {
-        Definition {
-            boundary_positions: BoundaryPositions::for_nodes(&[node("review")]),
-            schema_version: 1,
-            next_flow_sequence: None,
-            id: "workflow-1".into(),
-            name: "Review".into(),
-            description: "Review the supplied change".into(),
-            background: "Shared workflow background".into(),
-            nodes: vec![node("review")],
-            flows: vec![flow("entry", None, Some("review"))],
-            viewport: Viewport {
-                x: 20.0,
-                y: -20.0,
-                zoom: 1.0,
-            },
-        }
-    }
-
-    fn validate(definition: &Definition) -> Vec<Issue> {
-        definition
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap()
-    }
-
-    fn has_issue(issues: &[Issue], code: &str, subject: &str) -> bool {
-        issues
-            .iter()
-            .any(|issue| issue.code == code && issue.subject == subject)
-    }
-
-    #[test]
-    fn self_connections_are_rejected_for_agents_and_gates() {
-        let graph = gated_graph();
-        for node in &graph.nodes {
-            let mut invalid = graph.clone();
-            invalid
-                .flows
-                .push(flow("self", Some(&node.id), Some(&node.id)));
-            assert_eq!(
-                invalid.validate(&HashSet::new()).unwrap_err(),
-                "A flow cannot connect a node to itself"
-            );
-        }
-    }
-
-    #[test]
-    fn flow_anchors_round_trip_and_reject_invalid_offsets() {
-        let mut graph = definition();
-        graph.flows[0].source_anchor = Some(Anchor {
-            side: AnchorSide::Top,
-            offset: 0.35,
-        });
-        graph.flows[0].target_anchor = Some(Anchor {
-            side: AnchorSide::Bottom,
-            offset: 0.7,
-        });
-        let value = serde_json::to_value(&graph).unwrap();
-        let restored: Definition = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(restored).unwrap(), value);
-        assert!(validate(&graph).is_empty());
-        for offset in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
-            graph.flows[0].source_anchor.as_mut().unwrap().offset = offset;
-            assert!(graph
-                .validate(&HashSet::from(["model-review".into()]))
-                .is_err());
-        }
-    }
-
-    #[test]
-    fn conversation_permission_modes_are_strict_and_subagent_references_are_rejected() {
-        for mode in ["default", "custom", "full"] {
-            let mut value = serde_json::to_value(definition()).unwrap();
-            value["nodes"][0]["permissionMode"] = json!(mode);
-            let graph: Definition = serde_json::from_value(value.clone()).unwrap();
-            assert!(validate(&graph).is_empty());
-            assert_eq!(serde_json::to_value(graph).unwrap(), value);
-        }
-        for mode in [json!(null), json!("unknown"), json!(true), json!(1)] {
-            let mut value = serde_json::to_value(definition()).unwrap();
-            value["nodes"][0]["permissionMode"] = mode;
-            assert!(serde_json::from_value::<Definition>(value).is_err());
-        }
-        let mut value = serde_json::to_value(definition()).unwrap();
-        value["nodes"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("permissionMode");
-        assert!(serde_json::from_value::<Definition>(value).is_err());
-        let mut value = serde_json::to_value(definition()).unwrap();
-        value["nodes"][0]["templateId"] = json!(null);
-        assert!(serde_json::from_value::<Definition>(value).is_err());
-    }
-
-    #[test]
-    fn independent_node_needs_no_template_and_preserves_boundary_flows() {
-        let original = definition();
-        assert!(validate(&original).is_empty());
-        let serialized = serde_json::to_value(&original).unwrap();
-        assert!(serialized["nodes"][0].get("templateId").is_none());
-        assert_eq!(serialized["nodes"][0]["permissionMode"], json!("default"));
-        assert_eq!(
-            serialized["nodes"][0]["modelConfigId"],
-            json!("model-review")
-        );
-        assert_eq!(
-            serialized["flows"][0]["source"],
-            json!({"kind": "boundary"})
-        );
-        assert_eq!(
-            serialized["flows"][0]["target"],
-            json!({"kind": "node", "nodeId": "review"})
-        );
-        assert_eq!(serialized["flows"].as_array().unwrap().len(), 1);
-        let restored: Definition = serde_json::from_value(serialized.clone()).unwrap();
-        assert_eq!(serde_json::to_value(restored).unwrap(), serialized);
-    }
-
-    #[test]
-    fn user_entry_only_emits_and_terminal_agents_need_no_shared_exit() {
-        let graph = definition();
-        assert!(validate(&graph).is_empty());
-        let mut invalid = graph.clone();
-        invalid
-            .flows
-            .push(flow("return-to-entry", Some("review"), None));
-        assert!(invalid
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap_err()
-            .contains("cannot receive"));
-        let mut cycle = gated_graph();
-        cycle
-            .flows
-            .retain(|flow| !flow.id.starts_with("out-") || flow.id == "out-binding");
-        cycle.nodes.retain(|node| !node.id.starts_with("result-"));
-        cycle
-            .flows
-            .push(flow("return", Some("output"), Some("input")));
-        assert!(validate(&cycle).is_empty());
-    }
-
-    #[test]
-    fn explicit_boundary_positions_are_strict_and_stay_within_layout_limits() {
-        let original = serde_json::to_value(definition()).unwrap();
-        for position in [
-            json!(null),
-            json!({}),
-            json!({"input":{"x":0,"y":0},"output":{"x":0,"y":0}}),
-            json!({"input":{"x":0,"y":0},"output":{"x":0,"y":0},"extra":true}),
-            json!({"input":{"x":0,"y":0,"nodeId":"worker"},"output":{"x":0,"y":0}}),
-        ] {
-            let mut wire = original.clone();
-            wire["boundaryPositions"] = position;
-            assert!(serde_json::from_value::<Definition>(wire).is_err());
-        }
-        let mut graph = definition();
-        graph.boundary_positions.input.x = 100001.0;
-        assert!(graph.validate(&HashSet::new()).is_err());
-        graph.boundary_positions.input.x = 0.0;
-        graph.boundary_positions.input.y = f64::INFINITY;
-        assert!(graph.validate(&HashSet::new()).is_err());
-    }
-
-    #[test]
-    fn model_choices_use_the_authoritative_available_set() {
-        let mut graph = definition();
-        assert!(validate(&graph).is_empty());
-        let issues = graph.validate(&HashSet::new()).unwrap();
-        assert_eq!(
-            issues,
-            vec![Issue {
-                code: "node_model_unavailable".into(),
-                subject: "review".into()
-            }]
-        );
-        for invalid in [
-            String::new(),
-            " padded".into(),
-            "line\nbreak".into(),
-            "x".repeat(513),
-        ] {
-            graph.nodes[0].agent_mut().model_config_id = Some(invalid);
-            assert!(graph.validate(&HashSet::new()).is_err());
-        }
-    }
-
-    #[test]
-    fn shared_protocol_fixture_round_trips_and_validates() {
-        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../packages/protocol/fixtures/workflow-definition-v1.json"
-        ))
-        .unwrap();
-        let definition: Definition = serde_json::from_value(fixture.clone()).unwrap();
-        assert_eq!(
-            validate(&definition)
-                .iter()
-                .map(|issue| issue.code.as_str())
-                .collect::<Vec<_>>(),
-            vec!["node_model", "node_model", "node_model"]
-        );
-        // JSON has one number type; normalize its layout values to Rust's f64
-        // representation before comparing the serialized wire contract.
-        for node in fixture["nodes"].as_array_mut().unwrap() {
-            for field in ["x", "y"] {
-                node[field] = json!(node[field].as_f64().unwrap());
-            }
-        }
-        for field in ["x", "y", "zoom"] {
-            fixture["viewport"][field] = json!(fixture["viewport"][field].as_f64().unwrap());
-        }
-        for side in ["input"] {
-            for field in ["x", "y"] {
-                fixture["boundaryPositions"][side][field] =
-                    json!(fixture["boundaryPositions"][side][field].as_f64().unwrap());
-            }
-        }
-        assert_eq!(serde_json::to_value(definition).unwrap(), fixture);
-    }
-
-    #[test]
-    fn incomplete_authoring_and_missing_model_are_saveable_draft_issues() {
-        let mut draft = definition();
-        draft.name.clear();
-        draft.nodes[0].name.clear();
-        draft.nodes[0].agent_mut().task.clear();
-        draft.nodes[0].agent_mut().model_config_id = None;
-        let issues = validate(&draft);
-        assert!(has_issue(&issues, "name", "workflow-1"));
-        assert!(has_issue(&issues, "task", "review"));
-        assert!(has_issue(&issues, "node_model", "review"));
-    }
-
-    #[test]
-    fn empty_and_disconnected_graphs_remain_editable_drafts() {
-        let mut draft = definition();
-        draft.nodes.clear();
-        draft.flows.clear();
-        let issues = validate(&draft);
-        for code in ["empty", "entry"] {
-            assert!(has_issue(&issues, code, "workflow-1"));
-        }
-        draft.nodes.push(node("isolated"));
-        let issues = validate(&draft);
-        assert!(has_issue(&issues, "unreachable", "isolated"));
-        assert!(!has_issue(&issues, "noExit", "isolated"));
-        // A zero-degree ALL rule is not itself malformed; reachability diagnoses it.
-        assert!(!has_issue(&issues, "inputRule", "isolated"));
-    }
-
-    #[test]
-    fn no_input_degree_does_not_implicitly_make_a_node_an_entry() {
-        let mut graph = definition();
-        graph.flows.retain(|flow| flow.id != "entry");
-        let issues = validate(&graph);
-        assert!(has_issue(&issues, "entry", "workflow-1"));
-        assert!(has_issue(&issues, "unreachable", "review"));
-    }
-
-    #[test]
-    fn malformed_topology_is_a_hard_error_not_a_draft_issue() {
-        let mut graph = definition();
-        graph
-            .flows
-            .push(flow("broken", Some("missing"), Some("review")));
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap_err()
-            .contains("missing node"));
-        graph.flows.pop();
-        graph.flows.push(flow("broken", None, None));
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap_err()
-            .contains("cannot receive"));
-        graph.flows.pop();
-        graph.nodes.push(node("review"));
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap_err()
-            .contains("identifiers"));
-        graph.nodes.pop();
-        graph.flows.push(flow("entry", None, Some("review")));
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .unwrap_err()
-            .contains("identifiers"));
-    }
-
-    #[test]
-    fn presets_and_ranges_validate_cardinality() {
-        let flows = HashSet::from(["a", "b", "c"]);
-        for mode in [Mode::All, Mode::One, Mode::Any] {
-            assert!(rule(mode).valid(&flows));
-        }
-        assert!(!rule(Mode::One).valid(&HashSet::new()));
-        assert!(!rule(Mode::Any).valid(&HashSet::new()));
-        for (min, max, expected) in [
-            (1, 3, true),
-            (2, 2, true),
-            (0, 2, false),
-            (3, 2, false),
-            (1, 4, false),
-        ] {
-            let mut rule = rule(Mode::Range);
-            rule.min = min;
-            rule.max = max;
-            assert_eq!(rule.valid(&flows), expected, "range {min}..={max}");
-        }
-    }
-
-    #[test]
-    fn custom_rules_support_required_optional_and_disjoint_choice_groups() {
-        let flows = HashSet::from(["required", "b", "c", "optional"]);
-        let mut custom = rule(Mode::Custom);
-        custom.required = vec!["required".into()];
-        custom.groups = vec![Group {
-            id: "choice".into(),
-            flow_ids: vec!["b".into(), "c".into()],
-            min: 1,
-            max: 1,
-        }];
-        assert!(custom.valid(&flows));
-        // An unmentioned flow remains optional. Required-only rules are valid too.
-        custom.groups.clear();
-        assert!(custom.valid(&flows));
-        custom.required.clear();
-        assert!(!custom.valid(&flows));
-        custom.groups = vec![Group {
-            id: "choice".into(),
-            flow_ids: vec!["b".into(), "c".into()],
-            min: 1,
-            max: 2,
-        }];
-        assert!(custom.valid(&flows));
-    }
-
-    #[test]
-    fn custom_rules_reject_conflicting_missing_duplicate_or_impossible_members() {
-        let flows = HashSet::from(["a", "b", "c"]);
-        let mut base = rule(Mode::Custom);
-        base.required = vec!["a".into()];
-        base.groups = vec![Group {
-            id: "g".into(),
-            flow_ids: vec!["b".into(), "c".into()],
-            min: 1,
-            max: 1,
-        }];
-        let mut invalid = Vec::new();
-        let mut r = base.clone();
-        r.required.push("a".into());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.required.push("missing".into());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].flow_ids.push("a".into());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].flow_ids.push("b".into());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].flow_ids.push("missing".into());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups.push(r.groups[0].clone());
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].max = 3;
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].min = 2;
-        invalid.push(r);
-        let mut r = base.clone();
-        r.groups[0].flow_ids.clear();
-        invalid.push(r);
-        for (index, r) in invalid.into_iter().enumerate() {
-            assert!(!r.valid(&flows), "invalid custom rule case {index}");
-        }
-    }
-
-    #[test]
-    fn unknown_schema_invalid_identifiers_and_nonfinite_layout_are_rejected() {
-        let mut graph = definition();
-        graph.schema_version = 2;
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-        graph.schema_version = 1;
-        for id in ["", " leading-space", "newline\ninside"] {
-            graph.id = id.into();
-            assert!(graph
-                .validate(&HashSet::from(["model-review".into()]))
-                .is_err());
-        }
-        graph.id = "valid".into();
-        graph.nodes[0].x = f64::NAN;
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-        graph.nodes[0].x = 0.0;
-        graph.viewport.zoom = f64::INFINITY;
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-    }
-
-    #[test]
-    fn text_and_graph_size_limits_are_enforced() {
-        let mut graph = definition();
-        graph.background = "x".repeat(MAX_TEXT_BYTES + 1);
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-        graph.background.clear();
-        graph.flows[0].name = "x".repeat(MAX_NAME_BYTES + 1);
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-        graph.flows[0].name.clear();
-        graph.nodes = (0..=MAX_NODES).map(|i| node(&format!("n{i}"))).collect();
-        assert!(graph
-            .validate(&HashSet::from(["model-review".into()]))
-            .is_err());
-    }
-
-    #[test]
-    fn instance_activation_wire_contract_is_strict() {
-        assert!(matches!(
-            serde_json::from_value::<Request>(json!({
-                "operation": "setInstanceEnabled", "id": "workflow-review", "enabled": true,
-                "expectedRevision": 1
-            }))
-            .unwrap(),
-            Request::Manage(crate::workflow_management::Request::SetInstanceEnabled {
-                enabled: true,
-                expected_revision: 1,
-                ..
-            })
-        ));
-        for invalid in [
-            json!({"operation":"setInstanceEnabled","id":"workflow-review","expectedRevision":1}),
-            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":null,"expectedRevision":1}),
-            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":1,"expectedRevision":1}),
-            json!({"operation":"setInstanceEnabled","id":"workflow-review","enabled":true,"expectedRevision":1,"extra":true}),
-        ] {
-            assert!(serde_json::from_value::<Request>(invalid).is_err());
-        }
-        let legacy = json!({"definition": definition(), "revision": 1,"updatedAt": 1,"issues": []});
-        let record = serde_json::from_value::<Record>(legacy.clone()).unwrap();
-        assert!(!record.enabled);
-        assert_eq!(serde_json::to_value(record).unwrap()["enabled"], false);
-        let mut invalid = legacy;
-        invalid["enabled"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<Record>(invalid).is_err());
-    }
-
-    #[test]
-    fn wire_schema_rejects_ambiguous_boundaries_and_non_integer_counts() {
-        assert!(matches!(
-            serde_json::from_value::<Request>(json!({"operation": "list"})).unwrap(),
-            Request::List
-        ));
-        assert!(serde_json::from_value::<Request>(json!({
-            "operation": "list", "definition": definition()
-        }))
-        .is_err());
-        let mut value = serde_json::to_value(definition()).unwrap();
-        value["flows"][0]["source"] = json!({"kind": "boundary", "nodeId": "review"});
-        assert!(serde_json::from_value::<Definition>(value).is_err());
-        for count in [json!(-1), json!(1.5), json!("2"), json!(1e30)] {
-            let mut value = serde_json::to_value(gated_graph()).unwrap();
-            value["nodes"][2]["selection"]["min"] = count;
-            assert!(serde_json::from_value::<Definition>(value).is_err());
-        }
-        let mut value = serde_json::to_value(definition()).unwrap();
-        value["script"] = json!("not executable");
-        assert!(serde_json::from_value::<Definition>(value).is_err());
-    }
-    fn gated_graph() -> Definition {
-        let mut graph = definition();
-        graph.nodes.push(Node {
-            id: "input".into(),
-            name: String::new(),
-            x: -120.0,
-            y: 180.0,
-            config: NodeConfig::InputGate {
-                processing_mode: InputProcessingMode::Batch,
-                busy_policy: BusyPolicy::Queue,
-            },
-        });
-        graph.nodes.push(Node {
-            id: "output".into(),
-            name: String::new(),
-            x: 420.0,
-            y: 180.0,
-            config: NodeConfig::OutputGate {
-                selection: rule(Mode::All),
-            },
-        });
-        graph.flows = vec![
-            flow("in-binding", Some("input"), Some("review")),
-            flow("out-binding", Some("review"), Some("output")),
-        ];
-        for index in 0..3 {
-            graph.nodes.push(node(&format!("result-{index}")));
-            graph
-                .flows
-                .push(flow(&format!("in-{index}"), None, Some("input")));
-            graph.flows.push(flow(
-                &format!("out-{index}"),
-                Some("output"),
-                Some(&format!("result-{index}")),
-            ));
-        }
-        graph
-    }
-
-    #[test]
-    fn users_accept_input_gates_and_direct_fanout_without_models_or_output_rules() {
-        let mut graph = gated_graph();
-        graph.nodes[0].config = NodeConfig::User {
-            task: "Review and send feedback".into(),
-        };
-        graph
-            .nodes
-            .retain(|n| n.id != "output" && !n.id.starts_with("result-"));
-        graph
-            .flows
-            .retain(|f| f.source.node() != Some("output") && f.target.node() != Some("output"));
-        for id in ["a", "b"] {
-            graph.nodes.push(node(id));
-            graph
-                .flows
-                .push(flow(&format!("send-{id}"), Some("review"), Some(id)));
-        }
-        assert!(validate(&graph).is_empty());
-        graph.nodes[0].config = NodeConfig::User {
-            task: String::new(),
-        };
-        assert!(has_issue(&validate(&graph), "userTask", "review"));
-        graph.nodes[0].config = NodeConfig::User {
-            task: "Review".into(),
-        };
-        graph.flows.push(flow("bypass", None, Some("review")));
-        assert!(has_issue(&validate(&graph), "inputGateRequired", "review"));
-        graph.flows.retain(|f| f.id != "bypass");
-        let mut output = node("output");
-        output.config = NodeConfig::OutputGate {
-            selection: rule(Mode::All),
-        };
-        graph.nodes.push(output);
-        graph
-            .flows
-            .push(flow("forbidden", Some("review"), Some("output")));
-        graph.flows.push(flow("out", Some("output"), Some("a")));
-        assert!(has_issue(&validate(&graph), "outputGateBinding", "output"));
-    }
-
-    #[test]
-    fn gates_round_trip_without_agent_fields_or_models_and_validate_three_way_rules() {
-        let mut graph = gated_graph();
-        assert!(validate(&graph).is_empty());
-        for processing_mode in [InputProcessingMode::Individual, InputProcessingMode::Batch] {
-            for busy_policy in [BusyPolicy::Queue, BusyPolicy::Inject] {
-                graph.nodes[1].config = NodeConfig::InputGate {
-                    processing_mode: processing_mode.clone(),
-                    busy_policy,
-                };
-                assert!(validate(&graph).is_empty());
-                let wire = serde_json::to_value(&graph).unwrap();
-                let restored: Definition = serde_json::from_value(wire.clone()).unwrap();
-                assert_eq!(serde_json::to_value(restored).unwrap(), wire);
-            }
-        }
-        for count in [1, 2, 3, 4, 0] {
-            let NodeConfig::OutputGate { selection } = &mut graph.nodes[2].config else {
-                unreachable!()
-            };
-            selection.mode = Mode::Exact;
-            selection.min = count;
-            assert_eq!(
-                has_issue(&validate(&graph), "outputRule", "output"),
-                count == 0 || count > 3
-            );
-        }
-        let wire = serde_json::to_value(&graph).unwrap();
-        assert!(wire["nodes"][1].get("task").is_none());
-        assert!(wire["nodes"][1].get("modelConfigId").is_none());
-        assert_eq!(wire["nodes"][1]["busyPolicy"], "inject");
-        let restored: Definition = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(restored).unwrap(), wire);
-    }
-
-    #[test]
-    fn input_modes_need_incoming_flows_but_have_no_quantity_constraints() {
-        let mut graph = gated_graph();
-        graph.flows.retain(|f| f.target.node() != Some("input"));
-        for mode in [InputProcessingMode::Individual, InputProcessingMode::Batch] {
-            graph.nodes[1].config = NodeConfig::InputGate {
-                processing_mode: mode,
-                busy_policy: BusyPolicy::Queue,
-            };
-            assert!(has_issue(&validate(&graph), "inputRule", "input"));
-            assert!(has_issue(&validate(&graph), "unreachable", "input"));
-        }
-    }
-
-    #[test]
-    fn missing_gate_bindings_and_agent_bypasses_are_saveable_but_not_valid() {
-        let mut graph = gated_graph();
-        graph.flows.push(flow("bypass-in", None, Some("review")));
-        graph
-            .flows
-            .push(flow("bypass-out", Some("review"), Some("result-0")));
-        let issues = validate(&graph);
-        assert!(has_issue(&issues, "inputGateRequired", "review"));
-        assert!(has_issue(&issues, "outputGateRequired", "review"));
-        graph
-            .flows
-            .retain(|f| f.id != "in-binding" && f.id != "out-binding");
-        let issues = validate(&graph);
-        assert!(has_issue(&issues, "inputGateBinding", "input"));
-        assert!(has_issue(&issues, "outputGateBinding", "output"));
-    }
-
-    #[test]
-    fn gate_only_cycles_are_invalid_but_exclusive_branches_can_accumulate() {
-        let mut graph = gated_graph();
-        graph.flows[0].target = endpoint(Some("output"));
-        graph.flows[1].source = endpoint(Some("input"));
-        let issues = validate(&graph);
-        assert!(has_issue(&issues, "inputGateBinding", "input"));
-        assert!(has_issue(&issues, "outputGateBinding", "output"));
-        let mut graph = gated_graph();
-        let NodeConfig::OutputGate { selection } = &mut graph.nodes[2].config else {
-            unreachable!()
-        };
-        selection.mode = Mode::One;
-        graph
-            .flows
-            .retain(|f| !f.id.starts_with("in-") || f.id == "in-binding");
-        graph.flows.extend([
-            flow("loop-a", Some("output"), Some("input")),
-            flow("loop-b", Some("output"), Some("input")),
-        ]);
-        assert!(!has_issue(&validate(&graph), "impossibleJoin", "input"));
-    }
-
-    #[test]
-    fn new_node_contract_rejects_old_agent_rules_and_cross_kind_fields() {
-        let graph = gated_graph();
-        let wire = serde_json::to_value(graph).unwrap();
-        for (index, key, value) in [
-            (
-                0,
-                "inputRule",
-                serde_json::to_value(rule(Mode::All)).unwrap(),
-            ),
-            (1, "modelConfigId", json!("model-review")),
-            (1, "busyPolicy", json!("interrupt")),
-            (1, "processingMode", json!("atLeast")),
-            (1, "processingMode", json!(null)),
-            (
-                1,
-                "trigger",
-                json!({"mode":"atLeast","count":2,"required":[],"groups":[{"id":"g","flowIds":[],"min":1,"max":2}]}),
-            ),
-            (2, "busyPolicy", json!("queue")),
-        ] {
-            let mut invalid = wire.clone();
-            invalid["nodes"][index][key] = value;
-            assert!(
-                serde_json::from_value::<Definition>(invalid).is_err(),
-                "{index} {key}"
-            );
-        }
-        let mut old = wire.clone();
-        old["nodes"][0].as_object_mut().unwrap().remove("kind");
-        assert!(serde_json::from_value::<Definition>(old).is_err());
+        Ok(issues)
     }
 }

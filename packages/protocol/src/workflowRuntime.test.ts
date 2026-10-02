@@ -18,8 +18,10 @@ const source = (node: string): WorkflowSourceMessage => ({
   sourceConversationId: `chat-${node}`,
   sourceConversationTitle: node,
   targetNodeId: 'reviewer',
-  flowId: `flow-${node}`,
-  pathFlowIds: [`flow-${node}`, 'joined'],
+  targetNodeName: 'Reviewer',
+  targetConversationId: 'chat-review',
+  targetConversationTitle: 'Review',
+  replyToMessageId: null,
   content: `${node} result`,
   createdAt: 10
 })
@@ -33,9 +35,9 @@ const snapshot: WorkflowRuntimeSnapshot = {
       nodeId: 'reviewer',
       conversationId: 'chat-review',
       executionVersion: 'v1',
-      content: 'One assembled input with both results',
-      messages: [source('a'), source('b')],
-      busyPolicy: 'queue',
+      content: 'One delivered message',
+      messages: [source('a')],
+      mailStatus: 'pending',
       status: 'pending',
       runId: null,
       deliveryId: null,
@@ -48,7 +50,9 @@ const snapshot: WorkflowRuntimeSnapshot = {
       sequence: 4,
       instanceId: 'workflow',
       inputId: 'input',
-      flowIds: ['joined'],
+      messageId: 'message-a',
+      sourceNodeId: 'a',
+      targetNodeId: 'reviewer',
       kind: 'delivered',
       createdAt: 10
     }
@@ -58,7 +62,6 @@ describe('workflow runtime boundary', () => {
   it('validates queue metadata and node-scoped paginated message bodies', () => {
     const metadata = {
       ...snapshot,
-      pendingMessages: [source('a')],
       pausedConversationIds: ['chat-review'],
       inputRuns: [{ inputId: 'input', status: 'cancelled' }]
     }
@@ -77,7 +80,7 @@ describe('workflow runtime boundary', () => {
           sequence: 8,
           message: source('a'),
           inputId: 'input',
-          status: 'paused',
+          status: 'pending',
           runStatus: null,
           error: null
         }
@@ -104,15 +107,14 @@ describe('workflow runtime boundary', () => {
       beforeSequence: 8
     })
   })
-  it('round-trips one batch input and all its original sources', () => {
+  it('round-trips one independently delivered mail', () => {
     expect(parseWorkflowRuntimeSnapshot(snapshot)).toEqual(snapshot)
     expect(parseWorkflowResponse({ records: [], issues: [], runtime: snapshot }).runtime).toEqual(
       snapshot
     )
     for (const request of [
       { operation: 'runtimeSnapshot', instanceId: 'workflow', afterSequence: 4 },
-      { operation: 'completeUserInput', instanceId: 'workflow', inputId: 'input' },
-      { operation: 'discardFailedInput', instanceId: 'workflow', inputId: 'input' }
+      { operation: 'completeUserInput', instanceId: 'workflow', inputId: 'input' }
     ])
       expect(parseWorkflowRequest(request)).toEqual(request)
   })
@@ -124,7 +126,9 @@ describe('workflow runtime boundary', () => {
       { ...snapshot, inputs: [...snapshot.inputs, ...snapshot.inputs] },
       { ...snapshot, inputs: [{ ...snapshot.inputs[0], status: 'running' }] },
       { ...snapshot, inputs: [{ ...snapshot.inputs[0], nodeId: 'other' }] },
-      { ...snapshot, inputs: [{ ...snapshot.inputs[0], messages: [] }] }
+      { ...snapshot, inputs: [{ ...snapshot.inputs[0], messages: [] }] },
+      { ...snapshot, inputs: [{ ...snapshot.inputs[0], messages: [source('a'), source('b')] }] },
+      { ...snapshot, inputs: [{ ...snapshot.inputs[0], mailStatus: 'applied' }] }
     ])
       expect(() => parseWorkflowRuntimeSnapshot(bad)).toThrow()
   })
@@ -140,7 +144,7 @@ describe('workflow runtime boundary', () => {
         conversationTitle: message.sourceConversationTitle
       }))
     }
-    expect(parseWorkflowMessageSource(proof).sources).toHaveLength(2)
+    expect(parseWorkflowMessageSource(proof).sources).toHaveLength(1)
     const withBodies = {
       ...proof,
       sources: proof.sources.map((source, index) => ({

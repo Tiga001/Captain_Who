@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 63;
+pub const STORAGE_SCHEMA_VERSION: i32 = 64;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -18,8 +18,10 @@ const V61_SCHEMA_FINGERPRINT: &str =
     "sha256:8909ce2f44597641f7cfb60c7cad159d0fb7ff0e165306992dc5d36785943cd7";
 const V62_SCHEMA_FINGERPRINT: &str =
     "sha256:704ff3fdec03347fc91caa2adb18468e51180aecb91bf28010a4d88bb0bf4ece";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V63_SCHEMA_FINGERPRINT: &str =
     "sha256:787e81d73f2a814771846a8cf104152623200986c5b7c8e3c4c72d9818aa1ee0";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:5ee4d7a0c9c3e7a8ca588dbf76bb14d0353217143a3afe329d394c7c6d05e56f";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -34,6 +36,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v60 indexes chronological history metadata without rewriting messages, traces or FTS content.
 /// v61 adds trusted trace publication revisions; v62 adds a pending-only workflow sequence index.
 /// v63 adds optional long-paste source metadata without changing existing attachment contents.
+/// v64 installs independent workflow mailboxes; legacy workflow records are not converted.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -95,6 +98,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 62 {
         upgrade_pasted_text_v62(connection)?;
+    }
+
+    if read_schema_version(connection)? == 63 {
+        install_workflow_mail_v63(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -384,13 +391,27 @@ fn workflow_pending_schema() -> &'static str {
 }
 
 fn pasted_text_schema() -> &'static str {
-    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+    let start = CANONICAL_SCHEMA
         .find("-- Long pasted text source metadata, schema v63.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Independent workflow mailboxes, schema v64.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn workflow_mail_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Independent workflow mailboxes, schema v64.")
         .unwrap()..]
 }
 
+fn canonical_schema_v63() -> String {
+    CANONICAL_SCHEMA.replace(workflow_mail_schema(), "")
+}
+
 fn canonical_schema_v62() -> String {
-    CANONICAL_SCHEMA.replace(pasted_text_schema(), "")
+    canonical_schema_v63().replace(pasted_text_schema(), "")
 }
 
 fn upgrade_pasted_text_v62(connection: &Connection) -> rusqlite::Result<()> {
@@ -398,6 +419,15 @@ fn upgrade_pasted_text_v62(connection: &Connection) -> rusqlite::Result<()> {
     validate_schema_fingerprint(&transaction, V62_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(pasted_text_schema())?;
     transaction.pragma_update(None, "user_version", 63)?;
+    validate_schema_fingerprint(&transaction, V63_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+
+fn install_workflow_mail_v63(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V63_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_mail_schema())?;
+    transaction.pragma_update(None, "user_version", 64)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
 }
@@ -639,6 +669,52 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn v64_installs_empty_mailboxes_without_converting_workflows_or_losing_chat() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&super::canonical_schema_v63())
+            .unwrap();
+        connection.pragma_update(None, "user_version", 63).unwrap();
+        connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('chat','keep',1,1);
+            INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('message','chat','user','original','sent',1,0);
+            INSERT INTO workflow_execution_pauses(conversation_id,created_at) VALUES('chat',1);").unwrap();
+        super::run_migrations(&connection).unwrap();
+        super::run_migrations(&connection).unwrap();
+        assert_eq!(
+            super::read_schema_version(&connection).unwrap(),
+            super::STORAGE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM messages WHERE id='message'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "original"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM workflow_mail_pauses", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM workflow_mail_messages", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(connection.execute("INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,mail_status,message_json,created_at) VALUES('m','i','e','n','applied','{}',1)", []).is_err());
+        super::validate_canonical_schema(&connection).unwrap();
+    }
+
     #[test]
     fn pasted_text_v62_upgrade_preserves_existing_attachment_and_reopens() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();

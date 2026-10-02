@@ -11,7 +11,7 @@
       "modelConfigId": null,
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
-      "delivers": "Deliver the result to the selected outgoing flow.",
+      "delivers": "Send useful results to the appropriate workflow member.",
       "x": 280,
       "y": 180,
       "kind": "agent",
@@ -23,34 +23,11 @@
       "modelConfigId": null,
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
-      "delivers": "Deliver the result to the selected outgoing flow.",
+      "delivers": "Send useful results to the appropriate workflow member.",
       "x": 580,
       "y": 180,
       "kind": "agent",
       "permissionMode": "default"
-    },
-    {
-      "id": "implement-input",
-      "kind": "inputGate",
-      "name": "Implementation input",
-      "x": 40,
-      "y": 180,
-      "processingMode": "individual",
-      "busyPolicy": "queue"
-    },
-    {
-      "id": "review-output",
-      "kind": "outputGate",
-      "name": "Review output",
-      "x": 860,
-      "y": 180,
-      "selection": {
-        "mode": "one",
-        "min": 1,
-        "max": 1,
-        "required": [],
-        "groups": []
-      }
     },
     {
       "id": "result",
@@ -58,95 +35,16 @@
       "modelConfigId": null,
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
-      "delivers": "Deliver the result to the selected outgoing flow.",
+      "delivers": "Send useful results to the appropriate workflow member.",
       "x": 1120,
       "y": 180,
       "kind": "agent",
       "permissionMode": "default"
     }
   ],
-  "flows": [
-    {
-      "id": "entry",
-      "name": "entry",
-      "source": {
-        "kind": "boundary"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "implement-input"
-      }
-    },
-    {
-      "id": "submit",
-      "name": "submit",
-      "source": {
-        "kind": "node",
-        "nodeId": "implement"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "review"
-      }
-    },
-    {
-      "id": "revise",
-      "name": "revise",
-      "source": {
-        "kind": "node",
-        "nodeId": "review-output"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "implement-input"
-      }
-    },
-    {
-      "id": "deliver",
-      "name": "deliver",
-      "source": {
-        "kind": "node",
-        "nodeId": "review-output"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "result"
-      }
-    },
-    {
-      "id": "input-binding",
-      "name": "",
-      "source": {
-        "kind": "node",
-        "nodeId": "implement-input"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "implement"
-      }
-    },
-    {
-      "id": "output-binding",
-      "name": "",
-      "source": {
-        "kind": "node",
-        "nodeId": "review"
-      },
-      "target": {
-        "kind": "node",
-        "nodeId": "review-output"
-      }
-    }
-  ],
   "viewport": {
     "x": 0,
     "y": 0,
     "zoom": 1
-  },
-  "boundaryPositions": {
-    "input": {
-      "x": -250,
-      "y": 180
-    }
   }
 }

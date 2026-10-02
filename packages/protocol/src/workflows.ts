@@ -5,19 +5,6 @@ import {
   type WorkflowRuntimeSnapshot,
   type WorkflowNodeMessages
 } from './workflowRuntime'
-export interface WorkflowGroup {
-  id: string
-  flowIds: string[]
-  min: number
-  max: number
-}
-export interface WorkflowRule {
-  mode: 'all' | 'one' | 'any' | 'exact' | 'range' | 'custom'
-  min: number
-  max: number
-  required: string[]
-  groups: WorkflowGroup[]
-}
 interface WorkflowNodeBase {
   id: string
   name: string
@@ -36,51 +23,7 @@ export interface WorkflowUserNode extends WorkflowNodeBase {
   kind: 'user'
   task: string
 }
-/** Assemble input before deciding how to deliver it to a busy agent. */
-export interface WorkflowInputGateNode extends WorkflowNodeBase {
-  kind: 'inputGate'
-  /** Individual consumes one message; batch consumes one message from every incoming flow. */
-  processingMode: 'individual' | 'batch'
-  /** Applies to complete inputs only, including complete batches. */
-  busyPolicy: 'queue' | 'inject'
-}
-export interface WorkflowOutputGateNode extends WorkflowNodeBase {
-  kind: 'outputGate'
-  selection: WorkflowRule
-}
-export type WorkflowNode =
-  WorkflowAgentNode | WorkflowUserNode | WorkflowInputGateNode | WorkflowOutputGateNode
-export type WorkflowGateNode = WorkflowInputGateNode | WorkflowOutputGateNode
-export type WorkflowEndpoint = { kind: 'boundary' } | { kind: 'node'; nodeId: string }
-export interface WorkflowAnchor {
-  side: 'left' | 'right' | 'top' | 'bottom'
-  /** Relative position along the side, from left/top to right/bottom. */
-  offset: number
-}
-export interface WorkflowFlow {
-  id: string
-  name: string
-  source: WorkflowEndpoint
-  target: WorkflowEndpoint
-  sourceAnchor?: WorkflowAnchor
-  targetAnchor?: WorkflowAnchor
-}
-export interface WorkflowBoundaryPositions {
-  input: { x: number; y: number }
-}
-/** Boundary cards are layout only. They never become executable worker nodes. */
-export function getDefaultWorkflowBoundaryPositions(
-  nodes: readonly { x: number; y: number }[]
-): WorkflowBoundaryPositions {
-  if (!nodes.length) return { input: { x: 80, y: 220 } }
-  const clamp = (value: number) => Math.max(-100000, Math.min(100000, value))
-  const y = clamp(
-    (Math.min(...nodes.map((node) => node.y)) + Math.max(...nodes.map((node) => node.y))) / 2
-  )
-  return {
-    input: { x: clamp(Math.min(...nodes.map((node) => node.x)) - 280), y }
-  }
-}
+export type WorkflowNode = WorkflowAgentNode | WorkflowUserNode
 export interface WorkflowDefinition {
   schemaVersion: 1
   id: string
@@ -88,10 +31,7 @@ export interface WorkflowDefinition {
   description: string
   background: string
   nodes: WorkflowNode[]
-  flows: WorkflowFlow[]
-  nextFlowSequence?: number
   viewport: { x: number; y: number; zoom: number }
-  boundaryPositions: WorkflowBoundaryPositions
 }
 export interface WorkflowIssue {
   code: string
@@ -109,7 +49,6 @@ export type WorkflowRequest =
   | { operation: 'runtimeSnapshot'; instanceId: string; afterSequence?: number }
   | { operation: 'nodeMessages'; instanceId: string; nodeId: string; beforeSequence?: number }
   | { operation: 'completeUserInput'; instanceId: string; inputId: string }
-  | { operation: 'discardFailedInput'; instanceId: string; inputId: string }
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
   | {
@@ -235,72 +174,11 @@ function array<T>(value: unknown, parse: (item: unknown) => T, max = 512): T[] {
   if (!Array.isArray(value) || value.length > max) throw new Error('Invalid workflow collection')
   return value.map(parse)
 }
-function endpoint(value: unknown): WorkflowEndpoint {
-  const kind = (value as { kind?: unknown } | null)?.kind
-  const item = object(value, kind === 'boundary' ? ['kind'] : ['kind', 'nodeId'])
-  if (kind === 'boundary') return { kind }
-  if (kind === 'node') return { kind, nodeId: text(item.nodeId) }
-  throw new Error('Invalid workflow endpoint')
-}
-function anchor(value: unknown): WorkflowAnchor {
-  const item = object(value, ['side', 'offset'])
-  if (!['left', 'right', 'top', 'bottom'].includes(String(item.side)))
-    throw new Error('Invalid workflow anchor side')
-  const offset = number(item.offset)
-  if (offset < 0 || offset > 1) throw new Error('Invalid workflow anchor offset')
-  return { side: item.side as WorkflowAnchor['side'], offset }
-}
-function boundaryPositions(value: unknown): WorkflowBoundaryPositions {
-  const item = object(value, ['input'])
-  const point = (value: unknown) => {
-    const position = object(value, ['x', 'y'])
-    const x = number(position.x),
-      y = number(position.y)
-    if (Math.abs(x) > 100000 || Math.abs(y) > 100000)
-      throw new Error('Invalid workflow boundary coordinate')
-    return { x, y }
-  }
-  return { input: point(item.input) }
-}
-function rule(value: unknown): WorkflowRule {
-  const item = object(value, ['mode', 'min', 'max', 'required', 'groups'])
-  if (
-    typeof item.mode !== 'string' ||
-    !['all', 'one', 'any', 'exact', 'range', 'custom'].includes(item.mode)
-  )
-    throw new Error('Invalid workflow rule mode')
-  return {
-    mode: item.mode as WorkflowRule['mode'],
-    min: integer(item.min),
-    max: integer(item.max),
-    required: array(item.required, text),
-    groups: array(item.groups, (value) => {
-      const group = object(value, ['id', 'flowIds', 'min', 'max'])
-      return {
-        id: text(group.id),
-        flowIds: array(group.flowIds, text),
-        min: integer(group.min),
-        max: integer(group.max)
-      }
-    })
-  }
-}
 export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
   const item = object(
     value,
-    [
-      'schemaVersion',
-      'id',
-      'name',
-      'description',
-      'background',
-      'nodes',
-      'flows',
-      'viewport',
-      'boundaryPositions',
-      'nextFlowSequence'
-    ],
-    ['nextFlowSequence']
+    ['schemaVersion', 'id', 'name', 'description', 'background', 'nodes', 'viewport'],
+    []
   )
   if (item.schemaVersion !== 1) throw new Error('Unsupported workflow version')
   const viewport = object(item.viewport, ['x', 'y', 'zoom'])
@@ -312,11 +190,7 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
       const fields =
         kind === 'agent'
           ? ['permissionMode', 'modelConfigId', 'receives', 'task', 'delivers']
-          : kind === 'inputGate'
-            ? ['processingMode', 'busyPolicy']
-            : kind === 'user'
-              ? ['task']
-              : ['selection']
+          : ['task']
       const node = object(value, [...common, ...fields], kind === 'user' ? ['task'] : [])
       const base = {
         id: text(node.id),
@@ -345,14 +219,6 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
       }
       if (kind === 'user')
         return { ...base, kind, task: node.task === undefined ? '' : text(node.task) }
-      if (kind === 'inputGate') {
-        if (node.processingMode !== 'individual' && node.processingMode !== 'batch')
-          throw new Error('Invalid input processing mode')
-        if (node.busyPolicy !== 'queue' && node.busyPolicy !== 'inject')
-          throw new Error('Invalid busy agent policy')
-        return { ...base, kind, processingMode: node.processingMode, busyPolicy: node.busyPolicy }
-      }
-      if (kind === 'outputGate') return { ...base, kind, selection: rule(node.selection) }
       throw new Error('Invalid workflow node kind')
     },
     128
@@ -363,28 +229,7 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
     name: text(item.name),
     description: text(item.description),
     background: text(item.background),
-    ...(item.nextFlowSequence !== undefined
-      ? { nextFlowSequence: flowSequence(item.nextFlowSequence) }
-      : {}),
     nodes,
-    boundaryPositions: boundaryPositions(item.boundaryPositions),
-    flows: array(item.flows, (value) => {
-      const flow = object(
-        value,
-        ['id', 'name', 'source', 'target', 'sourceAnchor', 'targetAnchor'],
-        ['sourceAnchor', 'targetAnchor']
-      )
-      const target = endpoint(flow.target)
-      if (target.kind === 'boundary') throw new Error('The user entry cannot receive flows')
-      return {
-        id: text(flow.id),
-        name: text(flow.name),
-        source: endpoint(flow.source),
-        target,
-        ...(flow.sourceAnchor !== undefined ? { sourceAnchor: anchor(flow.sourceAnchor) } : {}),
-        ...(flow.targetAnchor !== undefined ? { targetAnchor: anchor(flow.targetAnchor) } : {})
-      }
-    }),
     viewport: { x: number(viewport.x), y: number(viewport.y), zoom: number(viewport.zoom) }
   }
   if (new TextEncoder().encode(JSON.stringify(result)).length > 2_000_000)
@@ -392,11 +237,6 @@ export function parseWorkflowDefinition(value: unknown): WorkflowDefinition {
   return result
 }
 
-function flowSequence(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1)
-    throw new Error('Invalid workflow flow sequence')
-  return value
-}
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
   if (op === 'nodeMessages') {
@@ -420,7 +260,7 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
       ...(item.afterSequence !== undefined ? { afterSequence: integer(item.afterSequence) } : {})
     }
   }
-  if (op === 'completeUserInput' || op === 'discardFailedInput') {
+  if (op === 'completeUserInput') {
     const item = object(value, ['operation', 'instanceId', 'inputId'])
     return { operation: op, instanceId: text(item.instanceId), inputId: text(item.inputId) }
   }

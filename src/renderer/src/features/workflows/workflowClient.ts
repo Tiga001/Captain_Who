@@ -11,8 +11,8 @@ export async function requestWorkflows(input: WorkflowRequest): Promise<Workflow
       'listInstances',
       'validate',
       'runtimeSnapshot',
-      'completeUserInput',
-      'discardFailedInput'
+      'nodeMessages',
+      'completeUserInput'
     ].includes(input.operation)
   ) {
     window.dispatchEvent(new Event('captain:workflows-changed'))

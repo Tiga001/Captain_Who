@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-02
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,11 +24,13 @@ last_verified: 2026-09-28
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v62**（SQLite `PRAGMA user_version = 62`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v64**（SQLite `PRAGMA user_version = 64`）：
 
-- `STORAGE_SCHEMA_VERSION = 62`；
+- `STORAGE_SCHEMA_VERSION = 64`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
+- v64 新增独立 `workflow_mail_*` 表和索引，用于自由邮件网络、六态处理和操作幂等；exact v63 安装空表，不转换旧工作流数据，不修改项目或聊天；
+- v63 增加长文本粘贴附件来源元数据，保留既有附件；
 - v62 新增 `workflow_execution_input_pending_sequence` 部分索引，只收录 pending 输入并按 sequence 分页；exact v61 升级只建立索引，不修改记录、正文或 JSON；
 - v61 新增按助手消息维护的 `conversation_trace_journal_revisions`（随机 epoch 与递增 revision）、Trace/header/model-context 写入触发器及待处理交互部分覆盖索引。热提交游标只在不可变 Runtime 发布证书、数据库身份与持久 revision 一致时复用前缀校验；重启、外部写入或失败后重新全量验证。升级不改写历史正文；
 - v60 新增 `conversation_history_timeline` 普通顺序投影，支持按会话及历史位置索引分页；既有身份索引继续按 ref_key 定位 FTS rowid，全文检索仍由 FTS 处理。同版增加 `idx_messages_pending_assistant_summary` 部分覆盖索引，加速待处理助手消息的运行摘要查询；
@@ -37,7 +39,7 @@ last_verified: 2026-09-28
 - v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表，统计起始时间在创建 schema 时固定，不回填此前的观测；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 当前 v62 库须通过 exact fingerprint 和外键校验。exact v61 → v62 只增加工作流 pending sequence 部分索引；exact v60 → v61 保留全部历史，仅增加修订记录、触发器和摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为工作流实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留全部历史，增加工作流消息、输入、事件、来源与 Run 身份记录，并扩展 Trace 类型约束支持 workflow_delivery；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有工作流并增加默认关闭的模板 enabled 历史字段（当前可用性已改为校验结果派生）；exact v53 → v54 增加工作流定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
+- 当前 v64 库须通过 exact fingerprint 和外键校验。exact v63 → v64 只新增独立邮箱表；exact v62 → v63 增加可空的长粘贴元数据；exact v61 → v62 只增加工作流 pending sequence 部分索引；exact v60 → v61 保留全部历史，仅增加修订记录、触发器和摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为工作流实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留全部历史，增加工作流消息、输入、事件、来源与 Run 身份记录，并扩展 Trace 类型约束支持 workflow_delivery；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有工作流并增加默认关闭的模板 enabled 历史字段（当前可用性已改为校验结果派生）；exact v53 → v54 增加工作流定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 未知版、非空未版本化或结构被篡改的数据库也返回 `development_storage_schema_reset_required`，不修改源库或自动重置。
 
@@ -298,4 +300,4 @@ Composer Folder Reference 不属于上述项目绑定。v50 的 `agent_run_guida
 
 绑定确认在同一事务中新建缺失对话、一次性设置输入框的模型与权限并保存绑定；已有对话的当前模型元数据、活跃 Run 和队列快照保持不变，下一次发送沿普通模型切换路径生效。普通生成中的对话可被绑定；模型切换或手动上下文压缩期间沿相同 admission 锁拒绝配置变更。
 
-开启实例中的对话由数据库触发器禁止归档；关闭实例后才允许归档。归档或删除绑定对话、正式发布模板更新会关闭相关实例并标记 needsReview；重新开启须通过当前模板、绑定完整性、对话未归档及颜色占用检查。读取时的模板校验失效只使模板不可选，不自动关闭现有实例。前端批量归档先预检全部目标，数据库逐请求校验，不新增跨请求的原子批量 RPC。独立编辑草稿不改变正式模板；开启实例的活跃会话 Trace 或实例运行状态阻止覆盖正式模板。v58 增加独立消息/输入/回执/事件表、消息来源映射和 Run 身份冻结；输入门持久按流 FIFO 组装，投递使用普通根 Turn 或安全采样注入，工作流来信通过 WorkflowDelivery Trace 保存，UI 展示副本不再作为 HumanText 重放。关闭阻止新发送和新投递但不取消当前任务；再开启可恢复待投递输入，改版则使旧输入失效。详见[工作流定义与画布编辑](../subsystems/workflow-authoring.md)。
+开启实例中的对话由数据库触发器禁止归档；关闭实例后才允许归档。归档或删除绑定对话、正式发布模板更新会关闭相关实例并标记 needsReview；重新开启须通过当前模板、绑定完整性、对话未归档及颜色占用检查。读取时的模板校验失效只使模板不可选，不自动关闭现有实例。前端批量归档先预检全部目标，数据库逐请求校验，不新增跨请求的原子批量 RPC。独立编辑草稿不改变正式模板；开启实例的活跃会话 Trace 或实例运行状态阻止覆盖正式模板。v64 的 `workflow_mail_*` 表保存自由邮件网络的不可变信封、处理状态、幂等回执、事件、来源与 Run 身份。工作流来信通过 WorkflowDelivery Trace 保存，UI 展示副本不作为 HumanText 重放。休眠节点只按顺序取一封唤醒；运行期间其他邮件需由模型主动领取，没有输入门或自动插入策略。关闭阻止新发送和新投递但不取消当前任务；同一收件身份仍保留 pending 邮件，移除或改绑收件人使其旧未处理邮件失效。邮件结算与 Turn terminal trace 同事务完成，显式已处理不会被后续停止覆盖。详见[工作流邮件网络](../subsystems/workflow-authoring.md)。

@@ -1,5 +1,4 @@
 import type { WorkflowDefinition } from '@mycopilot/protocol'
-import { nextWorkflowFlowSequence } from './workflowAuthoring'
 
 export interface WorkflowChangeOptions {
   group?: string
@@ -23,7 +22,7 @@ export type WorkflowHistoryAction =
 
 /** Moving the viewport is persisted on save, but does not edit the workflow itself. */
 export function workflowContentKey(definition: WorkflowDefinition): string {
-  return JSON.stringify({ ...definition, viewport: undefined, nextFlowSequence: undefined })
+  return JSON.stringify({ ...definition, viewport: undefined })
 }
 export function createWorkflowHistory(
   definition: WorkflowDefinition | null = null
@@ -43,11 +42,7 @@ export function workflowHistoryReducer(
     if (!restored) return state
     const present = {
       ...restored,
-      viewport: state.present.viewport,
-      nextFlowSequence: Math.max(
-        nextWorkflowFlowSequence(restored),
-        nextWorkflowFlowSequence(state.present)
-      )
+      viewport: state.present.viewport
     }
     return action.type === 'undo'
       ? {

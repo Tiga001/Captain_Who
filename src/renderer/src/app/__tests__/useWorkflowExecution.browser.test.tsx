@@ -30,7 +30,16 @@ function snapshot(
     sequence,
     inputs: [],
     events: [
-      { sequence, instanceId, inputId: null, flowIds: ['flow'], kind, createdAt: Date.now() }
+      {
+        sequence,
+        instanceId,
+        inputId: null,
+        messageId: 'mail',
+        sourceNodeId: 'sender',
+        targetNodeId: 'recipient',
+        kind,
+        createdAt: Date.now()
+      }
     ]
   }
 }

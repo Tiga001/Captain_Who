@@ -240,7 +240,7 @@ mod tests {
                 },
             )
         };
-        let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"","nodes":[],"flows":[],"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":0}}});
+        let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"","nodes":[],"viewport":{"x":0,"y":0,"zoom":1}});
         for _ in 0..10 {
             for params in [
                 json!({"operation":"list"}),
@@ -450,7 +450,7 @@ mod tests {
         };
         let workflow = serde_json::from_value(json!({
             "id":"input", "instanceId":"instance", "nodeId":"node", "conversationId":"recipient",
-            "executionVersion":"version", "content":"queued", "messages":[], "busyPolicy":"queue",
+            "executionVersion":"version", "content":"queued", "messages":[], "mailStatus":"pending",
             "status":"pending", "runId":null, "deliveryId":null, "createdAt":1, "error":null
         }))
         .unwrap();
@@ -561,7 +561,7 @@ mod deadline_tests {
         let storage = Arc::new(StorageService::open(&path).unwrap());
         let service = AgentService::new_authorized_for_test(storage);
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute("DROP INDEX workflow_execution_input_pending_sequence", [])
+        db.execute("DROP INDEX workflow_mail_input_pending_sequence", [])
             .unwrap();
         let generation = service.workflow_retry.lock().unwrap().generation;
         service.workflow_retry.lock().unwrap().defer(
@@ -598,7 +598,7 @@ mod deadline_tests {
             1,
             "expired entry must not retry failing SQL every 10ms"
         );
-        db.execute("CREATE INDEX workflow_execution_input_pending_sequence ON workflow_execution_inputs(sequence) WHERE status='pending'",[]).unwrap();
+        db.execute("CREATE INDEX workflow_mail_input_pending_sequence ON workflow_mail_inputs(sequence) WHERE status='pending'",[]).unwrap();
         service.workflow_readiness_changed(None);
         tokio::time::timeout(Duration::from_millis(500), async {
             loop {

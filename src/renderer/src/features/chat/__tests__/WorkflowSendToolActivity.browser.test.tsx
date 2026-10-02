@@ -22,14 +22,13 @@ vi.mock('../components/clipboard', () => ({ copyTextToClipboard: (text: string) 
 const metadata = {
   workflowName: '新功能开发',
   instanceId: 'workflow-private-id',
-  outputs: [
+  messages: [
     {
-      flowId: 'flow-a',
       targetNodeId: 'node-a',
       targetNodeName: '开发',
       targetConversationId: 'chat-a'
     },
-    { flowId: 'flow-b', targetNodeId: 'node-b', targetNodeName: '验收', targetConversationId: null }
+    { targetNodeId: 'node-b', targetNodeName: '验收', targetConversationId: null }
   ]
 }
 const call: AgentToolCall = {
@@ -38,9 +37,9 @@ const call: AgentToolCall = {
   approvalStatus: 'not_required',
   reason: null,
   args: {
-    outputs: [
-      { flowId: 'flow-a', message: '暗号：升龙拳\n保留换行' },
-      { flowId: 'flow-b', message: '请验收' }
+    messages: [
+      { targetNodeId: 'node-a', message: '暗号：升龙拳\n保留换行' },
+      { targetNodeId: 'node-b', message: '请验收' }
     ],
     _workflowSend: metadata
   }
@@ -115,14 +114,17 @@ describe('workflow send presentation', () => {
     expect(view.container.textContent).not.toContain('结果')
   })
 
-  it('handles legacy receipts and malformed partial arguments without raw identifiers or false success', async () => {
-    const legacy = { ...call, args: { outputs: [{ flowId: 'legacy-uuid', message: '旧消息' }] } }
+  it('handles missing display metadata and malformed partial arguments without raw identifiers or false success', async () => {
+    const legacy = {
+      ...call,
+      args: { messages: [{ targetNodeId: 'unknown-uuid', message: '旧消息' }] }
+    }
     const view = await render(<WorkflowSendToolActivity call={legacy} settledStatus="completed" />)
     await expect.element(view.getByText('向工作流节点发送消息的结果待确认')).toBeVisible()
     await view.getByText('向工作流节点发送消息的结果待确认').click()
     await expect.element(view.getByText('旧消息')).toBeVisible()
-    expect(view.container.textContent).not.toContain('legacy-uuid')
-    await view.rerender(<WorkflowSendToolActivity call={{ ...call, args: '{"outputs":[' }} />)
+    expect(view.container.textContent).not.toContain('unknown-uuid')
+    await view.rerender(<WorkflowSendToolActivity call={{ ...call, args: '{"messages":[' }} />)
     await expect.element(view.getByText('正在向工作流节点发送消息')).toBeVisible()
   })
 
@@ -130,14 +132,14 @@ describe('workflow send presentation', () => {
     const view = await render(
       <WorkflowSendToolActivity
         call={call}
-        result={{ ...receipt, ok: false, error: '输出门要求全部出口' }}
+        result={{ ...receipt, ok: false, error: '收件节点当前不可用' }}
       />
     )
     await expect
       .element(view.getByText('向工作流【新功能开发】的节点【开发、验收】发送消息失败'))
       .toBeVisible()
     await view.getByText('向工作流【新功能开发】的节点【开发、验收】发送消息失败').click()
-    await expect.element(view.getByText('输出门要求全部出口')).toBeVisible()
+    await expect.element(view.getByText('收件节点当前不可用')).toBeVisible()
     await view.rerender(<WorkflowSendToolActivity call={call} cancelled />)
     await expect
       .element(view.getByText('已取消向工作流【新功能开发】的节点【开发、验收】发送消息'))

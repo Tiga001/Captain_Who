@@ -1,3 +1,4 @@
+import { WorkflowMailActionToolActivity } from './WorkflowMailActionToolActivity'
 import type {
   AgentFileChangeProposal,
   AgentToolCall,
@@ -31,6 +32,8 @@ import { McpToolActivity } from './McpToolActivity'
 import { BuiltinCapabilityToolActivity } from './BuiltinCapabilityToolActivity'
 import { ActivateCapabilityToolActivity } from './ActivateCapabilityToolActivity'
 import { SendMessageToolActivity } from './SendMessageToolActivity'
+import { WorkflowStateToolActivity } from './WorkflowStateToolActivity'
+import { WorkflowMailboxToolActivity } from './WorkflowMailboxToolActivity'
 import { WorkflowSendToolActivity } from './WorkflowSendToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -127,6 +130,29 @@ export function AgentToolActivity({
       />
     )
   }
+
+  if (call.tool === 'workflow_get_state' || call.tool === 'workflow_get_mailbox') {
+    const Activity =
+      call.tool === 'workflow_get_state' ? WorkflowStateToolActivity : WorkflowMailboxToolActivity
+    return (
+      <Activity
+        call={call}
+        result={result}
+        cancelled={cancelled && !result}
+        settledStatus={settledStatus}
+      />
+    )
+  }
+
+  if (['workflow_accept', 'workflow_complete', 'workflow_recall'].includes(call.tool))
+    return (
+      <WorkflowMailActionToolActivity
+        call={call}
+        result={result}
+        cancelled={cancelled && !result}
+        settledStatus={settledStatus}
+      />
+    )
 
   if (call.tool === 'workflow_send') {
     return (

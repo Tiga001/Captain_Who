@@ -5,10 +5,11 @@ use super::*;
 use mycopilot_core::storage::models::ChatMessageRecord;
 use mycopilot_core::workflow_awareness::{MailboxQuery, StateQuery};
 use mycopilot_core::workflow_execution::{
-    ConversationSnapshot, Input, RuntimeSnapshot, SendReceipt, SendRequest,
+    ConversationSnapshot, Input, MutationRequest, RuntimeSnapshot, SendReceipt, SendRequest,
 };
 use mycopilot_core::{
-    AgentWorkflowDelivery, AgentWorkflowInbox, WorkflowRuntimeHost, WorkflowSendInvocation,
+    AgentWorkflowDelivery, AgentWorkflowInbox, WorkflowMutationInvocation, WorkflowRuntimeHost,
+    WorkflowSendInvocation,
 };
 use serde_json::json;
 
@@ -102,6 +103,50 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             .map_err(AgentError::new)?;
         Ok(awareness)
     }
+    fn mutate(&self, invocation: WorkflowMutationInvocation) -> AgentResult<Value> {
+        if invocation.conversation_id != self.conversation_id
+            || invocation.run_id != self.run_id
+            || invocation.assistant_message_id != self.assistant_message_id
+        {
+            return Err(AgentError::new(
+                "Workflow mail operation does not match its Host owner.",
+            ));
+        }
+        self.validate_owner()?;
+        let tokens = self
+            .service
+            .cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.cancellation.check()?;
+        if !tokens
+            .get(&self.run_id)
+            .is_some_and(|token| token.shares_state_with(&self.cancellation))
+        {
+            return Err(AgentError::new("Workflow execution segment was retired."));
+        }
+        let receipt = self
+            .service
+            .storage
+            .workflow_execution_mutate(&MutationRequest {
+                conversation_id: self.conversation_id.clone(),
+                source_run_id: self.run_id.clone(),
+                tool_call_id: invocation.tool_call_id,
+                execution_version: invocation.execution_version,
+                action: invocation.action,
+                message_ids: invocation.message_ids,
+            })
+            .map_err(AgentError::new)?;
+        drop(tokens);
+        if let Some(instance_id) = receipt["instanceId"].as_str() {
+            self.service
+                .publish_workflow_runtime(instance_id, &self.notifications);
+        }
+        // accept already owns its chosen letters; the next safe sampling boundary publishes
+        // their WorkflowDelivery. Never wake a separate run or auto-claim other pending mail.
+        Ok(receipt)
+    }
+
     fn send(&self, invocation: WorkflowSendInvocation) -> AgentResult<SendReceipt> {
         if invocation.conversation_id != self.conversation_id
             || invocation.run_id != self.run_id
@@ -133,7 +178,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
                 source_run_id: self.run_id.clone(),
                 tool_call_id: invocation.tool_call_id,
                 execution_version: invocation.execution_version,
-                outputs: invocation.outputs,
+                messages: invocation.messages,
             })
             .map_err(AgentError::new)?;
         drop(tokens);
@@ -157,11 +202,8 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
             ));
         }
         self.validate_owner()?;
-        // A fresh boundary can claim injections which arrived after the previous scan. This runs
-        // only after all tools/approvals/human waits have reached the normal safe boundary.
-        self.service
-            .claim_workflow_injections(&self.conversation_id, &self.run_id)
-            .map_err(AgentError::new)?;
+        // Only the startup letter and explicitly accepted letters have been bound to this run.
+        // Running recipients never auto-claim additional pending mail at sampling boundaries.
         let inputs = self
             .service
             .storage
@@ -174,11 +216,15 @@ impl AgentWorkflowInbox for StoredWorkflowRuntime {
                 .workflow_execution_load_input(id)
                 .map_err(AgentError::new)?;
             if admitted.as_ref().is_none_or(|input| {
-                input.status != mycopilot_core::workflow_execution::InputStatus::Applied
+                !matches!(
+                    input.status,
+                    mycopilot_core::workflow_execution::InputStatus::Applied
+                        | mycopilot_core::workflow_execution::InputStatus::Completed
+                ) || input.run_id.as_deref() != Some(self.run_id.as_str())
             }) && !inputs.iter().any(|input| &input.id == id)
             {
                 return Err(AgentError::new(
-                    "Workflow input was paused or invalidated before the first model request.",
+                    "Workflow mail was stopped or recalled before the first model request.",
                 ));
             }
         }
@@ -350,24 +396,6 @@ impl AgentService {
         );
         Ok(snapshot)
     }
-    pub(crate) fn discard_failed_workflow_input(
-        &self,
-        instance_id: &str,
-        input_id: &str,
-        notifications: &CoreServerNotificationSender,
-    ) -> Result<RuntimeSnapshot, String> {
-        let input = self
-            .storage
-            .workflow_execution_load_input(input_id)?
-            .ok_or_else(|| "Workflow input was removed.".to_string())?;
-        if input.instance_id != instance_id {
-            return Err("Workflow input belongs to another workflow.".into());
-        }
-        self.storage.workflow_execution_discard_failed(input_id)?;
-        self.publish_workflow_runtime(instance_id, notifications);
-        self.workflow_readiness_changed(input.conversation_id.as_deref());
-        self.storage.workflow_execution_runtime(instance_id)
-    }
     pub(super) fn publish_workflow_runtime(
         &self,
         instance_id: &str,
@@ -412,19 +440,6 @@ impl AgentService {
         }
         for id in changed {
             self.publish_workflow_runtime(&id, notifications);
-        }
-        Ok(())
-    }
-    fn claim_workflow_injections(&self, conversation_id: &str, run_id: &str) -> Result<(), String> {
-        if let Some(input) = self
-            .storage
-            .workflow_execution_pending_injection(conversation_id, run_id)?
-        {
-            self.storage.workflow_execution_bind_input(
-                &input.id,
-                run_id,
-                &format!("workflow-message-{}", input.id),
-            )?;
         }
         Ok(())
     }

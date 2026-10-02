@@ -117,9 +117,6 @@
 .workflow-selection-delete:hover {
   color: var(--mc-color-text-danger);
 }
-.workflow-gate-controls input[readonly] {
-  cursor: default;
-}
 @media (max-width: 700px) {
   .workflow-graph-editor__topbar {
     padding: 8px;
@@ -438,27 +435,6 @@
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 1px;
 }
-.workflow-graph-inspector .workflow-rule {
-  padding-top: 0;
-  border-top: 0;
-}
-.workflow-graph-inspector .workflow-rule + .workflow-rule {
-  padding-top: 20px;
-  border-top: 1px solid var(--mc-color-border-subtle);
-}
-.workflow-graph-inspector .workflow-rule legend {
-  margin-bottom: 9px;
-  font-size: 12px;
-}
-.workflow-graph-inspector .workflow-rule > p:first-of-type {
-  display: none;
-}
-.workflow-graph-inspector .workflow-rule p {
-  margin: 0;
-  color: var(--mc-color-text-muted);
-  font-size: 11px;
-  line-height: 1.6;
-}
 @media (max-width: 1000px) {
   .workflow-graph-inspector {
     flex-basis: 280px;
@@ -580,20 +556,6 @@
 .workflow-template-picker__option:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.workflow-gate-settings__arrival {
-  display: grid;
-  gap: 10px;
-}
-.workflow-gate-settings__arrival > span {
-  font-weight: var(--mc-font-weight-strong);
-}
-.workflow-gate-settings__arrival p {
-  margin: 0;
-  color: var(--mc-color-text-muted);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .workflow-graph-toolbar button[aria-pressed='true'] {

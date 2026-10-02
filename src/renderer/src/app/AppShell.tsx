@@ -44,6 +44,7 @@ import type {
   RightSidebarWorkspaceReferenceNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
+import { WorkflowNavigationProvider } from '../features/workflows/WorkflowNavigationContext'
 import { ConversationNavigationProvider } from '../features/chat/ConversationNavigationContext'
 import {
   AttachmentFileNavigationContext,
@@ -1655,8 +1656,7 @@ export function AppShell() {
             activeConversationWorkflow
               ? {
                   ...activeConversationWorkflow,
-                  upstream: activeWorkflowNeighbors?.upstream ?? [],
-                  downstream: activeWorkflowNeighbors?.downstream ?? [],
+                  members: activeWorkflowNeighbors ?? [],
                   onOpen: () => openWorkflowMonitor(activeConversationWorkflow.id),
                   onOpenConversation: (conversationId: string) =>
                     requestOpenConversationFromScheduled(conversationId)
@@ -1970,9 +1970,11 @@ export function AppShell() {
   )
   return (
     <ConversationNavigationProvider onOpenConversation={requestOpenConversationFromScheduled}>
-      <AttachmentFileNavigationContext.Provider value={openAttachmentFile}>
-        {workspace}
-      </AttachmentFileNavigationContext.Provider>
+      <WorkflowNavigationProvider onOpenWorkflow={openWorkflowMonitor}>
+        <AttachmentFileNavigationContext.Provider value={openAttachmentFile}>
+          {workspace}
+        </AttachmentFileNavigationContext.Provider>
+      </WorkflowNavigationProvider>
     </ConversationNavigationProvider>
   )
 }

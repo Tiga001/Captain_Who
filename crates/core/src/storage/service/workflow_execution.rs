@@ -3,6 +3,21 @@ use crate::storage::workflow_execution_repository as repository;
 use crate::workflow_execution::*;
 
 impl StorageService {
+    pub fn workflow_execution_mutate(
+        &self,
+        request: &MutationRequest,
+    ) -> Result<serde_json::Value, String> {
+        repository::mutate(&mut *self.state.connection()?, request)
+    }
+    pub fn workflow_execution_settle_run(&self, run_id: &str, status: &str) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        repository::settle_run(&transaction, run_id, status)?;
+        transaction.commit().map_err(|e| e.to_string())
+    }
+
     pub fn workflow_execution_awareness_for_conversation(
         &self,
         conversation_id: &str,
@@ -39,9 +54,6 @@ impl StorageService {
         before: Option<u64>,
     ) -> Result<NodeMessages, String> {
         repository::node_messages(&*self.state.connection()?, instance_id, node_id, before)
-    }
-    pub fn workflow_execution_discard_failed(&self, input_id: &str) -> Result<(), String> {
-        repository::discard_failed(&mut *self.state.connection()?, input_id)
     }
 
     pub fn workflow_execution_mark_run_unread(&self, run_id: &str) -> Result<(), String> {
@@ -97,13 +109,7 @@ impl StorageService {
     ) -> Result<Option<Input>, String> {
         repository::eligible_pending_input(&*self.state.connection()?, input_id)
     }
-    pub fn workflow_execution_pending_injection(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-    ) -> Result<Option<Input>, String> {
-        repository::pending_injection(&*self.state.connection()?, conversation_id, run_id)
-    }
+
     pub fn workflow_execution_bound_inputs(&self, run_id: &str) -> Result<Vec<Input>, String> {
         repository::bound_inputs(&*self.state.connection()?, run_id)
     }

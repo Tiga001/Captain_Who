@@ -6,43 +6,28 @@ import {
   workflowContentKey,
   workflowHistoryReducer
 } from '../../features/workflows/workflowHistory'
-import { removeWorkflowFlows } from '../../features/workflows/workflowAuthoring'
 
 describe('workflow editing history', () => {
-  it('undoes a deletion with its flows/rule memberships and redoes it without moving the viewport', () => {
+  it('restores removed member settings while preserving the current viewport', () => {
     const graph = parseWorkflowDefinition(fixture)
-    if (graph.nodes[3].kind !== 'outputGate') throw new Error('Expected output gate')
-    graph.nodes[3].selection = {
-      mode: 'custom',
-      min: 1,
-      max: 1,
-      required: ['deliver'],
-      groups: [{ id: 'g', flowIds: ['revise'], min: 1, max: 1 }]
-    }
     let state = workflowHistoryReducer(createWorkflowHistory(graph), {
       type: 'change',
       at: 1,
-      update: (current) => removeWorkflowFlows(current, new Set(['revise']))
+      update: (g) => ({ ...g, nodes: g.nodes.slice(1) })
     })
     state = workflowHistoryReducer(state, {
       type: 'change',
       at: 2,
-      update: (current) => ({ ...current, viewport: { x: 120, y: 50, zoom: 0.75 } }),
+      update: (g) => ({ ...g, viewport: { x: 120, y: 50, zoom: 0.75 } }),
       options: { transient: true }
     })
     expect(state.past).toHaveLength(1)
     state = workflowHistoryReducer(state, { type: 'undo' })
-    expect(state.present?.flows).toHaveLength(6)
-    expect(state.present?.nodes[3]).toMatchObject({
-      selection: { groups: [{ flowIds: ['revise'] }] }
-    })
+    expect(state.present?.nodes).toEqual(graph.nodes)
     expect(state.present?.viewport).toEqual({ x: 120, y: 50, zoom: 0.75 })
     expect(workflowContentKey(state.present!)).toBe(workflowContentKey(graph))
     state = workflowHistoryReducer(state, { type: 'redo' })
-    expect(state.present?.flows).toHaveLength(5)
-    expect(state.present?.nodes[3]).toMatchObject({
-      selection: { groups: [{ flowIds: [], min: 1 }] }
-    })
+    expect(state.present?.nodes).toEqual(graph.nodes.slice(1))
   })
   it('coalesces one drag, separates gestures, and clears redo after new edits', () => {
     let state = createWorkflowHistory(parseWorkflowDefinition(fixture))

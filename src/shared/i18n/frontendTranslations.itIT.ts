@@ -26,8 +26,7 @@ export const itITTranslations = {
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': 'Visualizza bacheca del flusso',
-  'workflows.upstreamNodes': 'Nodi a monte',
-  'workflows.downstreamNodes': 'Nodi a valle',
+  'workflows.members': 'Membri',
   'workflows.noNodes': 'Nessun nodo',
   'configuration.invalidContextCapacityTitle': 'Finestra di contesto insufficiente',
   'configuration.invalidContextCapacity':

@@ -10,8 +10,10 @@ export interface WorkflowSourceMessage {
   sourceConversationId: string
   sourceConversationTitle: string
   targetNodeId: string
-  flowId: string
-  pathFlowIds: string[]
+  targetNodeName: string
+  targetConversationId: string | null
+  targetConversationTitle: string | null
+  replyToMessageId: string | null
   content: string
   createdAt: number
 }
@@ -24,6 +26,10 @@ export type WorkflowInputStatus =
   | 'paused'
   | 'failed'
   | 'invalidated'
+  | 'stopped'
+  | 'recalled'
+export type WorkflowMailStatus =
+  'pending' | 'processing' | 'processed' | 'stopped' | 'failed' | 'recalled'
 export interface WorkflowRuntimeInput {
   id: string
   instanceId: string
@@ -32,7 +38,7 @@ export interface WorkflowRuntimeInput {
   executionVersion: string
   content: string
   messages: WorkflowSourceMessage[]
-  busyPolicy: 'queue' | 'inject'
+  mailStatus: WorkflowMailStatus
   status: WorkflowInputStatus
   runId: string | null
   deliveryId: string | null
@@ -43,7 +49,9 @@ export interface WorkflowRuntimeEvent {
   sequence: number
   instanceId: string
   inputId: string | null
-  flowIds: string[]
+  messageId: string | null
+  sourceNodeId: string | null
+  targetNodeId: string | null
   kind: string
   createdAt: number
 }
@@ -52,7 +60,6 @@ export interface WorkflowRuntimeSnapshot {
   sequence: number
   inputs: WorkflowRuntimeInput[]
   events: WorkflowRuntimeEvent[]
-  pendingMessages?: WorkflowSourceMessage[]
   pausedConversationIds?: string[]
   inputRuns?: { inputId: string; status: string }[]
 }
@@ -137,8 +144,10 @@ export function parseWorkflowSourceMessage(value: unknown): WorkflowSourceMessag
     'sourceConversationId',
     'sourceConversationTitle',
     'targetNodeId',
-    'flowId',
-    'pathFlowIds',
+    'targetNodeName',
+    'targetConversationId',
+    'targetConversationTitle',
+    'replyToMessageId',
     'content',
     'createdAt'
   ])
@@ -151,8 +160,11 @@ export function parseWorkflowSourceMessage(value: unknown): WorkflowSourceMessag
     sourceConversationId: id(item.sourceConversationId),
     sourceConversationTitle: text(item.sourceConversationTitle, 4096),
     targetNodeId: id(item.targetNodeId),
-    flowId: id(item.flowId),
-    pathFlowIds: list(item.pathFlowIds, id, 512),
+    targetNodeName: text(item.targetNodeName, 512),
+    targetConversationId: nullableId(item.targetConversationId),
+    targetConversationTitle:
+      item.targetConversationTitle === null ? null : text(item.targetConversationTitle, 4096),
+    replyToMessageId: nullableId(item.replyToMessageId),
     content: text(item.content),
     createdAt: integer(item.createdAt)
   }
@@ -166,15 +178,19 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
     'executionVersion',
     'content',
     'messages',
-    'busyPolicy',
+    'mailStatus',
     'status',
     'runId',
     'deliveryId',
     'createdAt',
     'error'
   ])
-  if (item.busyPolicy !== 'queue' && item.busyPolicy !== 'inject')
-    throw new Error('Invalid workflow input policy')
+  if (
+    !['pending', 'processing', 'processed', 'stopped', 'failed', 'recalled'].includes(
+      String(item.mailStatus)
+    )
+  )
+    throw new Error('Invalid workflow mail status')
   const statuses: string[] = [
     'pending',
     'claimed',
@@ -183,7 +199,9 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
     'completed',
     'paused',
     'failed',
-    'invalidated'
+    'invalidated',
+    'stopped',
+    'recalled'
   ]
   if (typeof item.status !== 'string' || !statuses.includes(item.status))
     throw new Error('Invalid workflow input status')
@@ -195,7 +213,7 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
     executionVersion: id(item.executionVersion),
     content: text(item.content),
     messages: list(item.messages, parseWorkflowSourceMessage, 512),
-    busyPolicy: item.busyPolicy,
+    mailStatus: item.mailStatus as WorkflowMailStatus,
     status: item.status as WorkflowInputStatus,
     runId: nullableId(item.runId),
     deliveryId: nullableId(item.deliveryId),
@@ -203,7 +221,7 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
     error: item.error === null ? null : text(item.error)
   }
   if (
-    !input.messages.length ||
+    input.messages.length !== 1 ||
     input.messages.some(
       (message) => message.instanceId !== input.instanceId || message.targetNodeId !== input.nodeId
     )
@@ -212,12 +230,23 @@ export function parseWorkflowRuntimeInput(value: unknown): WorkflowRuntimeInput 
   return input
 }
 export function parseWorkflowRuntimeEvent(value: unknown): WorkflowRuntimeEvent {
-  const item = record(value, ['sequence', 'instanceId', 'inputId', 'flowIds', 'kind', 'createdAt'])
+  const item = record(value, [
+    'sequence',
+    'instanceId',
+    'inputId',
+    'messageId',
+    'sourceNodeId',
+    'targetNodeId',
+    'kind',
+    'createdAt'
+  ])
   return {
     sequence: integer(item.sequence),
     instanceId: id(item.instanceId),
     inputId: nullableId(item.inputId),
-    flowIds: list(item.flowIds, id, 512),
+    messageId: nullableId(item.messageId),
+    sourceNodeId: nullableId(item.sourceNodeId),
+    targetNodeId: nullableId(item.targetNodeId),
     kind: id(item.kind),
     createdAt: integer(item.createdAt)
   }
@@ -226,16 +255,13 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   const item = record(
     value,
     ['instanceId', 'sequence', 'inputs', 'events'],
-    ['pendingMessages', 'pausedConversationIds', 'inputRuns']
+    ['pausedConversationIds', 'inputRuns']
   )
   const result = {
     instanceId: id(item.instanceId),
     sequence: integer(item.sequence),
     inputs: list(item.inputs, parseWorkflowRuntimeInput, 4096),
     events: list(item.events, parseWorkflowRuntimeEvent, 4096),
-    ...(item.pendingMessages !== undefined
-      ? { pendingMessages: list(item.pendingMessages, parseWorkflowSourceMessage, 1024) }
-      : {}),
     ...(item.pausedConversationIds !== undefined
       ? { pausedConversationIds: list(item.pausedConversationIds, id, 128) }
       : {}),
@@ -254,7 +280,6 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   }
   if (
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
-    result.pendingMessages?.some((message) => message.instanceId !== result.instanceId) ||
     result.inputRuns?.some((run) => !result.inputs.some((input) => input.id === run.inputId)) ||
     result.events.some(
       (event) => event.instanceId !== result.instanceId || event.sequence > result.sequence

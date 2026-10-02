@@ -1,37 +1,20 @@
 use super::*;
 use crate::storage::migrations::run_migrations;
+use crate::workflow_awareness::MailboxQuery;
 use serde_json::json;
 use std::collections::HashSet;
 
-fn fixture(batch: bool, user: bool) -> Connection {
+pub(super) fn fixture(user: bool) -> Connection {
     let mut c = Connection::open_in_memory().unwrap();
     run_migrations(&c).unwrap();
-    let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model","receives":"Receive artifacts","task":"Review quality","delivers":"Review report"});
-    let target = if user {
-        json!({"kind":"user","id":"b","name":"Human","x":0,"y":0,"task":"Inspect result manually"})
-    } else {
-        agent("b")
-    };
-    let flow = |id: &str, source: Option<&str>, target: &str| json!({"id":id,"name":id,"source":source.map(|v|json!({"kind":"node","nodeId":v})).unwrap_or(json!({"kind":"boundary"})),"target":{"kind":"node","nodeId":target}});
-    let mut nodes = vec![agent("a"), target];
-    let mut flows = vec![flow("entry", None, "a")];
-    if batch {
-        nodes.push(json!({"kind":"outputGate","id":"out","name":"out","x":0,"y":0,"selection":{"mode":"any","min":1,"max":2,"required":[],"groups":[]}}));
-        nodes.push(json!({"kind":"inputGate","id":"in","name":"in","x":0,"y":0,"processingMode":"batch","busyPolicy":"inject"}));
-        flows.extend([
-            flow("out-bind", Some("a"), "out"),
-            flow("left", Some("out"), "in"),
-            flow("right", Some("out"), "in"),
-            flow("in-bind", Some("in"), "b"),
-        ]);
-    } else {
-        flows.push(flow("direct", Some("a"), "b"));
+    let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model","receives":"Artifacts","task":"Review quality","delivers":"Review report"});
+    let mut nodes = vec![agent("a"), agent("b"), agent("c")];
+    if user {
+        nodes.push(
+            json!({"kind":"user","id":"human","name":"Human","x":0,"y":0,"task":"Inspect results"}),
+        );
     }
-    let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"Shared project background","nodes":nodes,"flows":flows,"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":0}}});
-    let mut bindings = vec![json!({"nodeId":"a","conversationId":null})];
-    if !user {
-        bindings.push(json!({"nodeId":"b","conversationId":null}));
-    }
+    let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"Team","background":"Shared background","nodes":nodes,"viewport":{"x":0,"y":0,"zoom":1}});
     let models = HashSet::from(["model".into()]);
     crate::storage::workflow_repository::request(
         &mut c,
@@ -42,668 +25,602 @@ fn fixture(batch: bool, user: bool) -> Connection {
         &models,
     )
     .unwrap();
-    crate::storage::workflow_repository::request(&mut c,serde_json::from_value(json!({"operation":"saveInstance","id":"instance","templateId":"template","name":"Review workflow","color":"#123456","bindings":bindings,"expectedRevision":0,"expectedTemplateRevision":1})).unwrap(),&models).unwrap();
-    let source = conversation(&c, "a");
-    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('assistant',?1,'assistant','',1,0)",[&source]).unwrap();
-    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('assistant',?1,'run',1,'in_progress',0,1,1)",[&source]).unwrap();
-    bind_run(&mut c, &source, "run").unwrap();
+    crate::storage::workflow_repository::request(&mut c,serde_json::from_value(json!({"operation":"saveInstance","id":"instance","templateId":"template","name":"Review workflow","color":"#123456","bindings":[{"nodeId":"a","conversationId":null},{"nodeId":"b","conversationId":null},{"nodeId":"c","conversationId":null}],"expectedRevision":0,"expectedTemplateRevision":1})).unwrap(),&models).unwrap();
+    start_run(&mut c, "a", "run-a");
     c
 }
-fn conversation(c: &Connection, node: &str) -> String {
+pub(super) fn conversation(c: &Connection, node: &str) -> String {
     c.query_row("SELECT conversation_id FROM workflow_instance_bindings WHERE instance_id='instance' AND node_id=?1",[node],|r|r.get(0)).unwrap()
 }
-fn request(c: &Connection, call: &str, outputs: &[(&str, &str)]) -> SendRequest {
-    let conversation_id = conversation(c, "a");
-    let s = snapshot_for_conversation(c, &conversation_id)
-        .unwrap()
-        .unwrap();
+pub(super) fn start_run(c: &mut Connection, node: &str, run: &str) {
+    let chat = conversation(c, node);
+    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES(?1,?2,'assistant','',1,(SELECT COALESCE(MAX(position),-1)+1 FROM messages WHERE conversation_id=?2))",params![run,chat]).unwrap();
+    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES(?1,?2,?1,?3,'in_progress',0,1,1)",params![run,chat,crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION]).unwrap();
+    bind_run(c, &chat, run).unwrap();
+}
+pub(super) fn request(c: &Connection, call: &str, messages: &[(&str, &str)]) -> SendRequest {
+    let chat = conversation(c, "a");
+    let identity = snapshot_for_run(c, &chat, "run-a").unwrap().unwrap();
     SendRequest {
-        conversation_id,
-        source_run_id: "run".into(),
+        conversation_id: chat,
+        source_run_id: "run-a".into(),
         tool_call_id: call.into(),
-        execution_version: s.execution_version,
-        outputs: outputs
+        execution_version: identity.execution_version,
+        messages: messages
             .iter()
-            .map(|(flow, message)| SendOutput {
-                flow_id: (*flow).into(),
+            .map(|(target, message)| SendOutput {
+                target_node_id: (*target).into(),
                 message: (*message).into(),
+                reply_to_message_id: None,
             })
             .collect(),
     }
 }
-#[test]
-fn workflow_execution_batch_accumulates_fifo_and_wraps_only_once() {
-    let mut c = fixture(true, false);
-    for (call, flow, text) in [("1", "left", "first-left"), ("2", "left", "second-left")] {
-        let r = request(&c, call, &[(flow, text)]);
-        assert!(send(&mut c, &r).unwrap().input_ids.is_empty());
+pub(super) fn action(
+    c: &Connection,
+    node: &str,
+    run: &str,
+    call: &str,
+    action: MutationAction,
+    messages: &[String],
+) -> MutationRequest {
+    let chat = conversation(c, node);
+    let identity = snapshot_for_run(c, &chat, run).unwrap().unwrap();
+    MutationRequest {
+        conversation_id: chat,
+        source_run_id: run.into(),
+        tool_call_id: call.into(),
+        execution_version: identity.execution_version,
+        action,
+        message_ids: messages.to_vec(),
     }
-    let r = request(&c, "3", &[("right", "first-right")]);
-    let receipt = send(&mut c, &r).unwrap();
-    assert_eq!(receipt.input_ids.len(), 1);
-    let inputs = pending_inputs(&c).unwrap();
-    assert_eq!(inputs.len(), 1);
-    let input = &inputs[0];
+}
+pub(super) fn prove(c: &Connection, input_id: &str) {
+    let input = load_input(c, input_id).unwrap().unwrap();
+    let sequence:u64=c.query_row("SELECT COALESCE(MAX(sequence),-1)+1 FROM conversation_turn_trace_items WHERE assistant_message_id=?1",[&input.run_id],|r|r.get(0)).unwrap();
+    let proof = json!({"type":"workflow_delivery","sequence":sequence,"inputId":input_id,"instanceId":input.instance_id,"workflowName":"Review workflow","content":input.content,"createdAt":input.created_at,"truncated":false});
+    c.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES(?1,?2,'workflow_delivery',?3)",params![input.run_id,sequence,proof.to_string()]).unwrap();
+}
+
+pub(super) fn send_mail(c: &mut Connection, call: &str, messages: &[(&str, &str)]) -> SendReceipt {
+    let req = request(c, call, messages);
+    send(c, &req).unwrap()
+}
+fn status(c: &Connection, receipt: &SendReceipt, index: usize) -> MailStatus {
+    load_input(c, &receipt.input_ids[index])
+        .unwrap()
+        .unwrap()
+        .mail_status
+}
+
+#[test]
+fn workflow_execution_any_member_sends_atomically_and_retry_is_idempotent() {
+    let mut c = fixture(false);
+    let req = request(&c, "send", &[("b", "first"), ("c", "second")]);
+    let receipt = send(&mut c, &req).unwrap();
+    let retry = send(&mut c, &req).unwrap();
+    assert_eq!(receipt.id, retry.id);
+    assert!(retry.duplicate);
+    assert_eq!(receipt.input_ids.len(), 2);
+    assert_eq!(receipt.messages[0].target_node_name, "b");
     assert_eq!(
-        input
+        load_input(&c, &receipt.input_ids[0])
+            .unwrap()
+            .unwrap()
             .messages
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>(),
-        ["first-left", "first-right"]
-    );
-    assert_eq!(
-        input
-            .content
-            .matches("[Shared workflow background]")
-            .count(),
+            .len(),
         1
     );
-    assert_eq!(
-        input
-            .content
-            .matches("[Workflow collaboration message]")
-            .count(),
-        1
-    );
-    assert!(input
-        .content
-        .contains("Sources: a (conversation: a), a (conversation: a)"));
-    assert!(!input.content.contains("second-left"));
-    assert_eq!(input.busy_policy, BusyPolicy::Inject);
-    let r = request(&c, "4", &[("right", "second-right")]);
-    assert_eq!(send(&mut c, &r).unwrap().input_ids.len(), 1);
-    assert_eq!(pending_inputs(&c).unwrap().len(), 1); // FIFO admits only oldest input.
-}
-#[test]
-fn workflow_execution_send_is_atomic_and_retry_is_idempotent() {
-    let mut c = fixture(false, false);
-    let r = request(&c, "1", &[("direct", "Review this")]);
-    let first = send(&mut c, &r).unwrap();
-    let second = send(&mut c, &r).unwrap();
-    assert_eq!(first.id, second.id);
-    assert!(second.duplicate);
+    let mut changed = req.clone();
+    changed.messages[0].message = "different".into();
+    assert!(send(&mut c, &changed).is_err());
+    let invalid = request(&c, "bad", &[("b", "valid"), ("missing", "invalid")]);
+    assert!(send(&mut c, &invalid).is_err());
     assert_eq!(
         runtime_snapshot(&c, "instance", None).unwrap().inputs.len(),
-        1
-    );
-    let mut altered = r.clone();
-    altered.outputs[0].message = "Other".into();
-    assert!(send(&mut c, &altered).is_err());
-    let bad = request(&c, "2", &[("direct", "valid"), ("missing", "invalid")]);
-    assert!(send(&mut c, &bad).is_err());
-    assert_eq!(
-        runtime_snapshot(&c, "instance", None).unwrap().inputs.len(),
-        1
+        2
     );
 }
 #[test]
-fn workflow_execution_delivery_claim_stays_durable_across_disable_and_reenable() {
-    let mut c = fixture(false, false);
-    let r = request(&c, "1", &[("direct", "Review")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let id = &receipt.input_ids[0];
-    c.execute(
-        "UPDATE workflow_instances SET enabled=0 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    assert!(!bind_input(&mut c, id, "receiver", "msg").unwrap());
-    c.execute(
-        "UPDATE workflow_instances SET enabled=1 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    assert!(bind_input(&mut c, id, "receiver", "msg").unwrap());
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    assert!(!bind_input(&mut c, id, "different", "msg-2").unwrap());
-    assert_eq!(bound_inputs(&c, "receiver").unwrap().len(), 1);
-    assert!(mark_applied(&mut c, id).is_err()); // A claim alone is not a model receipt.
-    let input = load_input(&c, id).unwrap().unwrap();
-    let target = conversation(&c, "b");
-    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('received',?1,'assistant','',1,0)",[&target]).unwrap();
-    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('received',?1,'receiver',1,'in_progress',0,1,1)",[&target]).unwrap();
-    let proof = json!({"type":"workflow_delivery","sequence":0,"inputId":id,"instanceId":input.instance_id,"workflowName":"Review workflow","content":input.content,"createdAt":input.created_at,"truncated":false});
-    c.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES ('received',0,'workflow_delivery',?1)",[proof.to_string()]).unwrap();
-    mark_applied(&mut c, id).unwrap();
-    mark_applied(&mut c, id).unwrap();
-    assert_eq!(
-        load_input(&c, id).unwrap().unwrap().status,
-        InputStatus::Applied
+fn workflow_execution_idle_fifo_and_explicit_accept_are_separate() {
+    let mut c = fixture(false);
+    let receipt = send_mail(
+        &mut c,
+        "send",
+        &[("b", "oldest"), ("b", "later"), ("b", "last")],
     );
-}
-#[test]
-fn workflow_execution_user_completion_has_no_downstream_send() {
-    let mut c = fixture(false, true);
-    let r = request(&c, "1", &[("direct", "Inspect this")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let id = &receipt.input_ids[0];
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    assert_eq!(
-        load_input(&c, id).unwrap().unwrap().status,
-        InputStatus::WaitingUser
-    );
-    complete_user_input(&mut c, id).unwrap();
-    complete_user_input(&mut c, id).unwrap();
-    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
-    assert_eq!(snapshot.inputs.len(), 1);
-    assert_eq!(snapshot.inputs[0].status, InputStatus::Completed);
-    assert_eq!(
-        snapshot.events.iter().filter(|e| e.kind == "sent").count(),
-        1
-    );
-}
-#[test]
-fn workflow_execution_stale_graph_and_stopped_conversation_do_not_auto_run() {
-    let mut c = fixture(false, false);
-    let r = request(&c, "1", &[("direct", "Review")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let chat = conversation(&c, "b");
-    pause_conversation(&mut c, &chat).unwrap();
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    assert_eq!(
-        load_input(&c, &receipt.input_ids[0])
-            .unwrap()
-            .unwrap()
-            .status,
-        InputStatus::Paused
-    );
-    resume_conversation(&mut c, &chat).unwrap();
-    assert_eq!(pending_inputs(&c).unwrap().len(), 1);
-    invalidate_instance(&c, "instance", "bindings changed").unwrap();
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    assert_eq!(
-        load_input(&c, &receipt.input_ids[0])
-            .unwrap()
-            .unwrap()
-            .status,
-        InputStatus::Invalidated
-    );
-    c.execute(
-        "UPDATE workflow_instances SET template_revision=2 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    let mut stale = r;
-    stale.tool_call_id = "2".into();
-    assert!(send(&mut c, &stale).is_err());
-}
-#[test]
-fn workflow_execution_run_without_identity_cannot_gain_it_mid_turn() {
-    let mut c = fixture(false, false);
-    let chat = conversation(&c, "a");
-    c.execute(
-        "UPDATE workflow_instances SET enabled=0 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    assert!(bind_run(&mut c, &chat, "no-workflow").unwrap().is_none());
-    c.execute(
-        "UPDATE workflow_instances SET enabled=1 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    assert!(bind_run(&mut c, &chat, "no-workflow").unwrap().is_none());
-    assert!(bind_run(&mut c, &chat, "run").unwrap().is_some());
-}
-#[test]
-fn workflow_execution_output_gate_rules_cover_all_presets_and_custom_groups() {
-    let available = vec!["a".into(), "b".into(), "c".into()];
-    for (mode, min, max, chosen, expected) in [
-        (crate::workflow::Mode::All, 0, 0, vec!["a"], false),
-        (crate::workflow::Mode::All, 0, 0, vec!["a", "b", "c"], true),
-        (crate::workflow::Mode::One, 0, 0, vec!["a", "b"], false),
-        (crate::workflow::Mode::Any, 0, 0, vec!["a", "c"], true),
-        (crate::workflow::Mode::Exact, 2, 0, vec!["b", "c"], true),
-        (
-            crate::workflow::Mode::Range,
-            1,
-            2,
-            vec!["a", "b", "c"],
-            false,
-        ),
-    ] {
-        let rule = Rule {
-            mode,
-            min,
-            max,
-            required: vec![],
-            groups: vec![],
-        };
-        assert_eq!(
-            validate_selection(
-                Some(&rule),
-                &available,
-                &chosen.into_iter().map(str::to_owned).collect::<Vec<_>>()
-            )
-            .is_ok(),
-            expected
-        );
-    }
-    let rule = Rule {
-        mode: crate::workflow::Mode::Custom,
-        min: 0,
-        max: 0,
-        required: vec!["a".into()],
-        groups: vec![crate::workflow::Group {
-            id: "choice".into(),
-            flow_ids: vec!["b".into(), "c".into()],
-            min: 1,
-            max: 1,
-        }],
-    };
-    assert!(validate_selection(Some(&rule), &available, &["a".into(), "c".into()]).is_ok());
-    assert!(validate_selection(Some(&rule), &available, &available).is_err());
-}
-
-#[test]
-fn workflow_execution_stop_blocks_new_sends_but_preserves_successful_retry_receipt() {
-    let mut c = fixture(false, false);
-    let accepted = request(&c, "before-stop", &[("direct", "Accepted")]);
-    send(&mut c, &accepted).unwrap();
-    let rejected = request(&c, "after-stop", &[("direct", "Do not forward")]);
-    let source = conversation(&c, "a");
-    pause_conversation(&mut c, &source).unwrap();
-    assert!(send(&mut c, &rejected).unwrap_err().contains("stopped"));
-    assert!(send(&mut c, &accepted).unwrap().duplicate);
-}
-#[test]
-fn workflow_execution_monitor_is_lightweight_and_keeps_pending_users_after_history() {
-    let mut c = fixture(false, true);
-    let first = request(&c, "old-wait", &[("direct", "Private incoming body")]);
-    let oldest = send(&mut c, &first).unwrap().input_ids[0].clone();
-    for index in 0..140 {
-        let r = request(&c, &format!("later-{index}"), &[("direct", "Later task")]);
-        let id = send(&mut c, &r).unwrap().input_ids[0].clone();
-        complete_user_input(&mut c, &id).unwrap();
-    }
-    let view = runtime_snapshot(&c, "instance", None).unwrap();
-    assert!(view
-        .inputs
-        .iter()
-        .any(|i| i.id == oldest && i.status == InputStatus::WaitingUser));
-    assert_eq!(view.inputs[0].id, oldest);
-    assert!(view
-        .inputs
-        .iter()
-        .all(|i| i.content.is_empty() && i.messages.iter().all(|m| m.content.is_empty())));
-    assert!(load_input(&c, &oldest)
-        .unwrap()
-        .unwrap()
-        .content
-        .contains("Private incoming body"));
-}
-
-#[test]
-fn workflow_execution_snapshot_and_envelope_explain_downstream_intake() {
-    for (batch, user) in [(false, false), (true, false), (false, true), (true, true)] {
-        let c = fixture(batch, user);
-        let source = conversation(&c, "a");
-        let snapshot = snapshot_for_conversation(&c, &source).unwrap().unwrap();
-        let rule = &snapshot.outputs[0].input_rule;
-        if batch {
-            assert!(rule.contains("waits for every incoming flow"));
-        } else {
-            assert!(rule.contains("Each incoming message"));
-        }
-        if user {
-            assert!(rule.contains("user to confirm completion"));
-            assert!(rule.contains("never sends a downstream message automatically"));
-        } else if batch {
-            assert!(rule.contains("next safe input boundary"));
-        } else {
-            assert!(rule.contains("FIFO order until the current task finishes"));
-        }
-        let body = assemble_message(&snapshot, &[]);
-        assert!(body.contains(rule));
-        let wire = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(
-            wire["outputs"][0]["inputRule"].as_str(),
-            Some(rule.as_str())
-        );
-    }
-}
-
-#[test]
-fn workflow_execution_discard_is_explicit_idempotent_and_releases_fifo_without_replay() {
-    let mut c = fixture(false, false);
-    let first = request(&c, "first", &[("direct", "Ambiguous delivery")]);
-    let first = send(&mut c, &first).unwrap().input_ids[0].clone();
-    let second = request(&c, "second", &[("direct", "Next delivery")]);
-    let second = send(&mut c, &second).unwrap().input_ids[0].clone();
-    assert!(discard_failed(&mut c, &first).is_err());
-    assert!(bind_input(&mut c, &first, "lost-run", "lost-message").unwrap());
-    fail_input(&mut c, &first, "Delivery outcome unknown").unwrap();
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    c.execute(
-        "UPDATE workflow_instances SET enabled=0 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    discard_failed(&mut c, &first).unwrap();
-    discard_failed(&mut c, &first).unwrap();
-    let skipped = load_input(&c, &first).unwrap().unwrap();
-    assert_eq!(skipped.status, InputStatus::Invalidated);
-    assert_eq!(skipped.error.as_deref(), Some("Delivery outcome unknown"));
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    c.execute(
-        "UPDATE workflow_instances SET enabled=1 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
+    start_run(&mut c, "b", "run-b");
     assert_eq!(
         pending_inputs(&c)
             .unwrap()
             .iter()
-            .map(|i| i.id.as_str())
+            .map(|i| &i.id)
             .collect::<Vec<_>>(),
-        [second.as_str()]
+        vec![&receipt.input_ids[0]]
+    );
+    assert!(!bind_input(&mut c, &receipt.input_ids[1], "run-b", "auto-later").unwrap());
+    let req = action(
+        &c,
+        "b",
+        "run-b",
+        "accept-later",
+        MutationAction::Accept,
+        &[receipt.messages[1].id.clone()],
+    );
+    let result = mutate(&mut c, &req).unwrap();
+    assert_eq!(result["messages"][0]["success"], true);
+    assert_eq!(result["messages"][0]["content"], "later");
+    assert_eq!(mutate(&mut c, &req).unwrap(), result);
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processing);
+    assert_eq!(bound_inputs(&c, "run-b").unwrap().len(), 1);
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Pending);
+    assert!(bind_input(&mut c, &receipt.input_ids[0], "run-b", "auto-oldest").unwrap());
+    assert_eq!(bound_inputs(&c, "run-b").unwrap().len(), 2);
+}
+#[test]
+fn workflow_execution_completion_requires_durable_context_and_never_regresses() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "work")]);
+    start_run(&mut c, "b", "run-b");
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &[receipt.messages[0].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    let incomplete = action(
+        &c,
+        "b",
+        "run-b",
+        "complete-too-soon",
+        MutationAction::Complete,
+        &[receipt.messages[0].id.clone()],
+    );
+    assert_eq!(
+        mutate(&mut c, &incomplete).unwrap()["messages"][0]["success"],
+        false
+    );
+    assert!(mark_applied(&mut c, &receipt.input_ids[0]).is_err());
+    prove(&c, &receipt.input_ids[0]);
+    let complete = action(
+        &c,
+        "b",
+        "run-b",
+        "complete",
+        MutationAction::Complete,
+        &[receipt.messages[0].id.clone()],
+    );
+    assert_eq!(
+        mutate(&mut c, &complete).unwrap()["messages"][0]["status"],
+        "processed"
+    );
+    mark_applied(&mut c, &receipt.input_ids[0]).unwrap();
+    settle_run(&c, "run-b", "failed").unwrap();
+    settle_run(&c, "run-b", "cancelled").unwrap();
+    fail_input(&mut c, &receipt.input_ids[0], "late error").unwrap();
+    recover_claims(&mut c).unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
+    assert_eq!(
+        load_input(&c, &receipt.input_ids[0])
+            .unwrap()
+            .unwrap()
+            .status,
+        InputStatus::Completed
+    );
+}
+#[test]
+fn workflow_execution_stop_pauses_pending_without_turning_it_into_stopped_mail() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "current"), ("b", "future")]);
+    start_run(&mut c, "b", "run-b");
+    bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
+    prove(&c, &receipt.input_ids[0]);
+    let chat = conversation(&c, "b");
+    pause_conversation(&mut c, &chat).unwrap();
+    settle_run(&c, "run-b", "cancelled").unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Stopped);
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Pending);
+    assert!(pending_inputs(&c).unwrap().is_empty());
+    resume_conversation(&mut c, &chat).unwrap();
+    assert_eq!(pending_inputs(&c).unwrap()[0].id, receipt.input_ids[1]);
+}
+#[test]
+fn workflow_execution_terminal_failure_releases_fifo_and_normal_completion_is_durable() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "fails"), ("b", "next")]);
+    start_run(&mut c, "b", "run-b");
+    bind_input(&mut c, &receipt.input_ids[0], "run-b", "first").unwrap();
+    settle_run(&c, "run-b", "failed").unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Failed);
+    assert_eq!(pending_inputs(&c).unwrap()[0].id, receipt.input_ids[1]);
+    c.execute(
+        "UPDATE conversation_turn_traces SET terminal_status='failed',completed_at=2 WHERE run_id='run-b'",
+        [],
+    )
+    .unwrap();
+    start_run(&mut c, "b", "run-next");
+    bind_input(&mut c, &receipt.input_ids[1], "run-next", "next").unwrap();
+    prove(&c, &receipt.input_ids[1]);
+    settle_run(&c, "run-next", "completed").unwrap();
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processed);
+}
+#[test]
+fn workflow_execution_recall_is_sender_only_and_cannot_win_after_accept() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "retract"), ("b", "already taken")]);
+    start_run(&mut c, "b", "run-b");
+    start_run(&mut c, "c", "run-c");
+    let wrong = action(
+        &c,
+        "c",
+        "run-c",
+        "not-owner",
+        MutationAction::Recall,
+        &[receipt.messages[0].id.clone()],
+    );
+    let result = mutate(&mut c, &wrong).unwrap();
+    assert_eq!(result["messages"][0]["success"], false);
+    assert!(result["messages"][0].get("content").is_none());
+    let recall = action(
+        &c,
+        "a",
+        "run-a",
+        "recall",
+        MutationAction::Recall,
+        &[receipt.messages[0].id.clone()],
+    );
+    let recalled = mutate(&mut c, &recall).unwrap();
+    assert_eq!(recalled["messages"][0]["status"], "recalled");
+    assert_eq!(mutate(&mut c, &recall).unwrap(), recalled);
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &[receipt.messages[1].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    let late = action(
+        &c,
+        "a",
+        "run-a",
+        "too-late",
+        MutationAction::Recall,
+        &[receipt.messages[1].id.clone()],
+    );
+    assert_eq!(
+        mutate(&mut c, &late).unwrap()["messages"][0]["success"],
+        false
     );
     let events = runtime_snapshot(&c, "instance", None).unwrap().events;
+    let event = events.iter().find(|e| e.kind == "recalled").unwrap();
+    assert_eq!(event.source_node_id.as_deref(), Some("b"));
+    assert_eq!(event.target_node_id.as_deref(), Some("a"));
+}
+#[test]
+fn workflow_execution_recovery_does_not_complete_unproven_claims() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "not received")]);
+    start_run(&mut c, "b", "run-b");
+    bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
+    c.execute(
+        "UPDATE conversation_turn_traces SET terminal_status='completed',completed_at=2 WHERE run_id='run-b'",
+        [],
+    )
+    .unwrap();
+    recover_claims(&mut c).unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Failed);
+}
+#[test]
+fn workflow_execution_user_completion_is_idempotent_and_does_not_send() {
+    let mut c = fixture(true);
+    let receipt = send_mail(&mut c, "send", &[("human", "Review this")]);
+    assert!(pending_inputs(&c).unwrap().is_empty());
+    complete_user_input(&mut c, &receipt.input_ids[0]).unwrap();
+    complete_user_input(&mut c, &receipt.input_ids[0]).unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
     assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.kind == "discarded" && e.input_id.as_deref() == Some(&first))
-            .count(),
+        runtime_snapshot(&c, "instance", None).unwrap().inputs.len(),
         1
     );
-    // Log retention never changes the operation's idempotent result.
-    c.execute(
-        "DELETE FROM workflow_execution_events WHERE kind='discarded'",
-        [],
-    )
-    .unwrap();
-    discard_failed(&mut c, &first).unwrap();
-    assert_eq!(
-        runtime_snapshot(&c, "instance", None)
-            .unwrap()
-            .events
-            .iter()
-            .filter(|e| e.kind == "discarded")
-            .count(),
-        0
-    );
-    assert!(discard_failed(&mut c, &second).is_err());
 }
-
 #[test]
-fn workflow_execution_completion_receipt_updates_unread_once_and_keeps_old_referenced_inputs() {
-    let mut c = fixture(false, false);
-    let first = request(&c, "applied", &[("direct", "Long-running task")]);
-    let first = send(&mut c, &first).unwrap().input_ids[0].clone();
-    assert!(bind_input(&mut c, &first, "long-run", "long-message").unwrap());
-    let mut applied = load_input(&c, &first).unwrap().unwrap();
-    applied.status = InputStatus::Applied;
+fn workflow_execution_epoch_changes_keep_mail_but_rebinding_fences_original_recipient() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "keep me")]);
+    c.execute("UPDATE workflow_instances SET template_revision=template_revision+1 WHERE instance_id='instance'",[]).unwrap();
     c.execute(
-        "UPDATE workflow_execution_inputs SET input_json=?1,status='applied' WHERE input_id=?2",
-        params![json(&applied).unwrap(), applied.id],
-    )
-    .unwrap();
-    let target = conversation(&c, "b");
-    let failed = request(&c, "failed", &[("direct", "Do not hide this diagnostic")]);
-    let failed = send(&mut c, &failed).unwrap().input_ids[0].clone();
-    fail_input(&mut c, &failed, "Ambiguous dispatch outcome").unwrap();
-    // More than the historical tail and event page arrive while the first input is running.
-    for index in 0..270 {
-        let r = request(
-            &c,
-            &format!("later-{index}"),
-            &[("direct", "Later completed history")],
-        );
-        let id = send(&mut c, &r).unwrap().input_ids[0].clone();
-        let mut input = load_input(&c, &id).unwrap().unwrap();
-        input.status = InputStatus::Invalidated;
-        c.execute("UPDATE workflow_execution_inputs SET input_json=?1,status='invalidated' WHERE input_id=?2",params![json(&input).unwrap(),input.id]).unwrap();
-        event(&c, "instance", None, &[], "completed").unwrap();
-    }
-    let before = runtime_snapshot(&c, "instance", None).unwrap();
-    assert!(!before.inputs.iter().any(|i| i.id == first));
-    assert!(before
-        .inputs
-        .iter()
-        .any(|i| i.id == failed && i.status == InputStatus::Failed));
-    c.execute(
-        "UPDATE conversations SET unread_at=NULL WHERE id=?1",
-        [&target],
-    )
-    .unwrap();
-    mark_run_unread(&mut c, "long-run").unwrap();
-    let view = runtime_snapshot(&c, "instance", Some(before.sequence)).unwrap();
-    assert_eq!(view.events.len(), 1);
-    assert_eq!(view.events[0].kind, "run_completed");
-    assert_eq!(view.events[0].input_id.as_deref(), Some(first.as_str()));
-    assert!(view.inputs.iter().any(|i| i.id == first
-        && i.content.is_empty()
-        && i.conversation_id.as_deref() == Some(&target)));
-    let unread: Option<i64> = c
-        .query_row(
-            "SELECT unread_at FROM conversations WHERE id=?1",
-            [&target],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(unread.is_some());
-    // After the user reads it, a repeated terminal callback must not mark it unread again.
-    c.execute(
-        "UPDATE conversations SET unread_at=NULL WHERE id=?1",
-        [&target],
-    )
-    .unwrap();
-    c.execute(
-        "DELETE FROM workflow_execution_events WHERE kind='run_completed'",
+        "UPDATE workflow_definitions SET revision=revision+1 WHERE workflow_id='template'",
         [],
     )
     .unwrap();
-    mark_run_unread(&mut c, "long-run").unwrap();
-    let unread: Option<i64> = c
-        .query_row(
-            "SELECT unread_at FROM conversations WHERE id=?1",
-            [&target],
-            |r| r.get(0),
+    assert_eq!(pending_inputs(&c).unwrap()[0].id, receipt.input_ids[0]);
+    start_run(&mut c, "b", "run-b");
+    let b = conversation(&c, "b");
+    let inbox = mailbox_for_run(&c, &b, "run-b", &MailboxQuery::default()).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "keep me");
+    let replacement = conversation(&c, "c");
+    c.execute(
+        "DELETE FROM workflow_instance_bindings WHERE node_id='c'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE workflow_instance_bindings SET conversation_id=?1 WHERE node_id='b'",
+        [&replacement],
+    )
+    .unwrap();
+    reconcile_recipients(&c, "instance").unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Failed);
+    assert!(pending_inputs(&c).unwrap().is_empty());
+    start_run(&mut c, "b", "run-rebound");
+    assert!(
+        mailbox_for_run(&c, &replacement, "run-rebound", &MailboxQuery::default()).unwrap()
+            ["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+#[test]
+fn workflow_execution_stop_rejects_new_mutation_but_retry_keeps_success_receipt() {
+    let mut c = fixture(false);
+    let req = request(&c, "send", &[("b", "delivered")]);
+    let receipt = send(&mut c, &req).unwrap();
+    let chat = conversation(&c, "a");
+    pause_conversation(&mut c, &chat).unwrap();
+    assert_eq!(send(&mut c, &req).unwrap().id, receipt.id);
+    let another = request(&c, "other", &[("b", "blocked")]);
+    assert!(send(&mut c, &another).is_err());
+}
+#[test]
+fn workflow_execution_reply_reference_must_belong_to_both_participants() {
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "question")]);
+    let mut req = request(&c, "reply", &[("c", "private reply")]);
+    req.messages[0].reply_to_message_id = Some(receipt.messages[0].id.clone());
+    assert!(send(&mut c, &req).is_err());
+    req.messages[0].target_node_id = "b".into();
+    assert!(send(&mut c, &req).is_ok());
+}
+#[test]
+fn workflow_execution_terminal_trace_settlement_is_atomic_and_preserves_explicit_completion() {
+    use crate::storage::conversation_trace_repository::{
+        commit_trace_in_connection, get_base_trace_for_message,
+    };
+    use crate::ConversationTurnTraceTerminalStatus;
+    let mut c = fixture(false);
+    let receipt = send_mail(
+        &mut c,
+        "send",
+        &[("b", "finish automatically"), ("b", "finish explicitly")],
+    );
+    start_run(&mut c, "b", "run-b");
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &receipt
+            .messages
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>(),
+    );
+    mutate(&mut c, &accept).unwrap();
+    for input in &receipt.input_ids {
+        prove(&c, input);
+        mark_applied(&mut c, input).unwrap();
+    }
+    let complete = action(
+        &c,
+        "b",
+        "run-b",
+        "complete",
+        MutationAction::Complete,
+        &[receipt.messages[1].id.clone()],
+    );
+    mutate(&mut c, &complete).unwrap();
+    let mut trace = get_base_trace_for_message(&c, "run-b").unwrap().unwrap();
+    trace.terminal_status = ConversationTurnTraceTerminalStatus::Completed;
+    {
+        let tx = c.transaction().unwrap();
+        commit_trace_in_connection(&tx, &trace, 1, 2).unwrap();
+        assert_eq!(
+            load_input(&tx, &receipt.input_ids[0])
+                .unwrap()
+                .unwrap()
+                .mail_status,
+            MailStatus::Processed
+        );
+        tx.rollback().unwrap();
+    }
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processing);
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processed);
+    {
+        let tx = c.transaction().unwrap();
+        commit_trace_in_connection(&tx, &trace, 1, 2).unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
+    // A late terminal callback cannot undo work explicitly completed in this turn.
+    settle_run(&c, "run-b", "cancelled").unwrap();
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processed);
+}
+#[test]
+fn workflow_execution_claim_uses_current_context_without_rewriting_original_envelope() {
+    let mut c = fixture(false);
+    let receipt = send_mail(
+        &mut c,
+        "send",
+        &[("b", "original body"), ("b", "manual body")],
+    );
+    let mut definition: Value = serde_json::from_str(
+        &c.query_row(
+            "SELECT definition_json FROM workflow_definitions WHERE workflow_id='template'",
+            [],
+            |r| r.get::<_, String>(0),
         )
-        .unwrap();
-    assert!(unread.is_none());
-    assert!(!runtime_snapshot(&c, "instance", None)
+        .unwrap(),
+    )
+    .unwrap();
+    definition["nodes"][1]["name"] = json!("New recipient");
+    c.execute("UPDATE workflow_definitions SET definition_json=?1,revision=revision+1 WHERE workflow_id='template'",[definition.to_string()]).unwrap();
+    c.execute("UPDATE workflow_instances SET name='Renamed workflow',template_revision=template_revision+1 WHERE instance_id='instance'",[]).unwrap();
+    start_run(&mut c, "b", "run-b");
+    bind_input(&mut c, &receipt.input_ids[0], "run-b", "initial").unwrap();
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &[receipt.messages[1].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    for id in &receipt.input_ids {
+        let input = load_input(&c, id).unwrap().unwrap();
+        assert!(input.content.contains("Recipient: New recipient"));
+        assert!(input.content.contains("Workflow: Renamed workflow"));
+        assert_eq!(input.messages[0].workflow_name, "Review workflow");
+        assert_eq!(input.messages[0].target_node_name, "b");
+        prove(&c, id);
+        mark_applied(&mut c, id).unwrap();
+    }
+}
+#[test]
+fn workflow_execution_manual_completion_gets_one_later_terminal_refresh_event() {
+    use crate::storage::conversation_trace_repository::{
+        get_base_trace_for_message, replace_trace,
+    };
+    use crate::ConversationTurnTraceTerminalStatus;
+    let mut c = fixture(false);
+    let receipt = send_mail(&mut c, "send", &[("b", "work before final answer")]);
+    start_run(&mut c, "b", "run-b");
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &[receipt.messages[0].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    prove(&c, &receipt.input_ids[0]);
+    let complete = action(
+        &c,
+        "b",
+        "run-b",
+        "complete",
+        MutationAction::Complete,
+        &[receipt.messages[0].id.clone()],
+    );
+    mutate(&mut c, &complete).unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
+    mark_run_unread(&mut c, "run-b").unwrap();
+    assert!(runtime_snapshot(&c, "instance", None)
         .unwrap()
         .events
         .iter()
-        .any(|e| e.kind == "run_completed"));
-}
-
-#[test]
-fn workflow_execution_monitor_reports_partial_batches_pauses_and_paginated_bodies() {
-    let mut c = fixture(true, false);
-    let chat = conversation(&c, "b");
-    let initial = runtime_snapshot(&c, "instance", None).unwrap();
-    pause_conversation(&mut c, &chat).unwrap();
-    let paused = runtime_snapshot(&c, "instance", Some(initial.sequence)).unwrap();
-    assert!(paused.sequence > initial.sequence);
-    assert_eq!(paused.paused_conversation_ids, vec![chat.clone()]);
-    for index in 0..23 {
-        let r = request(
-            &c,
-            &format!("left-{index}"),
-            &[("left", &format!("body-{index}"))],
-        );
-        send(&mut c, &r).unwrap();
-    }
+        .all(|event| event.kind != "run_completed"));
+    let mut trace = get_base_trace_for_message(&c, "run-b").unwrap().unwrap();
+    trace.terminal_status = ConversationTurnTraceTerminalStatus::Completed;
+    replace_trace(&mut c, &trace, 1, 2).unwrap();
+    mark_run_unread(&mut c, "run-b").unwrap();
     let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
-    assert_eq!(snapshot.pending_messages.len(), 23);
-    assert!(snapshot
-        .pending_messages
+    let completed: Vec<_> = snapshot
+        .events
         .iter()
-        .all(|m| m.content.is_empty()));
-    assert!(snapshot.inputs.is_empty());
-    let first = node_messages(&c, "instance", "b", None).unwrap();
-    assert_eq!(first.messages.len(), 20);
-    assert_eq!(first.messages[0].message.content, "body-22");
-    assert_eq!(first.messages[0].status, "collecting");
-    let second = node_messages(&c, "instance", "b", first.next_before_sequence).unwrap();
-    assert_eq!(second.messages.len(), 3);
-    assert!(second.next_before_sequence.is_none());
-    assert!(node_messages(&c, "instance", "a", None)
-        .unwrap()
-        .messages
-        .is_empty());
-    assert!(node_messages(&c, "other-instance", "b", None).is_err());
-    assert!(node_messages(&c, "instance", "missing-node", None).is_err());
-    let r = request(&c, "right", &[("right", "partner")]);
-    send(&mut c, &r).unwrap();
-    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
-    assert_eq!(snapshot.pending_messages.len(), 22);
-    assert_eq!(snapshot.inputs.len(), 1);
-    assert_eq!(snapshot.inputs[0].status, InputStatus::Paused);
-    assert_eq!(snapshot.inputs[0].messages.len(), 2);
-    assert!(pending_inputs(&c).unwrap().is_empty());
-    resume_conversation(&mut c, &chat).unwrap();
-    let resumed = runtime_snapshot(&c, "instance", Some(snapshot.sequence)).unwrap();
-    assert!(resumed.sequence > snapshot.sequence);
-    assert!(resumed.paused_conversation_ids.is_empty());
-    assert_eq!(resumed.inputs[0].status, InputStatus::Pending);
-}
-
-#[test]
-fn workflow_execution_monitor_keeps_cancelled_run_distinct_from_completed_delivery() {
-    let mut c = fixture(false, false);
-    let r = request(&c, "delivery", &[("direct", "review body")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let chat = conversation(&c, "b");
-    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('target-assistant',?1,'assistant','',1,0)", [&chat]).unwrap();
-    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at,completed_at) VALUES ('target-assistant',?1,'target-run',1,'cancelled',0,1,1,2)", [&chat]).unwrap();
-    let mut input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
-    input.run_id = Some("target-run".into());
-    input.status = InputStatus::Applied;
-    c.execute("UPDATE workflow_execution_inputs SET status='applied',run_id='target-run',input_json=?1 WHERE input_id=?2", params![json(&input).unwrap(), input.id]).unwrap();
-    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
-    assert_eq!(snapshot.inputs[0].status, InputStatus::Applied);
-    assert_eq!(snapshot.input_runs[0].status, "cancelled");
-    let history = node_messages(&c, "instance", "b", None).unwrap();
-    assert_eq!(history.messages[0].status, "applied");
-    assert_eq!(history.messages[0].run_status.as_deref(), Some("cancelled"));
-    assert_eq!(history.messages[0].message.content, "review body");
-}
-
-fn insert_synthetic_input(c: &Connection, input: &Input) {
-    c.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,1,1)",params![input.id,input.instance_id,input.execution_version,input.node_id,input.conversation_id,json(input).unwrap(),status_name(&input.status)]).unwrap();
-}
-
-#[test]
-fn workflow_exact_injection_escapes_global_128_but_preserves_run_identity_and_fifo() {
-    let mut c = fixture(true, false);
-    let r = request(&c, "1", &[("left", "one"), ("right", "two")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
-    c.execute(
-        "DELETE FROM workflow_execution_inputs WHERE input_id=?1",
-        [&input.id],
-    )
-    .unwrap();
-    for index in 0..1000 {
-        let mut other = input.clone();
-        other.id = format!("blocked-{index}");
-        other.conversation_id = Some(format!("other-{index}"));
-        insert_synthetic_input(&c, &other);
-    }
-    insert_synthetic_input(&c, &input);
-    let target = conversation(&c, "b");
-    bind_run(&mut c, &target, "receiver").unwrap();
-    assert!(
-        pending_inputs(&c).unwrap().is_empty(),
-        "old global page masks this recipient"
-    );
+        .filter(|event| event.kind == "run_completed")
+        .collect();
+    assert_eq!(completed.len(), 1);
     assert_eq!(
-        pending_injection(&c, &target, "receiver")
-            .unwrap()
-            .unwrap()
-            .id,
-        input.id
+        completed[0].input_id.as_deref(),
+        Some(receipt.input_ids[0].as_str())
     );
-    assert!(pending_injection(&c, &target, "unbound-run")
-        .unwrap()
-        .is_none());
-    pause_conversation(&mut c, &target).unwrap();
-    assert!(pending_injection(&c, &target, "receiver")
-        .unwrap()
-        .is_none());
-    resume_conversation(&mut c, &target).unwrap();
-    assert!(bind_input(&mut c, &input.id, "receiver", "delivery").unwrap());
-    assert!(bind_input(&mut c, &input.id, "receiver", "delivery").unwrap());
-    let mut later = input.clone();
-    later.id = "later".into();
-    insert_synthetic_input(&c, &later);
-    assert!(
-        pending_injection(&c, &target, "receiver")
-            .unwrap()
-            .is_none(),
-        "claimed FIFO head blocks later injection"
+    assert!(completed[0].source_node_id.is_none() && completed[0].target_node_id.is_none());
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
+    assert_eq!(
+        c.query_row(
+            "SELECT completion_notified FROM workflow_mail_inputs WHERE input_id=?1",
+            [&receipt.input_ids[0]],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
     );
-    c.execute(
-        "UPDATE workflow_instances SET enabled=0 WHERE instance_id='instance'",
-        [],
-    )
-    .unwrap();
-    assert!(pending_injection(&c, &target, "receiver")
-        .unwrap()
-        .is_none());
-    assert!(!bind_input(&mut c, &later.id, "receiver", "later-delivery").unwrap());
+    mark_run_unread(&mut c, "run-b").unwrap();
+    assert_eq!(
+        runtime_snapshot(&c, "instance", None).unwrap().sequence,
+        snapshot.sequence
+    );
 }
-
 #[test]
-fn workflow_candidate_pages_advance_across_ineligible_heads_without_decoding_history() {
-    let mut c = fixture(false, false);
-    let r = request(&c, "1", &[("direct", "ready after old failures")]);
-    let receipt = send(&mut c, &r).unwrap();
-    let input = load_input(&c, &receipt.input_ids[0]).unwrap().unwrap();
-    c.execute(
-        "DELETE FROM workflow_execution_inputs WHERE input_id=?1",
-        [&input.id],
-    )
-    .unwrap();
-    for index in 0..1000 {
-        let mut other = input.clone();
-        other.id = format!("old-{index}");
-        other.conversation_id = Some(format!("old-owner-{index}"));
-        insert_synthetic_input(&c, &other);
-    }
-    insert_synthetic_input(&c, &input);
-    let mut cursor = 0;
-    let mut ids = Vec::new();
-    let mut pages = 0;
-    loop {
-        let page = pending_candidates(&c, cursor, 128).unwrap();
-        pages += 1;
-        assert!(page.len() <= 128);
-        if let Some(last) = page.last() {
-            cursor = last.sequence;
+fn workflow_execution_snapshot_includes_old_event_references_without_unbounded_history_or_bodies() {
+    use crate::storage::conversation_trace_repository::{
+        get_base_trace_for_message, replace_trace,
+    };
+    use crate::ConversationTurnTraceTerminalStatus;
+    let mut c = fixture(true);
+    let receipt = send_mail(&mut c, "old-mail", &[("b", "private original body")]);
+    start_run(&mut c, "b", "run-b");
+    let accept = action(
+        &c,
+        "b",
+        "run-b",
+        "accept",
+        MutationAction::Accept,
+        &[receipt.messages[0].id.clone()],
+    );
+    mutate(&mut c, &accept).unwrap();
+    prove(&c, &receipt.input_ids[0]);
+    let complete = action(
+        &c,
+        "b",
+        "run-b",
+        "complete",
+        MutationAction::Complete,
+        &[receipt.messages[0].id.clone()],
+    );
+    mutate(&mut c, &complete).unwrap();
+    // Completed history is deliberately larger than the normal 128-row monitor window.
+    for call in ["newer-1", "newer-2"] {
+        let newer = send_mail(&mut c, call, &vec![("human", "other private body"); 80]);
+        for input in newer.input_ids {
+            complete_user_input(&mut c, &input).unwrap();
         }
-        ids.extend(page.iter().map(|p| p.id.clone()));
-        if page.len() < 128 {
-            break;
-        }
     }
-    assert_eq!(ids.len(), 1001);
-    assert_eq!(ids.last(), Some(&input.id));
-    assert_eq!(pages, 8);
-    assert!(eligible_pending_input(&c, &ids[0]).unwrap().is_none());
-    assert!(eligible_pending_input(&c, &input.id).unwrap().is_some());
-    let mut plan = c
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            delivery::PENDING_CANDIDATES_SQL
-        ))
-        .unwrap();
-    let rows = plan
-        .query_map(params![0, 128], |r| r.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    println!("workflow candidate EXPLAIN: {}", rows.join(" | "));
-    assert!(rows.iter().any(
-        |r| r.contains("workflow_execution_input_pending_sequence") && r.contains("sequence>?")
-    ));
-    assert!(rows
+    let boundary = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    let before = runtime_snapshot(&c, "instance", Some(boundary)).unwrap();
+    assert_eq!(before.inputs.len(), 128);
+    assert!(before
+        .inputs
         .iter()
-        .any(|r| r.contains("COVERING INDEX workflow_execution_input_queue")));
-    assert!(!rows.iter().any(|r| r.contains("TEMP B-TREE")));
+        .all(|input| input.id != receipt.input_ids[0]));
+    let mut trace = get_base_trace_for_message(&c, "run-b").unwrap().unwrap();
+    trace.terminal_status = ConversationTurnTraceTerminalStatus::Completed;
+    replace_trace(&mut c, &trace, 1, 2).unwrap();
+    mark_run_unread(&mut c, "run-b").unwrap();
+    let after = runtime_snapshot(&c, "instance", Some(boundary)).unwrap();
+    assert_eq!(after.events.len(), 1);
+    assert_eq!(after.events[0].kind, "run_completed");
+    assert_eq!(after.inputs.len(), 129);
+    assert!(after
+        .inputs
+        .iter()
+        .any(|input| input.id == receipt.input_ids[0]
+            && input.conversation_id == Some(conversation(&c, "b"))));
+    assert!(after.inputs.iter().all(|input| input.content.is_empty()
+        && input
+            .messages
+            .iter()
+            .all(|message| message.content.is_empty())));
+    let caught_up = runtime_snapshot(&c, "instance", Some(after.sequence)).unwrap();
+    assert!(caught_up.events.is_empty());
+    assert_eq!(caught_up.inputs.len(), 128);
 }

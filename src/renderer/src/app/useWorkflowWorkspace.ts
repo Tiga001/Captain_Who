@@ -161,12 +161,9 @@ export function useWorkflowWorkspace({
     }
     return { memberships, allMemberships }
   }, [instances])
-  /** Upstream and downstream bound agents, keyed by the conversation bound to the node. */
+  /** Other bound members, keyed by the active conversation. */
   const neighborNodes = useMemo(() => {
-    const neighbors: Record<
-      string,
-      { upstream: WorkflowNeighborNode[]; downstream: WorkflowNeighborNode[] }
-    > = {}
+    const neighbors: Record<string, WorkflowNeighborNode[]> = {}
     for (const instance of instances) {
       const definition = records.find(
         (record) => record.definition.id === instance.templateId
@@ -174,7 +171,7 @@ export function useWorkflowWorkspace({
       for (const binding of instance.bindings) {
         neighbors[binding.conversationId] = definition
           ? workflowNeighborNodes(definition, instance.bindings, binding.nodeId)
-          : { upstream: [], downstream: [] }
+          : []
       }
     }
     return neighbors

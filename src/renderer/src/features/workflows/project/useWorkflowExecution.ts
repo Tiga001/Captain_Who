@@ -1,12 +1,12 @@
 import type { WorkflowRuntimeEvent, WorkflowRuntimeSnapshot } from '@mycopilot/protocol'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { hostClient } from '../../../host/hostClient'
 import { requestWorkflows } from '../workflowClient'
 
-const FLOW_EVENT_KINDS = new Set(['sent', 'delivered', 'waiting_user'])
+const FLOW_EVENT_KINDS = new Set(['sent', 'recalled'])
 
 /** Notifications are durable facts, never a Renderer-side scheduler or inferred transmission. */
-export function useWorkflowExecution(instanceId: string) {
+export function useWorkflowExecution(instanceId: string, foreground = true) {
   const scope = useMemo(() => ({ instanceId }), [instanceId])
   const [snapshot, setSnapshot] = useState<{
     scope: typeof scope
@@ -16,6 +16,17 @@ export function useWorkflowExecution(instanceId: string) {
     scope: typeof scope
     events: WorkflowRuntimeEvent[]
   } | null>(null)
+  const foregroundRef = useRef(foreground)
+  const baselineRequiredRef = useRef(false)
+  const refreshRef = useRef<(() => void) | null>(null)
+  useLayoutEffect(() => {
+    if (foregroundRef.current !== foreground) baselineRequiredRef.current = true
+    foregroundRef.current = foreground
+  }, [foreground])
+  useEffect(() => {
+    if (!foreground) setTransmissions(null)
+    else refreshRef.current?.()
+  }, [foreground])
   const acceptRef = useRef<((value: WorkflowRuntimeSnapshot) => void) | null>(null)
 
   useEffect(() => {
@@ -24,25 +35,33 @@ export function useWorkflowExecution(instanceId: string) {
     let pending = false
     let dirty = false
     const timers = new Set<ReturnType<typeof setTimeout>>()
-    const accept = (value: WorkflowRuntimeSnapshot) => {
+    const accept = (value: WorkflowRuntimeSnapshot, baseline = false) => {
       if (
         disposed ||
         value.instanceId !== instanceId ||
-        (cursor !== null && value.sequence <= cursor)
+        (cursor !== null && value.sequence < cursor)
       )
         return
+      const suppressAnimation = baselineRequiredRef.current
+      if (baseline && foregroundRef.current && document.visibilityState !== 'hidden')
+        baselineRequiredRef.current = false
+      if (value.sequence === cursor) return
       const previousCursor = cursor
       cursor = value.sequence
       setSnapshot({ scope, value })
       // The initial snapshot is a baseline, so opening a diagram never replays its history.
       const fresh =
-        previousCursor === null
+        previousCursor === null ||
+        suppressAnimation ||
+        !foregroundRef.current ||
+        document.visibilityState === 'hidden'
           ? []
           : value.events.filter(
               (event) =>
                 event.sequence > previousCursor &&
                 FLOW_EVENT_KINDS.has(event.kind) &&
-                event.flowIds.length > 0 &&
+                event.sourceNodeId !== null &&
+                event.targetNodeId !== null &&
                 Date.now() - event.createdAt < 10_000
             )
       if (!fresh.length) return
@@ -75,7 +94,7 @@ export function useWorkflowExecution(instanceId: string) {
           instanceId,
           ...(cursor === null ? {} : { afterSequence: cursor })
         })
-        if (response.runtime) accept(response.runtime)
+        if (response.runtime) accept(response.runtime, true)
       } catch {
         /* Preserve the last known state; focus/polling retries only reads. */
       } finally {
@@ -90,18 +109,28 @@ export function useWorkflowExecution(instanceId: string) {
     const recover = () => {
       void refresh()
     }
+    refreshRef.current = recover
+    const visibilityChanged = () => {
+      if (document.visibilityState === 'hidden') {
+        baselineRequiredRef.current = true
+        setTransmissions(null)
+        timers.forEach(clearTimeout)
+        timers.clear()
+      } else recover()
+    }
     const interval = setInterval(recover, 5_000)
     window.addEventListener('focus', recover)
-    document.addEventListener('visibilitychange', recover)
+    document.addEventListener('visibilitychange', visibilityChanged)
     recover()
     return () => {
       disposed = true
       acceptRef.current = null
+      refreshRef.current = null
       unsubscribe?.()
       clearInterval(interval)
       timers.forEach(clearTimeout)
       window.removeEventListener('focus', recover)
-      document.removeEventListener('visibilitychange', recover)
+      document.removeEventListener('visibilitychange', visibilityChanged)
     }
   }, [instanceId, scope])
 
@@ -117,23 +146,10 @@ export function useWorkflowExecution(instanceId: string) {
     },
     [instanceId]
   )
-  const discardFailedInput = useCallback(
-    async (inputId: string) => {
-      const response = await requestWorkflows({
-        operation: 'discardFailedInput',
-        instanceId,
-        inputId
-      })
-      if (!response.runtime) throw new Error('Workflow recovery did not return its saved state')
-      acceptRef.current?.(response.runtime)
-    },
-    [instanceId]
-  )
 
   return {
     snapshot: snapshot?.scope === scope ? snapshot.value : null,
-    transmissions: transmissions?.scope === scope ? transmissions.events : [],
-    completeUserInput,
-    discardFailedInput
+    transmissions: foreground && transmissions?.scope === scope ? transmissions.events : [],
+    completeUserInput
   }
 }

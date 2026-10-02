@@ -13,8 +13,7 @@ impl crate::WorkflowRuntimeHost for WorkflowHost {
         Ok(Some(serde_json::from_value(json!({
             "instanceId":"workflow-1","name":"Review workflow","templateId":"template-1","templateRevision":1,
             "executionVersion":"epoch-1","nodeId":"review","nodeName":"Reviewer","background":"Ship the feature",
-            "receives":"Implementation","task":"Review code","delivers":"Review result","predecessors":[],"outputs":[],
-            "inputRule":"individual queue","outputRule":"No downstream exits","enabled":true
+            "receives":"Implementation","task":"Review code","delivers":"Review result","members":[],"enabled":true
         })).unwrap()))
     }
     fn state(&self, _: crate::workflow_awareness::StateQuery) -> AgentResult<Value> {
@@ -139,6 +138,9 @@ async fn workflow_wakes_empty_chat_without_human_message_and_revokes_tool_on_nex
         "workflow_send",
         "workflow_get_state",
         "workflow_get_mailbox",
+        "workflow_accept",
+        "workflow_complete",
+        "workflow_recall",
     ] {
         assert!(tool_names(&first).contains(&name.into()));
         assert!(!tool_names(&second).contains(&name.into()));
@@ -190,7 +192,13 @@ fn workflow_preview_never_grants_capability_to_children_automation_or_unbound_ro
             .exposed_tool_names
             .iter()
             .any(|name| name == "workflow_send");
-        for tool in ["workflow_get_state", "workflow_get_mailbox"] {
+        for tool in [
+            "workflow_get_state",
+            "workflow_get_mailbox",
+            "workflow_accept",
+            "workflow_complete",
+            "workflow_recall",
+        ] {
             assert_eq!(
                 projection
                     .exposed_tool_names
@@ -249,7 +257,7 @@ async fn workflow_read_tools_return_scoped_results_without_replaying_input() {
         let (mut stream, _) = listener.accept().await.unwrap();
         let first = read_runtime_test_json_request(&mut stream).await;
         write_runtime_test_json_response(&mut stream, json!({"choices":[{"message":{"role":"assistant","tool_calls":[
-            {"id":"read-state","type":"function","function":{"name":"workflow_get_state","arguments":"{\"view\":\"all\"}"}},
+            {"id":"read-state","type":"function","function":{"name":"workflow_get_state","arguments":"{\"reason\":\"Check current activity\",\"view\":\"all\"}"}},
             {"id":"read-mailbox","type":"function","function":{"name":"workflow_get_mailbox","arguments":"{}"}}
         ]},"finish_reason":"tool_calls"}]})).await;
         let (mut stream, _) = listener.accept().await.unwrap();

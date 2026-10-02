@@ -26,8 +26,7 @@ export const ruRUTranslations = {
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': 'Открыть доску процесса',
-  'workflows.upstreamNodes': 'Узлы выше по потоку',
-  'workflows.downstreamNodes': 'Узлы ниже по потоку',
+  'workflows.members': 'Участники',
   'workflows.noNodes': 'Нет узлов',
   'configuration.invalidContextCapacityTitle': 'Недостаточное окно контекста',
   'configuration.invalidContextCapacity':

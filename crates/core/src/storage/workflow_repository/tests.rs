@@ -1,19 +1,10 @@
 use super::*;
 use crate::storage::{migrations::run_migrations, service::StorageService};
-use crate::workflow::{
-    AgentConfig, BoundaryPoint, BoundaryPositions, Endpoint, Flow, Node, NodeConfig, Viewport,
-};
+use crate::workflow::{AgentConfig, Node, NodeConfig, Viewport};
 
 fn graph() -> Definition {
     Definition {
-        boundary_positions: BoundaryPositions {
-            input: BoundaryPoint {
-                x: -180.0,
-                y: 200.0,
-            },
-        },
         schema_version: 1,
-        next_flow_sequence: None,
         id: "workflow-review".into(),
         name: "Review".into(),
         description: "Review a change".into(),
@@ -35,16 +26,6 @@ fn graph() -> Definition {
             }),
             x: 100.0,
             y: 200.0,
-        }],
-        flows: vec![Flow {
-            source_anchor: None,
-            target_anchor: None,
-            id: "input".into(),
-            name: "Task".into(),
-            source: Endpoint::Boundary,
-            target: Endpoint::Node {
-                node_id: "review".into(),
-            },
         }],
     }
 }
@@ -204,22 +185,19 @@ fn permission_modes_round_trip_without_creating_conversations() {
 }
 
 #[test]
-fn invalid_boundary_positions_cannot_replace_persisted_layout() {
+fn invalid_node_positions_cannot_replace_persisted_layout() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
     save(&mut connection, graph(), 0).unwrap();
     let mut invalid = graph();
-    invalid.boundary_positions.input.y = 100001.0;
+    invalid.nodes[0].y = 100001.0;
     assert!(matches!(
         save(&mut connection, invalid, 1),
         Err(Error::Invalid(_))
     ));
     let read = request(&mut connection, Request::List).unwrap();
     assert_eq!(read.records[0].revision, 1);
-    assert_eq!(
-        read.records[0].definition.boundary_positions,
-        graph().boundary_positions
-    );
+    assert_eq!(read.records[0].definition.nodes[0].y, graph().nodes[0].y);
 }
 
 #[test]
@@ -289,7 +267,6 @@ fn semantic_drafts_save_but_structural_corruption_is_rejected_without_mutation()
     run_migrations(&connection).unwrap();
     let mut definition = graph();
     definition.nodes[0].agent_mut().task.clear();
-    definition.flows.clear();
     let validation = request(
         &mut connection,
         Request::Validate {
@@ -298,7 +275,7 @@ fn semantic_drafts_save_but_structural_corruption_is_rejected_without_mutation()
     )
     .unwrap();
     assert!(validation.records.is_empty());
-    assert!(validation.issues.iter().any(|issue| issue.code == "entry"));
+    assert!(validation.issues.iter().any(|issue| issue.code == "task"));
     let saved = save(&mut connection, definition.clone(), 0).unwrap();
     assert_eq!(saved.records[0].issues, validation.issues);
     definition.schema_version = 2;
@@ -307,15 +284,13 @@ fn semantic_drafts_save_but_structural_corruption_is_rejected_without_mutation()
         Err(Error::Invalid(_))
     ));
     let mut definition = graph();
-    definition.flows[0].source = definition.flows[0].target.clone();
+    definition.nodes.push(definition.nodes[0].clone());
     assert!(matches!(
         save(&mut connection, definition, 1),
         Err(Error::Invalid(_))
     ));
     let mut definition = graph();
-    definition.flows[0].target = Endpoint::Node {
-        node_id: "missing".into(),
-    };
+    definition.nodes[0].x = f64::INFINITY;
     assert!(matches!(
         save(&mut connection, definition, 1),
         Err(Error::Invalid(_))
@@ -460,37 +435,17 @@ fn catalog_byte_quota_accounts_for_replacements_and_bounds_reads() {
 }
 
 #[test]
-fn independent_gates_reopen_with_modes_and_disconnected_input_saves_as_disabled_draft() {
-    use crate::workflow::{BusyPolicy, InputProcessingMode};
+fn independent_members_reopen_without_edges_or_routing_configuration() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("logic-gates.sqlite");
-    let mut definition: Definition = serde_json::from_str(include_str!(
-        "../../../../../packages/protocol/fixtures/workflow-definition-v1.json"
-    ))
-    .unwrap();
-    for node in &mut definition.nodes {
-        match &mut node.config {
-            NodeConfig::User { .. } => {}
-            NodeConfig::Agent(agent) => agent.model_config_id = Some("model-review".into()),
-            NodeConfig::InputGate {
-                processing_mode,
-                busy_policy,
-            } => {
-                *processing_mode = InputProcessingMode::Individual;
-                *busy_policy = BusyPolicy::Inject;
-            }
-            NodeConfig::OutputGate { selection } => {
-                selection.mode = crate::workflow::Mode::Exact;
-                selection.min = 2;
-            }
-        }
-    }
-    let expected = serde_json::to_value(&definition).unwrap();
+    let path = directory.path().join("mail-network.sqlite");
+    let mut definition = graph();
+    let mut second = definition.nodes[0].clone();
+    second.id = "second".into();
+    definition.nodes.push(second);
     {
         let mut connection = Connection::open(&path).unwrap();
         run_migrations(&connection).unwrap();
         let saved = save(&mut connection, definition.clone(), 0).unwrap();
-        assert!(saved.records[0].issues.is_empty());
         assert!(saved.records[0].enabled);
     }
     let mut connection = Connection::open(&path).unwrap();
@@ -498,24 +453,11 @@ fn independent_gates_reopen_with_modes_and_disconnected_input_saves_as_disabled_
     let reopened = request(&mut connection, Request::List).unwrap();
     assert_eq!(
         serde_json::to_value(&reopened.records[0].definition).unwrap(),
-        expected
-    );
-    assert!(reopened.records[0].enabled);
-    definition
-        .flows
-        .retain(|flow| flow.target.node() != Some("implement-input"));
-    let saved = save(&mut connection, definition.clone(), 1).unwrap();
-    assert!(!saved.records[0].enabled);
-    assert!(saved.records[0]
-        .issues
-        .iter()
-        .any(|i| i.code == "inputRule"));
-
-    let reopened = request(&mut connection, Request::List).unwrap();
-    assert_eq!(
-        serde_json::to_value(&reopened.records[0].definition).unwrap(),
         serde_json::to_value(&definition).unwrap()
     );
+    let mut removed_format = serde_json::to_value(&definition).unwrap();
+    removed_format["flows"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<Definition>(removed_format).is_err());
 }
 
 #[test]

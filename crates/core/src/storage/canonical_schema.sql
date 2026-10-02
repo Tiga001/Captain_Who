@@ -7070,3 +7070,86 @@ WHERE status = 'pending';
 
 -- Long pasted text source metadata, schema v63.
 ALTER TABLE attachments ADD COLUMN pasted_text_json TEXT;
+
+-- Independent workflow mailboxes, schema v64. No legacy workflow data is converted.
+CREATE TABLE workflow_mail_sends (
+    send_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    source_conversation_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at INTEGER NOT NULL,
+    UNIQUE(source_run_id, tool_call_id)
+);
+CREATE TABLE workflow_mail_messages (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL UNIQUE,
+    instance_id TEXT NOT NULL,
+    execution_version TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    recipient_conversation_id TEXT,
+    mail_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (mail_status IN ('pending','processing','processed','stopped','failed','recalled')),
+    message_json TEXT NOT NULL CHECK (json_valid(message_json)),
+    input_id TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_mail_message_queue
+ON workflow_mail_messages(instance_id, node_id, recipient_conversation_id, mail_status, sequence);
+CREATE INDEX workflow_mail_message_input ON workflow_mail_messages(input_id);
+CREATE TABLE workflow_mail_inputs (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    input_id TEXT NOT NULL UNIQUE,
+    instance_id TEXT NOT NULL,
+    execution_version TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    conversation_id TEXT,
+    input_json TEXT NOT NULL CHECK (json_valid(input_json)),
+    status TEXT NOT NULL CHECK (status IN ('pending','claimed','applied','waiting_user','completed','paused','failed','invalidated','stopped','recalled')),
+    completion_notified INTEGER NOT NULL DEFAULT 0 CHECK (completion_notified IN (0,1)),
+    run_id TEXT,
+    delivery_id TEXT UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_mail_input_queue ON workflow_mail_inputs(status, conversation_id, sequence);
+CREATE INDEX workflow_mail_input_instance ON workflow_mail_inputs(instance_id, sequence);
+CREATE INDEX workflow_mail_input_run ON workflow_mail_inputs(run_id, status);
+CREATE INDEX workflow_mail_input_pending_sequence ON workflow_mail_inputs(sequence) WHERE status = 'pending';
+CREATE TABLE workflow_mail_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT NOT NULL,
+    input_id TEXT,
+    message_id TEXT,
+    source_node_id TEXT,
+    target_node_id TEXT,
+    kind TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX workflow_mail_event_instance ON workflow_mail_events(instance_id, sequence);
+CREATE TABLE workflow_mail_pauses (
+    conversation_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE workflow_mail_runs (
+    run_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE workflow_mail_message_origins (
+    message_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    input_id TEXT NOT NULL
+);
+CREATE INDEX workflow_mail_origin_conversation ON workflow_mail_message_origins(conversation_id, message_id);
+CREATE TABLE workflow_mail_mutations (
+    source_run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+    receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(source_run_id, tool_call_id)
+);

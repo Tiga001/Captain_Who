@@ -24,8 +24,7 @@ export const zhCNTranslations = {
   'workflows.settingsTitle': '工作流模板',
   'workflows.settingsDescription': '创建和编辑工作流图、节点与连线规则。',
   'workflows.openBoard': '查看工作流看板',
-  'workflows.upstreamNodes': '上游节点',
-  'workflows.downstreamNodes': '下游节点',
+  'workflows.members': '协作成员',
   'workflows.noNodes': '暂无节点',
   'configuration.invalidContextCapacityTitle': '上下文窗口不足',
   'configuration.invalidContextCapacity':

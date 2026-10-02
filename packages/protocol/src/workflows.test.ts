@@ -12,7 +12,7 @@ describe('workflow authoring contract', () => {
       x: 320,
       y: 160
     }
-    const graph = { ...fixture, nodes: [node], flows: [] }
+    const graph = { ...fixture, nodes: [node] }
     expect(parseWorkflowDefinition(graph)).toEqual(graph)
     expect(
       parseWorkflowDefinition({ ...graph, nodes: [{ ...node, task: undefined }] }).nodes[0]
@@ -24,54 +24,6 @@ describe('workflow authoring contract', () => {
       { selection: {} }
     ])
       expect(() => parseWorkflowDefinition({ ...graph, nodes: [{ ...node, ...extra }] })).toThrow()
-  })
-  it('persists the next flow sequence and rejects invalid counters', () => {
-    const graph = { ...fixture, nextFlowSequence: 24 }
-    expect(parseWorkflowDefinition(graph)).toEqual(graph)
-    for (const nextFlowSequence of [null, 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, '24'])
-      expect(() => parseWorkflowDefinition({ ...fixture, nextFlowSequence })).toThrow()
-  })
-  it('round-trips per-flow anchors and rejects invalid coordinates or sides', () => {
-    const flow = {
-      ...fixture.flows[0],
-      sourceAnchor: { side: 'top', offset: 0.35 },
-      targetAnchor: { side: 'left', offset: 0.8 }
-    }
-    const graph = { ...fixture, flows: [flow] }
-    expect(parseWorkflowDefinition(graph)).toEqual(graph)
-    for (const sourceAnchor of [
-      null,
-      {},
-      { side: 'diagonal', offset: 0.5 },
-      { side: 'top', offset: -0.1 },
-      { side: 'top', offset: 1.1 },
-      { side: 'top', offset: NaN },
-      { side: 'top', offset: Infinity }
-    ])
-      expect(() =>
-        parseWorkflowDefinition({ ...graph, flows: [{ ...flow, sourceAnchor }] })
-      ).toThrow()
-  })
-
-  it('round-trips manually positioned boundaries and rejects malformed root layout', () => {
-    const definition = {
-      ...fixture,
-      boundaryPositions: { input: { x: -125.5, y: 80 } }
-    }
-    expect(parseWorkflowDefinition(definition)).toEqual(definition)
-    for (const boundaryPositions of [
-      null,
-      undefined,
-      {},
-      { input: { x: 0, y: 0 }, output: { x: 0, y: 0 } },
-      { input: { x: 0, y: 0 }, output: { x: 0, y: 0 }, extra: true },
-      { input: { x: 0, y: 0, nodeId: 'worker' }, output: { x: 0, y: 0 } },
-      { input: { x: Infinity, y: 0 }, output: { x: 0, y: 0 } },
-      { input: { x: 0, y: 0 }, output: { x: 100001, y: 0 } },
-      { input: { x: 0 }, output: { x: 0, y: 0 } }
-    ]) {
-      expect(() => parseWorkflowDefinition({ ...fixture, boundaryPositions })).toThrow()
-    }
   })
   it('preserves independent conversation models and permissions', () => {
     const configured = structuredClone(fixture)
@@ -128,22 +80,7 @@ describe('workflow authoring contract', () => {
     }
   })
 
-  it('rejects flows targeting the fixed user entry', () => {
-    expect(() =>
-      parseWorkflowDefinition({
-        ...fixture,
-        flows: [
-          {
-            ...fixture.flows[0],
-            source: { kind: 'node', nodeId: 'review' },
-            target: { kind: 'boundary' }
-          }
-        ]
-      })
-    ).toThrow('cannot receive')
-  })
-
-  it('preserves boundary flows, cycles, blank nodes and viewport', () => {
+  it('preserves independent members and viewport', () => {
     expect(parseWorkflowDefinition(fixture)).toEqual(fixture)
     const input = { operation: 'save', expectedRevision: 0, definition: fixture }
     expect(parseWorkflowRequest(input)).toEqual(input)
@@ -256,16 +193,14 @@ describe('workflow authoring contract', () => {
     ).toThrow()
   })
   it('validates nested objects without rejecting incomplete drafts', () => {
-    expect(parseWorkflowDefinition({ ...fixture, name: '', nodes: [], flows: [] }).nodes).toEqual(
-      []
-    )
+    expect(parseWorkflowDefinition({ ...fixture, name: '', nodes: [] }).nodes).toEqual([])
     expect(() =>
       parseWorkflowDefinition({ ...fixture, viewport: { x: Infinity, y: 0, zoom: 1 } })
     ).toThrow()
     expect(() =>
       parseWorkflowDefinition({
         ...fixture,
-        flows: [{ ...fixture.flows[0], source: { kind: 'boundary', nodeId: 'fake' } }]
+        flows: [{ id: 'removed-flow', source: { kind: 'boundary', nodeId: 'fake' } }]
       })
     ).toThrow()
     expect(() =>
@@ -288,63 +223,25 @@ describe('workflow authoring contract', () => {
   })
 })
 
-describe('logic gate wire contract', () => {
-  it('round-trips distinct gates without template, model or agent prompts', () => {
-    const graph = parseWorkflowDefinition(fixture)
-    const input = graph.nodes.find((n) => n.kind === 'inputGate')!
-    const output = graph.nodes.find((n) => n.kind === 'outputGate')!
-    expect(input).not.toHaveProperty('modelConfigId')
-    expect(input).not.toHaveProperty('task')
-    input.processingMode = 'batch'
-    input.busyPolicy = 'inject'
-    output.selection.mode = 'exact'
-    output.selection.min = 2
-    expect(parseWorkflowDefinition(graph)).toEqual(graph)
-  })
-
-  it('round-trips all four input modes and rejects missing policies', () => {
-    for (const processingMode of ['individual', 'batch'])
-      for (const busyPolicy of ['queue', 'inject']) {
-        const graph = { ...fixture, nodes: [{ ...fixture.nodes[2], processingMode, busyPolicy }] }
-        expect(parseWorkflowDefinition(graph)).toEqual(graph)
-      }
-    for (const key of ['processingMode', 'busyPolicy']) {
-      const node = { ...fixture.nodes[2] }
-      Reflect.deleteProperty(node, key)
-      expect(() => parseWorkflowDefinition({ ...fixture, nodes: [node] })).toThrow()
-    }
-  })
-
-  it('rejects agent/gate field mixing and unsupported arrival modes', () => {
-    const input = fixture.nodes[2]
-    const output = fixture.nodes[3]
-    for (const node of [
-      { ...input, task: 'Do work' },
-      { ...input, modelConfigId: null },
-      { ...input, busyPolicy: 'interrupt' },
-      { ...input, processingMode: 'any' },
-      { ...input, processingMode: null },
-      { ...input, busyPolicy: null },
-      { ...input, processingMode: ['individual'] },
-      { ...input, trigger: { mode: 'one', count: 1, required: [], groups: [] } },
-      { ...input, trigger: { mode: 'atLeast', count: 1.5, required: [], groups: [] } },
-      {
-        ...input,
-        trigger: {
-          mode: 'custom',
-          count: 1,
-          required: [],
-          groups: [{ id: 'g', flowIds: [], min: 1, max: 2 }]
-        }
-      },
-      { ...output, lateArrivals: 'queue' },
-      { ...fixture.nodes[0], inputRule: { mode: 'all' } }
-    ]) {
-      expect(() => parseWorkflowDefinition({ ...fixture, nodes: [node] })).toThrow()
-    }
-    const old = { ...fixture.nodes[0] }
-    Reflect.deleteProperty(old, 'kind')
-    expect(() => parseWorkflowDefinition({ ...fixture, nodes: [old] })).toThrow()
+describe('free mail network wire contract', () => {
+  it('rejects removed graph and delivery policies rather than migrating them', () => {
+    for (const extra of [
+      { flows: [] },
+      { boundaryPositions: { input: { x: 0, y: 0 } } },
+      { nextFlowSequence: 1 }
+    ])
+      expect(() => parseWorkflowDefinition({ ...fixture, ...extra })).toThrow()
+    for (const extra of [
+      { kind: 'inputGate' },
+      { kind: 'outputGate' },
+      { busyPolicy: 'queue' },
+      { processingMode: 'batch' },
+      { inputRule: {} },
+      { selection: {} }
+    ])
+      expect(() =>
+        parseWorkflowDefinition({ ...fixture, nodes: [{ ...fixture.nodes[0], ...extra }] })
+      ).toThrow()
   })
 })
 
@@ -509,7 +406,7 @@ describe('workflow catalog recovery contract', () => {
     expect(() =>
       parseWorkflowDefinition({
         ...fixture,
-        boundaryPositions: { ...fixture.boundaryPositions, output: { x: 0, y: 0 } }
+        boundaryPositions: { output: { x: 0, y: 0 } }
       })
     ).toThrow()
   })

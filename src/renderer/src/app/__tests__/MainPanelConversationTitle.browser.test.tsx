@@ -349,11 +349,9 @@ describe('MainPanelToolbar project card', () => {
     const workflowProps = {
       name: 'Review workflow',
       color: '#e472a0',
-      upstream: [
+      members: [
         { nodeId: 'planner', name: 'Planner', conversationId: 'conversation-planner' },
-        { nodeId: 'researcher', name: 'Researcher', conversationId: 'conversation-researcher' }
-      ],
-      downstream: [
+        { nodeId: 'researcher', name: 'Researcher', conversationId: 'conversation-researcher' },
         { nodeId: 'reviewer', name: 'Reviewer', conversationId: 'conversation-reviewer' }
       ],
       onOpen,
@@ -397,10 +395,10 @@ describe('MainPanelToolbar project card', () => {
       .getByRole('menuitem')
       .elements()
       .map((item) => item.textContent)
-    expect(items).toEqual(['View workflow board', 'Upstream nodes', 'Downstream nodes'])
+    expect(items).toEqual(['View workflow board', 'Members'])
 
-    await menu.getByRole('menuitem', { name: 'Upstream nodes' }).click()
-    const upstream = screen.getByRole('menu', { name: 'Upstream nodes' })
+    await menu.getByRole('menuitem', { name: 'Members' }).click()
+    const upstream = screen.getByRole('menu', { name: 'Members' })
     await expect
       .poll(() =>
         upstream
@@ -408,16 +406,14 @@ describe('MainPanelToolbar project card', () => {
           .elements()
           .map((item) => item.textContent)
       )
-      .toEqual(['Planner', 'Researcher'])
+      .toEqual(['Planner', 'Researcher', 'Reviewer'])
     const menuBox = menu.element().getBoundingClientRect()
     expect(upstream.element().getBoundingClientRect().left).toBeGreaterThanOrEqual(menuBox.right)
     await page.screenshot({
       path: '../../../../../.cache/workflow-authoring/conversation-workflow-menu-light.png'
     })
 
-    await menu.getByRole('menuitem', { name: 'Downstream nodes' }).hover()
-    const downstream = screen.getByRole('menu', { name: 'Downstream nodes' })
-    await downstream.getByRole('menuitem', { name: 'Reviewer' }).click()
+    await upstream.getByRole('menuitem', { name: 'Reviewer' }).click()
     expect(onOpenConversation).toHaveBeenCalledWith('conversation-reviewer')
     await expect.element(menu).not.toBeInTheDocument()
 

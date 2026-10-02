@@ -24,8 +24,7 @@ export const zhTWTranslations = {
   'workflows.settingsTitle': '工作流程',
   'workflows.settingsDescription': '建立與編輯工作流程圖、節點與連線規則。',
   'workflows.openBoard': '查看工作流程看板',
-  'workflows.upstreamNodes': '上游節點',
-  'workflows.downstreamNodes': '下游節點',
+  'workflows.members': '協作成員',
   'workflows.noNodes': '暫無節點',
   'configuration.invalidContextCapacityTitle': '上下文視窗不足',
   'configuration.invalidContextCapacity':

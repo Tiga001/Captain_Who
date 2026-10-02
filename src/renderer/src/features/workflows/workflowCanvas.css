@@ -44,73 +44,6 @@
   overflow: visible;
   pointer-events: none;
 }
-.workflow-edge {
-  color: var(--mc-color-text-primary);
-  cursor: pointer;
-  pointer-events: auto;
-  outline: none;
-}
-.workflow-edge.is-selected,
-.workflow-edge:focus-visible {
-  color: var(--mc-color-text-primary);
-}
-.workflow-edge__line {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  opacity: 1;
-}
-.workflow-edge.is-selected .workflow-edge__line,
-.workflow-edge:focus-visible .workflow-edge__line {
-  stroke-width: 2;
-  opacity: 1;
-  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
-}
-.workflow-crossing {
-  color: var(--mc-color-text-primary);
-  cursor: pointer;
-  pointer-events: stroke;
-}
-.workflow-crossing.is-selected {
-  color: var(--mc-color-text-primary);
-}
-.workflow-crossing__halo {
-  fill: none;
-  stroke: var(--mc-color-surface-muted);
-  stroke-width: 5.5;
-}
-.workflow-crossing__line {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  opacity: 1;
-}
-.workflow-crossing.is-selected .workflow-crossing__line {
-  stroke-width: 2;
-  opacity: 1;
-  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
-}
-.workflow-edge__hit {
-  fill: none;
-  stroke: transparent;
-  stroke-width: 18;
-}
-.workflow-edge__label {
-  fill: currentColor;
-  stroke: var(--mc-color-surface-muted);
-  stroke-width: 4px;
-  stroke-linejoin: round;
-  paint-order: stroke fill;
-  font-size: 11px;
-  pointer-events: auto;
-}
-.workflow-edge__preview {
-  fill: none;
-  stroke: var(--mc-color-text-primary);
-  stroke-width: 1.5;
-  stroke-dasharray: 5 4;
-  pointer-events: none;
-}
 .workflow-node {
   position: absolute;
   box-sizing: border-box;
@@ -151,9 +84,6 @@
   width: 28px;
   height: 28px;
   margin-left: 10px;
-}
-.workflow-node--root {
-  border-style: dashed;
 }
 .workflow-node__copy strong,
 .workflow-node__copy span {
@@ -251,79 +181,6 @@
   background: var(--mc-color-text-primary);
 }
 
-.workflow-node--gate,
-.workflow-node--gate:hover,
-.workflow-node--gate.is-selected,
-.workflow-node--gate:focus-visible {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  outline: none;
-}
-.workflow-gate-shape {
-  position: absolute;
-  inset: 0 0 auto;
-  width: 64px;
-  height: 56px;
-  overflow: visible;
-}
-.workflow-gate-shape path {
-  fill: var(--mc-color-text-primary);
-  stroke: var(--mc-color-text-primary);
-  stroke-width: 1.4;
-  stroke-linejoin: round;
-}
-.workflow-node--gate:hover .workflow-gate-shape path,
-.workflow-node--gate.is-selected .workflow-gate-shape path,
-.workflow-node--gate:focus-visible .workflow-gate-shape path {
-  stroke: var(--mc-color-text-primary);
-  stroke-width: 2;
-}
-.workflow-node--gate.is-selected .workflow-gate-shape path,
-.workflow-node--gate:focus-visible .workflow-gate-shape path {
-  stroke: var(--mc-color-focus-ring);
-  stroke-width: 2.5;
-  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
-}
-.workflow-canvas.is-connecting .workflow-node {
-  cursor: crosshair;
-}
-.workflow-anchor-handle {
-  position: absolute;
-  z-index: 2;
-  width: 10px;
-  height: 10px;
-  padding: 0;
-  transform: translate(-50%, -50%);
-  border: 1.5px solid var(--mc-color-text-primary);
-  border-radius: 50%;
-  background: var(--mc-color-surface-card);
-  cursor: grab;
-  touch-action: none;
-}
-.workflow-anchor-handle::before {
-  position: absolute;
-  inset: -5px;
-  content: '';
-}
-.workflow-anchor-handle:hover,
-.workflow-anchor-handle.is-selected,
-.workflow-anchor-handle:focus-visible {
-  outline: 3px solid var(--mc-color-focus-ring);
-  outline-offset: 1px;
-}
-.workflow-anchor-handle:active {
-  cursor: grabbing;
-}
-.workflow-canvas.is-connecting .workflow-anchor-handle {
-  cursor: crosshair;
-}
-
-.workflow-anchor-handle.is-selected {
-  z-index: 3;
-}
-
 .workflow-user-avatar {
   display: inline-flex;
   flex-shrink: 0;
@@ -334,4 +191,68 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.workflow-node__mailbox {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  margin-left: 10px;
+  color: inherit;
+}
+.workflow-node__mailbox + .workflow-node__avatar {
+  margin-left: 8px;
+}
+.workflow-node__mailbox-count {
+  position: absolute;
+  top: -9px;
+  right: -6px;
+  min-width: 13px;
+  padding: 1px 3px;
+  border-radius: 7px;
+  color: var(--mc-color-surface-main-panel);
+  background: var(--workflow-instance-color, var(--mc-color-text-primary));
+  font-size: 9px;
+  line-height: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.workflow-mail-transmissions {
+  pointer-events: none;
+}
+.workflow-mail-transmission {
+  color: var(--workflow-instance-color);
+  animation: workflow-mail-fade 2.5s ease both;
+}
+.workflow-mail-transmission.is-recalled {
+  color: var(--mc-color-text-secondary);
+}
+.workflow-mail-transmission__line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  opacity: 0.65;
+}
+@keyframes workflow-mail-fade {
+  0% {
+    opacity: 0;
+  }
+  10%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workflow-mail-transmission {
+    animation: none;
+  }
+  .workflow-mail-transmission .workflow-monitor__transmission {
+    display: none;
+  }
 }

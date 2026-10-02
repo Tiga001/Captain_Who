@@ -56,7 +56,7 @@ const snapshot = (status: 'claimed' | 'applied' = 'applied'): WorkflowRuntimeSna
       executionVersion: 'v1',
       content: 'batch',
       messages: [],
-      busyPolicy: 'inject',
+      mailStatus: 'processing',
       status,
       runId: 'run',
       deliveryId: 'delivery',
@@ -139,7 +139,9 @@ it('reloads a terminal event even when the delivery receipt did not change', asy
         sequence: 3,
         instanceId: 'workflow',
         inputId: 'input',
-        flowIds: [],
+        messageId: null,
+        sourceNodeId: null,
+        targetNodeId: null,
         kind: 'run_completed',
         createdAt: 456
       }

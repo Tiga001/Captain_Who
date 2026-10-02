@@ -167,13 +167,14 @@ pub(super) fn publish(
         .into_iter()
         .filter(|instance| instance.template_id == definition.id)
     {
-        crate::storage::workflow_execution_repository::invalidate_instance(
-            c,
-            &instance.id,
-            "Workflow template was updated",
-        )
-        .map_err(Error::Storage)?;
-        for binding in instance.bindings {
+        let previously_bound: HashSet<_> = instance
+            .bindings
+            .iter()
+            .map(|binding| binding.node_id.as_str())
+            .collect();
+        let needs_review =
+            !issues.is_empty() || agent_ids.iter().any(|id| !previously_bound.contains(id));
+        for binding in &instance.bindings {
             if !agent_ids.contains(binding.node_id.as_str()) {
                 c.execute(
                     "DELETE FROM workflow_instance_bindings WHERE instance_id=?1 AND node_id=?2",
@@ -182,7 +183,9 @@ pub(super) fn publish(
                 .map_err(storage_error)?;
             }
         }
-        c.execute("UPDATE workflow_instances SET enabled=0, needs_review=1, revision=revision+1, updated_at=MAX(updated_at+1,?1), last_request_json='{}' WHERE instance_id=?2",params![now_ms(),instance.id]).map_err(storage_error)?;
+        c.execute("UPDATE workflow_instances SET template_revision=?1, enabled=CASE WHEN ?2 THEN 0 ELSE enabled END, needs_review=?2, revision=revision+1, updated_at=MAX(updated_at+1,?3), last_request_json='{}' WHERE instance_id=?4",params![expected_revision+1,needs_review,now_ms(),instance.id]).map_err(storage_error)?;
+        crate::storage::workflow_execution_repository::reconcile_recipients(c, &instance.id)
+            .map_err(Error::Storage)?;
     }
     c.execute(
         "DELETE FROM workflow_editing_drafts WHERE template_id=?1",
@@ -573,19 +576,6 @@ pub(super) fn request(
                     conversation_id,
                 });
             }
-            if current.is_some()
-                && (resolved.len() != previous.len()
-                    || resolved.iter().any(|binding| {
-                        previous.get(&binding.node_id) != Some(&binding.conversation_id)
-                    }))
-            {
-                crate::storage::workflow_execution_repository::invalidate_instance(
-                    c,
-                    &id,
-                    "Workflow conversation bindings were changed",
-                )
-                .map_err(Error::Storage)?;
-            }
             c.execute("INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,project_id) VALUES (?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10) ON CONFLICT(instance_id) DO UPDATE SET template_revision=excluded.template_revision,name=excluded.name,color=excluded.color,enabled=excluded.enabled,project_id=excluded.project_id,revision=excluded.revision,updated_at=MAX(workflow_instances.updated_at+1,excluded.updated_at),needs_review=0,last_request_json=excluded.last_request_json",params![id,template_id,expected_template_revision,name,color,next,now,serde_json::json!({"request":request_json,"affected":affected}).to_string(),enabled,project_id]).map_err(storage_error)?;
             c.execute(
                 "DELETE FROM workflow_instance_bindings WHERE instance_id=?1",
@@ -595,6 +585,8 @@ pub(super) fn request(
             for binding in resolved {
                 c.execute("INSERT INTO workflow_instance_bindings(instance_id,node_id,conversation_id) VALUES (?1,?2,?3)",params![id,binding.node_id,binding.conversation_id]).map_err(storage_error)?;
             }
+            crate::storage::workflow_execution_repository::reconcile_recipients(c, &id)
+                .map_err(Error::Storage)?;
             Ok(affected)
         }
     }

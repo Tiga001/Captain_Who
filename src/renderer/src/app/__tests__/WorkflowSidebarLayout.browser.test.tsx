@@ -21,8 +21,7 @@ vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
   useWorkflowExecution: () => ({
     snapshot: null,
     transmissions: [],
-    completeUserInput: vi.fn(),
-    discardFailedInput: vi.fn()
+    completeUserInput: vi.fn()
   })
 }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -61,16 +60,7 @@ const record: WorkflowRecord = {
         delivers: ''
       }
     ],
-    flows: [
-      {
-        id: 'flow',
-        name: 'S1',
-        source: { kind: 'boundary' },
-        target: { kind: 'node', nodeId: 'writer' }
-      }
-    ],
-    viewport: { x: 0, y: 0, zoom: 1 },
-    boundaryPositions: { input: { x: 0, y: 160 } }
+    viewport: { x: 0, y: 0, zoom: 1 }
   }
 }
 const instance: WorkflowInstance = {

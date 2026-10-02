@@ -43,7 +43,7 @@ mod tests {
         assert!(serde_json::from_value::<RuntimeRequest>(json!({
             "operation":"discardFailedInput", "instanceId":"i", "inputId":"p"
         }))
-        .is_ok());
+        .is_err());
         for params in [
             json!({"operation":"nodeMessages", "instanceId":"i", "nodeId":"n", "beforeSequence":-1}),
             json!({"operation":"nodeMessages", "instanceId":"i", "nodeId":"n", "resume":true}),
@@ -78,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_conversation_projection_preserves_raw_batch_bodies_and_fork_provenance() {
+    fn workflow_conversation_projection_preserves_raw_mail_bodies_and_fork_provenance() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("batch-origins.sqlite");
         let storage = StorageService::open(&path).unwrap();
@@ -90,24 +90,23 @@ mod tests {
         let source = |index: usize| {
             json!({
                 "id":format!("source-{index}"), "instanceId":"workflow",
-                "workflowName":"Batch workflow", "sourceNodeId":format!("node-{index}"),
+                "workflowName":"Mail workflow", "sourceNodeId":format!("node-{index}"),
                 "sourceNodeName":format!("Worker {index}"),
                 "sourceConversationId":format!("sender-{index}"),
                 "sourceConversationTitle":format!("Sender {index}"),
-                "targetNodeId":"receiver", "flowId":format!("flow-{index}"),
-                "pathFlowIds":[format!("flow-{index}")], "content":bodies[index], "createdAt":1
+                "targetNodeId":"receiver", "targetNodeName":"Receiver", "targetConversationId":"original", "targetConversationTitle":"Original", "replyToMessageId":null, "content":bodies[index], "createdAt":1
             })
         };
         let assembled = "The complete host-assembled envelope remains separate from the raw body.";
         let input = json!({
             "id":"input", "instanceId":"workflow", "nodeId":"receiver",
             "conversationId":"original", "executionVersion":"epoch", "content":assembled,
-            "messages":[source(0), source(1)], "busyPolicy":"queue", "status":"completed",
+            "messages":[source(0)], "mailStatus":"processed", "status":"completed",
             "runId":"run", "deliveryId":"delivery", "createdAt":1, "error":null
         });
-        connection.execute("INSERT INTO workflow_execution_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,run_id,delivery_id,created_at,updated_at) VALUES ('input','workflow','epoch','receiver','original',?1,'completed','run','delivery',1,1)", [input.to_string()]).unwrap();
+        connection.execute("INSERT INTO workflow_mail_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,run_id,delivery_id,created_at,updated_at) VALUES ('input','workflow','epoch','receiver','original',?1,'completed','run','delivery',1,1)", [input.to_string()]).unwrap();
         // Forks retain their own message ID mapped to the original immutable workflow input.
-        connection.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) VALUES ('original-message','original','input'),('fork-message','fork','input')", []).unwrap();
+        connection.execute("INSERT INTO workflow_mail_message_origins(message_id,conversation_id,input_id) VALUES ('original-message','original','input'),('fork-message','fork','input')", []).unwrap();
         for (conversation, message) in [("original", "original-message"), ("fork", "fork-message")]
         {
             let projected = workflow_conversation_projection(
@@ -124,9 +123,9 @@ mod tests {
             assert_eq!(message["content"], assembled);
             assert_eq!(message["workflowInput"]["inputId"], "input");
             assert_eq!(message["workflowInput"]["instanceId"], "workflow");
-            assert_eq!(message["workflowInput"]["workflowName"], "Batch workflow");
+            assert_eq!(message["workflowInput"]["workflowName"], "Mail workflow");
             let sources = message["workflowInput"]["sources"].as_array().unwrap();
-            assert_eq!(sources.len(), bodies.len());
+            assert_eq!(sources.len(), 1);
             for (index, source) in sources.iter().enumerate() {
                 assert_eq!(source["content"], bodies[index]);
                 assert_eq!(source["nodeId"], format!("node-{index}"));
@@ -156,8 +155,7 @@ mod tests {
         let storage = StorageService::open(&directory.path().join("workflow.sqlite")).unwrap();
         let definition = json!({
             "schemaVersion": 1, "id": "draft", "name": "Draft", "description": "", "background": "",
-            "nodes": [], "flows": [], "viewport": {"x":0,"y":0,"zoom":1},
-            "boundaryPositions": {"input":{"x":80,"y":220}}
+            "nodes": [], "viewport": {"x":80,"y":220,"zoom":1}
         });
         let saved = call(
             &storage,
@@ -166,7 +164,7 @@ mod tests {
         assert_eq!(saved["result"]["records"][0]["revision"], 1);
         assert_eq!(saved["result"]["records"][0]["enabled"], false);
         assert_eq!(
-            saved["result"]["records"][0]["definition"]["boundaryPositions"]["input"]["x"].as_f64(),
+            saved["result"]["records"][0]["definition"]["viewport"]["x"].as_f64(),
             Some(80.0)
         );
         assert!(!saved["result"]["records"][0]["issues"]
@@ -218,7 +216,7 @@ mod tests {
         assert_eq!(deleted["result"]["records"], json!([]));
     }
     #[test]
-    fn workflow_rpc_preserves_logic_gates_and_rejects_agent_fields_on_gates() {
+    fn workflow_rpc_preserves_free_members_and_rejects_removed_policies() {
         let directory = tempfile::tempdir().unwrap();
         let storage = StorageService::open(&directory.path().join("gates.sqlite")).unwrap();
         let definition: Value = serde_json::from_str(include_str!(
@@ -233,9 +231,8 @@ mod tests {
         );
         assert_eq!(saved["result"]["records"][0]["revision"], 1);
         let record = &saved["result"]["records"][0];
-        assert_eq!(record["definition"]["nodes"][2]["kind"], "inputGate");
-        assert_eq!(record["definition"]["nodes"][2]["busyPolicy"], "queue");
-        assert_eq!(record["definition"]["nodes"][3]["selection"]["mode"], "one");
+        assert_eq!(record["definition"]["nodes"].as_array().unwrap().len(), 3);
+        assert!(record["definition"].get("flows").is_none());
         assert_eq!(record["issues"].as_array().unwrap().len(), 3);
         assert!(record["issues"]
             .as_array()
@@ -243,7 +240,7 @@ mod tests {
             .iter()
             .all(|issue| issue["code"] == "node_model"));
         let mut invalid = definition.clone();
-        invalid["nodes"][2]["task"] = json!("A gate must not execute a task");
+        invalid["nodes"][2]["busyPolicy"] = json!("queue");
         let rejected = call(
             &storage,
             json!({
@@ -279,7 +276,7 @@ mod management_tests {
         };
         let empty = call(json!({"operation":"listInstances"}));
         assert_eq!(empty["result"]["instances"], json!([]));
-        let definition = json!({"schemaVersion":1,"id":"template","name":"Original","description":"","background":"","nodes":[],"flows":[],"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":0}}});
+        let definition = json!({"schemaVersion":1,"id":"template","name":"Original","description":"","background":"","nodes":[],"viewport":{"x":0,"y":0,"zoom":1}});
         call(json!({"operation":"save","definition":definition,"expectedRevision":0}));
         let mut edited = definition.clone();
         edited["name"] = json!("Editing draft");
@@ -328,10 +325,6 @@ enum RuntimeRequest {
         instance_id: String,
         input_id: String,
     },
-    DiscardFailedInput {
-        instance_id: String,
-        input_id: String,
-    },
 }
 
 pub(crate) fn handle_workflow_runtime_request(
@@ -365,10 +358,6 @@ pub(crate) fn handle_workflow_runtime_request(
             instance_id,
             input_id,
         } => service.complete_workflow_user_input(&instance_id, &input_id, &notifications),
-        RuntimeRequest::DiscardFailedInput {
-            instance_id,
-            input_id,
-        } => service.discard_failed_workflow_input(&instance_id, &input_id, &notifications),
     };
     match result {
         Ok(runtime) => response_success(

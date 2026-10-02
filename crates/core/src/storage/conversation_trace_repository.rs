@@ -124,6 +124,12 @@ pub(crate) fn commit_trace_with_loaded_prefix(
     });
     if !state_changed {
         let materialized = if trace.terminal_status.is_terminal() {
+            crate::storage::workflow_execution_repository::settle_run(
+                connection,
+                &trace.run_id,
+                trace.terminal_status.as_str(),
+            )
+            .map_err(invalid_trace_input)?;
             let materialized = materialize_pending_command_session_lifecycle(
                 connection,
                 &trace.assistant_message_id,
@@ -199,6 +205,15 @@ pub(crate) fn commit_trace_with_loaded_prefix(
     }
 
     if trace.terminal_status.is_terminal() {
+        // Mail completion belongs to the authoritative Turn commit, including cancellation,
+        // recovery and human-interaction settlement. Keeping both in the same transaction
+        // prevents a crash from leaving delivered mail in processing after its Turn ended.
+        crate::storage::workflow_execution_repository::settle_run(
+            connection,
+            &trace.run_id,
+            trace.terminal_status.as_str(),
+        )
+        .map_err(invalid_trace_input)?;
         materialize_pending_command_session_lifecycle(
             connection,
             &trace.assistant_message_id,

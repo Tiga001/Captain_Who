@@ -25,8 +25,7 @@ export const koKRTranslations = {
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': '워크플로 보드 보기',
-  'workflows.upstreamNodes': '업스트림 노드',
-  'workflows.downstreamNodes': '다운스트림 노드',
+  'workflows.members': '구성원',
   'workflows.noNodes': '노드 없음',
   'configuration.invalidContextCapacityTitle': '컨텍스트 창이 너무 작습니다',
   'configuration.invalidContextCapacity':

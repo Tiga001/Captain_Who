@@ -75,24 +75,7 @@
 .workflow-monitor__canvas.is-panning .workflow-node {
   cursor: grabbing;
 }
-.workflow-monitor__canvas .workflow-monitor__gate {
-  position: relative;
-  width: 100%;
-  height: 100%;
-}
-.workflow-monitor__gate:focus-visible {
-  outline: 2px solid var(--mc-color-focus-ring);
-  outline-offset: 3px;
-}
-.workflow-monitor__gate-tooltip {
-  max-width: 320px;
-}
-.workflow-monitor__gate-tooltip .workflow-binding-node-tooltip__task dd {
-  display: block;
-  max-height: none;
-  overflow: visible;
-}
-.workflow-monitor__canvas .workflow-node:not(.workflow-node--gate) {
+.workflow-monitor__canvas .workflow-node {
   color: var(--workflow-node-text);
   background: var(--workflow-node-surface);
   border-color: var(--workflow-node-border);
@@ -100,13 +83,6 @@
 }
 .workflow-monitor__canvas .workflow-node__copy > span {
   color: var(--workflow-node-muted);
-}
-.workflow-monitor__canvas .workflow-gate-shape path {
-  fill: var(--workflow-node-surface);
-  stroke: var(--workflow-node-border);
-}
-.workflow-monitor__canvas .workflow-node--root {
-  border-style: solid;
 }
 .workflow-monitor__canvas button.workflow-monitor__node {
   position: relative;
@@ -296,34 +272,6 @@
 .workflow-monitor__body > .workflow-monitor__shell {
   flex: 1;
   min-width: 0;
-}
-.workflow-monitor__gate-queue {
-  position: absolute;
-  inset: 0;
-  width: 64px;
-  height: 56px;
-  overflow: visible;
-  pointer-events: none;
-}
-.workflow-monitor__queue-layer path,
-.workflow-monitor__queue-layer ellipse {
-  fill: var(--workflow-node-surface);
-  stroke: var(--workflow-node-muted);
-  stroke-width: 1;
-}
-.workflow-monitor__queue-layer[data-filled='true'] path,
-.workflow-monitor__queue-layer[data-filled='true'] ellipse {
-  fill: var(--workflow-queue-color);
-  stroke: color-mix(in srgb, var(--workflow-queue-color) 70%, #262626);
-}
-.workflow-monitor__queue-count {
-  fill: var(--workflow-node-text);
-  font-size: 10px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.workflow-monitor__gate-queue[data-overloaded='true'] .workflow-monitor__queue-count {
-  fill: #b45309;
 }
 .workflow-monitor__canvas .workflow-monitor__node.is-selected {
   outline: 2px solid var(--workflow-instance-color);

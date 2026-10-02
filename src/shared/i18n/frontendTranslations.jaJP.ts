@@ -26,8 +26,7 @@ export const jaJPTranslations = {
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': 'ワークフローボードを表示',
-  'workflows.upstreamNodes': '上流ノード',
-  'workflows.downstreamNodes': '下流ノード',
+  'workflows.members': 'メンバー',
   'workflows.noNodes': 'ノードなし',
   'configuration.invalidContextCapacityTitle': 'コンテキスト容量が不足しています',
   'configuration.invalidContextCapacity':

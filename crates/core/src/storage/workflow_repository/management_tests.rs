@@ -10,8 +10,9 @@ fn call(c: &mut Connection, value: Value) -> Result<Response, Error> {
     )
 }
 fn definition() -> Value {
-    json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"","nodes":[{"kind":"agent","id":"a","name":"Worker","x":300,"y":100,"permissionMode":"full","modelConfigId":"model-default","receives":"Task","task":"Work","delivers":"Result"}],"flows":[{"id":"entry","name":"S1","source":{"kind":"boundary"},"target":{"kind":"node","nodeId":"a"}}],"viewport":{"x":0,"y":0,"zoom":1},"boundaryPositions":{"input":{"x":0,"y":100}}})
+    json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"","nodes":[{"kind":"agent","id":"a","name":"Worker","x":300,"y":100,"permissionMode":"full","modelConfigId":"model-default","receives":"Task","task":"Work","delivers":"Result"}],"viewport":{"x":0,"y":0,"zoom":1}})
 }
+
 fn setup() -> Connection {
     let mut c = Connection::open_in_memory().unwrap();
     run_migrations(&c).unwrap();
@@ -112,14 +113,11 @@ fn workflow_only_enabled_instances_reserve_colors_and_enabling_rechecks_occupanc
 }
 
 #[test]
-fn workflow_template_updates_disable_instances_until_binding_confirmation() {
+fn workflow_template_metadata_updates_preserve_enabled_membership() {
     let mut c = setup();
     let first = call(&mut c, create("instance", None)).unwrap();
     let published=call(&mut c,json!({"operation":"save","definition":definition(),"expectedRevision":2,"expectedUsageRevision":first.usages[0].usage_revision})).unwrap();
-    assert!(!published.instances[0].enabled && published.instances[0].needs_review);
-    assert!(
-        matches!(toggle(&mut c,"instance",true,2),Err(Error::Invalid(message)) if message=="workflow_instance_needs_review")
-    );
+    assert!(published.instances[0].enabled && !published.instances[0].needs_review);
     let mut configure = create(
         "instance",
         Some(&first.instances[0].bindings[0].conversation_id),
@@ -422,10 +420,7 @@ fn workflow_bindings_are_exclusive_and_fail_atomically() {
     let mut other = graph["nodes"][0].clone();
     other["id"] = json!("b");
     graph["nodes"].as_array_mut().unwrap().push(other);
-    let mut flow = graph["flows"][0].clone();
-    flow["id"] = json!("second");
-    flow["target"]["nodeId"] = json!("b");
-    graph["flows"].as_array_mut().unwrap().push(flow);
+
     let usages = call(&mut c, json!({"operation":"list"})).unwrap().usages;
     call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":usages[0].usage_revision})).unwrap();
     let mut invalid = create("new", None);
@@ -450,14 +445,13 @@ fn workflow_template_publish_requires_usage_confirmation_and_reconciles_stable_n
     );
     let updated=call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":2,"expectedUsageRevision":created.usages[0].usage_revision})).unwrap();
     assert_eq!(updated.instances[0].bindings, vec![original]);
-    assert!(updated.instances[0].needs_review);
+    assert!(!updated.instances[0].needs_review);
     assert!(call(
         &mut c,
         json!({"operation":"delete","id":"template","expectedRevision":3})
     )
     .is_err());
     graph["nodes"] = json!([]);
-    graph["flows"] = json!([]);
     let removed=call(&mut c,json!({"operation":"save","definition":graph,"expectedRevision":3,"expectedUsageRevision":updated.usages[0].usage_revision})).unwrap();
     assert!(removed.instances[0].bindings.is_empty());
     assert_eq!(count(&c, "conversations"), 1);
@@ -678,7 +672,7 @@ fn workflow_invalid_topology_is_isolated_and_recovery_metadata_does_not_expose_r
     let mut broken = definition();
     broken["id"] = json!("invalid");
     broken["name"] = json!("\nunsafe name");
-    broken["flows"][0]["source"] = json!({"kind":"node","nodeId":"a"});
+    broken["nodes"][0]["x"] = json!(100001);
     broken["background"] = json!("PRIVATE_GRAPH_CONTENT");
     let raw = broken.to_string();
     c.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at,enabled) VALUES ('invalid',?1,1,1,0)",[&raw]).unwrap();
@@ -713,7 +707,7 @@ fn workflow_invalid_drafts_are_isolated_from_published_templates_and_deleted_exp
             draft["boundaryPositions"]["output"] = json!({"x":760,"y":220});
             InvalidRecordReason::IncompatibleDefinition
         } else {
-            draft["flows"][0]["source"] = json!({"kind":"node","nodeId":"a"});
+            draft["nodes"][0]["x"] = json!(100001);
             InvalidRecordReason::InvalidDefinition
         };
         let raw = draft.to_string();

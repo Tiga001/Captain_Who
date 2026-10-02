@@ -1,7 +1,7 @@
 use super::*;
 use mycopilot_core::workflow_execution::SendRequest;
 
-fn tool_result(sample: &Value, tool: &str) -> Value {
+pub(super) fn tool_result(sample: &Value, tool: &str) -> Value {
     let messages = sample["messages"].as_array().unwrap();
     let call = messages
         .iter()
@@ -21,7 +21,7 @@ fn tool_result(sample: &Value, tool: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_delivery() {
+async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_delivery() {
     let directory = tempdir().unwrap();
     let storage =
         Arc::new(StorageService::open(&directory.path().join("awareness.sqlite")).unwrap());
@@ -32,7 +32,7 @@ async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_del
         listener.local_addr().unwrap()
     );
     storage.save_model_settings(settings).unwrap();
-    let (source, target) = workflow_fixture(&storage, "queue");
+    let (source, target) = workflow_fixture(&storage);
     storage
         .upsert_chat_messages(
             &source,
@@ -69,8 +69,9 @@ async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_del
             source_run_id: "seed-run".into(),
             tool_call_id: "seed-call".into(),
             execution_version: snapshot.execution_version,
-            outputs: vec![mycopilot_core::workflow_execution::SendOutput {
-                flow_id: "direct".into(),
+            messages: vec![mycopilot_core::workflow_execution::SendOutput {
+                target_node_id: "b".into(),
+                reply_to_message_id: None,
                 message: "Own sent payload 72310".into(),
             }],
         })
@@ -86,7 +87,16 @@ async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_del
     let (captured, mut requests) = unbounded_channel();
     let provider = tokio::spawn(async move {
         let calls = [
-            ("inspect-state", "workflow_get_state", json!({"view":"all"})),
+            (
+                "inspect-state",
+                "workflow_get_state",
+                json!({"view":"all","reason":"Check workflow progress"}),
+            ),
+            (
+                "inspect-node",
+                "workflow_get_state",
+                json!({"view":"runtime","nodeId":"b","reason":"Inspect stopped receiver details"}),
+            ),
             (
                 "inspect-outbox",
                 "workflow_get_mailbox",
@@ -135,7 +145,7 @@ async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_del
     while let Ok(sample) = requests.try_recv() {
         samples.push(sample);
     }
-    assert_eq!(samples.len(), 4);
+    assert_eq!(samples.len(), 5);
     for name in [
         "workflow_send",
         "workflow_get_state",
@@ -148,29 +158,60 @@ async fn workflow_awareness_tools_query_real_topology_and_own_outbox_without_del
             .any(|tool| tool["function"]["name"] == name));
     }
     let state = tool_result(&samples[1], "workflow_get_state");
-    let topology = &state["topology"];
-    assert_eq!(topology["nodes"].as_array().unwrap().len(), 3);
-    assert_eq!(topology["flows"].as_array().unwrap().len(), 3);
-    assert!(topology.to_string().contains("inputGate"));
+    let members = &state["members"];
+    assert_eq!(members.as_array().unwrap().len(), 2);
+    assert!(state.get("topology").is_none());
     let nodes = state["runtime"]["nodes"].as_array().unwrap();
     let current = nodes.iter().find(|node| node["nodeId"] == "a").unwrap();
-    assert_eq!(current["state"], "running");
-    assert_eq!(current["activeRunId"], turn.run_id);
-    assert!(
-        current["currentInputIds"].as_array().unwrap().is_empty(),
-        "manual root activity must be visible without a workflow input"
-    );
     assert_eq!(
-        nodes.iter().find(|node| node["nodeId"] == "b").unwrap()["state"],
-        "stopped"
+        state["runtime"]["summaryPolicy"],
+        "unchanged_from_world_state_omitted"
     );
-    let outbox = tool_result(&samples[2], "workflow_get_mailbox");
+    for key in ["state", "activeRunId", "currentInputIds"] {
+        assert!(
+            current.get(key).is_none(),
+            "unchanged {key} must come from World State"
+        );
+    }
+    assert!(samples[0]["messages"].to_string().contains(&turn.run_id));
+    for key in [
+        "workflowName",
+        "executionVersion",
+        "currentNodeId",
+        "background",
+    ] {
+        assert!(state.get(key).is_none(), "redundant {key}");
+    }
+    let own = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["nodeId"] == "a")
+        .unwrap();
+    assert!(own.get("task").is_none());
+    assert!(own.get("outputs").is_none());
+    let other = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["nodeId"] == "b")
+        .unwrap();
+    assert!(other.get("task").is_some());
+    let stopped = nodes.iter().find(|node| node["nodeId"] == "b").unwrap();
+    assert!(stopped.get("state").is_none());
+    assert_eq!(stopped["inputs"].as_array().unwrap().len(), 1);
+    let focused = tool_result(&samples[2], "workflow_get_state");
+    assert_eq!(focused["runtime"]["summaryPolicy"], "complete");
+    assert_eq!(focused["runtime"]["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(focused["runtime"]["nodes"][0]["state"], "stopped");
+    assert!(focused.get("members").is_none());
+    let outbox = tool_result(&samples[3], "workflow_get_mailbox");
     let messages = outbox["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["messageId"], receipt.messages[0].id);
     assert_eq!(messages[0]["content"], "Own sent payload 72310");
     assert_eq!(messages[0]["inputId"], receipt.input_ids[0]);
-    let inbox = tool_result(&samples[3], "workflow_get_mailbox");
+    let inbox = tool_result(&samples[4], "workflow_get_mailbox");
     assert!(inbox["messages"].as_array().unwrap().is_empty());
     let runtime = storage.workflow_execution_runtime("instance").unwrap();
     assert_eq!(runtime.inputs.len(), 1);

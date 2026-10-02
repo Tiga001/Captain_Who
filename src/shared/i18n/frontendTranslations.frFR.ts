@@ -26,8 +26,7 @@ export const frFRTranslations = {
   'workflows.settingsTitle': 'Workflows',
   'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'workflows.openBoard': 'Voir le tableau du flux',
-  'workflows.upstreamNodes': 'Nœuds en amont',
-  'workflows.downstreamNodes': 'Nœuds en aval',
+  'workflows.members': 'Membres',
   'workflows.noNodes': 'Aucun nœud',
   'configuration.invalidContextCapacityTitle': 'Fenêtre de contexte insuffisante',
   'configuration.invalidContextCapacity':

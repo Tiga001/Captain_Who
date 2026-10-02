@@ -27,11 +27,7 @@ import { WorkflowTemplateSaveDialog } from './WorkflowTemplateSaveDialog'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { requestWorkflows } from './workflowClient'
 import { workflowErrorDetail } from './workflowErrors'
-import {
-  createWorkflow,
-  nameUnnamedWorkflowFlows,
-  nameUnnamedWorkflowGates
-} from './workflowAuthoring'
+import { createWorkflow } from './workflowAuthoring'
 import { workflowText } from './workflowText'
 import { WorkflowGraphEditor } from './WorkflowGraphEditor'
 import { WorkflowIssues } from './WorkflowIssues'
@@ -178,9 +174,7 @@ export function WorkflowSettingsSection({
         ? editingDrafts.find((item) => item.definition.id === record.definition.id)
         : undefined
       const definition = record
-        ? nameUnnamedWorkflowGates(
-            nameUnnamedWorkflowFlows(structuredClone(storedDraft?.definition ?? record.definition))
-          )
+        ? structuredClone(storedDraft?.definition ?? record.definition)
         : createWorkflow()
       setBaseline(workflowContentKey(definition))
       reset(definition)

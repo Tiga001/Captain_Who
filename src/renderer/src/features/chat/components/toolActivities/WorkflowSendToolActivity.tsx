@@ -33,7 +33,7 @@ function outputs(value: unknown): ObjectValue[] {
     .filter((item): item is ObjectValue => Boolean(item))
 }
 
-function WorkflowMessageBox({
+export function WorkflowMessageBox({
   name,
   message,
   conversationId,
@@ -102,9 +102,9 @@ export function WorkflowSendToolActivity({
   // Receipts freeze display names at send time. Never resolve old messages against mutable graphs.
   const metadata = (result?.ok ? object(result.result) : undefined) ?? object(args?._workflowSend)
   const workflowName = text(metadata?.workflowName)
-  const destinations = outputs(metadata?.outputs)
-  const messages = outputs(args?.outputs).map((output, index) => {
-    const target = destinations.find((item) => item.flowId === output.flowId)
+  const destinations = outputs(metadata?.messages)
+  const messages = outputs(args?.messages).map((output, index) => {
+    const target = destinations.find((item) => item.targetNodeId === output.targetNodeId)
     return {
       name:
         text(target?.targetNodeName) ??

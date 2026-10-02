@@ -582,6 +582,23 @@ pub fn terminalize_automation_runs_before_message_delete(
                  WHERE run_id = ?2 AND terminal_status = 'in_progress'",
                 params![timestamp, agent_run_id],
             )?;
+            let terminal_status: Option<String> = transaction
+                .query_row(
+                    "SELECT terminal_status FROM conversation_turn_traces WHERE run_id = ?1",
+                    [agent_run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(status) = terminal_status {
+                crate::storage::workflow_execution_repository::settle_run(
+                    transaction,
+                    agent_run_id,
+                    &status,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
+                })?;
+            }
         }
         transaction.execute(
             "UPDATE messages SET status = 'cancelled'
@@ -975,4 +992,3 @@ pub fn tombstone_automation(
     transaction.commit()?;
     Ok(AutomationCompareAndSetOutcome::Updated(deleted))
 }
-

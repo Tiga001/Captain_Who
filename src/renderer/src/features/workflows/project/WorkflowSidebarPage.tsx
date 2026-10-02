@@ -23,6 +23,7 @@ export function WorkflowSidebarPage({ context, ...props }: Props) {
     <div className="workflow-sidebar-page">
       <WorkflowsPage
         {...props}
+        foreground={context.activity === 'foreground'}
         key={`${page.id}:${navigationId ?? 0}`}
         initialMonitorId={state?.instanceId ?? null}
         onMonitorChange={handleMonitorChange}

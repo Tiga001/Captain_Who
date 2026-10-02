@@ -38,8 +38,7 @@ vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
   useWorkflowExecution: () => ({
     snapshot: null,
     transmissions: [],
-    completeUserInput: vi.fn(),
-    discardFailedInput: vi.fn()
+    completeUserInput: vi.fn()
   })
 }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -145,22 +144,7 @@ beforeEach(async () => {
           delivers: ''
         }
       ],
-      flows: [
-        {
-          id: 'flow-1',
-          name: 'S1',
-          source: { kind: 'boundary' },
-          target: { kind: 'node', nodeId: 'analysis' }
-        },
-        {
-          id: 'flow-2',
-          name: 'S2',
-          source: { kind: 'node', nodeId: 'analysis' },
-          target: { kind: 'node', nodeId: 'delivery' }
-        }
-      ],
-      viewport: { x: 0, y: 0, zoom: 1 },
-      boundaryPositions: { input: { x: 20, y: 160 } }
+      viewport: { x: 0, y: 0, zoom: 1 }
     }
   }
   instances = []
@@ -533,8 +517,7 @@ describe('global workflow management', () => {
           ...record.definition,
           id: 'template-b',
           name: '另一套流程',
-          nodes: record.definition.nodes.map((node) => ({ ...node, id: `new-${node.id}` })),
-          flows: []
+          nodes: record.definition.nodes.map((node) => ({ ...node, id: `new-${node.id}` }))
         }
       }
     ]

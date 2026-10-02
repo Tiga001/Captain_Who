@@ -27,7 +27,10 @@ impl MemoryConversationWorldState {
         sections: Vec<WorldStateSectionEnvelope>,
     ) -> AgentResult<Vec<crate::AnchoredWorldStateRecord>> {
         let current = fold_records(&self.records)?;
-        let desired = self.preview_sections(sections)?;
+        let desired = crate::workflow_mailbox_sections_for_request(
+            self.preview_sections(sections)?,
+            &self.records,
+        )?;
         let target = WorldStateSnapshot::new(
             current
                 .as_ref()
@@ -136,6 +139,8 @@ pub(super) fn conversation_capability_section_ids() -> AgentResult<Vec<WorldStat
         "agent.collaboration",
         "human.interaction",
         "workflow.execution",
+        "workflow.awareness",
+        "workflow.mailbox",
         "builtin.capabilities.policy",
     ]
     .into_iter()

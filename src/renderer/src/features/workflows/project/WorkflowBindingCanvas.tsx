@@ -1,6 +1,7 @@
+import { Inbox } from 'lucide-react'
 import type { WorkflowDefinition } from '@mycopilot/protocol'
 import { Maximize2, Minus, Plus } from 'lucide-react'
-import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { dismissActiveTooltip, Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { AgentAvatar } from '../../agentCollaboration/AgentAvatar'
@@ -10,7 +11,7 @@ import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
 import { getChatPermissionPresentation } from '../../chat/chatPermissionPresentation'
 import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import { workflowNodeSize } from '../workflowAuthoring'
-import { graphBounds, graphFlowLayout } from '../workflowCanvasGeometry'
+import { graphBounds } from '../workflowCanvasGeometry'
 import { workflowNodeModelLabel, type WorkflowModelDisplay } from '../workflowModelPresentation'
 import { workflowText } from '../workflowText'
 import { projectWorkflowText, WORKFLOW_CONVERSATION_DRAG_TYPE } from './projectWorkflowText'
@@ -31,7 +32,7 @@ interface Props {
   onBind: (nodeId: string, conversationId: string) => void
 }
 
-/** A binding surface: positions and connections always come from the selected template. */
+/** A binding surface: member positions come from the selected template. */
 export function WorkflowBindingCanvas({
   graph,
   conversations,
@@ -55,9 +56,7 @@ export function WorkflowBindingCanvas({
   const [manualZoom, setManualZoom] = useState<number | null>(null)
   const [dragTarget, setDragTarget] = useState<string | null>(null)
   const pan = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
-  const markerId = useId().replaceAll(':', '')
-  const { geometries } = useMemo(() => graphFlowLayout(graph), [graph])
-  const bounds = useMemo(() => graphBounds(graph, geometries), [graph, geometries])
+  const bounds = useMemo(() => graphBounds(graph), [graph])
   const origin = { x: 64 - bounds.left, y: 64 - bounds.top }
   const width = Math.max(400, bounds.right - bounds.left + 128)
   const height = Math.max(260, bounds.bottom - bounds.top + 128)
@@ -125,74 +124,6 @@ export function WorkflowBindingCanvas({
               transform: `scale(${zoom})`
             }}
           >
-            <svg
-              className="workflow-canvas__edges"
-              width={width}
-              height={height}
-              aria-hidden="true"
-            >
-              <defs>
-                <marker
-                  id={markerId}
-                  markerWidth="7"
-                  markerHeight="7"
-                  refX="6.2"
-                  refY="3.5"
-                  orient="auto"
-                >
-                  <path d="M 0 0 L 7 3.5 L 0 7 z" fill="currentColor" />
-                </marker>
-              </defs>
-              <g transform={`translate(${origin.x} ${origin.y})`}>
-                {graph.flows.map((flow) => {
-                  const geometry = geometries.get(flow.id)
-                  return geometry ? (
-                    <g key={flow.id} className="workflow-edge">
-                      <path
-                        className="workflow-edge__line"
-                        d={geometry.path}
-                        markerEnd={`url(#${markerId})`}
-                      />
-                      <text
-                        className="workflow-edge__label"
-                        x={geometry.label.x}
-                        y={geometry.label.y - 7}
-                        textAnchor="middle"
-                      >
-                        {flow.name}
-                      </text>
-                    </g>
-                  ) : null
-                })}
-                {graph.flows.flatMap((flow) =>
-                  (geometries.get(flow.id)?.bridges ?? []).map((bridge, index) => (
-                    <g key={`${flow.id}-bridge-${index}`} className="workflow-crossing">
-                      <path className="workflow-crossing__halo" d={bridge.path} />
-                      <path className="workflow-crossing__line" d={bridge.path} />
-                    </g>
-                  ))
-                )}
-              </g>
-            </svg>
-            <div
-              className="workflow-node workflow-node--root"
-              style={{
-                left: graph.boundaryPositions.input.x + origin.x,
-                top: graph.boundaryPositions.input.y + origin.y,
-                ...workflowNodeSize()
-              }}
-            >
-              <span className="workflow-node__avatar workflow-user-avatar">
-                <AccountAvatar
-                  src={profile?.avatarDataUrl}
-                  localAvatarSeed={profile?.localAccount?.avatarSeed}
-                />
-              </span>
-              <div className="workflow-node__copy">
-                <strong>{userName}</strong>
-                <span>{t('用户输入', 'User input')}</span>
-              </div>
-            </div>
             {graph.nodes.map((node) => {
               const dimensions = workflowNodeSize(node)
               const style = {
@@ -201,29 +132,12 @@ export function WorkflowBindingCanvas({
                 width: dimensions.width,
                 height: dimensions.height
               }
-              if (node.kind === 'inputGate' || node.kind === 'outputGate') {
-                return (
-                  <div
-                    key={node.id}
-                    className={`workflow-node workflow-node--gate workflow-node--${node.kind}`}
-                    style={style}
-                    title={node.name}
-                  >
-                    <svg className="workflow-gate-shape" viewBox="0 0 64 56" aria-hidden="true">
-                      <path
-                        d={
-                          node.kind === 'inputGate'
-                            ? 'M 2 2 L 62 28 L 2 54 Z'
-                            : 'M 62 2 L 2 28 L 62 54 Z'
-                        }
-                      />
-                    </svg>
-                  </div>
-                )
-              }
               if (node.kind === 'user') {
                 return (
                   <div key={node.id} className="workflow-node" style={style}>
+                    <span className="workflow-node__mailbox" aria-hidden="true">
+                      <Inbox size={19} />
+                    </span>
                     <span className="workflow-node__avatar workflow-user-avatar">
                       <AccountAvatar
                         src={profile?.avatarDataUrl}
@@ -324,6 +238,9 @@ export function WorkflowBindingCanvas({
                         if (id && !disabled) onBind(node.id, id)
                       }}
                     >
+                      <span className="workflow-node__mailbox" aria-hidden="true">
+                        <Inbox size={19} />
+                      </span>
                       <AgentAvatar agentId={node.id} className="workflow-node__avatar" />
                       <span className="workflow-node__copy workflow-node__copy--configurable">
                         <strong>{conversation?.title || node.name}</strong>

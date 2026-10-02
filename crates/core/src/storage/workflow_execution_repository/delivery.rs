@@ -1,169 +1,108 @@
-pub(super) const PENDING_CANDIDATES_SQL: &str = "SELECT input_id, sequence, instance_id, execution_version, conversation_id
-        FROM workflow_execution_inputs i INDEXED BY workflow_execution_input_pending_sequence
-        WHERE status='pending' AND sequence>?1
-          AND NOT EXISTS(SELECT 1 FROM workflow_execution_inputs older
-            WHERE older.conversation_id=i.conversation_id
-              AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<i.sequence)
-        ORDER BY sequence LIMIT ?2";
-
 use super::*;
+pub(super) const PENDING_CANDIDATES_SQL: &str = "SELECT i.input_id,i.sequence,i.instance_id,i.execution_version,i.conversation_id FROM workflow_mail_inputs i INDEXED BY workflow_mail_input_pending_sequence JOIN workflow_mail_messages m ON m.input_id=i.input_id WHERE i.status='pending' AND m.mail_status='pending' AND i.sequence>?1 AND NOT EXISTS(SELECT 1 FROM workflow_mail_inputs older JOIN workflow_mail_messages om ON om.input_id=older.input_id WHERE older.conversation_id=i.conversation_id AND om.mail_status='pending' AND older.sequence<i.sequence) ORDER BY i.sequence LIMIT ?2";
 
 pub fn load_input(c: &Connection, input_id: &str) -> Result<Option<Input>, String> {
     c.query_row(
-        "SELECT input_json FROM workflow_execution_inputs WHERE input_id=?1",
+        "SELECT input_json FROM workflow_mail_inputs WHERE input_id=?1",
         [input_id],
         |r| r.get::<_, String>(0),
     )
     .optional()
     .map_err(db)?
-    .map(|v| parse(&v))
+    .map(|raw| parse(&raw))
     .transpose()
 }
 pub fn input_for_delivery(c: &Connection, delivery_id: &str) -> Result<Option<Input>, String> {
     c.query_row(
-        "SELECT input_json FROM workflow_execution_inputs WHERE delivery_id=?1",
+        "SELECT input_json FROM workflow_mail_inputs WHERE delivery_id=?1",
         [delivery_id],
         |r| r.get::<_, String>(0),
     )
     .optional()
     .map_err(db)?
-    .map(|v| parse(&v))
+    .map(|raw| parse(&raw))
     .transpose()
 }
 fn list(c: &Connection, query: &str, param: &str) -> Result<Vec<Input>, String> {
-    let mut statement = c.prepare(query).map_err(db)?;
-    let rows = statement
+    let mut s = c.prepare(query).map_err(db)?;
+    let result = s
         .query_map([param], |r| r.get::<_, String>(0))
         .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    rows.iter().map(|row| parse(row)).collect()
+        .map(|raw| parse(&raw.map_err(db)?))
+        .collect();
+    result
 }
 pub fn inputs_for_conversation(
     c: &Connection,
     conversation_id: &str,
 ) -> Result<Vec<Input>, String> {
-    list(c,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 ORDER BY sequence",conversation_id)
+    list(
+        c,
+        "SELECT input_json FROM workflow_mail_inputs WHERE conversation_id=?1 ORDER BY sequence",
+        conversation_id,
+    )
 }
 fn eligible(c: &Connection, input: &Input) -> Result<bool, String> {
     let Some(graph) = graph(c, &input.instance_id)? else {
         return Ok(false);
     };
-    if !graph.enabled || graph.execution_version != input.execution_version {
+    if !graph.enabled || !graph.definition.nodes.iter().any(|n| n.id == input.node_id) {
         return Ok(false);
     }
-    if let Some(chat) = input.conversation_id.as_deref() {
-        if graph.bindings.get(&input.node_id).map(String::as_str) != Some(chat)
+    if let Some(chat) = &input.conversation_id {
+        if graph.bindings.get(&input.node_id) != Some(chat)
             || !independent(c, chat)?
+            || is_paused(c, chat)?
         {
-            return Ok(false);
-        }
-        let paused: bool = c
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM workflow_execution_pauses WHERE conversation_id=?1)",
-                [chat],
-                |r| r.get(0),
-            )
-            .map_err(db)?;
-        if paused {
             return Ok(false);
         }
     }
     Ok(true)
 }
-/// Only the oldest ready input per conversation is offered. A claim blocks later inputs
-/// until durable model receipt, making worker races and batched FIFO deterministic.
-pub fn pending_inputs(c: &Connection) -> Result<Vec<Input>, String> {
-    let mut statement=c.prepare("SELECT input_json FROM workflow_execution_inputs i WHERE status='pending' AND NOT EXISTS(SELECT 1 FROM workflow_execution_inputs older WHERE older.conversation_id=i.conversation_id AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<i.sequence) ORDER BY sequence LIMIT 128").map_err(db)?;
-    let rows = statement
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    let mut result = vec![];
-    for row in rows {
-        let input: Input = parse(&row)?;
-        if eligible(c, &input)? {
-            result.push(input);
-        }
-    }
-    Ok(result)
-}
-/// Advance by durable sequence even when a candidate is disabled or cannot currently start.
-/// The page contains only lightweight hints; no graph, input content, or history is decoded.
 pub fn pending_candidates(
     c: &Connection,
     after_sequence: u64,
     limit: usize,
 ) -> Result<Vec<PendingInputCandidate>, String> {
-    let mut statement = c.prepare(PENDING_CANDIDATES_SQL).map_err(db)?;
-    let rows = statement
-        .query_map(params![after_sequence, limit.clamp(1, 128)], |row| {
+    let mut s = c.prepare(PENDING_CANDIDATES_SQL).map_err(db)?;
+    let result = s
+        .query_map(params![after_sequence, limit.clamp(1, 128)], |r| {
             Ok(PendingInputCandidate {
-                id: row.get(0)?,
-                sequence: row.get(1)?,
-                instance_id: row.get(2)?,
-                execution_version: row.get(3)?,
-                conversation_id: row.get(4)?,
+                id: r.get(0)?,
+                sequence: r.get(1)?,
+                instance_id: r.get(2)?,
+                execution_version: r.get(3)?,
+                conversation_id: r.get(4)?,
             })
         })
         .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    Ok(rows)
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db);
+    result
 }
-
 pub fn eligible_pending_input(c: &Connection, input_id: &str) -> Result<Option<Input>, String> {
     let Some(input) = load_input(c, input_id)? else {
         return Ok(None);
     };
-    if input.status != InputStatus::Pending || !eligible(c, &input)? {
-        return Ok(None);
-    }
-    Ok(Some(input))
+    Ok((input.status == InputStatus::Pending
+        && current_mail_status(c, input_id)? == MailStatus::Pending
+        && eligible(c, &input)?)
+    .then_some(input))
 }
-
-/// A busy run's inbox must never depend on the first global scheduler page. Frozen run identity,
-/// exact node/version, and the same conversation FIFO predecessor rule all remain authoritative.
-pub fn pending_injection(
-    c: &Connection,
-    conversation_id: &str,
-    run_id: &str,
-) -> Result<Option<Input>, String> {
-    let Some(identity) = snapshot_for_run(c, conversation_id, run_id)? else {
-        return Ok(None);
-    };
-    let row = c.query_row("SELECT input_json FROM workflow_execution_inputs i
-        WHERE status='pending' AND conversation_id=?1 AND instance_id=?2 AND node_id=?3 AND execution_version=?4
-          AND NOT EXISTS(SELECT 1 FROM workflow_execution_inputs older
-            WHERE older.conversation_id=i.conversation_id
-              AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<i.sequence)
-        ORDER BY sequence LIMIT 1", params![conversation_id,identity.instance_id,identity.node_id,identity.execution_version],
-        |row| row.get::<_,String>(0)).optional().map_err(db)?;
-    let Some(row) = row else { return Ok(None) };
-    let input: Input = parse(&row)?;
-    if input.busy_policy != BusyPolicy::Inject || !eligible(c, &input)? {
-        return Ok(None);
-    }
-    Ok(Some(input))
+pub fn pending_inputs(c: &Connection) -> Result<Vec<Input>, String> {
+    pending_candidates(c, 0, 128)?
+        .into_iter()
+        .map(|hint| eligible_pending_input(c, &hint.id))
+        .filter_map(|result| result.transpose())
+        .collect()
 }
-
 pub fn bound_inputs(c: &Connection, run_id: &str) -> Result<Vec<Input>, String> {
-    let inputs=list(c,"SELECT input_json FROM workflow_execution_inputs WHERE run_id=?1 AND status='claimed' ORDER BY sequence",run_id)?;
-    let mut result = vec![];
-    for input in inputs {
-        if eligible(c, &input)? {
-            result.push(input);
-        }
+    let mut inputs = vec![];
+    for input in list(c,"SELECT input_json FROM workflow_mail_inputs WHERE run_id=?1 AND status='claimed' ORDER BY sequence",run_id)? {
+        if input.mail_status==MailStatus::Processing && eligible(c,&input)? {inputs.push(input)}
     }
-    Ok(result)
+    Ok(inputs)
 }
-fn write(c: &Connection, input: &Input) -> Result<(), String> {
-    c.execute("UPDATE workflow_execution_inputs SET input_json=?1,status=?2,run_id=?3,delivery_id=?4,updated_at=?5 WHERE input_id=?6",params![json(input)?,status_name(&input.status),input.run_id,input.delivery_id,now_ms(),input.id]).map_err(db)?;
-    Ok(())
-}
-/// Caller can include this transition in a larger admission transaction. No external effects
-/// may happen before this succeeds. An uncertain claimed delivery is never automatically retried.
 pub fn bind_input_in_connection(
     c: &Connection,
     input_id: &str,
@@ -180,21 +119,38 @@ pub fn bind_input_in_connection(
         return eligible(c, &input);
     }
     if input.status != InputStatus::Pending
+        || current_mail_status(c, input_id)? != MailStatus::Pending
         || !eligible(c, &input)?
         || run_id.is_empty()
         || delivery_id.is_empty()
     {
         return Ok(false);
     }
-    let blocked:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM workflow_execution_inputs older WHERE older.conversation_id=?1 AND older.status IN ('pending','claimed','paused','failed') AND older.sequence<(SELECT sequence FROM workflow_execution_inputs WHERE input_id=?2))",params![input.conversation_id,input.id],|r|r.get(0)).map_err(db)?;
+    let blocked:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM workflow_mail_inputs older JOIN workflow_mail_messages m ON m.input_id=older.input_id WHERE older.conversation_id=?1 AND m.mail_status='pending' AND older.sequence<(SELECT sequence FROM workflow_mail_inputs WHERE input_id=?2))",params![input.conversation_id,input.id],|r|r.get(0)).map_err(db)?;
     if blocked {
         return Ok(false);
     }
-    c.execute("INSERT INTO workflow_execution_message_origins(message_id,conversation_id,input_id) VALUES (?1,?2,?3)",params![delivery_id,input.conversation_id,input.id]).map_err(db)?;
+    let owner = snapshot_for_run(
+        c,
+        input.conversation_id.as_deref().unwrap_or_default(),
+        run_id,
+    )?
+    .ok_or("Workflow identity was not admitted for this run")?;
+    input.content = assemble_message(&owner, &input.messages);
+    input.execution_version = owner.execution_version;
+    c.execute("INSERT INTO workflow_mail_message_origins(message_id,conversation_id,input_id) VALUES(?1,?2,?3)",params![delivery_id,input.conversation_id,input.id]).map_err(db)?;
     input.status = InputStatus::Claimed;
+    input.mail_status = MailStatus::Processing;
     input.run_id = Some(run_id.into());
     input.delivery_id = Some(delivery_id.into());
     write(c, &input)?;
+    event(
+        c,
+        &input.instance_id,
+        Some(&input.id),
+        input.messages.first(),
+        "accepted",
+    )?;
     Ok(true)
 }
 pub fn bind_input(
@@ -206,28 +162,38 @@ pub fn bind_input(
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    let bound = bind_input_in_connection(&tx, input_id, run_id, delivery_id)?;
+    let result = bind_input_in_connection(&tx, input_id, run_id, delivery_id)?;
     tx.commit().map_err(db)?;
-    Ok(bound)
+    Ok(result)
 }
-fn has_delivery_proof(c: &Connection, input: &Input) -> Result<bool, String> {
+pub(super) fn has_delivery_proof(c: &Connection, input: &Input) -> Result<bool, String> {
     c.query_row("SELECT EXISTS(SELECT 1 FROM conversation_turn_trace_items i JOIN conversation_turn_traces t ON t.assistant_message_id=i.assistant_message_id WHERE t.run_id=?1 AND t.conversation_id=?2 AND i.item_kind='workflow_delivery' AND json_extract(i.item_json,'$.inputId')=?3 AND json_extract(i.item_json,'$.instanceId')=?4 AND json_extract(i.item_json,'$.content')=?5)",params![input.run_id,input.conversation_id,input.id,input.instance_id,input.content],|r|r.get(0)).map_err(db)
 }
 fn apply_proven_input(c: &Connection, input: &mut Input) -> Result<(), String> {
+    if current_mail_status(c, &input.id)?.is_terminal() {
+        return Ok(());
+    }
+    if input.status == InputStatus::Applied {
+        return Ok(());
+    }
     input.status = InputStatus::Applied;
+    input.mail_status = MailStatus::Processing;
     input.error = None;
     write(c, input)?;
-    if let Some(conversation_id) = &input.conversation_id {
+    if let Some(chat) = &input.conversation_id {
         c.execute(
             "UPDATE conversations SET unread_at=?1,updated_at=MAX(updated_at,?1) WHERE id=?2",
-            params![now_ms(), conversation_id],
+            params![now_ms(), chat],
         )
         .map_err(db)?;
     }
-    let flows = graph(c, &input.instance_id)?
-        .map(|g| final_gate_flows(&g, input))
-        .unwrap_or_default();
-    event(c, &input.instance_id, Some(&input.id), &flows, "delivered")
+    event(
+        c,
+        &input.instance_id,
+        Some(&input.id),
+        input.messages.first(),
+        "delivered",
+    )
 }
 pub fn mark_applied(c: &mut Connection, input_id: &str) -> Result<(), String> {
     let tx = c
@@ -236,14 +202,12 @@ pub fn mark_applied(c: &mut Connection, input_id: &str) -> Result<(), String> {
     let Some(mut input) = load_input(&tx, input_id)? else {
         return Err("Workflow input no longer exists".into());
     };
-    if input.status == InputStatus::Applied {
+    if current_mail_status(&tx, input_id)?.is_terminal() {
         return Ok(());
     }
     if !has_delivery_proof(&tx, &input)? {
         return Err("Workflow input has no durable delivery receipt".into());
     }
-    // The trace observer calls this only after the model receipt was persisted. A disable
-    // racing that receipt cannot erase the fact that this input has already been applied.
     apply_proven_input(&tx, &mut input)?;
     tx.commit().map_err(db)
 }
@@ -252,84 +216,120 @@ pub fn fail_input(c: &mut Connection, input_id: &str, reason: &str) -> Result<()
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
     let Some(mut input) = load_input(&tx, input_id)? else {
-        return Err("Workflow input no longer exists".into());
+        return Ok(());
     };
-    if matches!(
-        input.status,
-        InputStatus::Applied
-            | InputStatus::Completed
-            | InputStatus::Invalidated
-            | InputStatus::Failed
-    ) {
+    if current_mail_status(&tx, input_id)?.is_terminal() {
         return Ok(());
     }
+    input.mail_status = MailStatus::Failed;
     input.status = InputStatus::Failed;
     input.error = Some(reason.chars().take(2000).collect());
     write(&tx, &input)?;
-    event(&tx, &input.instance_id, Some(input_id), &[], "failed")?;
+    event(
+        &tx,
+        &input.instance_id,
+        Some(input_id),
+        input.messages.first(),
+        "failed",
+    )?;
     tx.commit().map_err(db)
 }
 pub fn pause_conversation(c: &mut Connection, conversation_id: &str) -> Result<(), String> {
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    let changed = tx.execute("INSERT INTO workflow_execution_pauses(conversation_id,created_at) VALUES (?1,?2) ON CONFLICT(conversation_id) DO NOTHING",params![conversation_id,now_ms()]).map_err(db)?;
-    for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status IN ('pending','claimed')",conversation_id)? {
-        if input.status==InputStatus::Claimed {
-            if has_delivery_proof(&tx,&input)? {apply_proven_input(&tx,&mut input)?;continue;} else {input.status=InputStatus::Failed;input.error=Some("Conversation stopped before the workflow input was durably applied".into());}
-        }else{input.status=InputStatus::Paused;}
-        write(&tx,&input)?;
-    }
-    if changed > 0 {
-        conversation_event(&tx, conversation_id, "paused")?;
-    }
+    if tx.execute("INSERT INTO workflow_mail_pauses(conversation_id,created_at) VALUES(?1,?2) ON CONFLICT(conversation_id) DO NOTHING",params![conversation_id,now_ms()]).map_err(db)?>0{conversation_event(&tx,conversation_id,"paused")?}
+    // Pending mail remains pending. The durable terminal transaction settles processing mail.
     tx.commit().map_err(db)
 }
 pub fn resume_conversation(c: &mut Connection, conversation_id: &str) -> Result<(), String> {
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    let changed = tx
+    if tx
         .execute(
-            "DELETE FROM workflow_execution_pauses WHERE conversation_id=?1",
+            "DELETE FROM workflow_mail_pauses WHERE conversation_id=?1",
             [conversation_id],
         )
-        .map_err(db)?;
-    for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status='failed'",conversation_id)? {
-        if input.error.as_deref()==Some("Conversation stopped before the workflow input was durably applied") {
-            input.status=InputStatus::Invalidated;write(&tx,&input)?;
-        }
-    }
-    for mut input in list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE conversation_id=?1 AND status='paused'",conversation_id)? {input.status=InputStatus::Pending;write(&tx,&input)?;}
-    if changed > 0 {
-        conversation_event(&tx, conversation_id, "resumed")?;
+        .map_err(db)?
+        > 0
+    {
+        conversation_event(&tx, conversation_id, "resumed")?
     }
     tx.commit().map_err(db)
 }
-
 fn conversation_event(c: &Connection, conversation_id: &str, kind: &str) -> Result<(), String> {
-    let mut statement = c
-        .prepare(
-            "SELECT DISTINCT instance_id FROM workflow_instance_bindings WHERE conversation_id=?1",
-        )
+    let mut s = c
+        .prepare("SELECT instance_id FROM workflow_instance_bindings WHERE conversation_id=?1")
         .map_err(db)?;
-    let instances = statement
+    for row in s
         .query_map([conversation_id], |r| r.get::<_, String>(0))
         .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    for instance in instances {
-        event(c, &instance, None, &[], kind)?;
+    {
+        event(c, &row.map_err(db)?, None, None, kind)?;
     }
     Ok(())
 }
-/// Called when graph or bindings are replaced, never for a plain enable/disable switch.
-/// Old queued inputs remain inspectable and cannot migrate to a new destination.
+/// Structural removal fences pending work; immutable mail and completed results remain inspectable.
 pub fn invalidate_instance(c: &Connection, instance_id: &str, reason: &str) -> Result<(), String> {
-    for mut input in list(c,"SELECT input_json FROM workflow_execution_inputs WHERE instance_id=?1 AND status IN ('pending','claimed','paused','waiting_user','failed')",instance_id)? {
-        input.status=InputStatus::Invalidated;input.error=Some(reason.into());write(c,&input)?;
+    for mut input in list(
+        c,
+        "SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence",
+        instance_id,
+    )? {
+        if !current_mail_status(c, &input.id)?.is_terminal() {
+            input.mail_status = MailStatus::Failed;
+            input.status = InputStatus::Invalidated;
+            input.error = Some(reason.into());
+            write(c, &input)?;
+            event(
+                c,
+                instance_id,
+                Some(&input.id),
+                input.messages.first(),
+                "failed",
+            )?;
+        }
     }
-    c.execute("UPDATE workflow_execution_messages SET invalidated=1 WHERE instance_id=?1 AND input_id IS NULL",[instance_id]).map_err(db)?;
+    Ok(())
+}
+/// Fences only mail whose frozen recipient no longer exists or no longer owns the node.
+pub fn reconcile_recipients(c: &Connection, instance_id: &str) -> Result<(), String> {
+    let Some(graph) = graph(c, instance_id)? else {
+        return Ok(());
+    };
+    for mut input in list(
+        c,
+        "SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence",
+        instance_id,
+    )? {
+        if current_mail_status(c, &input.id)?.is_terminal() {
+            continue;
+        }
+        let recipient_matches = graph
+            .definition
+            .nodes
+            .iter()
+            .find(|n| n.id == input.node_id)
+            .is_some_and(|n| match &n.config {
+                NodeConfig::User { .. } => input.conversation_id.is_none(),
+                NodeConfig::Agent(_) => graph.bindings.get(&n.id) == input.conversation_id.as_ref(),
+            });
+        if !recipient_matches {
+            input.mail_status = MailStatus::Failed;
+            input.status = InputStatus::Invalidated;
+            input.error =
+                Some("Original mail recipient is no longer bound to this workflow node".into());
+            write(c, &input)?;
+            event(
+                c,
+                instance_id,
+                Some(&input.id),
+                input.messages.first(),
+                "failed",
+            )?;
+        }
+    }
     Ok(())
 }
 pub fn complete_user_input(c: &mut Connection, input_id: &str) -> Result<(), String> {
@@ -337,21 +337,83 @@ pub fn complete_user_input(c: &mut Connection, input_id: &str) -> Result<(), Str
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
     let Some(mut input) = load_input(&tx, input_id)? else {
-        return Err("Workflow input no longer exists".into());
+        return Err("Workflow mail is unavailable".into());
     };
-    if input.status == InputStatus::Completed {
+    if input.mail_status == MailStatus::Processed {
         return Ok(());
     }
-    if input.status != InputStatus::WaitingUser || input.conversation_id.is_some() {
-        return Err("This input is not waiting for user completion".into());
+    if input.status != InputStatus::WaitingUser
+        || input.conversation_id.is_some()
+        || !eligible(&tx, &input)?
+    {
+        return Err("This mail is not waiting for user completion".into());
     }
-    if !eligible(&tx, &input)? {
-        return Err("Enable and review the workflow before completing this input".into());
-    }
+    input.mail_status = MailStatus::Processed;
     input.status = InputStatus::Completed;
     write(&tx, &input)?;
-    event(&tx, &input.instance_id, Some(input_id), &[], "completed")?;
+    event(
+        &tx,
+        &input.instance_id,
+        Some(&input.id),
+        input.messages.first(),
+        "completed",
+    )?;
     tx.commit().map_err(db)
+}
+
+/// Called within the same transaction as the authoritative terminal run trace.
+pub fn settle_run(c: &Connection, run_id: &str, status: &str) -> Result<(), String> {
+    let final_status = match status {
+        "completed" => MailStatus::Processed,
+        "cancelled" | "stopped" => MailStatus::Stopped,
+        "failed" => MailStatus::Failed,
+        _ => return Ok(()),
+    };
+    for mut input in list(
+        c,
+        "SELECT input_json FROM workflow_mail_inputs WHERE run_id=?1 ORDER BY sequence",
+        run_id,
+    )? {
+        if current_mail_status(c, &input.id)? != MailStatus::Processing {
+            continue;
+        }
+        let proven = has_delivery_proof(c, &input)?;
+        let result = if final_status == MailStatus::Processed && !proven {
+            MailStatus::Failed
+        } else {
+            final_status
+        };
+        input.mail_status = result;
+        input.status = match result {
+            MailStatus::Processed => InputStatus::Completed,
+            MailStatus::Stopped => InputStatus::Stopped,
+            _ => InputStatus::Failed,
+        };
+        input.error = match result {
+            MailStatus::Failed => Some(
+                if proven {
+                    "The processing turn failed"
+                } else {
+                    "Mail was claimed but its delivery was not durably confirmed"
+                }
+                .into(),
+            ),
+            _ => None,
+        };
+        write(c, &input)?;
+        event(
+            c,
+            &input.instance_id,
+            Some(&input.id),
+            input.messages.first(),
+            match result {
+                MailStatus::Processed => "completed",
+                MailStatus::Stopped => "stopped",
+                _ => "failed",
+            },
+        )?;
+    }
+    Ok(())
 }
 pub fn runtime_snapshot(
     c: &Connection,
@@ -370,118 +432,95 @@ pub fn runtime_snapshot(
     }
     let sequence: u64 = c
         .query_row(
-            "SELECT COALESCE(MAX(sequence),0) FROM workflow_execution_events WHERE instance_id=?1",
+            "SELECT COALESCE(MAX(sequence),0) FROM workflow_mail_events WHERE instance_id=?1",
             [instance_id],
             |r| r.get(0),
         )
         .map_err(db)?;
-    // All outstanding work must remain visible even after many newer deliveries. Only the
-    // historical tail is capped. The monitor is a lightweight view, not a message-body API.
-    let mut inputs=list(c,"SELECT input_json FROM workflow_execution_inputs WHERE instance_id=?1 AND (status IN ('pending','claimed','paused','waiting_user','failed') OR sequence IN (SELECT sequence FROM workflow_execution_inputs WHERE instance_id=?1 ORDER BY sequence DESC LIMIT 128) OR input_id IN (SELECT input_id FROM workflow_execution_events WHERE instance_id=?1 ORDER BY sequence DESC LIMIT 512)) ORDER BY sequence",instance_id)?;
+    let mut s=c.prepare("SELECT sequence,input_id,message_id,source_node_id,target_node_id,kind,created_at FROM workflow_mail_events WHERE instance_id=?1 AND sequence>?2 ORDER BY sequence DESC LIMIT 512").map_err(db)?;
+    let mut events = s
+        .query_map(params![instance_id, after_sequence.unwrap_or(0)], |r| {
+            Ok(Event {
+                sequence: r.get(0)?,
+                instance_id: instance_id.into(),
+                input_id: r.get(1)?,
+                message_id: r.get(2)?,
+                source_node_id: r.get(3)?,
+                target_node_id: r.get(4)?,
+                kind: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db)?;
+    events.reverse();
+    // Events must always be resolvable by the renderer, including a late terminal event for mail
+    // explicitly completed before the newest 128 history rows. Only this bounded event page adds
+    // history rows; pending/processing mail and the normal history window retain their limits.
+    let referenced_inputs: Vec<_> = events
+        .iter()
+        .filter_map(|event| event.input_id.as_deref())
+        .collect();
+    let mut statement=c.prepare("SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 AND (input_id IN(SELECT input_id FROM workflow_mail_messages WHERE mail_status IN('pending','processing')) OR sequence IN(SELECT sequence FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence DESC LIMIT 128) OR input_id IN(SELECT value FROM json_each(?2))) ORDER BY sequence").map_err(db)?;
+    let mut inputs: Vec<Input> = statement
+        .query_map(params![instance_id, json(&referenced_inputs)?], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(db)?
+        .map(|row| parse(&row.map_err(db)?))
+        .collect::<Result<_, _>>()?;
     for input in &mut inputs {
         input.content.clear();
         for message in &mut input.messages {
             message.content.clear();
         }
     }
-
-    let mut statement=c.prepare("SELECT sequence,input_id,flow_ids_json,kind,created_at FROM workflow_execution_events WHERE instance_id=?1 AND sequence>?2 ORDER BY sequence DESC LIMIT 512").map_err(db)?;
-    let rows = statement
-        .query_map(params![instance_id, after_sequence.unwrap_or(0)], |r| {
-            Ok((
-                r.get::<_, u64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    let mut events = vec![];
-    for (sequence, input_id, flows, kind, created_at) in rows {
-        events.push(Event {
-            sequence,
-            instance_id: instance_id.into(),
-            input_id,
-            flow_ids: parse(&flows)?,
-            kind,
-            created_at,
-        });
-    }
-    events.reverse();
-    let mut pending_statement = c.prepare("SELECT message_json FROM workflow_execution_messages WHERE instance_id=?1 AND input_id IS NULL AND invalidated=0 ORDER BY sequence").map_err(db)?;
-    let mut pending_messages = pending_statement
-        .query_map([instance_id], |r| r.get::<_, String>(0))
-        .map_err(db)?
-        .map(|row| {
-            let mut message: SourceMessage = parse(&row.map_err(db)?)?;
-            message.content.clear();
-            Ok(message)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    // The queue admission limit also bounds this body-free projection.
-    pending_messages.shrink_to_fit();
-    let mut pauses = c.prepare("SELECT p.conversation_id FROM workflow_execution_pauses p JOIN workflow_instance_bindings b ON b.conversation_id=p.conversation_id WHERE b.instance_id=?1 ORDER BY p.conversation_id").map_err(db)?;
-    let paused_conversation_ids = pauses
+    let mut s=c.prepare("SELECT p.conversation_id FROM workflow_mail_pauses p JOIN workflow_instance_bindings b ON b.conversation_id=p.conversation_id WHERE b.instance_id=?1 ORDER BY p.conversation_id").map_err(db)?;
+    let paused_conversation_ids = s
         .query_map([instance_id], |r| r.get(0))
         .map_err(db)?
-        .collect::<rusqlite::Result<Vec<String>>>()
+        .collect::<rusqlite::Result<_>>()
         .map_err(db)?;
-    let mut input_runs = Vec::new();
-    let mut run_query = c.prepare("SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1 AND conversation_id=?2 LIMIT 1").map_err(db)?;
+    let mut input_runs = vec![];
     for input in &inputs {
-        if let Some(status) = run_query
-            .query_row(params![input.run_id, input.conversation_id], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(db)?
-        {
-            input_runs.push(InputRunState {
-                input_id: input.id.clone(),
-                status,
-            });
-        }
+        if let Some(status)=c.query_row("SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1 AND conversation_id=?2",params![input.run_id,input.conversation_id],|r|r.get(0)).optional().map_err(db)?{input_runs.push(InputRunState{input_id:input.id.clone(),status});}
     }
     Ok(RuntimeSnapshot {
         instance_id: instance_id.into(),
         sequence,
         inputs,
         events,
-        pending_messages,
         paused_conversation_ids,
         input_runs,
     })
 }
-
-/// Message bodies are loaded only for the selected node, in bounded pages. Never replay them.
 pub fn node_messages(
     c: &Connection,
     instance_id: &str,
     node_id: &str,
     before: Option<u64>,
 ) -> Result<NodeMessages, String> {
-    let graph = graph(c, instance_id)?.ok_or("Workflow instance no longer exists")?;
-    if !graph.definition.nodes.iter().any(|node| node.id == node_id) {
-        return Err("Workflow node no longer exists".into());
-    }
-    let mut statement = c.prepare("SELECT m.sequence,m.message_json,m.input_id,CASE WHEN m.invalidated=1 THEN 'invalidated' ELSE COALESCE(i.status,'collecting') END,t.terminal_status,json_extract(i.input_json,'$.error') FROM workflow_execution_messages m LEFT JOIN workflow_execution_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND (?3 IS NULL OR m.sequence<?3) ORDER BY m.sequence DESC LIMIT 21").map_err(db)?;
-    let rows = statement
-        .query_map(params![instance_id, node_id, before], |r| {
-            Ok((
-                r.get::<_, u64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })
-        .map_err(db)?;
-    let mut messages = Vec::new();
-    for row in rows {
+    let graph = graph(c, instance_id)?.ok_or("Workflow no longer exists")?;
+    let target = node(&graph, node_id)?;
+    let mut s=c.prepare("SELECT m.sequence,m.message_json,m.input_id,m.mail_status,t.terminal_status,json_extract(i.input_json,'$.error') FROM workflow_mail_messages m LEFT JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND m.recipient_conversation_id IS ?3 AND (?4 IS NULL OR m.sequence<?4) ORDER BY m.sequence DESC LIMIT 21").map_err(db)?;
+    let mut messages = vec![];
+    for row in s
+        .query_map(
+            params![instance_id, target.id, graph.bindings.get(node_id), before],
+            |r| {
+                Ok((
+                    r.get::<_, u64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .map_err(db)?
+    {
         let (sequence, raw, input_id, status, run_status, error) = row.map_err(db)?;
         messages.push(NodeMessage {
             sequence,
@@ -502,9 +541,6 @@ pub fn node_messages(
         next_before_sequence,
     })
 }
-
-/// Freeze even an absent identity at run admission: enabling or rebinding mid-turn cannot
-/// grant an old task new cross-conversation authority.
 pub fn bind_run(
     c: &mut Connection,
     conversation_id: &str,
@@ -515,161 +551,140 @@ pub fn bind_run(
         .map_err(db)?;
     let existing: Option<(String, String)> = tx
         .query_row(
-            "SELECT conversation_id,snapshot_json FROM workflow_execution_runs WHERE run_id=?1",
+            "SELECT conversation_id,snapshot_json FROM workflow_mail_runs WHERE run_id=?1",
             [run_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(db)?;
     let live = snapshot_for_conversation(&tx, conversation_id)?;
-    let snapshot = if let Some((owner, stored)) = existing {
+    let result = if let Some((owner, raw)) = existing {
         if owner != conversation_id {
             return Err("Workflow run belongs to another conversation".into());
         }
-        let frozen: Option<ConversationSnapshot> = parse(&stored)?;
-        frozen.filter(|old| {
-            live.as_ref().is_some_and(|current| {
-                current.execution_version == old.execution_version
-                    && current.node_id == old.node_id
-                    && current.instance_id == old.instance_id
+        let old: Option<ConversationSnapshot> = parse(&raw)?;
+        old.filter(|old| {
+            live.as_ref().is_some_and(|new| {
+                new.execution_version == old.execution_version
+                    && new.node_id == old.node_id
+                    && new.instance_id == old.instance_id
             })
         })
     } else {
-        tx.execute("INSERT INTO workflow_execution_runs(run_id,conversation_id,snapshot_json,created_at) VALUES (?1,?2,?3,?4)",params![run_id,conversation_id,json(&live)?,now_ms()]).map_err(db)?;
+        tx.execute("INSERT INTO workflow_mail_runs(run_id,conversation_id,snapshot_json,created_at) VALUES(?1,?2,?3,?4)",params![run_id,conversation_id,json(&live)?,now_ms()]).map_err(db)?;
         live
     };
     tx.commit().map_err(db)?;
-    Ok(snapshot)
+    Ok(result)
 }
-
-/// Recover only settled runs. In-progress traces may resume an approval/checkpoint and retain
-/// their claim. Missing proof after a terminal run is ambiguous and never causes a replay.
-pub fn recover_claims(c: &mut Connection) -> Result<(), String> {
-    let tx = c
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(db)?;
-    let inputs = list(
-        &tx,
-        "SELECT input_json FROM workflow_execution_inputs WHERE status=?1 ORDER BY sequence",
-        "claimed",
-    )?;
-    for mut input in inputs {
-        if has_delivery_proof(&tx, &input)? {
-            apply_proven_input(&tx, &mut input)?;
-            continue;
-        }
-        let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM conversation_turn_traces WHERE run_id=?1 AND conversation_id=?2 AND terminal_status='in_progress')",params![input.run_id,input.conversation_id],|r|r.get(0)).map_err(db)?;
-        if !active {
-            input.status = InputStatus::Failed;
-            input.error=Some("Delivery outcome is unknown after interruption; it will not be retried automatically".into());
-            write(&tx, &input)?;
-            event(&tx, &input.instance_id, Some(&input.id), &[], "failed")?;
-        }
-    }
-    tx.commit().map_err(db)
-}
-
-/// Read-only check for a previously admitted run. Legacy/restored runs without a receipt
-/// do not gain an identity merely because a workflow was enabled later.
 pub fn snapshot_for_run(
     c: &Connection,
     conversation_id: &str,
     run_id: &str,
 ) -> Result<Option<ConversationSnapshot>, String> {
-    let stored:Option<String>=c.query_row("SELECT snapshot_json FROM workflow_execution_runs WHERE run_id=?1 AND conversation_id=?2",params![run_id,conversation_id],|r|r.get(0)).optional().map_err(db)?;
-    let frozen: Option<ConversationSnapshot> = stored.as_deref().map(parse).transpose()?.flatten();
+    let raw: Option<String> = c
+        .query_row(
+            "SELECT snapshot_json FROM workflow_mail_runs WHERE run_id=?1 AND conversation_id=?2",
+            params![run_id, conversation_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    let old: Option<ConversationSnapshot> = raw.as_deref().map(parse).transpose()?.flatten();
     let live = snapshot_for_conversation(c, conversation_id)?;
-    Ok(frozen.filter(|old| {
-        live.as_ref().is_some_and(|current| {
-            current.execution_version == old.execution_version
-                && current.node_id == old.node_id
-                && current.instance_id == old.instance_id
+    Ok(old.filter(|old| {
+        live.as_ref().is_some_and(|new| {
+            new.instance_id == old.instance_id
+                && new.node_id == old.node_id
+                && new.execution_version == old.execution_version
         })
     }))
 }
-/// Returns chat-projection IDs including inherited fork bubbles. The durable Input remains
-/// owned by the original workflow; only the historical message projection is copied.
+pub fn recover_claims(c: &mut Connection) -> Result<(), String> {
+    let tx = c
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db)?;
+    let mut s=tx.prepare("SELECT DISTINCT i.run_id FROM workflow_mail_inputs i JOIN workflow_mail_messages m ON m.input_id=i.input_id WHERE m.mail_status='processing' AND i.run_id IS NOT NULL").map_err(db)?;
+    let runs = s
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db)?;
+    drop(s);
+    for run in runs {
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1",
+                [&run],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        if status.as_deref() != Some("in_progress") {
+            settle_run(&tx, &run, status.as_deref().unwrap_or("failed"))?;
+            continue;
+        }
+        for mut input in list(&tx,"SELECT input_json FROM workflow_mail_inputs WHERE run_id=?1 AND status='claimed' ORDER BY sequence",&run)?{if has_delivery_proof(&tx,&input)?{apply_proven_input(&tx,&mut input)?;}}
+    }
+    tx.commit().map_err(db)
+}
 pub fn delivery_origins_for_conversation(
     c: &Connection,
     conversation_id: &str,
 ) -> Result<Vec<(String, Input)>, String> {
-    let mut statement=c.prepare("SELECT o.message_id,i.input_json FROM workflow_execution_message_origins o JOIN workflow_execution_inputs i ON i.input_id=o.input_id WHERE o.conversation_id=?1 ORDER BY o.message_id").map_err(db)?;
-    let rows = statement
+    let mut s=c.prepare("SELECT o.message_id,i.input_json FROM workflow_mail_message_origins o JOIN workflow_mail_inputs i ON i.input_id=o.input_id WHERE o.conversation_id=?1 ORDER BY o.message_id").map_err(db)?;
+    let result = s
         .query_map([conversation_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(db)?;
-    rows.into_iter()
-        .map(|(id, input)| Ok((id, parse(&input)?)))
-        .collect()
+        .map(|row| {
+            let (id, raw) = row.map_err(db)?;
+            Ok((id, parse(&raw)?))
+        })
+        .collect();
+    result
 }
-
-/// The receipt flag survives event-log compaction, so a terminal callback replay cannot
-/// resurrect unread state after the user already read the completed conversation.
 pub fn mark_run_unread(c: &mut Connection, run_id: &str) -> Result<(), String> {
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db)?;
-    let inputs = list(&tx,"SELECT input_json FROM workflow_execution_inputs WHERE run_id=?1 AND status='applied' AND completion_notified=0 ORDER BY sequence",run_id)?;
-    let mut conversations = BTreeSet::new();
+    let terminal: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conversation_turn_traces WHERE run_id=?1 AND terminal_status!='in_progress')",
+        [run_id], |row| row.get(0),
+    ).map_err(db)?;
+    if !terminal {
+        return Ok(());
+    }
+    let inputs=list(&tx,"SELECT input_json FROM workflow_mail_inputs WHERE run_id=?1 AND completion_notified=0 ORDER BY sequence",run_id)?;
     for input in inputs {
-        tx.execute(
-            "UPDATE workflow_execution_inputs SET completion_notified=1 WHERE input_id=?1",
-            [&input.id],
-        )
-        .map_err(db)?;
-        if let Some(conversation_id) = input.conversation_id {
-            conversations.insert(conversation_id);
+        if !input.mail_status.is_terminal() {
+            continue;
         }
+        let changed = tx.execute(
+            "UPDATE workflow_mail_inputs SET completion_notified=1 WHERE input_id=?1 AND completion_notified=0",
+            [&input.id],
+        ).map_err(db)?;
+        if changed == 0 {
+            continue;
+        }
+        if let Some(chat) = &input.conversation_id {
+            tx.execute(
+                "UPDATE conversations SET unread_at=?1,updated_at=MAX(updated_at,?1) WHERE id=?2",
+                params![now_ms(), chat],
+            )
+            .map_err(db)?;
+        }
+        // Explicit workflow_complete may have settled this mail before the final answer existed.
+        // Notify chat subscribers about the later terminal turn even when Input status is unchanged.
+        // No transmission endpoints: this is a local refresh event, not another delivered letter.
         event(
             &tx,
             &input.instance_id,
             Some(&input.id),
-            &[],
+            None,
             "run_completed",
         )?;
     }
-    for conversation_id in conversations {
-        tx.execute(
-            "UPDATE conversations SET unread_at=?1,updated_at=MAX(updated_at,?1) WHERE id=?2",
-            params![now_ms(), conversation_id],
-        )
-        .map_err(db)?;
-    }
-    tx.commit().map_err(db)
-}
-
-/// Explicitly abandon an ambiguous/failed input without replaying it. This releases FIFO
-/// successors while retaining the original failure and its authenticated message provenance.
-pub fn discard_failed(c: &mut Connection, input_id: &str) -> Result<(), String> {
-    let tx = c
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(db)?;
-    let Some(mut input) = load_input(&tx, input_id)? else {
-        return Err("Workflow input no longer exists".into());
-    };
-    let discarded: bool = tx
-        .query_row(
-            "SELECT discarded FROM workflow_execution_inputs WHERE input_id=?1",
-            [input_id],
-            |r| r.get(0),
-        )
-        .map_err(db)?;
-    if discarded {
-        return Ok(());
-    }
-    if input.status != InputStatus::Failed {
-        return Err("Only a failed workflow input can be skipped".into());
-    }
-    input.status = InputStatus::Invalidated;
-    write(&tx, &input)?;
-    tx.execute(
-        "UPDATE workflow_execution_inputs SET discarded=1 WHERE input_id=?1",
-        [input_id],
-    )
-    .map_err(db)?;
-    event(&tx, &input.instance_id, Some(input_id), &[], "discarded")?;
     tx.commit().map_err(db)
 }

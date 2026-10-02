@@ -20,6 +20,7 @@ import '../workflows.css'
 import './projectWorkflows.css'
 
 export interface WorkflowsPageProps {
+  foreground?: boolean
   conversations: readonly ChatConversation[]
   conversationAttention?: ConversationAttentionById
   conversationDrafts?: Readonly<Record<string, ChatComposerDraft>>
@@ -72,6 +73,7 @@ function keepInstanceOrder(current: WorkflowInstance[], incoming: WorkflowInstan
 }
 
 export function WorkflowsPage({
+  foreground = true,
   conversations,
   conversationAttention,
   conversationDrafts,
@@ -616,6 +618,7 @@ export function WorkflowsPage({
     if (instance && record) {
       return (
         <WorkflowMonitorPage
+          foreground={foreground}
           key={instance.id}
           instance={instance}
           graph={record.definition}

@@ -1,11 +1,10 @@
 import type {
   WorkflowAgentNode,
-  WorkflowDefinition,
   WorkflowNodeMessage,
   WorkflowRuntimeSnapshot
 } from '@mycopilot/protocol'
 import { ExternalLink, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { requestWorkflows } from '../workflowClient'
 import { projectWorkflowText } from './projectWorkflowText'
@@ -14,7 +13,6 @@ import { workflowNodeQueue } from './workflowNodeQueue'
 export function WorkflowNodePanel({
   instanceId,
   node,
-  graph,
   snapshot,
   title,
   status,
@@ -25,7 +23,6 @@ export function WorkflowNodePanel({
 }: {
   instanceId: string
   node: WorkflowAgentNode
-  graph: WorkflowDefinition
   snapshot: WorkflowRuntimeSnapshot | null
   title: string
   status: string
@@ -45,36 +42,50 @@ export function WorkflowNodePanel({
   const [error, setError] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [retry, setRetry] = useState(0)
+  const loadedThrough = useRef<number | null>(null)
+  const historyRevision = useRef(0)
+  const loadingMoreRef = useRef(false)
   const sequence = snapshot?.sequence
   useEffect(() => {
     let disposed = false
     let pending = false
     const refresh = async () => {
-      if (pending || document.visibilityState === 'hidden') return
+      if (pending || loadingMoreRef.current || document.visibilityState === 'hidden') return
       pending = true
+      const revision = historyRevision.current
+      const oldestLoaded = loadedThrough.current
       try {
-        const response = await requestWorkflows({
-          operation: 'nodeMessages',
-          instanceId,
-          nodeId: node.id
-        })
-        const page = response.nodeMessages
-        if (!page || page.instanceId !== instanceId || page.nodeId !== node.id)
-          throw new Error('Invalid message page')
-        if (disposed) return
-        setHistory((previous) => {
-          // If more than a page arrived, reset to the new head so pagination cannot skip the gap.
-          const overlap = previous.messages.some((old) =>
-            page.messages.some((row) => row.sequence === old.sequence)
-          )
-          const rows = new Map((overlap ? previous.messages : []).map((row) => [row.sequence, row]))
+        const rows = new Map<number, WorkflowNodeMessage>()
+        let beforeSequence: number | undefined
+        let nextCursor: number | null = null
+        // Refresh the whole displayed range. Settled older mail can leave the
+        // compact runtime snapshot, so absence there cannot determine its status.
+        while (true) {
+          const response = await requestWorkflows({
+            operation: 'nodeMessages',
+            instanceId,
+            nodeId: node.id,
+            ...(beforeSequence === undefined ? {} : { beforeSequence })
+          })
+          if (disposed || revision !== historyRevision.current) return
+          const page = response.nodeMessages
+          if (!page || page.instanceId !== instanceId || page.nodeId !== node.id)
+            throw new Error('Invalid message page')
           page.messages.forEach((row) => rows.set(row.sequence, row))
-          return {
-            messages: [...rows.values()].sort((a, b) => b.sequence - a.sequence),
-            cursor: overlap ? previous.cursor : page.nextBeforeSequence,
-            loaded: true
-          }
-        })
+          nextCursor = page.nextBeforeSequence
+          if (
+            nextCursor === null ||
+            oldestLoaded === null ||
+            (page.messages.at(-1)?.sequence ?? Infinity) <= oldestLoaded
+          )
+            break
+          if (beforeSequence !== undefined && nextCursor >= beforeSequence)
+            throw new Error('Invalid message pagination cursor')
+          beforeSequence = nextCursor
+        }
+        const messages = [...rows.values()].sort((a, b) => b.sequence - a.sequence)
+        loadedThrough.current = messages.at(-1)?.sequence ?? null
+        setHistory({ messages, cursor: nextCursor, loaded: true })
         setError(false)
       } catch {
         if (!disposed) setError(true)
@@ -90,7 +101,9 @@ export function WorkflowNodePanel({
     }
   }, [instanceId, node.id, sequence, retry])
   const more = async () => {
-    if (cursor === null || loadingMore) return
+    if (cursor === null || loadingMoreRef.current) return
+    loadingMoreRef.current = true
+    historyRevision.current += 1
     setLoadingMore(true)
     try {
       const response = await requestWorkflows({
@@ -102,6 +115,7 @@ export function WorkflowNodePanel({
       const page = response.nodeMessages
       if (!page || page.instanceId !== instanceId || page.nodeId !== node.id)
         throw new Error('Invalid message page')
+      loadedThrough.current = page.messages.at(-1)?.sequence ?? loadedThrough.current
       setHistory((previous) => {
         if (previous.cursor !== cursor) return previous
         const rows = new Map(previous.messages.map((row) => [row.sequence, row]))
@@ -116,45 +130,20 @@ export function WorkflowNodePanel({
     } catch {
       setError(true)
     } finally {
+      loadingMoreRef.current = false
       setLoadingMore(false)
+      setRetry((value) => value + 1)
     }
   }
-  const gate = graph.nodes.find(
-    (candidate) =>
-      candidate.kind === 'inputGate' &&
-      graph.flows.some(
-        (flow) =>
-          flow.source.kind === 'node' &&
-          flow.source.nodeId === candidate.id &&
-          flow.target.kind === 'node' &&
-          flow.target.nodeId === node.id
-      )
-  )
-  const incoming = gate
-    ? graph.flows.filter((flow) => flow.target.kind === 'node' && flow.target.nodeId === gate.id)
-    : []
-  const label = (inputStatus: string, runStatus: string | null) => {
-    if (inputStatus === 'applied' && runStatus) {
-      if (runStatus === 'completed') return t('已完成', 'Completed')
-      if (runStatus === 'cancelled') return t('被停止', 'Stopped')
-      if (runStatus === 'failed') return t('运行失败', 'Run failed')
-      if (runStatus === 'in_progress') return t('处理中', 'Processing')
-      return t('运行已结束', 'Run ended')
-    }
-    return (
-      {
-        collecting: t('等待凑齐批次', 'Collecting batch'),
-        pending: t('排队中', 'Queued'),
-        paused: t('暂停等待', 'Paused'),
-        claimed: t('准备投递', 'Delivering'),
-        applied: t('已送达', 'Delivered'),
-        failed: t('投递失败', 'Delivery failed'),
-        invalidated: t('已失效', 'Invalidated'),
-        completed: t('已完成', 'Completed'),
-        waiting_user: t('等待用户操作', 'Waiting for user')
-      }[inputStatus] ?? inputStatus
-    )
-  }
+  const label = (status: string) =>
+    ({
+      pending: t('待处理', 'Pending'),
+      processing: t('处理中', 'Processing'),
+      processed: t('已处理', 'Processed'),
+      stopped: t('已停止', 'Stopped'),
+      failed: t('失败', 'Failed'),
+      recalled: t('已撤回', 'Recalled')
+    })[status] ?? t('待处理', 'Pending')
   return (
     <aside className="workflow-node-panel" aria-label={t('节点看板', 'Node dashboard')}>
       <header>
@@ -176,18 +165,14 @@ export function WorkflowNodePanel({
         {snapshot?.pausedConversationIds?.includes(conversationId ?? '') && (
           <p className="workflow-node-panel__notice">
             {t(
-              '你已停止此节点，后续消息会保留在队列中。向对应对话手动发送消息可恢复工作流接收；排队模式会等待该轮结束。',
-              'This node was stopped. Messages stay queued. Send a message in the conversation to resume; queued delivery waits for that turn to finish.'
+              '节点已停止，未处理邮件保留在收件箱中。向对应对话发送消息可恢复。',
+              'This node is stopped. Pending mail stays in its inbox. Send a message in the conversation to resume.'
             )}
           </p>
         )}
         <div className="workflow-node-panel__counts">
           <span>
-            {t('积压消息', 'Backlog')}
-            <strong>{snapshot ? queue.queuedMessages.length : '—'}</strong>
-          </span>
-          <span>
-            {t('待处理批次', 'Queued batches')}
+            {t('待处理', 'Pending')}
             <strong>{snapshot ? queue.waiting.length : '—'}</strong>
           </span>
           <span>
@@ -217,38 +202,10 @@ export function WorkflowNodePanel({
             </p>
           )}
         </section>
-        {gate?.kind === 'inputGate' && gate.processingMode === 'batch' && (
-          <section>
-            <h3>{t('下一批到达情况', 'Next batch arrivals')}</h3>
-            {incoming.map((flow) => {
-              const source = flow.source
-              const name =
-                source.kind === 'node'
-                  ? graph.nodes.find((item) => item.id === source.nodeId)?.name
-                  : t('用户', 'User')
-              const count = queue.collecting.filter(
-                (message) => message.flowId === flow.id || message.pathFlowIds.includes(flow.id)
-              ).length
-              return (
-                <p key={flow.id} className="workflow-node-panel__arrival">
-                  <span>
-                    {flow.name} · {name}
-                  </span>
-                  <strong>
-                    {count ? `${count} ${t('条已到达', 'arrived')}` : t('等待到达', 'Waiting')}
-                  </strong>
-                </p>
-              )
-            })}
-          </section>
-        )}
         <section>
           <h3>{t('消息记录', 'Message history')}</h3>
           <p className="workflow-node-panel__muted">
-            {t(
-              '包含待收集、排队、处理中和已结束的来信，按收到时间倒序。相同批次编号的消息一起处理。',
-              'Incoming messages, newest first. Matching batch numbers are processed together.'
-            )}
+            {t('按收到时间倒序展示工作流来信。', 'Workflow messages, newest first.')}
           </p>
           {error && (
             <p role="alert">
@@ -268,18 +225,15 @@ export function WorkflowNodePanel({
                 item.id === row.inputId ||
                 item.messages.some((message) => message.id === row.message.id)
             )
-            const batchId = input?.id ?? row.inputId
-            const runStatus = (input && queue.runs.get(input.id)) ?? row.runStatus
             return (
               <article key={row.message.id} className="workflow-node-panel__message">
                 <header>
                   <strong>{row.message.sourceNodeName}</strong>
-                  <span>{label(input?.status ?? row.status, runStatus)}</span>
+                  <span>{label(input?.mailStatus ?? row.status)}</span>
                 </header>
                 <small>
                   {row.message.sourceConversationTitle} ·{' '}
                   {new Date(row.message.createdAt).toLocaleString(language)}
-                  {batchId ? ` · ${t('批次', 'Batch')} ${batchId.slice(0, 8)}` : ''}
                 </small>
                 <p>{row.message.content}</p>
                 {(input?.error ?? row.error) && (
