@@ -1,4 +1,5 @@
-import { Building2 } from 'lucide-react'
+import { Building2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useState } from 'react'
 import { BotGroupIcon } from '../../../../components/BotGroupIcon'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -67,6 +68,100 @@ function fieldValue(field: RecordValue, side: 'before' | 'after', chinese: boole
   return typeof value === 'string' ? value : pick(['内容已更新', 'Content updated'])
 }
 
+/** Each kind of change keeps its own selection while the disclosure is collapsed. */
+function OrganizationEditChangeGroup({
+  changes,
+  department,
+  chinese
+}: {
+  changes: RecordValue[]
+  department: boolean
+  chinese: boolean
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const currentIndex = Math.max(0, Math.min(selectedIndex, changes.length - 1))
+  // Receipts normally remain immutable. Reconcile a shorter refreshed receipt before painting.
+  if (selectedIndex !== currentIndex) setSelectedIndex(currentIndex)
+  const change = changes[currentIndex]
+  if (!change) return null
+
+  const pick = (labels: [string, string]) => labels[chinese ? 0 : 1]
+  const Icon = department ? Building2 : BotGroupIcon
+  const name =
+    text(change.entityName).trim() || pick(department ? ['部门', 'Department'] : ['成员', 'Member'])
+  const fields = records(change.fields).filter((field) =>
+    Object.hasOwn(fieldLabels, text(field.field))
+  )
+  const previousLabel = pick(
+    department ? ['上一项', 'Previous department'] : ['上一位', 'Previous member']
+  )
+  const nextLabel = pick(department ? ['下一项', 'Next department'] : ['下一位', 'Next member'])
+
+  return (
+    <section className="organization-edit-change">
+      <div className="organization-edit-change__heading">
+        <Icon aria-hidden="true" />
+        <strong>
+          {pick(actionLabels[text(change.action)])} · {name}
+        </strong>
+        {changes.length > 1 && (
+          <nav
+            className="organization-edit-change__navigation"
+            aria-label={pick(
+              department
+                ? ['切换部门变更', 'Department changes']
+                : ['切换成员变更', 'Member changes']
+            )}
+          >
+            <button
+              type="button"
+              aria-label={previousLabel}
+              title={previousLabel}
+              disabled={currentIndex === 0}
+              onClick={() => setSelectedIndex(currentIndex - 1)}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </button>
+            <span aria-atomic="true" aria-live="polite">
+              {currentIndex + 1} / {changes.length}
+            </span>
+            <button
+              type="button"
+              aria-label={nextLabel}
+              title={nextLabel}
+              disabled={currentIndex === changes.length - 1}
+              onClick={() => setSelectedIndex(currentIndex + 1)}
+            >
+              <ChevronRight aria-hidden="true" />
+            </button>
+          </nav>
+        )}
+      </div>
+      {fields.length > 0 && (
+        <dl className="organization-edit-change__fields">
+          {fields.map((field, fieldIndex) => (
+            <div key={fieldIndex}>
+              <dt>{pick(fieldLabels[text(field.field)])}</dt>
+              <dd>
+                <span className="organization-edit-change__before">
+                  {fieldValue(field, 'before', chinese)}
+                </span>
+                <span
+                  className="organization-edit-change__arrow"
+                  aria-label={pick(['改为', 'changed to'])}
+                >
+                  →
+                </span>
+                <span>{fieldValue(field, 'after', chinese)}</span>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </section>
+  )
+}
+
 /** Organization edit receipts show member and department changes without execution metadata. */
 export function OrganizationEditToolActivity(props: WorkflowQueryProps) {
   const { language } = useFrontendConfig()
@@ -95,7 +190,7 @@ export function OrganizationEditToolActivity(props: WorkflowQueryProps) {
       ? pick([`正在编辑${organization}`, `Editing ${organization}`])
       : status === 'completed'
         ? changes.length
-          ? pick([`已编辑${organization}`, `Edited ${organization}`])
+          ? pick([`组织变动【${organization}】`, `Organization changes [${organization}]`])
           : pick(['组织配置未发生变化', 'No organization changes'])
         : status === 'cancelled'
           ? pick(['已取消组织编辑', 'Organization edit cancelled'])
@@ -113,47 +208,18 @@ export function OrganizationEditToolActivity(props: WorkflowQueryProps) {
     >
       {status === 'completed' && (
         <div className="workflow-query organization-edit-changes">
-          {changes.map((change, index) => {
-            const department = change.entityType === 'department'
-            const Icon = department ? Building2 : BotGroupIcon
-            const name =
-              text(change.entityName).trim() ||
-              pick(department ? ['部门', 'Department'] : ['成员', 'Member'])
-            const fields = records(change.fields).filter((field) =>
-              Object.hasOwn(fieldLabels, text(field.field))
-            )
-            return (
-              <section key={index} className="organization-edit-change">
-                <div className="organization-edit-change__heading">
-                  <Icon aria-hidden="true" />
-                  <strong>
-                    {pick(actionLabels[text(change.action)])} · {name}
-                  </strong>
-                </div>
-                {fields.length > 0 && (
-                  <dl className="organization-edit-change__fields">
-                    {fields.map((field, fieldIndex) => (
-                      <div key={fieldIndex}>
-                        <dt>{pick(fieldLabels[text(field.field)])}</dt>
-                        <dd>
-                          <span className="organization-edit-change__before">
-                            {fieldValue(field, 'before', chinese)}
-                          </span>
-                          <span
-                            className="organization-edit-change__arrow"
-                            aria-label={pick(['改为', 'changed to'])}
-                          >
-                            →
-                          </span>
-                          <span>{fieldValue(field, 'after', chinese)}</span>
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                )}
-              </section>
-            )
-          })}
+          <OrganizationEditChangeGroup
+            key={`${props.call.id}:members`}
+            changes={changes.filter((change) => change.entityType === 'member')}
+            department={false}
+            chinese={chinese}
+          />
+          <OrganizationEditChangeGroup
+            key={`${props.call.id}:departments`}
+            changes={changes.filter((change) => change.entityType === 'department')}
+            department
+            chinese={chinese}
+          />
         </div>
       )}
     </AgentActivityDisclosure>

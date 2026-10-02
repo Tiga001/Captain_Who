@@ -82,7 +82,7 @@ describe('organization edit presentation', () => {
         showImageGenerationPreview={false}
       />
     )
-    const label = '已编辑产品组织 · 完善评审职责'
+    const label = '组织变动【产品组织】 · 完善评审职责'
     await expect.element(view.getByText(label)).toBeVisible()
     await expect.element(view.getByText('更新成员 · 评审员')).not.toBeVisible()
     await view.getByText(label).click()
@@ -103,6 +103,7 @@ describe('organization edit presentation', () => {
     ])
       await expect.element(view.getByText(value, { exact: true })).toBeVisible()
     expect(view.container.querySelectorAll('.organization-edit-change')).toHaveLength(2)
+    expect(view.getByRole('navigation').elements()).toHaveLength(0)
     expect(
       view.container.querySelector('.organization-edit-change__heading .lucide-building-2')
     ).not.toBeNull()
@@ -118,14 +119,14 @@ describe('organization edit presentation', () => {
       expect(view.container.textContent).not.toContain(hidden)
   })
 
-  it('shows added and removed entities without requiring field details', async () => {
+  it('pages member and department changes independently in receipt order', async () => {
     const view = await render(
       <OrganizationEditToolActivity
         call={call}
         result={receipt([
           { action: 'add_member', entityType: 'member', entityName: '研究员', fields: [] },
-          { action: 'remove_member', entityType: 'member', entityName: '临时成员', fields: [] },
           { action: 'add_department', entityType: 'department', entityName: '研究部', fields: [] },
+          { action: 'remove_member', entityType: 'member', entityName: '临时成员', fields: [] },
           {
             action: 'remove_department',
             entityType: 'department',
@@ -135,14 +136,109 @@ describe('organization edit presentation', () => {
         ])}
       />
     )
-    await view.getByText('已编辑产品组织 · 完善评审职责').click()
-    for (const label of [
-      '添加成员 · 研究员',
-      '移除成员 · 临时成员',
-      '添加部门 · 研究部',
-      '移除部门 · 旧部门'
-    ])
-      await expect.element(view.getByText(label)).toBeVisible()
+    await view.getByText('组织变动【产品组织】 · 完善评审职责').click()
+    const members = view.getByRole('navigation', { name: '切换成员变更' })
+    const departments = view.getByRole('navigation', { name: '切换部门变更' })
+    await expect.element(members.getByText('1 / 2')).toBeVisible()
+    await expect.element(departments.getByText('1 / 2')).toBeVisible()
+    await expect.element(view.getByText('添加成员 · 研究员')).toBeVisible()
+    await expect.element(view.getByText('添加部门 · 研究部')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '上一位', exact: true })).toBeDisabled()
+    await expect.element(view.getByRole('button', { name: '上一项', exact: true })).toBeDisabled()
+    expect(view.container.querySelectorAll('.organization-edit-change')).toHaveLength(2)
+    expect(view.container.textContent).not.toContain('移除成员 · 临时成员')
+    expect(view.container.textContent).not.toContain('移除部门 · 旧部门')
+
+    await view.getByRole('button', { name: '下一位', exact: true }).click()
+    await expect.element(view.getByText('移除成员 · 临时成员')).toBeVisible()
+    await expect.element(members.getByText('2 / 2')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '下一位', exact: true })).toBeDisabled()
+    await expect.element(view.getByText('添加部门 · 研究部')).toBeVisible()
+    await expect.element(departments.getByText('1 / 2')).toBeVisible()
+
+    await view.getByRole('button', { name: '下一项', exact: true }).click()
+    await expect.element(view.getByText('移除部门 · 旧部门')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '下一项', exact: true })).toBeDisabled()
+    await expect.element(view.getByText('移除成员 · 临时成员')).toBeVisible()
+    await view.getByRole('button', { name: '上一位', exact: true }).click()
+    await expect.element(view.getByText('添加成员 · 研究员')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '上一位', exact: true })).toBeDisabled()
+    await expect.element(view.getByText('移除部门 · 旧部门')).toBeVisible()
+  })
+
+  it('retains each page across disclosure and receipt refreshes, clamps removal and resets for a new call', async () => {
+    const secondMember = { ...member, entityId: 'second-member', entityName: '研究员', fields: [] }
+    const thirdMember = { ...member, entityId: 'third-member', entityName: '设计师', fields: [] }
+    const secondDepartment = {
+      ...department,
+      entityId: 'second-department',
+      entityName: '研究部',
+      fields: []
+    }
+    const changes = [member, department, secondMember, secondDepartment, thirdMember]
+    const view = await render(
+      <OrganizationEditToolActivity call={call} result={receipt(changes)} />
+    )
+    const label = '组织变动【产品组织】 · 完善评审职责'
+    await view.getByText(label).click()
+    await view.getByRole('button', { name: '下一位', exact: true }).click()
+    await view.getByRole('button', { name: '下一位', exact: true }).click()
+    await view.getByRole('button', { name: '下一项', exact: true }).click()
+    await view.getByText(label).click()
+    await expect.element(view.getByText('更新成员 · 设计师')).not.toBeVisible()
+    await view.getByText(label).click()
+    await expect.element(view.getByText('更新成员 · 设计师')).toBeVisible()
+    await expect.element(view.getByText('更新部门 · 研究部')).toBeVisible()
+
+    await view.rerender(
+      <OrganizationEditToolActivity call={{ ...call }} result={receipt([...changes])} />
+    )
+    await expect.element(view.getByText('更新成员 · 设计师')).toBeVisible()
+    await expect.element(view.getByText('更新部门 · 研究部')).toBeVisible()
+
+    await view.rerender(
+      <OrganizationEditToolActivity
+        call={call}
+        result={receipt([member, department, secondMember, secondDepartment])}
+      />
+    )
+    await expect.element(view.getByText('更新成员 · 研究员')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '下一位', exact: true })).toBeDisabled()
+    await expect.element(view.getByText('更新部门 · 研究部')).toBeVisible()
+
+    const nextCall = { ...call, id: 'next-call' }
+    await view.rerender(
+      <OrganizationEditToolActivity
+        call={nextCall}
+        result={{ ...receipt(changes), callId: nextCall.id }}
+      />
+    )
+    if (!view.container.querySelector('details')?.open) await view.getByText(label).click()
+    await expect.element(view.getByText('更新成员 · 评审员')).toBeVisible()
+    await expect.element(view.getByText('更新部门 · 质量部')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '上一位', exact: true })).toBeDisabled()
+    await expect.element(view.getByRole('button', { name: '上一项', exact: true })).toBeDisabled()
+  })
+
+  it('omits absent groups and navigation for single changes', async () => {
+    const view = await render(
+      <OrganizationEditToolActivity call={call} result={receipt([member])} />
+    )
+    await view.getByText('组织变动【产品组织】 · 完善评审职责').click()
+    await expect.element(view.getByText('更新成员 · 评审员')).toBeVisible()
+    expect(view.container.querySelectorAll('.organization-edit-change')).toHaveLength(1)
+    expect(
+      view.container.querySelector('.organization-edit-change__heading .lucide-building-2')
+    ).toBeNull()
+    expect(view.getByRole('navigation').elements()).toHaveLength(0)
+    expect(view.container.textContent).not.toContain('1 / 1')
+
+    await view.rerender(<OrganizationEditToolActivity call={call} result={receipt([department])} />)
+    await expect.element(view.getByText('更新部门 · 质量部')).toBeVisible()
+    expect(view.container.querySelectorAll('.organization-edit-change')).toHaveLength(1)
+    expect(view.container.textContent).not.toContain('更新成员')
+    expect(view.getByRole('navigation').elements()).toHaveLength(0)
+    expect(view.container.textContent).not.toContain('1 / 1')
   })
 
   it('never renders unresolved references, unknown fields or raw JSON', async () => {
@@ -162,7 +258,7 @@ describe('organization edit presentation', () => {
         ])}
       />
     )
-    await view.getByText('已编辑产品组织 · 完善评审职责').click()
+    await view.getByText('组织变动【产品组织】 · 完善评审职责').click()
     await expect.element(view.getByText('明确任务', { exact: true })).toBeVisible()
     expect(view.container.textContent).toContain('名称暂不可用')
     expect(view.container.textContent).toContain('直属组织')
@@ -205,9 +301,33 @@ describe('organization edit presentation', () => {
     await view.rerender(
       <OrganizationEditToolActivity call={englishCall} result={receipt([member])} cancelled />
     )
-    await view.getByText('Edited 产品组织 · Clarify reviewer responsibilities').click()
+    await view
+      .getByText('Organization changes [产品组织] · Clarify reviewer responsibilities')
+      .click()
     await expect.element(view.getByText('Department administrator', { exact: true })).toBeVisible()
     await expect.element(view.getByText('Custom permissions', { exact: true })).toBeVisible()
+
+    await view.rerender(
+      <OrganizationEditToolActivity
+        call={englishCall}
+        result={receipt([
+          member,
+          department,
+          { ...member, entityName: 'Writer', fields: [] },
+          { ...department, entityName: 'Research', fields: [] }
+        ])}
+      />
+    )
+    await expect.element(view.getByRole('navigation', { name: 'Member changes' })).toBeVisible()
+    await expect.element(view.getByRole('navigation', { name: 'Department changes' })).toBeVisible()
+    await expect.element(view.getByRole('button', { name: 'Previous member' })).toBeDisabled()
+    await expect.element(view.getByRole('button', { name: 'Previous department' })).toBeDisabled()
+    await view.getByRole('button', { name: 'Next member' }).click()
+    await expect.element(view.getByText('Updated member · Writer')).toBeVisible()
+    await view.getByRole('button', { name: 'Next department' }).click()
+    await expect.element(view.getByText('Updated department · Research')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: 'Next member' })).toBeDisabled()
+    await expect.element(view.getByRole('button', { name: 'Next department' })).toBeDisabled()
   })
 
   it('keeps historical member-management receipts readable without exposing an executable alias', async () => {
@@ -236,7 +356,7 @@ describe('organization edit presentation', () => {
         showImageGenerationPreview={false}
       />
     )
-    await view.getByText('已编辑产品组织 · 完善评审职责').click()
+    await view.getByText('组织变动【产品组织】 · 完善评审职责').click()
     await expect.element(view.getByText('更新成员 · 评审员')).toBeVisible()
     expect(view.container.textContent).not.toContain('private-node')
     expect(view.container.textContent).not.toContain('organization_manage_members')
