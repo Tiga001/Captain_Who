@@ -146,6 +146,19 @@ async fn workflow_wakes_empty_chat_without_human_message_and_revokes_tool_on_nex
         assert!(!tool_names(&second).contains(&name.into()));
     }
     for request in [&first, &second] {
+        let messages = request["messages"].to_string();
+        for internal in [
+            "templateId",
+            "templateRevision",
+            "executionVersion",
+            "template-1",
+            "epoch-1",
+        ] {
+            assert!(
+                !messages.contains(internal),
+                "World State exposed {internal}"
+            );
+        }
         assert_eq!(
             request["messages"]
                 .to_string()

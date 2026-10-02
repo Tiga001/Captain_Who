@@ -217,12 +217,86 @@ impl ContextFrame {
         &self.conversation_world_state_records
     }
 
+    /// Replace only the exact recorded CWS text affected by the workflow metadata display
+    /// policy. The ledger is the authority: arbitrary text is never parsed or sanitized into
+    /// acceptance, and unrelated state/permission differences still fail exact comparison.
+    fn adopt_workflow_display_policy(
+        &mut self,
+        records: &[AnchoredWorldStateRecord],
+        check_observation: bool,
+    ) -> AgentResult<()> {
+        let stored =
+            crate::context::assembler::stored_world_state_projections_for_validation(records)?;
+        let current = crate::context::assembler::project_conversation_world_state_records(records)?;
+        let mut changes = Vec::new();
+        for (_, old) in stored {
+            let origin = old.metadata.origin().expect("CWS projection origin");
+            let next = current
+                .iter()
+                .map(|(_, item)| item)
+                .find(|item| item.metadata.origin() == Some(origin));
+            if next.is_some_and(|next| next.message == old.message) {
+                continue;
+            }
+            let mut matches = self
+                .iter_items()
+                .enumerate()
+                .filter(|(_, item)| item.metadata.origin() == Some(origin));
+            let Some((index, existing)) = matches.next() else {
+                continue;
+            };
+            if matches.next().is_some() {
+                return Err(AgentError::new(
+                    "检查点 canonical Conversation World State 投影重复。",
+                ));
+            }
+            if next.is_some_and(|next| existing.message == next.message) {
+                continue;
+            }
+            if existing.metadata.scope != ContextScope::Conversation
+                || existing.message != old.message
+                || check_observation
+                    && existing
+                        .metadata
+                        .sources
+                        .contains(&ContextSource::WorldStateUnobserved)
+                        != old
+                            .metadata
+                            .sources
+                            .contains(&ContextSource::WorldStateUnobserved)
+            {
+                return Err(AgentError::new(
+                    "Conversation World State 与可信 ledger 的存储投影不一致。",
+                ));
+            }
+            // The only permitted removal is a diff now invisible because it changed solely
+            // hidden template metadata; all other canonical records retain their exact origin.
+            changes.push((index, next.map(|next| next.message.clone())));
+        }
+        if !changes.is_empty() {
+            self.materialize_baseline();
+            changes.sort_by_key(|(index, _)| *index);
+            for (index, message) in changes.into_iter().rev() {
+                if let Some(message) = message {
+                    self.items[index].message = message;
+                    self.items[index].checkpoint_message = None;
+                    self.items[index].measurement = None;
+                } else {
+                    self.items.remove(index);
+                }
+            }
+            self.world_state_metadata_changed();
+        }
+        Ok(())
+    }
+
     /// Installs backend canonical authority alongside its already-rendered context. Recovery must
     /// validate both representations; sanitized model text is never used to reconstruct state.
     pub(crate) fn restore_conversation_world_state_records(
         &mut self,
         records: Vec<AnchoredWorldStateRecord>,
     ) -> AgentResult<()> {
+        self.adopt_workflow_display_policy(&records, true)?;
         let mut origins = Vec::new();
         for (_, projected) in
             crate::context::assembler::project_conversation_world_state_records(&records)?
@@ -299,6 +373,7 @@ impl ContextFrame {
         if records.is_empty() {
             return Ok(0);
         }
+        self.adopt_workflow_display_policy(records, false)?;
         let projected =
             crate::context::assembler::project_conversation_world_state_records(records)?;
         let mut appended = 0;
@@ -860,5 +935,243 @@ mod tests {
         let replaced_again = restored.replace_compacted_model_history(baseline);
         replaced_again.validate_cache_layout().unwrap();
         assert_eq!(text(&replaced_again), expected);
+    }
+
+    fn workflow_template_ledger() -> Vec<AnchoredWorldStateRecord> {
+        let make = |sequence, revision, state: &str| {
+            let execution = serde_json::json!({"available":true,"workflow":{"instanceId":"team-id","templateId":"private-template-id","templateRevision":revision,"executionVersion":format!("private-version-{revision}"),"task":"Review artifacts","nodeId":"reviewer"}});
+            let awareness = serde_json::json!({"available":true,"instanceId":"team-id","executionVersion":format!("private-version-{revision}"),"state":state});
+            let permissions = serde_json::json!({"mode":"review-only"});
+            WorldStateSnapshot::new(
+                "workflow-display",
+                sequence,
+                vec![
+                    WorldStateSectionEnvelope::model_visible(
+                        WorldStateSectionId::extension("workflow.execution").unwrap(),
+                        WorldStateLifetime::Conversation,
+                        execution.clone(),
+                        execution,
+                    )
+                    .unwrap(),
+                    WorldStateSectionEnvelope::model_visible(
+                        WorldStateSectionId::extension("workflow.awareness").unwrap(),
+                        WorldStateLifetime::Conversation,
+                        awareness.clone(),
+                        awareness,
+                    )
+                    .unwrap(),
+                    WorldStateSectionEnvelope::model_visible(
+                        WorldStateSectionId::EffectivePermissions,
+                        WorldStateLifetime::Conversation,
+                        permissions.clone(),
+                        permissions,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let full = make(0, 1, "idle");
+        let metadata = make(1, 2, "idle");
+        let running = make(2, 2, "running");
+        let mut records =
+            vec![
+                AnchoredWorldStateRecord::new(WorldStateRecord::Full(full.clone()), None).unwrap(),
+            ];
+        for (index, (before, after)) in [(&full, &metadata), (&metadata, &running)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut record = AnchoredWorldStateRecord::at_request(
+                WorldStateRecord::Diff(WorldStateDiff::between(before, after).unwrap()),
+                WorldStateRequestBoundary {
+                    run_id: "run".into(),
+                    assistant_message_id: "assistant".into(),
+                    request_index: index as u64 + 2,
+                    after_trace_sequence: Some(1),
+                },
+            )
+            .unwrap();
+            record.model_observed = false;
+            records.push(record);
+        }
+        records
+    }
+
+    fn frame_with_recorded_workflow_text(ledger: &[AnchoredWorldStateRecord]) -> ContextFrame {
+        let mut frame = frame();
+        frame.push(narration(1, false));
+        for (record, item) in
+            crate::context::assembler::stored_world_state_projections_for_validation(ledger)
+                .unwrap()
+        {
+            if matches!(record.record, WorldStateRecord::Full(_)) {
+                frame.items.insert(1, item);
+            } else {
+                frame.push(item);
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn workflow_template_display_restores_exact_old_checkpoint_without_rewriting_authority() {
+        let ledger = workflow_template_ledger();
+        let serialized = serde_json::to_value(&ledger).unwrap();
+        let old = frame_with_recorded_workflow_text(&ledger);
+        assert!(text(&old).join(" ").contains("private-template-id"));
+        let mut restored =
+            ContextFrame::from_checkpoint_items(old.checkpoint_items().unwrap()).unwrap();
+        restored
+            .restore_conversation_world_state_records(ledger.clone())
+            .unwrap();
+        let visible = text(&restored).join(" ");
+        assert!(
+            !visible.contains("templateId")
+                && !visible.contains("templateRevision")
+                && !visible.contains("executionVersion")
+        );
+        assert!(
+            visible.contains("team-id")
+                && visible.contains("Review artifacts")
+                && visible.contains("review-only")
+                && visible.contains("running")
+        );
+        assert_eq!(
+            serde_json::to_value(restored.conversation_world_state_records()).unwrap(),
+            serialized
+        );
+        let diffs = restored
+            .iter_items()
+            .filter(|item| {
+                item.metadata
+                    .sources
+                    .contains(&ContextSource::WorldStateDiff)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            diffs.len(),
+            1,
+            "a stored metadata-only diff has no current model representation"
+        );
+        assert!(diffs[0]
+            .metadata
+            .sources
+            .contains(&ContextSource::WorldStateUnobserved));
+        let mut again =
+            ContextFrame::from_checkpoint_items(restored.checkpoint_items().unwrap()).unwrap();
+        again
+            .restore_conversation_world_state_records(ledger)
+            .unwrap();
+        assert_eq!(text(&again), text(&restored));
+    }
+
+    #[test]
+    fn workflow_template_display_sync_updates_measured_context_and_preserves_observation_adoption()
+    {
+        let mut ledger = workflow_template_ledger();
+        let mut old = frame_with_recorded_workflow_text(&ledger);
+        ContextCapacityDetector::for_model(
+            "test-model",
+            crate::AgentApiStyle::OpenAiCompatible,
+            &[],
+        )
+        .prepare_frame(&mut old);
+        let baseline = old.share_measured_persistent_baseline().unwrap();
+        let mut cached = frame().replace_compacted_model_history(baseline);
+        for record in &mut ledger {
+            record.model_observed = true;
+        }
+        assert_eq!(
+            cached
+                .sync_conversation_world_state_records(&ledger, false)
+                .unwrap(),
+            0
+        );
+        assert!(!text(&cached).join(" ").contains("private-template-id"));
+        assert!(cached.iter_items().all(|item| !item
+            .metadata
+            .sources
+            .contains(&ContextSource::WorldStateUnobserved)));
+        cached.validate_cache_layout().unwrap();
+        let before = text(&cached);
+        assert_eq!(
+            cached
+                .sync_conversation_world_state_records(&ledger, false)
+                .unwrap(),
+            0
+        );
+        assert_eq!(text(&cached), before);
+    }
+
+    #[test]
+    fn workflow_template_display_rejects_tampering_hidden_values_permissions_and_observation() {
+        let ledger = workflow_template_ledger();
+        for (needle, replacement) in [
+            ("private-template-id", "forged-template-id"),
+            ("review-only", "full-access"),
+            ("Review artifacts", "Untrusted role"),
+        ] {
+            let mut forged = frame_with_recorded_workflow_text(&ledger);
+            let index = forged
+                .items
+                .iter()
+                .position(|item| item.message.content().contains(needle))
+                .unwrap();
+            let metadata = forged.items[index].metadata.clone();
+            let message = LlmMessage::backend_state(
+                forged.items[index]
+                    .message
+                    .content()
+                    .replace(needle, replacement),
+            );
+            forged.items[index] = ContextItem::new(message, metadata);
+            let before = text(&forged);
+            assert!(forged
+                .restore_conversation_world_state_records(ledger.clone())
+                .is_err());
+            assert_eq!(
+                text(&forged),
+                before,
+                "failed policy validation must be atomic"
+            );
+            assert!(forged
+                .sync_conversation_world_state_records(&ledger, false)
+                .is_err());
+        }
+        let mut forged = frame_with_recorded_workflow_text(&ledger);
+        let metadata_only = forged
+            .items
+            .iter_mut()
+            .find(|item| {
+                world_state_boundary(item).is_some_and(|boundary| boundary.request_index == 2)
+            })
+            .unwrap();
+        metadata_only
+            .metadata
+            .sources
+            .retain(|source| *source != ContextSource::WorldStateUnobserved);
+        assert!(
+            forged
+                .restore_conversation_world_state_records(ledger.clone())
+                .is_err(),
+            "hidden-only records must still respect observed-prefix authority"
+        );
+        let mut duplicate = frame_with_recorded_workflow_text(&ledger);
+        duplicate.items.push(duplicate.items[1].clone());
+        assert!(duplicate
+            .restore_conversation_world_state_records(ledger.clone())
+            .is_err());
+        let mut extra = frame_with_recorded_workflow_text(&ledger);
+        let extra_item = extra.items[1]
+            .clone()
+            .with_origin(ContextOrigin::world_state_record("forged-extra"));
+        extra.items.push(extra_item);
+        assert!(
+            extra
+                .restore_conversation_world_state_records(ledger)
+                .is_err(),
+            "extra canonical-looking records are never silently dropped"
+        );
     }
 }

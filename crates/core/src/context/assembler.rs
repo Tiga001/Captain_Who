@@ -488,6 +488,21 @@ fn assemble_world_state_timeline(
 pub(crate) fn project_conversation_world_state_records(
     records: &[AnchoredWorldStateRecord],
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    project_world_state_records(records, false)
+}
+
+/// The only consumer of this stored-text view is exact checkpoint/context validation before
+/// replacing the workflow metadata display projection. It must never feed a model request.
+pub(crate) fn stored_world_state_projections_for_validation(
+    records: &[AnchoredWorldStateRecord],
+) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    project_world_state_records(records, true)
+}
+
+fn project_world_state_records(
+    records: &[AnchoredWorldStateRecord],
+    stored_text_for_validation: bool,
+) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
     let Some(initial) = records.first() else {
         return Ok(Vec::new());
     };
@@ -502,9 +517,12 @@ pub(crate) fn project_conversation_world_state_records(
             "Conversation World State 的初始 full snapshot sequence 必须为 0。",
         ));
     }
-    let projection = snapshot
-        .model_projection(WorldStateLifetime::Conversation)
-        .map_err(world_state_assembly_error)?;
+    let projection = if stored_text_for_validation {
+        snapshot.stored_model_projection_for_validation(WorldStateLifetime::Conversation)
+    } else {
+        snapshot.model_projection(WorldStateLifetime::Conversation)
+    }
+    .map_err(world_state_assembly_error)?;
     let mut full = world_state_context_item(
         snapshot,
         projection.render_sanitized_text(),
@@ -524,9 +542,15 @@ pub(crate) fn project_conversation_world_state_records(
                 "Conversation World State 活跃 epoch 只能包含一个初始 full snapshot。",
             ));
         };
-        let projection = diff
-            .model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
-            .map_err(world_state_assembly_error)?;
+        let projection = if stored_text_for_validation {
+            diff.stored_model_projection_against_for_validation(
+                reducer.snapshot(),
+                WorldStateLifetime::Conversation,
+            )
+        } else {
+            diff.model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
+        }
+        .map_err(world_state_assembly_error)?;
         reducer.apply(diff).map_err(world_state_assembly_error)?;
         if let Some(projection) = projection {
             let mut item = world_state_context_item(

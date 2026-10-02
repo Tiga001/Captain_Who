@@ -16,6 +16,7 @@ use std::{
     str::FromStr,
 };
 
+pub(crate) mod workflow_projection;
 mod workspace_projection;
 pub use workspace_projection::{
     WorkspaceFolderModelChange, WorkspaceFolderModelProjection, WorkspaceFolderUpdateReason,
@@ -655,18 +656,27 @@ impl WorldStateSnapshot {
         Ok(WorldStateModelRecord::Full {
             schema_version: self.schema_version,
             lifetime: expected_lifetime,
-            sections: self
-                .sections
-                .iter()
-                .filter_map(|section| {
-                    section
-                        .model_projection
-                        .as_ref()
-                        .map(|value| WorldStateModelSection {
-                            id: section.id.clone(),
-                            value: value.clone(),
-                        })
-                })
+            sections: model_section_map(self)
+                .into_iter()
+                .map(|(id, value)| WorldStateModelSection { id, value })
+                .collect(),
+        })
+    }
+
+    /// Exact previously stored model text, used only to validate an existing context before
+    /// applying the workflow metadata display policy. Never publish this view to a Provider.
+    pub(crate) fn stored_model_projection_for_validation(
+        &self,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<WorldStateModelRecord, WorldStateError> {
+        self.validate()?;
+        validate_snapshot_lifetime(self, expected_lifetime)?;
+        Ok(WorldStateModelRecord::Full {
+            schema_version: self.schema_version,
+            lifetime: expected_lifetime,
+            sections: stored_model_section_map(self)
+                .into_iter()
+                .map(|(id, value)| WorldStateModelSection { id, value })
                 .collect(),
         })
     }
@@ -903,11 +913,35 @@ impl WorldStateDiff {
         base: &WorldStateSnapshot,
         expected_lifetime: WorldStateLifetime,
     ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
+        self.project_model_changes(base, expected_lifetime, true)
+    }
+
+    /// Validation-only counterpart of the stored full projection. It preserves the exact
+    /// prior diff semantics, including workspace patches, without editing the ledger.
+    pub(crate) fn stored_model_projection_against_for_validation(
+        &self,
+        base: &WorldStateSnapshot,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
+        self.project_model_changes(base, expected_lifetime, false)
+    }
+
+    fn project_model_changes(
+        &self,
+        base: &WorldStateSnapshot,
+        expected_lifetime: WorldStateLifetime,
+        apply_display_policy: bool,
+    ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
         validate_snapshot_lifetime(base, expected_lifetime)?;
         let result = WorldStateReducer::fold(base.clone(), std::slice::from_ref(self))?;
         validate_snapshot_lifetime(&result, expected_lifetime)?;
-        let before = model_section_map(base);
-        let after = model_section_map(&result);
+        let project = if apply_display_policy {
+            model_section_map
+        } else {
+            stored_model_section_map
+        };
+        let before = project(base);
+        let after = project(&result);
         let section_ids = before
             .keys()
             .chain(after.keys())
@@ -1549,7 +1583,7 @@ fn section_map(
         .collect()
 }
 
-fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectionId, &Value> {
+fn stored_model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectionId, Value> {
     snapshot
         .sections
         .iter()
@@ -1557,7 +1591,22 @@ fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectio
             section
                 .model_projection
                 .as_ref()
-                .map(|projection| (section.id.clone(), projection))
+                .map(|projection| (section.id.clone(), projection.clone()))
+        })
+        .collect()
+}
+
+fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectionId, Value> {
+    snapshot
+        .sections
+        .iter()
+        .filter_map(|section| {
+            section.model_projection.as_ref().map(|projection| {
+                (
+                    section.id.clone(),
+                    workflow_projection::for_model(section.id.as_str(), projection.clone()),
+                )
+            })
         })
         .collect()
 }

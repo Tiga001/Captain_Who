@@ -419,11 +419,12 @@ impl AgentTool for WorkflowReadTool {
 }
 
 fn section(id: &str, value: Value) -> AgentResult<WorldStateSectionEnvelope> {
+    let projection = crate::world_state::workflow_projection::for_model(id, value.clone());
     WorldStateSectionEnvelope::model_visible(
         WorldStateSectionId::extension(id).map_err(|e| AgentError::new(e.to_string()))?,
         WorldStateLifetime::Conversation,
-        value.clone(),
         value,
+        projection,
     )
     .map_err(|e| AgentError::new(e.to_string()))
 }
@@ -612,6 +613,20 @@ mod tests {
         assert!(!extension.active_tool_capabilities().unwrap().is_empty());
         let sections = extension.conversation_world_state_sections().unwrap();
         assert_eq!(sections.len(), 3);
+        let identity = &sections[0];
+        assert_eq!(identity.state["workflow"]["templateId"], "t");
+        assert_eq!(identity.state["workflow"]["templateRevision"], 1);
+        assert_eq!(identity.state["workflow"]["executionVersion"], "v");
+        for section in &sections {
+            let projection = section.model_projection.as_ref().unwrap().to_string();
+            for field in ["templateId", "templateRevision", "executionVersion"] {
+                assert!(!projection.contains(field), "model section exposed {field}");
+            }
+        }
+        assert_eq!(
+            identity.model_projection.as_ref().unwrap()["workflow"]["members"][0]["nodeId"],
+            "dev"
+        );
         assert!(sections[0]
             .state
             .to_string()
