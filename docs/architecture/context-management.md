@@ -177,6 +177,8 @@ Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户
 
 `AssistantNarration` 通过 `provider_turn_id` 和 `first_tool_call_id` 关联所属响应及首个 canonical 工具调用。Generic 的首个 Tool Call 投影已经含有该响应正文时，历史组装不再追加它的独立 narration；原生 Provider 恢复私有 continuation 后也只撤下对应响应的独立正文。不能按文本去重，其他响应即使正文相同也必须保留。私有 MCP 参数和 FileChange successor 不为缓存写进公共历史。
 
+对于声明 `DeferUntilProviderTurnClosed` 的 Provider，Host 必须根据完整审计 Trace 判断是否延后派生上下文刷新，包括首个尚未获得结果的 Tool Call；不能用已裁去 open call 的模型安全前缀作判断。运行中的原生工具轮次由 Runtime/checkpoint 持有精确上下文，持久化成功后不提前恢复完整 continuation，也不返回替换 baseline；终态再从完整持久事实重建。publication 与 snapshot 两条保存路径遵守同一边界，Generic 的安全前缀增量更新保持不变。
+
 `RunBootstrap`、`RunInput`、`RunTimeline` 和 `CapabilityInstructions` 是附加布局标签，保留原来源、角色、内容、图片、工具参数和绑定。物理重排不改作用域、保留策略、SQLite journal、Trace sequence、压缩游标或权限判定。摘要生成请求有独立的输入契约，不套用主 Agent 请求布局。
 
 工具 Schema 不放入上述消息序列。请求的独立 `tools` 字段保持“稳定工具按名称排序，再拼接动态工具按名称排序”；稳定工具的使用指导继续位于稳定 system，动态能力专项指导只来自对应扩展。

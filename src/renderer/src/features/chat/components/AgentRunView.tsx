@@ -484,10 +484,23 @@ export function AgentRunView({
   // erase the boundary between the question introduction and the model's subsequent work.
   const showTimeline =
     hasTimeline && (!(canToggleTimeline && timelineCollapsed) || preserveInputSequence)
+  // A terminal failure arrives as both an Error event and Done.content. Keep both durable
+  // projections, but use the visible error entry instead of rendering its text again as an
+  // answer. Collapsing the timeline still leaves the failure explanation visible.
+  const finalAnswerIsTerminalError =
+    run.status === 'failed' && run.error?.trim() === finalAnswerContent.trim()
+  const terminalErrorVisibleInTimeline =
+    finalAnswerIsTerminalError &&
+    showTimeline &&
+    !(canToggleTimeline && timelineCollapsed) &&
+    displayTimeline.some(
+      (item) => item.type === 'error' && item.message.trim() === finalAnswerContent.trim()
+    )
   const showFinalContent =
     hasDisplayableContent(finalAnswerContent) &&
     (runIsSettled || !hasTimeline) &&
-    !(showTimeline && finalAnswerRepresentedByTimeline)
+    !(showTimeline && finalAnswerRepresentedByTimeline) &&
+    !terminalErrorVisibleInTimeline
   const canShowThinkingActivity =
     !(canToggleTimeline && timelineCollapsed) &&
     !headerIsThinking &&
@@ -635,9 +648,13 @@ export function AgentRunView({
         run={run}
         waitingForCommandCompletion={waitingForCommandCompletion}
       />
-      {showTimeline && run.error && !hasTimelineError && !interruptionReason && (
-        <div className="agent-run__error">{run.error}</div>
-      )}
+      {showTimeline &&
+        run.error &&
+        !hasTimelineError &&
+        !interruptionReason &&
+        !(showFinalContent && finalAnswerIsTerminalError) && (
+          <div className="agent-run__error">{run.error}</div>
+        )}
     </div>
   )
 }

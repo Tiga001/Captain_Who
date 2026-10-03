@@ -35,6 +35,7 @@ mod command_sessions;
 mod context_history;
 mod context_rebuild_compaction;
 mod context_runtime;
+mod context_runtime_native;
 mod context_window_consistency;
 mod continuation;
 mod conversation_world_state;

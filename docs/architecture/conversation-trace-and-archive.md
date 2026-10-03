@@ -25,6 +25,8 @@ last_verified: 2026-09-28
 
 持久 assistant message 在 pending 阶段以空 `content` 开始；正常流式与完成路径保存模型生成的用户可见正文。模型请求中断以 failed 终态保存，可保留最后一次失败采样的公开部分正文，但不能保存私有思考或残缺工具参数。Host 在同一个终态事务中追加 `RuntimeError`，通过 `agent.model_interruption.<reason>` 代码持久化 typed interruption；历史投影从 Trace 重建原因，而不是依赖 Renderer 收到的实时事件。错误提示不拼入 message content，不重复显示原始诊断；已完成工具记录保留。其他受控错误或取消结算仍可能写入 Host 生成的终态可见正文。审批、Tool 状态、MCP/FileChange 卡片和系统恢复细节进入 Agent Run/Event/Trace 各自投影，不能为了 UI 方便拼接进 message content；否则历史重载会把系统生成文本误当成模型回复。
 
+受控失败通过 `Error` 与 `Done.content` 传递同一终态文案时，Renderer 在同一 Run 内只展示一次：展开时使用可见错误条目，折叠后仍保留失败说明。实时事件和持久历史均不删除；与错误不同的模型正文、其他 Run 的相同错误分别保留。
+
 ## Trace 生命周期
 
 ```text

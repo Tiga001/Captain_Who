@@ -593,10 +593,13 @@ impl AgentService {
                 notifications,
             );
         }
-        let committed_trace_count = publication_committed_trace_count(publication);
+        // The first open call is already durable and can activate its staged native turn.
+        // Inspect the complete audit publication: the safe model prefix deliberately omits
+        // that call and cannot yet hydrate the Provider-owned turn during a cold rebuild.
         let native_deferred =
             (|| {
-                if !publication.trace_items()[..committed_trace_count]
+                if !publication
+                    .trace_items()
                     .iter()
                     .any(|item| matches!(item.as_ref(), ConversationTurnTraceItem::ToolCall { .. }))
                 {
@@ -845,7 +848,7 @@ impl AgentService {
             || previous_activity_items != next_activity_items
             || previous_model_context_items.len() != committed_snapshot.model_context_items.len();
         let provider_native_tool_trace_is_in_progress =
-            match provider_native_tool_trace_is_in_progress(agent_input, &context_trace) {
+            match provider_native_tool_trace_is_in_progress(agent_input, &audit_trace) {
                 Ok(provider_native_tool_trace_is_in_progress) => {
                     provider_native_tool_trace_is_in_progress
                 }
