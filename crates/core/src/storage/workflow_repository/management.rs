@@ -162,6 +162,49 @@ fn template(c: &Connection, id: &str, expected: u64) -> Result<Definition, Error
     serde_json::from_str(&json).map_err(|_| Error::Invalid("workflow_template_unavailable".into()))
 }
 
+fn unavailable_member_models(
+    c: &Connection,
+    definition: &Definition,
+    unavailable_nodes: &HashSet<&str>,
+) -> Result<Vec<UnavailableMemberModel>, Error> {
+    // Availability was already decided by the credential-aware service projection. Only
+    // fetch display labels here; neither SQLite's enabled flag nor credential data is used.
+    let mut names = HashMap::<String, Option<String>>::new();
+    let mut members = Vec::with_capacity(unavailable_nodes.len());
+    for node in &definition.nodes {
+        if !unavailable_nodes.contains(node.id.as_str()) {
+            continue;
+        }
+        let NodeConfig::Agent(config) = &node.config;
+        let model_config_id = config
+            .model_config_id
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("workflow_template_unavailable".into()))?;
+        let model_display_name = match names.get(model_config_id) {
+            Some(name) => name.clone(),
+            None => {
+                let name: Option<String> = c
+                    .query_row(
+                        "SELECT display_name FROM models WHERE id=?1",
+                        [model_config_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(storage_error)?;
+                names.insert(model_config_id.clone(), name.clone());
+                name
+            }
+        };
+        members.push(UnavailableMemberModel {
+            node_id: node.id.clone(),
+            node_name: node.name.clone(),
+            model_config_id: model_config_id.clone(),
+            model_display_name,
+        });
+    }
+    Ok(members)
+}
+
 pub(super) fn request(
     c: &Connection,
     request: ManagementRequest,
@@ -211,11 +254,18 @@ pub(super) fn request(
                 definition
                     .validate_department_names()
                     .map_err(Error::Invalid)?;
-                if !definition
-                    .validate(models)
-                    .map_err(Error::Invalid)?
-                    .is_empty()
-                {
+                let issues = definition.validate(models).map_err(Error::Invalid)?;
+                let unavailable_nodes: HashSet<_> = issues
+                    .iter()
+                    .filter(|issue| issue.code == "node_model_unavailable")
+                    .map(|issue| issue.subject.as_str())
+                    .collect();
+                if !unavailable_nodes.is_empty() {
+                    return Err(Error::MemberModelsUnavailable {
+                        members: unavailable_member_models(c, definition, &unavailable_nodes)?,
+                    });
+                }
+                if !issues.is_empty() {
                     return Err(Error::Invalid("workflow_template_unavailable".into()));
                 }
                 let agents: HashSet<_> = definition

@@ -24,7 +24,7 @@ import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
 import type { ConversationAttentionById } from '../../chat/useConversationAttention'
 import { SettingsSelect } from '../../settings/components/SettingsSelect'
 import { requestWorkflows } from '../workflowClient'
-import { workflowErrorDetail } from '../workflowErrors'
+import { workflowErrorDetail, workflowUnavailableMemberModels } from '../workflowErrors'
 import { WorkflowIssues } from '../WorkflowIssues'
 import { WorkflowGraphEditor } from '../WorkflowGraphEditor'
 import { useWorkflowHistory } from '../useWorkflowHistory'
@@ -133,9 +133,11 @@ export function WorkflowsPage({
   const [loading, setLoading] = useState(true)
   const [hasSnapshot, setHasSnapshot] = useState(false)
   const [error, setErrorMessage] = useState('')
+  const [errorKind, setErrorKind] = useState<'models_unavailable' | null>(null)
   const [errorAcknowledged, setErrorAcknowledged] = useState(false)
-  const setError = useCallback((message: string) => {
+  const setError = useCallback((message: string, kind: 'models_unavailable' | null = null) => {
     setErrorMessage(message)
+    setErrorKind(kind)
     setErrorAcknowledged(false)
   }, [])
   const [validationIssues, setValidationIssues] = useState<WorkflowIssue[]>([])
@@ -759,6 +761,26 @@ export function WorkflowsPage({
       await synchronizeCommit(response)
     } catch (cause) {
       pendingOrganizationRefresh.current = true
+      const unavailableModels = !instance.enabled ? workflowUnavailableMemberModels(cause) : null
+      if (unavailableModels) {
+        setError(
+          [
+            t('成员使用的模型不可用。', 'Models used by organization members are unavailable.'),
+            ...unavailableModels.map((model) => {
+              const name = model.modelDisplayName
+                ? `${model.modelDisplayName}${t('（不可用）', ' (unavailable)')}`
+                : t('已删除或不可用的模型', 'Deleted or unavailable model')
+              return `${name}\n${t('受影响成员：', 'Affected members: ')}${model.memberNames.join(t('、', ', '))}`
+            }),
+            t(
+              '请在模型设置中检查并启用该模型，或在组织配置中为这些成员选择可用模型。',
+              'Check and enable these models in Model settings, or choose available models for these members in Organization settings.'
+            )
+          ].join('\n\n'),
+          'models_unavailable'
+        )
+        return
+      }
       setError(
         workflowErrorDetail(cause).includes('organization_duplicate_member_name')
           ? t(
@@ -796,8 +818,15 @@ export function WorkflowsPage({
     foreground && error && !errorAcknowledged ? (
       <ConfirmationDialog
         dialogRole="alertdialog"
-        title={t('暂时无法完成操作', 'Could not complete this action')}
+        title={
+          errorKind === 'models_unavailable'
+            ? t('无法启用组织', 'Could not enable organization')
+            : t('暂时无法完成操作', 'Could not complete this action')
+        }
         description={error}
+        descriptionClassName={
+          errorKind === 'models_unavailable' ? 'project-workflows__model-error' : undefined
+        }
         cancelLabel={t('关闭', 'Close')}
         confirmLabel={t('知道了', 'Got it')}
         confirmVariant="primary"

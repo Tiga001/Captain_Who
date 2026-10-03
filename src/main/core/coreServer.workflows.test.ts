@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import fixture from '../../../packages/protocol/fixtures/workflow-definition-v1.json'
 import { parseWorkflowDefinition, type WorkflowRequest } from '@mycopilot/protocol'
+import { captureHostInvocation, unwrapHostInvocation } from '@mycopilot/host-api'
 const rpcRequest = vi.hoisted(() => vi.fn())
 vi.mock('./jsonRpcClient', () => ({
   CoreJsonRpcClient: class {
@@ -98,6 +99,37 @@ describe('workflow IPC contract boundary', () => {
     rpcRequest.mockResolvedValue({ records: [], issues: [], instances: [] })
     await new CoreServer().requestWorkflows(request)
     expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
+  })
+  it('preserves unavailable member model details through the serializable Host error boundary', async () => {
+    const data = {
+      code: 'organization_member_models_unavailable',
+      members: [
+        {
+          nodeId: 'reviewer',
+          nodeName: 'Reviewer',
+          modelConfigId: 'disabled-model',
+          modelDisplayName: 'DSflash'
+        }
+      ]
+    }
+    rpcRequest.mockRejectedValue(Object.assign(new Error(data.code), { code: -32602, data }))
+    const result = await captureHostInvocation(() =>
+      new CoreServer().requestWorkflows({
+        operation: 'setInstanceEnabled',
+        id: fixture.id,
+        enabled: true,
+        expectedRevision: 2
+      })
+    )
+    const transported = JSON.parse(JSON.stringify(result))
+    expect(transported).toEqual({
+      ok: false,
+      error: { message: data.code, code: -32602, data }
+    })
+    expect(() => unwrapHostInvocation(transported)).toThrow(
+      expect.objectContaining({ message: data.code, code: -32602, data })
+    )
+    expect(rpcRequest).toHaveBeenCalledTimes(1)
   })
   it('preserves isolated recovery entries through the Host boundary for both workflow pages', async () => {
     const invalid = {

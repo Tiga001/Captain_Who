@@ -1,5 +1,5 @@
 use super::*;
-use mycopilot_core::storage::workflow_repository::Error;
+use mycopilot_core::storage::workflow_repository::{Error, MEMBER_MODELS_UNAVAILABLE_CODE};
 use mycopilot_core::workflow::Request;
 use serde::Deserialize;
 
@@ -18,14 +18,16 @@ pub(crate) fn handle_workflow_request(
     };
     match result {
         Ok(output) => response_success(request.id, output),
-        Err(error) => {
-            let code = match &error {
-                Error::Invalid(_) => -32602,
-                Error::Conflict(_) => -32009,
-                Error::Storage(_) => -32000,
-            };
-            response_error(Some(request.id), code, error.to_string())
-        }
+        Err(Error::MemberModelsUnavailable { members }) => serde_json::to_value(error_with_data(
+            Some(request.id),
+            -32602,
+            MEMBER_MODELS_UNAVAILABLE_CODE,
+            serde_json::json!({"code": MEMBER_MODELS_UNAVAILABLE_CODE, "members": members}),
+        ))
+        .expect("Organization model availability error must serialize"),
+        Err(Error::Invalid(message)) => response_error(Some(request.id), -32602, message),
+        Err(Error::Conflict(message)) => response_error(Some(request.id), -32009, message),
+        Err(Error::Storage(message)) => response_error(Some(request.id), -32000, message),
     }
 }
 
@@ -147,6 +149,114 @@ mod tests {
                 params: Some(params),
             },
         )
+    }
+
+    #[test]
+    fn organization_enable_rpc_reports_model_details_from_execution_availability() {
+        use mycopilot_core::storage::models::{ModelConfigRecord, ModelSettingsRecord};
+        use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("member-models.sqlite");
+        let storage = StorageService::open(&path).unwrap();
+        let settings = |enabled: bool, token: &str| ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".into(),
+            api_token: token.into(),
+            search_mode: "disabled".into(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "configured-model".into(),
+                provider_model_id: "provider-model".into(),
+                display_name: "Named model".into(),
+                api_url_override: None,
+                api_token_override: None,
+                supports_image: false,
+                context_window_tokens: Some(64_000),
+                provider_profile_config: ProviderProfileConfig::generic_for_dialect(
+                    ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
+                input_price: "0".into(),
+                cached_input_price: String::new(),
+                output_price: "0".into(),
+                enabled,
+            }],
+        };
+        storage
+            .save_model_settings(settings(true, "owned-test-token"))
+            .unwrap();
+        let nodes = ["a", "b"].map(|id| {
+            json!({
+                "kind":"agent","id":id,"name":format!("Member {id}"),"x":0,"y":0,
+                "permissionMode":"default","modelConfigId":"configured-model",
+                "receives":"Task","task":"Work","delivers":"Result"
+            })
+        });
+        let definition = json!({
+            "schemaVersion":1,"id":"instance","name":"Instance","description":"","background":"",
+            "nodes":nodes,
+            "viewport":{"x":0,"y":0,"zoom":1}
+        });
+        let created = call(
+            &storage,
+            json!({
+                "operation":"saveInstance","id":"instance","definition":definition,"name":"Instance",
+                "color":"#4A82E8","bindings":[],"expectedRevision":0
+            }),
+        );
+        assert_eq!(created["result"]["instances"][0]["enabled"], true);
+        let disabled = call(
+            &storage,
+            json!({
+                "operation":"setInstanceEnabled","id":"instance","enabled":false,"expectedRevision":1
+            }),
+        );
+        assert_eq!(disabled["result"]["instances"][0]["revision"], 2);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let snapshot = || {
+            connection.query_row(
+                "SELECT enabled,revision,updated_at,last_request_json FROM workflow_instances WHERE instance_id='instance'",
+                [],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+            ).unwrap()
+        };
+        let before = snapshot();
+        let enable = json!({"operation":"setInstanceEnabled","id":"instance","enabled":true,"expectedRevision":2});
+        // Exercise both disabled configuration and enabled configuration with missing
+        // credentials through the real service, not a SQL-only model availability check.
+        for configured in [settings(false, "owned-test-token"), settings(true, "")] {
+            storage.save_model_settings(configured).unwrap();
+            let response = call(&storage, enable.clone());
+            assert_eq!(
+                response,
+                json!({
+                    "jsonrpc":"2.0","id":1,"error":{
+                        "code":-32602,"message":"organization_member_models_unavailable",
+                        "data":{"code":"organization_member_models_unavailable","members":[
+                            {"nodeId":"a","nodeName":"Member a","modelConfigId":"configured-model","modelDisplayName":"Named model"},
+                            {"nodeId":"b","nodeName":"Member b","modelConfigId":"configured-model","modelDisplayName":"Named model"}
+                        ]}
+                    }
+                })
+            );
+            assert_eq!(snapshot(), before);
+        }
+        let mut deleted = settings(true, "owned-test-token");
+        deleted.models.clear();
+        storage.save_model_settings(deleted).unwrap();
+        let response = call(&storage, enable.clone());
+        let members = response["error"]["data"]["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(members
+            .iter()
+            .all(|member| member["modelDisplayName"].is_null()));
+        assert_eq!(snapshot(), before);
+
+        storage
+            .save_model_settings(settings(true, "owned-test-token"))
+            .unwrap();
+        let enabled = call(&storage, enable);
+        assert_eq!(enabled["result"]["instances"][0]["enabled"], true);
+        assert_eq!(enabled["result"]["instances"][0]["revision"], 3);
     }
 
     #[test]

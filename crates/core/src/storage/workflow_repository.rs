@@ -8,9 +8,23 @@ const MAX_SAFE_REVISION: i64 = 9_007_199_254_740_991;
 const MAX_DEFINITIONS: usize = 1_000;
 const MAX_CATALOG_BYTES: i64 = 16 * 1024 * 1024;
 
+pub const MEMBER_MODELS_UNAVAILABLE_CODE: &str = "organization_member_models_unavailable";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableMemberModel {
+    pub node_id: String,
+    pub node_name: String,
+    pub model_config_id: String,
+    pub model_display_name: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     Invalid(String),
+    MemberModelsUnavailable {
+        members: Vec<UnavailableMemberModel>,
+    },
     Conflict(String),
     Storage(String),
 }
@@ -20,6 +34,9 @@ impl std::fmt::Display for Error {
         match self {
             Self::Invalid(message) | Self::Conflict(message) | Self::Storage(message) => {
                 formatter.write_str(message)
+            }
+            Self::MemberModelsUnavailable { .. } => {
+                formatter.write_str(MEMBER_MODELS_UNAVAILABLE_CODE)
             }
         }
     }

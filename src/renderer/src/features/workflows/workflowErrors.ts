@@ -10,6 +10,58 @@ export interface WorkflowOperationError {
     | 'department_name_separator'
 }
 
+export interface WorkflowUnavailableModel {
+  modelConfigId: string
+  modelDisplayName: string | null
+  memberNames: string[]
+}
+
+/** Read only the explicit public error contract; unrelated failures must stay generic. */
+export function workflowUnavailableMemberModels(error: unknown): WorkflowUnavailableModel[] | null {
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+  const isText = (value: unknown): value is string =>
+    typeof value === 'string' && value.trim().length > 0
+  const code = 'organization_member_models_unavailable'
+  if (
+    !isRecord(error) ||
+    error.code !== -32602 ||
+    error.message !== code ||
+    !isRecord(error.data) ||
+    error.data.code !== code ||
+    !Array.isArray(error.data.members) ||
+    error.data.members.length === 0 ||
+    error.data.members.length > 128
+  )
+    return null
+
+  const groups = new Map<string, WorkflowUnavailableModel>()
+  const seenMembers = new Map<string, Set<string>>()
+  for (const member of error.data.members) {
+    if (
+      !isRecord(member) ||
+      !isText(member.nodeId) ||
+      !isText(member.nodeName) ||
+      !isText(member.modelConfigId) ||
+      (member.modelDisplayName !== null && typeof member.modelDisplayName !== 'string')
+    )
+      return null
+    const name = member.modelDisplayName?.trim().replace(/\s+/g, ' ') || null
+    let group = groups.get(member.modelConfigId)
+    if (!group) {
+      group = { modelConfigId: member.modelConfigId, modelDisplayName: name, memberNames: [] }
+      groups.set(member.modelConfigId, group)
+      seenMembers.set(member.modelConfigId, new Set())
+    } else if (!group.modelDisplayName) group.modelDisplayName = name
+    const seen = seenMembers.get(member.modelConfigId)!
+    if (!seen.has(member.nodeId)) {
+      group.memberNames.push(member.nodeName.trim().replace(/\s+/g, ' '))
+      seen.add(member.nodeId)
+    }
+  }
+  return [...groups.values()]
+}
+
 /** Turn an implementation error into a safe presentation category, never user-facing raw text. */
 export function workflowOperationError(
   error: unknown,

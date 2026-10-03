@@ -2,6 +2,7 @@ import { page, userEvent } from 'vitest/browser'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { useCallback, useEffect, useState } from 'react'
+import { HostInvocationError } from '@mycopilot/host-api'
 import type {
   RightSidebarPage,
   RightSidebarPageUpdate
@@ -25,6 +26,7 @@ import '../../styles/global.css'
 
 const service = vi.hoisted(() => ({
   request: vi.fn(),
+  language: 'zh-CN' as 'zh-CN' | 'en-US',
   runningIds: null as Set<string> | null,
   runtimeListeners: new Set<(snapshot: WorkflowRuntimeSnapshot) => void>()
 }))
@@ -61,7 +63,7 @@ vi.mock('../../features/workflows/project/useWorkflowExecution', () => ({
 }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
-    language: 'zh-CN',
+    language: service.language,
     resolvedColorScheme: 'dark',
     t: (key: string) => key
   })
@@ -176,6 +178,7 @@ beforeEach(async () => {
     }
   }
   instances = []
+  service.language = 'zh-CN'
   service.runningIds = null
   service.runtimeListeners.clear()
   extraRecords = []
@@ -655,6 +658,166 @@ describe('global organization management', () => {
     expect(
       onCommitted.mock.calls.every(([response]) => response.affectedConversationIds?.length === 0)
     ).toBe(true)
+  })
+
+  it.each(['zh-CN', 'en-US'] as const)(
+    'explains structured unavailable-model failures in %s without changing organization state',
+    async (language) => {
+      service.language = language
+      instances = [
+        {
+          ...instance('blocked', 'Research', [
+            { nodeId: 'analysis', conversationId: 'chat-a' },
+            { nodeId: 'delivery', conversationId: 'chat-b' }
+          ]),
+          enabled: false
+        }
+      ]
+      const before = structuredClone(instances)
+      const original = service.request.getMockImplementation()!
+      service.request.mockImplementation(async (input: WorkflowRequest) => {
+        if (input.operation !== 'setInstanceEnabled') return original(input)
+        throw new HostInvocationError({
+          message: 'organization_member_models_unavailable',
+          code: -32602,
+          data: {
+            code: 'organization_member_models_unavailable',
+            members: [
+              {
+                nodeId: 'analysis',
+                nodeName: '方法抽取员',
+                modelConfigId: 'private-model-id-a',
+                modelDisplayName: 'DSflash'
+              },
+              {
+                nodeId: 'delivery',
+                nodeName: '机制收集员',
+                modelConfigId: 'private-model-id-a',
+                modelDisplayName: 'DSflash'
+              },
+              ...['软件机制抽取员', '适用性评估员', '解析推导员', '数值验证员'].map(
+                (nodeName, index) => ({
+                  nodeId: `research-${index}`,
+                  nodeName,
+                  modelConfigId: 'private-model-id-a',
+                  modelDisplayName: 'DSflash'
+                })
+              ),
+              {
+                nodeId: 'reviewer',
+                nodeName: '数学复核员',
+                modelConfigId: 'private-model-id-b',
+                modelDisplayName: null
+              }
+            ]
+          }
+        })
+      })
+      await mount()
+      const zh = language === 'zh-CN'
+      const toggle = page.getByRole('switch', {
+        name: `${zh ? '启用组织' : 'Enable organization'} Research`,
+        exact: true
+      })
+      await toggle.click()
+      const dialog = page.getByRole('alertdialog', {
+        name: zh ? '无法启用组织' : 'Could not enable organization',
+        exact: true
+      })
+      await expect.element(dialog).toBeVisible()
+      const description = dialog.element().querySelector('p')!
+      expect(description.textContent).toContain(
+        zh
+          ? 'DSflash（不可用）\n受影响成员：方法抽取员、机制收集员'
+          : 'DSflash (unavailable)\nAffected members: 方法抽取员, 机制收集员'
+      )
+      expect(description.textContent?.match(/DSflash/g)).toHaveLength(1)
+      expect(description.textContent).toContain(
+        zh
+          ? '已删除或不可用的模型\n受影响成员：数学复核员'
+          : 'Deleted or unavailable model\nAffected members: 数学复核员'
+      )
+      expect(description.textContent).toContain('数学复核员')
+      expect(description.textContent).toContain(
+        zh
+          ? '请在模型设置中检查并启用该模型，或在组织配置中为这些成员选择可用模型。'
+          : 'Check and enable these models in Model settings, or choose available models for these members in Organization settings.'
+      )
+      expect(getComputedStyle(description).whiteSpace).toBe('pre-wrap')
+      for (const hidden of [
+        'organization_member_models_unavailable',
+        'private-model-id-',
+        '-32602',
+        '暂时无法切换组织状态',
+        'Could not change organization state'
+      ])
+        expect(dialog.element().textContent).not.toContain(hidden)
+      expect(instances).toEqual(before)
+      expect(onCommitted).not.toHaveBeenCalled()
+      expect(onBeforeCommit).not.toHaveBeenCalled()
+      await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+      await page.getByRole('button', { name: zh ? '知道了' : 'Got it', exact: true }).click()
+      expect(dialog.query()).toBeNull()
+      // A later, unrelated failure must not inherit the specific model-error title or content.
+      service.request.mockImplementation(async (input: WorkflowRequest) => {
+        if (input.operation !== 'setInstanceEnabled') return original(input)
+        throw new HostInvocationError({ message: 'private storage failure', code: -32000 })
+      })
+      await toggle.click()
+      const generic = page.getByRole('alertdialog', {
+        name: zh ? '暂时无法完成操作' : 'Could not complete this action',
+        exact: true
+      })
+      await expect
+        .element(generic)
+        .toHaveTextContent(
+          zh
+            ? '暂时无法切换组织状态，请检查配置后重试。'
+            : 'Could not change organization state. Check its configuration and try again.'
+        )
+      expect(generic.element().textContent).not.toContain('DSflash')
+      expect(generic.element().textContent).not.toContain('private storage failure')
+    }
+  )
+
+  it('keeps long unavailable-model member lists readable and the acknowledgement visible', async () => {
+    await page.viewport(400, 640)
+    instances = [
+      {
+        ...instance('blocked', 'Research', [
+          { nodeId: 'analysis', conversationId: 'chat-a' },
+          { nodeId: 'delivery', conversationId: 'chat-b' }
+        ]),
+        enabled: false
+      }
+    ]
+    const original = service.request.getMockImplementation()!
+    service.request.mockImplementation(async (input: WorkflowRequest) => {
+      if (input.operation !== 'setInstanceEnabled') return original(input)
+      throw new HostInvocationError({
+        message: 'organization_member_models_unavailable',
+        code: -32602,
+        data: {
+          code: 'organization_member_models_unavailable',
+          members: Array.from({ length: 40 }, (_, index) => ({
+            nodeId: `member-${index}`,
+            nodeName: `负责长流程研究及验证的成员${index + 1}`,
+            modelConfigId: 'private-model-id',
+            modelDisplayName: 'DSflash'
+          }))
+        }
+      })
+    })
+    await mount()
+    await page.getByRole('switch', { name: '启用组织 Research', exact: true }).click()
+    const dialog = page.getByRole('alertdialog', { name: '无法启用组织', exact: true })
+    await expect.element(dialog).toBeVisible()
+    const description = dialog.element().querySelector('p')!
+    expect(description.textContent).toContain('负责长流程研究及验证的成员40')
+    expect(description.scrollHeight).toBeGreaterThan(description.clientHeight)
+    expect(description.scrollWidth).toBeLessThanOrEqual(description.clientWidth + 1)
+    await expect.element(dialog.getByRole('button', { name: '知道了', exact: true })).toBeVisible()
+    expect(dialog.element().getBoundingClientRect().bottom).toBeLessThanOrEqual(640)
   })
 
   it('animates only active organizations in their own color without moving card content', async () => {

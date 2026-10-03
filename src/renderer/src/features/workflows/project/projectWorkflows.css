@@ -509,3 +509,9 @@
 .project-workflows__editor [hidden] {
   display: none;
 }
+.app-confirm-dialog__card .project-workflows__model-error {
+  max-height: min(50vh, 28rem);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

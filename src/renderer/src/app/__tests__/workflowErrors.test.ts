@@ -1,10 +1,64 @@
 import { describe, expect, it } from 'vitest'
 import {
   workflowErrorDetail,
-  workflowOperationError
+  workflowOperationError,
+  workflowUnavailableMemberModels
 } from '../../features/workflows/workflowErrors'
 
 describe('organization error diagnostics', () => {
+  const modelError = (members: unknown[]) => ({
+    message: 'organization_member_models_unavailable',
+    code: -32602,
+    data: { code: 'organization_member_models_unavailable', members }
+  })
+  const member = {
+    nodeId: 'member-a',
+    nodeName: '方法抽取员',
+    modelConfigId: 'model-a',
+    modelDisplayName: 'DSflash'
+  }
+
+  it('groups unavailable models by configuration ID and preserves member order without duplicates', () => {
+    expect(
+      workflowUnavailableMemberModels(
+        modelError([
+          member,
+          { ...member, nodeId: 'member-b', nodeName: '机制收集员' },
+          member,
+          { ...member, nodeId: 'member-c', modelConfigId: 'model-b', modelDisplayName: null },
+          { ...member, nodeId: 'member-d', modelConfigId: 'model-c' }
+        ])
+      )
+    ).toEqual([
+      {
+        modelConfigId: 'model-a',
+        modelDisplayName: 'DSflash',
+        memberNames: ['方法抽取员', '机制收集员']
+      },
+      { modelConfigId: 'model-b', modelDisplayName: null, memberNames: ['方法抽取员'] },
+      { modelConfigId: 'model-c', modelDisplayName: 'DSflash', memberNames: ['方法抽取员'] }
+    ])
+  })
+
+  it('rejects unrelated errors and malformed member payloads instead of guessing a model failure', () => {
+    const valid = modelError([member])
+    for (const error of [
+      null,
+      new Error('organization_member_models_unavailable'),
+      { ...valid, code: -32000 },
+      { ...valid, message: 'Storage unavailable' },
+      { ...valid, data: { ...valid.data, code: 'different_error' } },
+      modelError([]),
+      modelError([null]),
+      modelError([{ ...member, nodeId: '' }]),
+      modelError([{ ...member, nodeName: 42 }]),
+      modelError([{ ...member, modelConfigId: null }]),
+      modelError([{ ...member, modelDisplayName: {} }]),
+      modelError([member, { ...member, nodeName: ' ' }])
+    ])
+      expect(workflowUnavailableMemberModels(error)).toBeNull()
+  })
+
   it('keeps the host message and code without serializing payloads or stacks', () => {
     const error = Object.assign(new Error('Storage read failed'), {
       code: -32000,

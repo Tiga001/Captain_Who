@@ -52,6 +52,111 @@ fn toggle(c: &mut Connection, id: &str, enabled: bool, revision: u64) -> Result<
 }
 
 #[test]
+fn organization_enable_reports_all_unavailable_member_models_without_mutation() {
+    let mut c = setup();
+    let all_models: HashSet<String> = ["disabled", "no-credentials", "deleted", "available"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for (id, name, enabled) in [
+        ("disabled", "Disabled model", false),
+        ("no-credentials", "Credential unavailable model", true),
+        ("available", "Available model", true),
+    ] {
+        c.execute(
+            "INSERT INTO models(id,provider_model_id,display_name,normalized_display_name,supports_image,provider_profile_config_json,provider_connection_revision,provider_protocol_revision,input_price,output_price,enabled,position,created_at,updated_at) VALUES (?1,?1,?2,lower(?2),0,'{}','provider-connection-v1:test','provider-protocol-v1:test','0','0',?3,0,1,1)",
+            params![id, name, enabled],
+        )
+        .unwrap();
+    }
+    let mut definition = definition();
+    definition["nodes"] = json!([
+        ("a", "First disabled member", "disabled"),
+        ("b", "Second disabled member", "disabled"),
+        ("c", "Credential missing member", "no-credentials"),
+        ("d", "Deleted model member", "deleted"),
+        ("e", "Available member", "available"),
+    ]
+    .map(|(id, name, model)| {
+        let mut node = definition["nodes"][0].clone();
+        node["id"] = json!(id);
+        node["name"] = json!(name);
+        node["modelConfigId"] = json!(model);
+        node
+    }));
+    let request_with_models = |c: &mut Connection, value: Value, models: &HashSet<String>| {
+        super::request(c, serde_json::from_value(value).unwrap(), models)
+    };
+    request_with_models(
+        &mut c,
+        json!({"operation":"saveInstance","id":"instance","definition":definition,
+            "name":"Instance","color":"#4A82E8","bindings":[],"expectedRevision":0}),
+        &all_models,
+    )
+    .unwrap();
+    toggle(&mut c, "instance", false, 1).unwrap();
+    let snapshot = |c: &Connection| {
+        c.query_row(
+            "SELECT enabled,revision,updated_at,last_request_json,definition_json FROM workflow_instances WHERE instance_id='instance'",
+            [],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, u64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+        )
+        .unwrap()
+    };
+    let before = snapshot(&c);
+    let enable = json!({"operation":"setInstanceEnabled","id":"instance","enabled":true,"expectedRevision":2});
+    // An enabled SQL model can still be unusable because the authoritative execution
+    // projection excludes it (for example, its credentials are unavailable).
+    let error = request_with_models(&mut c, enable.clone(), &HashSet::from(["available".into()]))
+        .unwrap_err();
+    assert_eq!(error.to_string(), MEMBER_MODELS_UNAVAILABLE_CODE);
+    let Error::MemberModelsUnavailable { members } = error else {
+        panic!("expected structured model availability error");
+    };
+    assert_eq!(
+        serde_json::to_value(members).unwrap(),
+        json!([
+            {"nodeId":"a","nodeName":"First disabled member","modelConfigId":"disabled","modelDisplayName":"Disabled model"},
+            {"nodeId":"b","nodeName":"Second disabled member","modelConfigId":"disabled","modelDisplayName":"Disabled model"},
+            {"nodeId":"c","nodeName":"Credential missing member","modelConfigId":"no-credentials","modelDisplayName":"Credential unavailable model"},
+            {"nodeId":"d","nodeName":"Deleted model member","modelConfigId":"deleted","modelDisplayName":null}
+        ])
+    );
+    assert_eq!(snapshot(&c), before);
+    assert_eq!(count(&c, "conversations"), 5);
+    assert_eq!(count(&c, "workflow_instance_bindings"), 5);
+    // Model metadata alone must never override the supplied availability projection.
+    let restored = request_with_models(&mut c, enable, &all_models).unwrap();
+    assert!(restored.instances[0].enabled);
+    assert_eq!(restored.instances[0].revision, 3);
+}
+
+#[test]
+fn organization_enable_preserves_other_validation_errors_and_allows_disabling() {
+    let mut c = setup();
+    call(&mut c, create("instance", None)).unwrap();
+    c.execute(
+        "UPDATE workflow_instances SET definition_json=json_set(definition_json,'$.nodes[0].modelConfigId',NULL) WHERE instance_id='instance'",
+        [],
+    )
+    .unwrap();
+    toggle(&mut c, "instance", false, 1).unwrap();
+    assert_eq!(
+        toggle(&mut c, "instance", true, 2).unwrap_err(),
+        Error::Invalid("workflow_template_unavailable".into())
+    );
+    c.execute(
+        "UPDATE workflow_instances SET needs_review=1,definition_json=json_set(definition_json,'$.nodes[0].modelConfigId','unavailable-model') WHERE instance_id='instance'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        toggle(&mut c, "instance", true, 2).unwrap_err(),
+        Error::Invalid("workflow_instance_needs_review".into())
+    );
+}
+
+#[test]
 fn workflow_disable_preserves_busy_turns_and_live_edits_preserve_disabled_state() {
     let mut c = setup();
     let first = call(&mut c, create("instance", None)).unwrap();
