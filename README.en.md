@@ -2,164 +2,200 @@
 
 [简体中文](README.md) | English
 
-Captain Who is a local-first desktop AI work assistant. Its interface is built with Electron, React, and TypeScript; Rust Core handles the agent, tool execution, and local storage.
+**Research, create documents, and edit code with AI—in your local projects.**
 
-## Download and source code
+Captain Who is a local-first desktop AI work assistant. Connect your own model API and describe a task in natural language. It can read and write files, run commands, operate the built-in browser, and delegate work to multiple agents in parallel. Conversations, files, terminals, and execution records share one workspace.
 
-To use the app, download the macOS installer from the [Captain Who website](https://captainwhoagent.com/). The current official release supports Apple Silicon Macs running macOS 12 or later. See [Versions and releases](public-docs/releases/README.md) for installers, verification information, and upgrade instructions.
+[Website & download](https://captainwhoagent.com/) · [Interface & features](#interface--features) · [Quick start](#quick-start) · [Run from source](#run-from-source) · [User documentation](public-docs/README.md)
 
-There is currently no Windows installer. This is an independently developed project, and there has not yet been enough time to complete the Windows version. No release date has been set.
+![Four subagents research different topics for a presentation about Zhejiang University.](assets/screenshots/parallel-research.png)
 
-This [GitHub repository](https://github.com/Tiga001/Captain_Who) is the active development repository for Captain Who. The project is open source under the [Apache License 2.0](LICENSE) and continues to receive updates. Development builds may be ahead of the installers available on the website. For the released app, refer to the website and [release notes](public-docs/releases/release-notes/README.md).
+Four subagents gather material on university history, academic research, notable people, and rankings in parallel for a presentation.
 
-The linked developer and public documentation is currently in Chinese.
+## Download and project status
 
-Current features include:
+Download the macOS installer from **[captainwhoagent.com](https://captainwhoagent.com/)**. The current release supports **Apple Silicon Macs running macOS 12 or later**.
 
-- Local projects, conversations, drafts, archiving, and full-text search
-- Provider Profiles, OpenAI-compatible, Anthropic-compatible, and DeepSeek model connections, with safe switching between configurations
-- Reading file, image, PDF, Word, presentation, and spreadsheet attachments
-- Workspace search, unified file creation/update/deletion through FileChange, Git diffs, managed commands, and persistent Command Sessions
-- File and command operations with approval controls, plus default, full-access, and custom permission modes
-- Web search and page retrieval through Tavily
-- A built-in terminal, an interactive browser, Managed Playwright, persistent browsing/download history, a download center, and browser settings
-- User-configured stdio MCP servers, internal HostBridge capabilities, and bundled, installed, and workspace Skills
-- Multi-agent collaboration, project-assignable agent templates, attachment/artifact sharing within an agent tree, read-only observation, and crash recovery
-- Scheduled Automation: agent runs launched on structured schedules, with run history, attention tracking, and native notifications
-- Persistent system notifications shared by regular tasks and automations, with sound, content previews, and status-based notification policies
-- Managed artifact workflows for Word documents, spreadsheets, presentations, PDFs, and image generation
-- Agent tool traces across turns, context compaction, Exact Archive, and long-term usage indicators
-- Interface support for Simplified and Traditional Chinese, British and American English, Japanese, Korean, French, Italian, and Russian
+This is a solo-developed project. There has not yet been enough time to complete the Windows version, so no Windows installer or release date is available.
 
-## Architecture
+This is Captain Who's active development repository, with ongoing updates under the [Apache-2.0](LICENSE) open-source license. Development code may be ahead of the website's installers; see [Releases and upgrades](public-docs/releases/README.md) for released versions.
+
+> Starting an agent task requires a Captain Who account, a valid software license, and your own model API configuration. Model usage credits are not included.
+
+## Interface & features
+
+These screenshots show real usage, grouped by scenario. Model names, settings, and interfaces may differ in your installed version. Full-access permissions shown in screenshots are not a recommendation; start with the default permissions.
+
+### Work with files and code
+
+Work in a local folder, view files beside your conversation, review code changes, and use the built-in terminal.
+
+![A project conversation, Python file diff, and built-in terminal displayed together.](assets/screenshots/code-review-terminal.png)
+
+Review added code in a binary-search script with the project terminal open below.
+
+<details>
+<summary>More: project conversations, document previews, and shortcuts</summary>
+
+![A project conversation with model and permission selectors below the input.](assets/screenshots/workspace-chat.png)
+
+Start a project conversation, ask what the assistant can do, and check the selected model and permissions.
+
+![A Markdown preview beside the conversation, with usage statistics expanded for one response.](assets/screenshots/markdown-preview-tokens.png)
+
+Discuss a document while previewing its Markdown file and checking the response's token usage and cache hit rate.
+
+![A slash-command menu with model, context compaction, and conversation options.](assets/screenshots/chat-commands.png)
+
+Type `/` to switch models, compact context, or manage the current conversation.
+
+</details>
+
+### Research in parallel and create assets
+
+Subagents can research, write, and review independently. Use the relevant Skills for documents, spreadsheets, presentations, PDFs, and images.
+
+![A generated campus illustration in the conversation, with subagent progress on the right.](assets/screenshots/generated-artwork.png)
+
+Generate a campus illustration for a presentation and add focused research on Yuquan Campus after a follow-up request.
+
+### Browser and human collaboration
+
+The agent can read and interact with pages in the built-in browser, using interactive cards to ask for your judgment or help when needed.
+
+![An English conversation beside the built-in browser, with a website contact dialog open.](assets/screenshots/browser-inspection.png)
+
+Ask the assistant to inspect the official website and describe the page and its open dialog.
+
+<details>
+<summary>More: login handoff and interactive questions</summary>
+
+![A website login page in the browser and an interactive card requesting user assistance.](assets/screenshots/browser-login-handoff.jpg)
+
+When an email check reaches a login page, the assistant asks you to sign in before continuing.
+
+![A multi-question interactive card with preset choices and custom answers.](assets/screenshots/interactive-questions.png)
+
+Answer an MBTI-style questionnaire that demonstrates interactive questions with choices and custom responses.
+
+</details>
+
+### Skills, MCP, and subagent templates
+
+Skills package task methods and resources, MCP connects external tools, and subagent templates save reusable roles and model settings.
+
+![The Skill installation dialog offers GitHub and local-folder sources.](assets/screenshots/install-skills.png)
+
+Install a Skill from a public GitHub repository or a local folder to extend how the assistant works.
+
+<details>
+<summary>More: MCP connections and specialist templates</summary>
+
+![MCP settings list local servers, their switches, and connection status.](assets/screenshots/mcp-servers.png)
+
+Manage local MCP servers, with filesystem tools ready and the other connections disabled.
+
+![An enabled visual-review specialist template in the subagent settings.](assets/screenshots/subagent-templates.png)
+
+Enable a visual-review specialist template, choose its model, and assign it to a project.
+
+</details>
+
+### Models, permissions, and usage
+
+Choose your model provider, set file-access boundaries and approval rules, and review model usage and estimated costs.
+
+![Permission settings with default, full-access, and custom modes, file scopes, and approval options.](assets/screenshots/permissions.png)
+
+Configure permission modes and adjust the custom mode's file-access scope and approval rules.
+
+<details>
+<summary>More: model configuration, usage statistics, and appearance</summary>
+
+![Model settings show the model ID, context window, pricing, image input, and API configuration.](assets/screenshots/model-configuration.png)
+
+Configure a model's API connection, context window, image-input support, and prices used for cost estimates.
+
+![The usage panel shows input, output, cache, and cost statistics by date.](assets/screenshots/usage-costs.png)
+
+Review seven days of model usage, cache hit rates, and estimated costs.
+
+![Appearance settings with theme choices, a code-diff color preview, and display preferences.](assets/screenshots/appearance.png)
+
+Choose a dark theme, preview code-diff colors, and adjust font smoothing and sidebar effects.
+
+</details>
+
+### How collaboration has evolved
+
+The current development version uses **Organization**: independent agents communicate by role through a free-form mail network, exchanging tasks and results. This differs from temporary subagents dispatched within a regular conversation. See the [Organization development documentation](docs/subsystems/workflow-authoring.md) for the design. Development features may not yet be available in the website's installers.
+
+<details>
+<summary>Early workflow interface (historical screenshot, not the current Organization interface)</summary>
+
+![An early workflow canvas connects a copy coordinator, two editors, and a reviewer.](assets/screenshots/visual-workflow.png)
+
+An early version used connected nodes for coordination, editing, and review; current Organization collaboration no longer uses this wiring mechanism.
+
+</details>
+
+You can also set up recurring tasks under Scheduled and review run history and notifications. The app must remain running for scheduled execution. See [Scheduled tasks](public-docs/user/capabilities/automations.md).
+
+## Quick start
+
+1. Download and install from the [website](https://captainwhoagent.com/), sign in, and confirm that your software license is valid.
+2. Open **Settings → Configuration** and enter your model API URL and token. Under **Manage models**, add the actual model ID, select the matching provider configuration, and enable the model. A fresh installation has no configured models.
+3. Create a conversation, choose a local folder as the project, select a model, and keep the default permissions.
+4. Describe the task and output location. If needed, choose a Skill through **“+” → Skills** in the input area, then review approvals and the final files.
+
+Try a simple task:
 
 ```text
-src/main/                 Electron main process, domain-specific IPC, browser/terminal bridges
-src/preload/              Isolated Renderer Host API
-src/renderer/             React interface
-packages/protocol/        TypeScript cross-process data types
-packages/host-api/        Host API types available to the Renderer
-crates/protocol-rs/       Rust JSON-RPC protocol
-crates/core/              Agent, tools, permissions, and SQLite storage
-crates/core-server/       Core Server application boundary (application / transport / adapters)
-crates/mcp-client/        MCP protocol, catalog, connections, and stdio transport
-packages/artifact-runtime-node/  Node entry point for the managed Artifact Runtime
-scripts/                  Component preparation, testing, packaging, signing, and release verification
-public-docs/              Public documentation for users, integration developers, and support
+Read the materials in this folder and save a summary as summary.md.
+Include the main conclusions, supporting sources, and open questions.
+Do not modify the original files.
 ```
 
-In development, Electron launches `core-server` through Cargo. Production packages include the release binary in `process.resourcesPath`. Electron and Rust communicate using newline-delimited JSON-RPC.
+Model connections support OpenAI-compatible, Anthropic-compatible, DeepSeek, and Moonshot configurations. Web search and image generation require separate service configuration; they are not included in the chat model setup.
 
-The [developer documentation index](docs/README.md) covers architecture, subsystems, development, testing, releases, and security. New contributors should start with [Development setup](docs/development/getting-started.md), [Repository layout](docs/development/repository-layout.md), and [Architecture overview](docs/architecture/overview.md).
+[Installation and first launch](public-docs/user/getting-started/installation.md) · [Connect a model](public-docs/integrations/model-provider-integration.md) · [Your first task](public-docs/user/getting-started/first-task.md)
 
-For product usage, integrations, release status, and troubleshooting, see the [public documentation index](public-docs/README.md).
+## Data and usage boundaries
 
-## License
+- **Local-first does not mean offline.** Signing in does not sync projects, conversations, or model keys to the Captain Who account service. Model providers, search and image services, websites, and MCP services still receive the data needed for their tasks. See [Data and permissions](public-docs/security/data-and-permissions.md).
+- **Permissions are not an operating-system sandbox.** Default mode is not read-only. Review approvals for file changes, commands, and external actions. Stopping a task does not undo completed actions.
+- **Review the output.** Skills can work with Word, Excel, and PowerPoint files, but the right-side file viewer cannot render them directly; inspect finished files in their respective apps. Costs are local estimates, not provider bills, and screenshot cache hit rates are not performance guarantees.
+- **Protect credentials.** Enter API tokens only in settings, not in conversations, Issues, or public screenshots. Install Skills and MCP servers only from trusted sources.
 
-Captain Who's original code is released under the [Apache License 2.0](LICENSE). Third-party software, assets, and grammar files included in the repository and app packages retain their respective licenses. For attribution and notices, see [Third-party software notices](THIRD_PARTY_NOTICES.txt) and [Third-party grammar notices](THIRD_PARTY_GRAMMAR_NOTICES.txt).
+## Run from source
 
-## Requirements
+The interface uses Electron, React, and TypeScript. Rust Core handles agents, tool execution, permissions, and local storage.
 
-- Node.js 22 (see `.node-version`)
-- pnpm 11.10.0 (see `package.json#packageManager`)
-- Stable Rust, including `rustfmt` and `clippy`
-- A native build toolchain for your platform; both `node-pty` and the Rust sidecar require native compilation
-
-Install dependencies:
+You need Node.js 22, pnpm 11.10.0, Rust stable with `rustfmt` and `clippy`, and your platform's native build toolchain.
 
 ```bash
+git clone https://github.com/Tiga001/Captain_Who.git
+cd Captain_Who
 pnpm install --frozen-lockfile
-```
-
-The first development launch compiles Rust and takes longer than subsequent launches:
-
-```bash
 pnpm dev
 ```
 
-Once the app starts, open Settings → Configuration and enter your model API URL, token, model identifier, and optional Tavily API key. The repository no longer includes institution-specific endpoints or placeholder search keys.
+The first launch prepares managed components and compiles Rust. Development runs also require an account, a software license, and model configuration. Installers must be built on their target operating system; Windows/Linux build commands do not imply official support for those platforms.
 
-## Common commands
+Common checks: `pnpm check` runs the standard checks and tests; `pnpm test:automation-core-e2e` separately checks end-to-end behavior for scheduled tasks and Core Server.
 
-| Command                         | Purpose                                                                            |
-| ------------------------------- | ---------------------------------------------------------------------------------- |
-| `pnpm dev`                      | Start the Electron development environment and Core Server                         |
-| `pnpm format`                   | Format TypeScript, CSS, documentation, and Rust                                    |
-| `pnpm check:docs`               | Check documentation metadata, links, paths, commands, and version sources of truth |
-| `pnpm check:public-docs`        | Check public documentation structure, indexes, and scope boundaries                |
-| `pnpm check:test-layout`        | Check test-file ownership and registration of ignored Rust tests                   |
-| `pnpm lint`                     | Run ESLint                                                                         |
-| `pnpm typecheck`                | Type-check Main, Preload, and Renderer                                             |
-| `pnpm lint:rust`                | Run strict Clippy checks across the Rust workspace                                 |
-| `pnpm test:unit`                | Run the Node Vitest unit project                                                   |
-| `pnpm test:browser`             | Run the Vitest browser project using the pinned Chromium version                   |
-| `pnpm test:electron`            | Run real Electron fixtures and Managed Playwright tests                            |
-| `pnpm test:web`                 | Run the combined unit, browser, and Electron tests                                 |
-| `pnpm test:automation-core-e2e` | Run dedicated end-to-end tests for the Automation Host API and real Core Server    |
-| `pnpm test:rust`                | Run Rust workspace tests                                                           |
-| `pnpm test`                     | Run the standard script, web/browser, and Rust tests                               |
-| `pnpm check`                    | Run formatting, documentation, lint, type, Clippy, and test checks                 |
-| `pnpm build`                    | Type-check and generate Electron build output in `out/`                            |
-| `pnpm build:core`               | Build and verify the release Core Server binary                                    |
-| `pnpm build:unpack`             | Produce an unpacked app for the current platform for packaging smoke tests         |
+[Development setup](docs/development/getting-started.md) · [System architecture](docs/architecture/overview.md) · [Testing](docs/development/testing.md) · [Build and release](docs/development/build-and-release.md)
 
-## Packaging
+## Documentation and feedback
 
-Installers must be built on a native runner for the target operating system. The scripts reject attempts to build Windows or Linux packages directly on macOS, preventing Rust binaries for the wrong platform from being included.
+The linked user and developer documentation is currently in Chinese.
 
-```bash
-# Windows
-pnpm build:win
+- [User documentation](public-docs/README.md): installation, everyday use, capabilities, and safety.
+- [Developer documentation](docs/README.md): architecture, subsystems, testing, and maintenance conventions.
+- [GitHub Issues](https://github.com/Tiga001/Captain_Who/issues): include your operating system, app version, and reproduction steps, with credentials and private information removed.
 
-# macOS
-pnpm build:mac
+Issues and pull requests are welcome for features, fixes, and documentation improvements. Run the checks and tests relevant to your changes before submitting code.
 
-# Linux
-pnpm build:linux
-```
+## License
 
-`electron-builder.yml` includes only `out/`, runtime resources, production dependencies, and the platform-specific `core-server` in the app. Source code and the Cargo `target/` cache are excluded from the ASAR archive.
-
-The macOS `build:mac` command enforces Developer ID signing, hardened runtime, and signature verification through the managed native-component and privacy release gates. The DMG container is also signed. The official 1.0.5 DMG available on the website has been notarized by Apple and has its notarization ticket stapled. The public update feed is enabled; when a new version is available, the app offers user-initiated download and installation. The repository's build command does not perform Apple notarization, and `pnpm check` does not include every dedicated release gate. A locally built artifact should not be treated as an official installer. See [Build and release](docs/development/build-and-release.md) for the release process.
-
-## Local data and privacy
-
-The Electron app uses the location returned by `app.getPath('userData')` as its single authoritative data root and explicitly passes it to Core Server at startup. The database is stored at `storage.sqlite` within this root. Attachments, installed Skills, generated images, and credentials for unsigned macOS development builds are stored in separate managed subdirectories alongside it. At startup, orphaned attachment files with no database references are removed. Electron resolves the actual path for the current operating system and application identity; application code does not independently infer macOS, Windows, or Linux paths.
-
-When running `core-server` independently, `MYCOPILOT_STORAGE_DB` can still specify the database path. This is a testing and standalone diagnostics interface. The regular app launched through Electron overrides it with the data root supplied by the Host.
-
-To rebuild the SQLite baseline during development, fully quit Captain Who first, then run the non-destructive preflight:
-
-```bash
-pnpm storage:reset-dev
-```
-
-After reviewing the preflight summary, explicitly confirm the rebuild:
-
-```bash
-pnpm storage:reset-dev -- --confirm-reset
-```
-
-The command uses Electron to resolve the same authoritative data root and refuses to proceed while the app or Core Server still holds the database. A confirmed rebuild first creates a timestamped backup in `storage-backups/` under the data root, with restricted permissions and SQLite validation, then atomically replaces the database with a fresh canonical database. Model and search configuration, UI/prompt preferences, Skill enablement, MCP server configuration, notification settings, browser download/link preferences, and valid image-generation profiles are restored through the current strict write paths. Conversations, projects, agent templates, drafts, browsing/download history, general notification records, automation tasks/runs/events/outbox entries, usage records, approvals, continuations, compaction state, and forks are not restored.
-
-Attachment, installed Skill, generated-image, and credential directories are not deleted or moved as part of the rebuild transaction. Attachment records linked to removed conversations are not restored; their files are cleaned up by the existing orphaned-attachment policy on a subsequent normal app launch. The command prints only paths and counts, never tokens or configuration values.
-
-The built-in browser uses a separate persistent session. Rust Core stores browsing history, download records, and opening preferences. Clear browsing data lets you remove history, cookies/site data, cache, or download records by category and time range. The Main process fetches site icons through a managed session; the cache is limited to 256 entries and 30 days.
-
-Please note:
-
-- Model tokens, Tavily keys, and image-generation API keys are stored separately from ordinary configuration. The current v33 SQLite schema stores only credential references, configuration status, and non-secret metadata. The Renderer receives credential status and values newly entered by the user, but cannot retrieve existing keys or references.
-- Release builds with a stable signing identity use the operating system's credential store. Unsigned macOS development builds use a private file backend inside the data root, with directory permissions of `0700` and file permissions of `0600`. The entire data root should still be treated as sensitive.
-- Current SQLite backups do not contain current model/search secrets, but historical backups from older schemas may still contain plaintext credentials. Restoring SQLite alone does not restore operating-system credentials. Clearing or deleting data does not guarantee secure erasure from SSDs, system backups, or operating-system credential stores. If a key may have been exposed, revoke or rotate it with the provider.
-- Model requests are sent to your configured API URL. When web search is enabled, queries or target URLs are sent to Tavily.
-- The built-in browser denies website requests for camera, microphone, location, notifications, and other system permissions by default.
-- Removing a project permanently deletes its local conversations, messages, and attachments from Captain Who, but does not modify files in the project directory.
-- Cost figures are local estimates based on the configured price per 1,000 tokens. They are not provider invoices and do not distinguish between currencies.
-
-## Document and artifact support
-
-- Agent attachment reading supports `.docx`, `.pptx`, `.xlsx`, `.csv`, `.tsv`, and other formats. File previews in the right sidebar support a different set of formats; see [Workspace files](docs/subsystems/workspace-files.md).
-- Legacy `.doc`: parsed through the system `textutil` utility on macOS only.
-- Legacy `.ppt` and `.xls`: not currently supported. Convert them to `.pptx`, `.xlsx`, or a text format first.
-- PDF attachments support text extraction. Whether a scanned document can be read depends on whether it contains a text layer. More complex PDF processing is provided through the managed PDF Skill and command workflows.
-- Word document, spreadsheet, and presentation creation/editing uses managed builders, editors, renderers, and artifact publication gates. See [Office and artifacts](docs/subsystems/office-and-artifacts.md).
+Captain Who's original code is released under the [Apache License 2.0](LICENSE). Third-party software and assets retain their respective licenses; see [Third-party software notices](THIRD_PARTY_NOTICES.txt) and [Third-party grammar notices](THIRD_PARTY_GRAMMAR_NOTICES.txt).

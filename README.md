@@ -1,147 +1,176 @@
 # Captain Who
 
-**让 AI 在你的项目里读资料、做文档、改代码，并把执行过程留给你检查。**
+简体中文 | [English](README.en.md)
 
-Captain Who 是一款本地优先的桌面 AI 工作助手。选择本地文件夹，接入你自己的模型 API，用自然语言说明目标；Agent 可以读取文件、搜索资料、调用工具、运行命令，也可以把独立任务交给多个子 Agent 并行处理。
+**在本地项目里，让 AI 帮你查资料、做文档、改代码。**
 
-文档、表格、演示文稿和代码改动都可以成为实际输出。你可以查看工具活动、核对文件差异，并按任务选择权限范围。
+Captain Who 是一款本地优先的桌面 AI 工作助手。接入自己的模型 API，用自然语言说明任务；它可以读写文件、运行命令、操作内置浏览器，也可以把任务交给多个智能体并行处理。对话、文件、终端和执行记录放在同一个工作界面里。
 
-[快速开始](#快速开始) · [看看工作界面](#看看工作界面) · [从源码运行](#从源码运行) · [文档](public-docs/README.md) · [Releases](https://github.com/Tiga001/Captain_Who/releases) · [English](README.en.md)
+[官网与下载](https://captainwhoagent.com/) · [界面与功能](#界面与功能) · [快速开始](#快速开始) · [从源码运行](#从源码运行) · [使用文档](public-docs/README.md)
 
-![Captain Who in dark mode with a presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
+![制作浙江大学介绍 PPT 时，四个子智能体正在分别检索资料。](assets/screenshots/parallel-research.png)
 
-*Track a presentation task while four research sub-agents work in parallel.*
+制作一份大学介绍 PPT，将校史、科研、人物和排名资料交给四个子智能体并行检索。
 
-> **开始前请确认：**当前正式安装包面向 macOS 12+、Apple Silicon。启动新的 Agent 任务需要 Captain Who 账户、可用的软件许可，以及你自行配置的模型 API。项目采用 Apache-2.0 开源许可证；模型调用额度不包含在内。
+## 下载与项目状态
 
-## 你可以用它做什么
+想直接使用，可以到 **[captainwhoagent.com](https://captainwhoagent.com/)** 下载 macOS 安装包，目前支持 **macOS 12 及以上的 Apple Silicon Mac**。
 
-| 你手上的工作 | Captain Who 可以参与的步骤 | 可检查的结果 |
-| --- | --- | --- |
-| 把零散资料整理成文档 | 读取项目文件或附件，使用文档 Skill 组织内容、生成文件并渲染检查 | Word 文档、PDF，以及引用和待确认事项 |
-| 处理一份数据表 | 读取 XLSX、CSV 或 TSV，整理数据、补充公式、生成汇总 | 可继续编辑的工作簿；重要公式仍需复核 |
-| 准备一次演示 | 拆分资料检索，整理大纲，使用演示文稿 Skill 生成并检查版式 | PPTX 文件和逐页内容 |
-| 接手或修改一个代码项目 | 搜索代码、理解目录，按授权运行测试，通过 FileChange 提交修改 | 文件差异、命令结果和测试结论 |
-| 搜索资料或操作网页 | 使用 Tavily 搜索和读取网页，或操作应用内受管浏览器 | 来源链接、页面信息、下载文件 |
-| 定期检查同一件事 | 在“已安排”中设置周期任务，保留每次运行记录 | 检查报告、执行历史和需处理的审批 |
+这是一个个人开发项目，目前没有时间完成 Windows 版本，暂不提供 Windows 安装包，也没有确定的发布时间。
 
-以上概述当前仓库记录的能力；开发分支可能领先于安装包。实际结果取决于模型、权限、运行组件和外部服务，生成内容需要人工复核。
+本仓库是 Captain Who 的真实开发仓库，会持续更新，采用 [Apache-2.0](LICENSE) 开源许可证。开发代码可能领先于官网安装包，正式版本信息见[发行与升级](public-docs/releases/README.md)。
 
-## 看看工作界面
+> 启动 Agent 任务需要登录 Captain Who 账户、通过软件许可校验，并配置自己的模型 API。软件不包含模型调用额度。
 
-### 项目、文件差异和终端放在一起
+## 界面与功能
 
-围绕本地文件夹工作，在同一窗口查看文件、Git 差异与终端。Agent 的命令活动和文件变更也会留在对话时间线中，方便追踪。
+以下截图来自实际使用，按场景整理；模型名称、配置和界面以你安装的版本为准。截图中的完全权限不代表推荐设置，首次使用建议保留默认权限。
 
-![Light-mode workspace with a Python code diff and an integrated terminal.](assets/screenshots/code-review-terminal.png)
+### 处理文件与代码
 
-*Review code changes beside the conversation and an integrated workspace terminal.*
+围绕本地文件夹工作，在对话旁查看文件、核对代码改动，并使用内置终端。
 
-### 用 Skill 复用做事方法
+![项目对话、Python 文件差异和内置终端并排显示。](assets/screenshots/code-review-terminal.png)
 
-内置文档、表格、演示文稿、PDF 等 Skill，也支持从公开 GitHub 仓库或本地文件夹安装。项目可以在 `.agents/skills/` 中保留自己的任务说明、模板和资源。
-
-![Skills settings with GitHub and local-folder installation options.](assets/screenshots/install-skills.png)
-
-*Install skills from GitHub or a local folder and manage built-in capabilities.*
-
-### 按任务选择权限
-
-提供默认、完全和自定义三种模式。可以控制文件范围、命令和变更审批，先从只读理解开始，再开放完成任务所需的能力。
-
-![General settings with workspace access and approval controls.](assets/screenshots/permissions.png)
-
-*Configure workspace access and approval rules for file edits, commands, and built-in tools.*
-
-[查看完整截图画廊与英文说明](GALLERY.md)。截图中的配置仅用于展示，具体界面以安装版本为准；首次使用建议保留默认权限。
-
-## 快速开始
-
-### 1. 配置自己的模型
-
-登录后，打开 **设置 → 配置**：
-
-1. 填写模型服务的 **API URL** 和 **API Token**。
-2. 进入 **管理模型**，添加服务商实际接受的 **模型 ID**，填写显示名称与上下文窗口。
-3. 选择匹配的 Provider 配置，再在 **可用模型**中启用它。
-4. 返回应用，新建对话，选择该模型，先发一个简短问题确认连接。
-
-新安装的模型列表为空，需要手动添加并启用。当前支持 OpenAI-compatible、Anthropic-compatible，以及 DeepSeek、Moonshot 的专用配置。具体兼容要求见[连接模型 Provider](public-docs/integrations/model-provider-integration.md)。
-
-**API Token 只应填入设置，不要粘贴到聊天、Issue 或截图中。**
-
-### 2. 选一个文件夹，完成第一份文档
-
-不用准备素材，先用下面这组虚构会议记录练习：
-
-1. 在本机新建一个空文件夹，用作练习项目。
-2. 在 Captain Who 点击 **新对话 → 项目选择器 → 新建项目**，选择这个文件夹。
-3. 选择已配置的模型，保留 **默认权限**。
-4. 点击输入框 **“+” → 技能**，选择内置 **文档（Documents）** Skill。
-5. 复制下面的任务。出现审批时，核对目标文件、命令或变更内容后再决定是否批准。
-
-```text
-请使用文档 Skill，把下面的虚构会议记录整理成一份会议纪要。
-
-项目：示例团队的季度分享会。
-已确定：采用线上形式，内容包括产品演示和问题讨论。
-行动项：小林整理演示提纲，小陈收集问题；截止日期尚未确定。
-待确认：活动日期、时长和主持人。
-
-分别列出已确定事项、行动项和待确认问题。
-不要补写原文没有的负责人、日期或结论。
-保存为 output/meeting-summary.docx，不要覆盖现有文件。
-生成后渲染检查标题、分页和表格，并告诉我保存在哪里。
-```
-
-**完成后检查三件事：**输出文件是否实际存在，内容是否忠于原文，排版是否可用。DOCX、XLSX 和 PPTX 可以交给 Agent 处理，但不能在右侧“文件”预览器中直接渲染；请用对应应用打开成品复核。
-
-不想先处理文件，也可以选择“不使用项目”，用普通对话确认模型连接。[第一个任务](public-docs/user/getting-started/first-task.md)和[第一个项目](public-docs/user/getting-started/first-project.md)提供更细的操作说明。
-
-### 3. 逐步扩展工作方式
-
-- **联网搜索与图片：**按需配置 Tavily 或图片生成服务的 API。它们不包含在聊天模型配置中。
-- **浏览器：**开启应用内浏览器自动化，说明目标站点与允许动作。
-- **Skills 与 MCP：**复用任务方法，或连接你信任的本机 stdio MCP Server。
-- **多 Agent：**让独立的检索、实现或审查任务并行推进。
-- **已安排：**为重复工作设置周期任务，查看执行历史与通知。
-
-具体设置见[能力指南](public-docs/user/capabilities/README.md)。
-
-## 本地优先，数据去向清楚
-
-项目、对话、设置和执行记录主要保存在本机；添加项目或登录账户不会自动把本地工作内容同步到 Captain Who 的账户服务。
-
-使用网络能力时，相关输入会发送给对应服务：模型接收任务上下文和必要的文件/工具内容，Tavily 接收搜索查询或目标网址，图片服务、目标网站和 MCP 接收完成操作所需的数据。账户登录与许可校验也需要连接账户服务。
-
-模型等 API 密钥与普通配置分开保存。处理敏感资料前，请确认所选服务的数据政策；不要公开整个应用数据目录或历史数据库备份。详见[数据与权限](public-docs/security/data-and-permissions.md)。
-
-## 使用时的几个边界
-
-- **先用默认权限。**完全权限可以扩大文件访问并自动批准部分命令和变更；这些应用层策略不是操作系统沙箱，默认模式也不是只读模式。
-- **检查实际结果。**停止任务不会撤销已经完成的写入或外部请求；文档、代码和表格结论仍需复核。
-- **定时任务需要应用运行。**退出应用或关机后不会由系统后台唤醒任务。
-- **能力取决于环境。**模型需支持相应输入和工具调用；浏览器自动化只控制应用内页面；Office 处理依赖对应 Skill。
+查看一个二分查找脚本的新增代码，底部同时打开项目终端。
 
 <details>
-<summary>文件格式、平台与其他限制</summary>
+<summary>更多：项目对话、文档预览与快捷操作</summary>
 
-- 当前正式安装包面向 macOS 12+ Apple Silicon；Windows、Intel Mac 和 Linux 尚无正式支持的安装包。
-- DOCX、XLSX 和 PPTX 可以通过对应 Skill 处理，但不能在右侧“文件”预览器直接渲染；请用原生应用打开成品。
-- 旧版 `.doc` 的文本读取仅支持 macOS；`.ppt`、`.xls` 需要先转换。
-- 扫描 PDF 不能保证直接提取文字，图片理解需要模型实际支持图像输入。
-- 当前没有跨设备的项目、对话或模型密钥同步服务。
-- 不同 API 网关的兼容性与第三方服务的费用由实际配置决定。
+![项目中的对话页面，输入框下方显示模型和权限选择。](assets/screenshots/workspace-chat.png)
 
-更多说明：[权限与审批](public-docs/user/everyday-use/permissions-and-approvals.md) · [Office 与 Artifact](public-docs/user/capabilities/artifacts-and-office.md) · [已知问题](public-docs/support/known-issues.md)
+在项目中发起对话，让助手介绍当前能做的事，并查看所选模型与权限。
+
+![对话旁预览 Markdown 文档，并展开单条回复的用量统计。](assets/screenshots/markdown-preview-tokens.png)
+
+一边讨论文档内容，一边预览 Markdown 文件，并查看该次回复的 Token 用量与缓存命中率。
+
+![输入斜杠后展开模型、压缩上下文和对话管理菜单。](assets/screenshots/chat-commands.png)
+
+输入 `/` 打开快捷菜单，切换模型、压缩上下文或管理当前对话。
 
 </details>
 
+### 并行研究与生成素材
+
+子智能体可以分别检索、撰写和审查；文档、表格、演示文稿、PDF 与图片任务可配合对应 Skill 完成。
+
+![生成的校园插画出现在对话中，右侧列出子智能体进度。](assets/screenshots/generated-artwork.png)
+
+为 PPT 生成校园配图，并在用户补充要求后增加玉泉校区的专项检索。
+
+### 浏览器与人机协作
+
+Agent 可以读取和操作应用内网页，遇到需要你判断或亲自操作的环节，通过交互卡片请求协助。
+
+![英文对话与内置浏览器并排，网页打开了联系窗口。](assets/screenshots/browser-inspection.png)
+
+让助手查看内置浏览器中的官网页面，说明当前页面和弹窗里有什么。
+
+<details>
+<summary>更多：登录接管与交互问答</summary>
+
+![浏览器停在网站登录页，对话中显示请求用户协助的交互卡片。](assets/screenshots/browser-login-handoff.jpg)
+
+检查邮箱时遇到登录页，助手请用户在浏览器中完成登录，再继续检查邮件。
+
+![对话中出现带选项和自定义答案的多题交互卡片。](assets/screenshots/interactive-questions.png)
+
+通过逐题选择或填写答案，完成一组用于演示交互能力的 MBTI 风格问答。
+
+</details>
+
+### Skills、MCP 与子智能体模板
+
+Skill 保存任务方法和配套资源，MCP 连接外部工具，子智能体模板保存可复用的分工与模型设置。
+
+![技能安装窗口提供 GitHub 和本地文件夹两个来源。](assets/screenshots/install-skills.png)
+
+从公开 GitHub 仓库或本地文件夹安装 Skill，扩展助手的做事方法。
+
+<details>
+<summary>更多：MCP 连接与专家模板</summary>
+
+![MCP 设置列出本地服务器及其开关与连接状态。](assets/screenshots/mcp-servers.png)
+
+管理本地 MCP 服务器，确认文件系统工具已就绪，其余连接保持关闭。
+
+![子智能体设置中启用了一个视觉审查专家模板。](assets/screenshots/subagent-templates.png)
+
+启用“视觉审查专家”模板，为它指定模型并分配到项目。
+
+</details>
+
+### 模型、权限与用量
+
+模型服务由你选择，文件访问范围和审批规则由你设置；用量面板记录模型调用与费用估算。
+
+![权限设置展示默认、完全和自定义模式，以及读写范围与审批选项。](assets/screenshots/permissions.png)
+
+设置可用的权限模式，并调整自定义模式的文件范围和审批规则。
+
+<details>
+<summary>更多：模型配置、用量统计与外观</summary>
+
+![模型编辑页面显示模型 ID、上下文窗口、价格、图像输入和 API 配置。](assets/screenshots/model-configuration.png)
+
+配置模型的 API 连接、上下文窗口、图像输入能力和用于估算费用的单价。
+
+![用量面板按日期展示模型输入、输出、缓存和费用统计。](assets/screenshots/usage-costs.png)
+
+按模型查看近七天的调用用量、缓存命中率和估算费用。
+
+![外观设置展示主题选择、代码差异配色预览和显示偏好。](assets/screenshots/appearance.png)
+
+选择深色主题，预览代码差异配色，并调整字体平滑与侧边栏效果。
+
+</details>
+
+### 协作界面的演进
+
+当前开发版使用“组织”：多个独立智能体按职责交流，通过邮件传递任务和结果。它与普通对话中临时派出的子智能体不同，具体设计见[组织协作开发文档](docs/subsystems/workflow-authoring.md)。开发版能力不代表官网安装包已提供。
+
+<details>
+<summary>早期工作流界面（历史截图，非当前组织界面）</summary>
+
+![早期工作流画布连接文案协调者、两位编辑和审阅者。](assets/screenshots/visual-workflow.png)
+
+早期版本用连线展示文案协调、双人编辑和审阅流程；当前组织协作已不再采用这套连线机制。
+
+</details>
+
+此外，还支持在“已安排”中设置周期任务，查看每次执行记录与通知；定时执行需要应用保持运行。详见[定时任务](public-docs/user/capabilities/automations.md)。
+
+## 快速开始
+
+1. 从[官网](https://captainwhoagent.com/)下载安装，登录账户并确认软件许可可用。
+2. 打开 **设置 → 配置**，填写模型 API URL 和 Token；在 **管理模型**中添加实际模型 ID，选择匹配的服务商配置，再启用模型。新安装的模型列表为空，需要自行配置。
+3. 新建对话，选择一个本地文件夹作为项目，选择模型并保留默认权限。
+4. 说明任务和输出位置；需要时从输入框 **“+” → 技能**选择对应 Skill，核对审批与最终文件。
+
+可以从一个简单任务开始：
+
+```text
+请阅读这个文件夹里的资料，整理一份摘要，保存为 summary.md。
+列出主要结论、对应来源和仍需确认的问题，不要修改原始文件。
+```
+
+模型接入支持 OpenAI-compatible、Anthropic-compatible、DeepSeek 和 Moonshot 配置。联网搜索与图片生成需要另行配置对应服务，不包含在聊天模型配置中。
+
+[安装与首次启动](public-docs/user/getting-started/installation.md) · [连接模型](public-docs/integrations/model-provider-integration.md) · [第一个任务](public-docs/user/getting-started/first-task.md)
+
+## 数据与使用边界
+
+- **本地优先不等于离线。**登录账户不会把项目、对话和模型密钥同步给 Captain Who 账户服务；模型、搜索、图片、网站及 MCP 仍会接收完成任务所需的数据。详见[数据与权限](public-docs/security/data-and-permissions.md)。
+- **权限不是操作系统沙箱。**默认模式也不是只读模式；请检查文件写入、命令执行和外部操作的审批。停止任务不会撤销已经完成的操作。
+- **输出需要复核。**Word、Excel、PowerPoint 文件可通过相应 Skill 处理，但不能在右侧文件预览器直接渲染，请用对应应用打开成品检查。费用是本地估算，不是服务商账单；截图中的缓存命中率不是性能承诺。
+- **保护凭据。**API Token 只填入设置，不要放进对话、Issue 或公开截图；只安装可信来源的 Skill 和 MCP 服务。
+
 ## 从源码运行
 
-界面使用 Electron、React 和 TypeScript；Rust Core 负责 Agent、工具执行、权限与 SQLite 存储。这个仓库是实际开发仓库，源码版本与已发布安装包可能不同。
+界面使用 Electron、React 和 TypeScript；Rust Core 负责 Agent、工具执行、权限与本地存储。
 
-需要 Node.js **22**、pnpm **11.10.0**、Rust **stable**（含 `rustfmt`、`clippy`），以及当前平台的原生编译工具链。
+需要 Node.js 22、pnpm 11.10.0、Rust stable（含 `rustfmt`、`clippy`），以及当前平台的原生编译工具链。
 
 ```bash
 git clone https://github.com/Tiga001/Captain_Who.git
@@ -150,38 +179,19 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-首次启动会准备受管组件并编译 Rust。具体步骤见[开发环境](docs/development/getting-started.md)。
+首次启动会准备受管组件并编译 Rust。开发启动同样需要账户、软件许可和模型配置。安装包须在目标操作系统构建；存在 Windows/Linux 构建命令不代表已正式支持这些平台。
 
-<details>
-<summary>开发检查、构建与架构</summary>
+常用检查：`pnpm check` 运行常规检查与测试；`pnpm test:automation-core-e2e` 单独检查定时任务与 Core Server 的端到端行为。
 
-| 命令 | 用途 |
-| --- | --- |
-| `pnpm check` | 格式、文档、lint、类型、Clippy 和常规测试 |
-| `pnpm test:unit` / `pnpm test:rust` | Node / Rust 测试 |
-| `pnpm build` / `pnpm build:core` | Electron 输出 / release Core Server |
-| `pnpm build:unpack` | 当前平台的未封装应用，供本地诊断 |
-
-正式安装包必须在目标操作系统上构建。`pnpm build:mac` 还要求更新源配置和真实 Developer ID 签名；构建成功不代表完成 Apple 公证。Windows/Linux 构建入口不等于正式支持。开发启动同样需要满足当前账户、许可和模型配置要求。
-
-主要目录：`src/main/`（Electron 主进程）、`src/renderer/`（React）、`crates/core/`（Agent、权限与存储）、`crates/core-server/`（Rust 服务）、`crates/mcp-client/`（MCP）和 `packages/`（协议、Host API、运行时）。Electron 与 Rust 通过逐行 JSON-RPC 通信。
-
-[构建与发布](docs/development/build-and-release.md) · [测试体系](docs/development/testing.md) · [系统架构](docs/architecture/overview.md) · [仓库结构](docs/development/repository-layout.md)
-
-</details>
+[开发环境](docs/development/getting-started.md) · [系统架构](docs/architecture/overview.md) · [测试体系](docs/development/testing.md) · [构建与发布](docs/development/build-and-release.md)
 
 ## 文档与反馈
 
-- [用户指南](public-docs/user/README.md)：首次配置与日常使用
-- [能力指南](public-docs/user/capabilities/README.md)：Skill、MCP、多 Agent、浏览器与定时任务
-- [Office 与 Artifact](public-docs/user/capabilities/artifacts-and-office.md)：文档、表格、演示、PDF 与图片
-- [扩展与集成](public-docs/integrations/README.md)：模型接入、Skill 开发与 MCP
-- [自助排查](public-docs/support/README.md)：常见故障、诊断与已知问题
-- [开发文档](docs/README.md)：实现细节与贡献前的阅读入口
+- [使用文档](public-docs/README.md)：安装、日常使用、能力与安全说明。
+- [开发文档](docs/README.md)：架构、子系统、测试和维护约定。
+- [GitHub Issues](https://github.com/Tiga001/Captain_Who/issues)：报告问题时，请附系统、应用版本和复现步骤，并移除密钥与私人内容。
 
-发现问题，可以在 [GitHub Issues](https://github.com/Tiga001/Captain_Who/issues) 描述系统与芯片、应用版本、复现步骤、预期结果和实际结果。截图与日志请先移除 Token、邮箱、私有路径和项目内容。
-
-欢迎通过 Issue 或 Pull Request 改进文档、修复问题和完善功能。提交代码前请阅读开发文档，并运行与改动相关的检查和测试。
+欢迎通过 Issue 或 Pull Request 改进功能、修复问题和完善文档。提交代码前请运行与改动相关的检查和测试。
 
 ## 许可证
 
