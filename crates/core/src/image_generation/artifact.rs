@@ -8,12 +8,9 @@ use super::types::ImageGenerationUrlOutput;
 use crate::durable_fs::{atomic_rename_noreplace, sync_directory};
 use crate::AgentCancellationToken;
 use futures_util::future::{join, join_all, BoxFuture};
-use futures_util::StreamExt;
 use image::{ImageFormat, ImageReader, Limits};
-use reqwest::header::{
-    HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, LOCATION,
-};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::header::{HeaderMap, CONTENT_ENCODING, CONTENT_TYPE, LOCATION};
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -24,9 +21,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+#[path = "artifact_transport.rs"]
+mod transport;
+use crate::network::NetworkRoute;
+use transport::{get_pinned, ArtifactHttpResponse};
 
 pub const DEFAULT_IMAGE_ARTIFACT_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -631,24 +633,64 @@ impl ManagedImageGenerationArtifactStore {
         staging: &mut tokio::fs::File,
         cancellation: &AgentCancellationToken,
     ) -> Result<Option<String>, ImageArtifactError> {
+        // Only the idempotent Artifact GET is retried. Provider generation is outside this
+        // boundary and is never repeated because its returned download URL was unreachable.
+        let download = async {
+            for attempt in 0..2 {
+                staging.set_len(0).await.map_err(io_error)?;
+                staging.rewind().await.map_err(io_error)?;
+                match self
+                    .download_attempt(initial_url, &transfer_policy, staging, cancellation)
+                    .await
+                {
+                    Err(error) if attempt == 0 && artifact_get_can_retry(&error) => {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    result => return result,
+                }
+            }
+            unreachable!("the final GET attempt always returns")
+        };
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(ImageArtifactError::cancelled()),
+            result = tokio::time::timeout(self.config.download_timeout, download) => {
+                result.unwrap_or_else(|_| Err(ImageArtifactError::new(
+                    ImageArtifactErrorCode::DownloadTimedOut,
+                    "image Artifact download timed out",
+                    true,
+                )))
+            }
+        }
+    }
+
+    async fn download_attempt(
+        &self,
+        initial_url: &str,
+        transfer_policy: &ImageArtifactTransferPolicy,
+        staging: &mut tokio::fs::File,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<Option<String>, ImageArtifactError> {
         let download = async {
             let mut url =
-                validate_artifact_url(initial_url, self.config.network_policy, &transfer_policy)?;
+                validate_artifact_url(initial_url, self.config.network_policy, transfer_policy)?;
             for redirect_count in 0..=self.config.max_redirects {
                 cancellation_check(cancellation)?;
-                let resolved =
-                    resolve_artifact_target(&url, self.config, &transfer_policy, cancellation)
-                        .await?;
-                let client = client_for_resolved_target(&resolved, self.config)?;
-                let response = tokio::select! {
+                let route = resolve_artifact_route(&url).await?;
+                let resolved = resolve_artifact_target(
+                    &url,
+                    self.config,
+                    transfer_policy,
+                    &route,
+                    cancellation,
+                )
+                .await?;
+                let mut response = tokio::select! {
                     _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
-                    response = client
-                        .get(url.clone())
-                        .header(ACCEPT, HeaderValue::from_static("image/png, image/jpeg, image/webp"))
-                        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-                        .send() => response.map_err(classify_transport_error)?,
+                    response = get_pinned(
+                        &url, &resolved.addresses, &route,
+                        "image/png, image/jpeg, image/webp", self.config
+                    ) => response?,
                 };
-                verify_remote_address(&response, &resolved)?;
                 if response.status().is_redirection() {
                     if redirect_count == self.config.max_redirects {
                         return Err(ImageArtifactError::new(
@@ -662,7 +704,7 @@ impl ManagedImageGenerationArtifactStore {
                         response.status(),
                         response.headers(),
                         self.config.network_policy,
-                        &transfer_policy,
+                        transfer_policy,
                     )?;
                     continue;
                 }
@@ -670,7 +712,8 @@ impl ManagedImageGenerationArtifactStore {
                     return Err(ImageArtifactError::new(
                         ImageArtifactErrorCode::HttpRejected,
                         "image Artifact server returned an unsuccessful status",
-                        response.status().is_server_error(),
+                        response.status().is_server_error()
+                            || matches!(response.status().as_u16(), 408 | 429),
                     )
                     .with_http_status(response.status().as_u16()));
                 }
@@ -686,12 +729,10 @@ impl ManagedImageGenerationArtifactStore {
                 }
                 let content_type = normalized_content_type(response.headers());
                 let mut total = 0usize;
-                let mut stream = response.bytes_stream();
                 while let Some(chunk) = tokio::select! {
                     _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
-                    chunk = stream.next() => chunk,
+                    chunk = response.next_chunk() => chunk?,
                 } {
-                    let chunk = chunk.map_err(classify_transport_error)?;
                     total = total.checked_add(chunk.len()).ok_or_else(|| {
                         ImageArtifactError::new(
                             ImageArtifactErrorCode::ResponseTooLarge,
@@ -723,16 +764,7 @@ impl ManagedImageGenerationArtifactStore {
                 false,
             ))
         };
-        tokio::select! {
-            _ = cancellation.cancelled() => Err(ImageArtifactError::cancelled()),
-            result = tokio::time::timeout(self.config.download_timeout, download) => {
-                result.unwrap_or_else(|_| Err(ImageArtifactError::new(
-                    ImageArtifactErrorCode::DownloadTimedOut,
-                    "image Artifact download timed out",
-                    true,
-                )))
-            }
-        }
+        download.await
     }
 
     fn validate_candidate_path(
@@ -944,7 +976,6 @@ impl Drop for StagingArtifactFile {
 }
 
 struct ResolvedArtifactTarget {
-    host: String,
     addresses: Vec<SocketAddr>,
 }
 
@@ -967,6 +998,7 @@ async fn resolve_artifact_target(
     url: &Url,
     config: ImageArtifactStoreConfig,
     transfer_policy: &ImageArtifactTransferPolicy,
+    route: &NetworkRoute,
     cancellation: &AgentCancellationToken,
 ) -> Result<ResolvedArtifactTarget, ImageArtifactError> {
     let host = url
@@ -976,10 +1008,11 @@ async fn resolve_artifact_target(
         .port_or_known_default()
         .ok_or_else(|| unsafe_url("image Artifact URL uses an unsupported network scheme"))?;
     let mut system_lookup_failed = false;
-    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
+    let lookup_host = host.trim_matches(['[', ']']);
+    let addresses = if let Ok(address) = lookup_host.parse::<IpAddr>() {
         vec![SocketAddr::new(address, port)]
     } else {
-        let lookup = tokio::net::lookup_host((host, port));
+        let lookup = tokio::net::lookup_host((lookup_host, port));
         tokio::select! {
             _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
             result = tokio::time::timeout(config.dns_timeout, lookup) => {
@@ -996,8 +1029,13 @@ async fn resolve_artifact_target(
     let system_reported_fake_ip = addresses
         .iter()
         .any(|address| matches!(address.ip(), IpAddr::V4(value) if benchmark_fake_ipv4(value)));
-    let mut addresses =
-        approved_resolved_addresses(host, addresses, config.network_policy, transfer_policy);
+    let mut addresses = approved_addresses_for_route(
+        host,
+        addresses,
+        config.network_policy,
+        transfer_policy,
+        route,
+    );
     if addresses.is_empty()
         && (system_reported_fake_ip || system_lookup_failed)
         && config.network_policy == ImageArtifactNetworkPolicy::PublicHttpsOnly
@@ -1012,9 +1050,35 @@ async fn resolve_artifact_target(
             system_lookup_failed,
         ));
     }
-    Ok(ResolvedArtifactTarget {
-        host: host.to_string(),
-        addresses,
+    Ok(ResolvedArtifactTarget { addresses })
+}
+
+fn approved_addresses_for_route(
+    host: &str,
+    addresses: impl IntoIterator<Item = SocketAddr>,
+    network_policy: ImageArtifactNetworkPolicy,
+    transfer_policy: &ImageArtifactTransferPolicy,
+    route: &NetworkRoute,
+) -> Vec<SocketAddr> {
+    // Fake-IP is meaningful only to the local TUN. Sending one through an explicit CONNECT or
+    // SOCKS proxy would instead ask that proxy to dial a benchmarking/private destination.
+    let direct_policy = ImageArtifactTransferPolicy::public_https_only();
+    let policy = if matches!(route, NetworkRoute::Direct) {
+        transfer_policy
+    } else {
+        &direct_policy
+    };
+    approved_resolved_addresses(host, addresses, network_policy, policy)
+}
+
+async fn resolve_artifact_route(url: &Url) -> Result<NetworkRoute, ImageArtifactError> {
+    crate::network::resolve_route(url).await.map_err(|_| {
+        eprintln!("image Artifact network failure: stage=host_route retryable=true");
+        ImageArtifactError::new(
+            ImageArtifactErrorCode::TransportFailed,
+            "image Artifact Host network route resolution failed",
+            true,
+        )
     })
 }
 
@@ -1083,33 +1147,25 @@ async fn query_public_dns_resolver(
     if resolver_addresses.is_empty() {
         return Err(public_dns_unavailable());
     }
-    let client = Client::builder()
-        .connect_timeout(config.connect_timeout.min(config.dns_timeout))
-        .timeout(config.dns_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .resolve_to_addrs(resolver.host, &resolver_addresses)
-        .build()
-        .map_err(|_| public_dns_unavailable())?;
     let mut addresses = BTreeSet::new();
     let mut received_response = false;
     let (ipv4, ipv6) = join(
         query_public_dns_record(
-            &client,
             resolver,
             &resolver_addresses,
             host,
             "A",
             1,
+            config,
             cancellation,
         ),
         query_public_dns_record(
-            &client,
             resolver,
             &resolver_addresses,
             host,
             "AAAA",
             28,
+            config,
             cancellation,
         ),
     )
@@ -1132,12 +1188,12 @@ async fn query_public_dns_resolver(
 }
 
 async fn query_public_dns_record(
-    client: &Client,
     resolver: PublicDnsResolver,
     resolver_addresses: &[SocketAddr],
     host: &str,
     record_type: &str,
     expected_type: u16,
+    config: ImageArtifactStoreConfig,
     cancellation: &AgentCancellationToken,
 ) -> Result<Vec<IpAddr>, ImageArtifactError> {
     let mut url =
@@ -1151,24 +1207,18 @@ async fn query_public_dns_record(
     url.query_pairs_mut()
         .append_pair("name", host)
         .append_pair("type", record_type);
+    let route = resolve_artifact_route(&url).await?;
     let response = tokio::select! {
         _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
-        response = client
-            .get(url)
-            .header(
-                ACCEPT,
-                HeaderValue::from_static("application/dns-json, application/json"),
-            )
-            .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-            .send() => response.map_err(|_| public_dns_unavailable())?,
+        response = get_pinned(
+            &url, resolver_addresses, &route,
+            "application/dns-json, application/json", config
+        ) => response.map_err(|_| public_dns_unavailable())?,
     };
     if !response.status().is_success()
         || response
             .content_length()
             .is_some_and(|length| length > MAX_PUBLIC_DNS_RESPONSE_BYTES as u64)
-        || response
-            .remote_addr()
-            .is_none_or(|remote| !resolver_addresses.contains(&remote))
     {
         return Err(public_dns_unavailable());
     }
@@ -1190,16 +1240,14 @@ fn parse_public_dns_response(body: &[u8]) -> Result<PublicDnsJsonResponse, Image
 }
 
 async fn read_bounded_public_dns_body(
-    response: reqwest::Response,
+    mut response: ArtifactHttpResponse,
     cancellation: &AgentCancellationToken,
 ) -> Result<Vec<u8>, ImageArtifactError> {
     let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
     while let Some(chunk) = tokio::select! {
         _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
-        chunk = stream.next() => chunk,
+        chunk = response.next_chunk() => chunk.map_err(|_| public_dns_unavailable())?,
     } {
-        let chunk = chunk.map_err(|_| public_dns_unavailable())?;
         if body.len().saturating_add(chunk.len()) > MAX_PUBLIC_DNS_RESPONSE_BYTES {
             return Err(public_dns_unavailable());
         }
@@ -1231,48 +1279,6 @@ fn approved_resolved_addresses(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
-}
-
-fn client_for_resolved_target(
-    target: &ResolvedArtifactTarget,
-    config: ImageArtifactStoreConfig,
-) -> Result<Client, ImageArtifactError> {
-    Client::builder()
-        .connect_timeout(config.connect_timeout)
-        .timeout(config.download_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .resolve_to_addrs(&target.host, &target.addresses)
-        .build()
-        .map_err(|_| {
-            ImageArtifactError::new(
-                ImageArtifactErrorCode::InvalidConfiguration,
-                "image Artifact HTTP client could not be initialized",
-                false,
-            )
-        })
-}
-
-fn verify_remote_address(
-    response: &reqwest::Response,
-    target: &ResolvedArtifactTarget,
-) -> Result<(), ImageArtifactError> {
-    let remote = response.remote_addr().ok_or_else(|| {
-        ImageArtifactError::new(
-            ImageArtifactErrorCode::DnsRejected,
-            "image Artifact connection identity could not be verified",
-            false,
-        )
-    })?;
-    if target.addresses.contains(&remote) {
-        Ok(())
-    } else {
-        Err(ImageArtifactError::new(
-            ImageArtifactErrorCode::DnsRejected,
-            "image Artifact connection did not use an approved network address",
-            false,
-        ))
-    }
 }
 
 fn validate_artifact_url(
@@ -1730,19 +1736,14 @@ fn fake_ip_eligible_dns_hostname(host: &str) -> bool {
     })
 }
 
-fn classify_transport_error(error: reqwest::Error) -> ImageArtifactError {
-    if error.is_timeout() {
-        return ImageArtifactError::new(
-            ImageArtifactErrorCode::DownloadTimedOut,
-            "image Artifact download timed out",
-            true,
-        );
-    }
-    ImageArtifactError::new(
-        ImageArtifactErrorCode::TransportFailed,
-        "image Artifact transport failed",
-        error.is_connect(),
-    )
+fn artifact_get_can_retry(error: &ImageArtifactError) -> bool {
+    error.retryable
+        && matches!(
+            error.code,
+            ImageArtifactErrorCode::TransportFailed
+                | ImageArtifactErrorCode::HttpRejected
+                | ImageArtifactErrorCode::DnsRejected
+        )
 }
 
 fn unsafe_url(message: &'static str) -> ImageArtifactError {
@@ -1849,6 +1850,159 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn explicit_proxies_never_receive_adapter_trusted_fake_ip_destinations() {
+        let policy = ImageArtifactTransferPolicy::public_https_only()
+            .with_configured_endpoint_https_origin("artifact.vendor.com", 443);
+        let fake = "198.18.0.8:443".parse().unwrap();
+        let public = "8.8.8.8:443".parse().unwrap();
+        assert_eq!(
+            approved_addresses_for_route(
+                "artifact.vendor.com",
+                [fake],
+                ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                &policy,
+                &NetworkRoute::Direct
+            ),
+            vec![fake]
+        );
+        for route in [
+            NetworkRoute::HttpProxy {
+                host: "localhost".into(),
+                port: 7890,
+            },
+            NetworkRoute::HttpsProxy {
+                host: "localhost".into(),
+                port: 7890,
+            },
+            NetworkRoute::Socks5Proxy {
+                host: "localhost".into(),
+                port: 7890,
+            },
+            NetworkRoute::Socks4Proxy {
+                host: "localhost".into(),
+                port: 7890,
+            },
+        ] {
+            assert_eq!(
+                approved_addresses_for_route(
+                    "artifact.vendor.com",
+                    [fake, public],
+                    ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                    &policy,
+                    &route
+                ),
+                vec![public]
+            );
+            assert!(approved_addresses_for_route(
+                "artifact.vendor.com",
+                [fake],
+                ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                &policy,
+                &route
+            )
+            .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_ipv6_literal_is_pinned_without_a_hostname_lookup() {
+        let url = Url::parse("https://[2606:4700:4700::1111]/image").unwrap();
+        let target = resolve_artifact_target(
+            &url,
+            ImageArtifactStoreConfig::default(),
+            &ImageArtifactTransferPolicy::public_https_only(),
+            &NetworkRoute::Direct,
+            &AgentCancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            target.addresses,
+            vec!["[2606:4700:4700::1111]:443".parse().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_partial_get_is_retried_once_without_appending_corrupt_bytes() {
+        use tokio::io::AsyncReadExt;
+        let directory = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/image?signature=secret",
+            listener.local_addr().unwrap()
+        );
+        let bytes = png_bytes();
+        let expected = bytes.clone();
+        let worker = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() < 16 * 1024);
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket
+                    .write_all(if attempt == 0 { &bytes[..8] } else { &bytes })
+                    .await
+                    .unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let store = test_store(directory.path());
+        let prepared = store
+            .stage(
+                &ImageGenerationUrlOutput::new(url),
+                ImageArtifactTransferPolicy::public_https_only(),
+                &AgentCancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let published = store
+            .publish(prepared, &AgentCancellationToken::new())
+            .unwrap();
+        assert_eq!(fs::read(published.absolute_path).unwrap(), expected);
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_is_bounded_to_two_artifact_gets() {
+        use tokio::io::AsyncReadExt;
+        let directory = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/image", listener.local_addr().unwrap());
+        let worker = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() < 16 * 1024);
+                }
+                socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let error = test_store(directory.path())
+            .stage(
+                &ImageGenerationUrlOutput::new(url),
+                ImageArtifactTransferPolicy::public_https_only(),
+                &AgentCancellationToken::new(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, ImageArtifactErrorCode::HttpRejected);
+        assert_eq!(error.http_status, Some(503));
+        worker.await.unwrap();
     }
 
     fn seed_published_png(

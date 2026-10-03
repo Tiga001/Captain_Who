@@ -5,7 +5,6 @@ use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -314,12 +313,6 @@ impl TavilySearchClient {
                 .map_err(|_| AgentError::new("Tavily API Key 包含非法字符。"))?,
         );
 
-        let client = Client::builder()
-            .timeout(SEARCH_ATTEMPT_TIMEOUT)
-            .connect_timeout(web_retry::CONNECT_TIMEOUT)
-            .build()
-            .map_err(|error| AgentError::new(format!("创建 Tavily HTTP 客户端失败：{error}")))?;
-
         let deadline = Instant::now() + SEARCH_TOTAL_BUDGET;
         let mut last_error: Option<AgentError> = None;
         let mut retry_after: Option<Duration> = None;
@@ -357,7 +350,7 @@ impl TavilySearchClient {
             let attempt_timeout = SEARCH_ATTEMPT_TIMEOUT.min(remaining);
             let outcome = self
                 .search_once(
-                    &client,
+                    TAVILY_SEARCH_ENDPOINT,
                     &headers,
                     request,
                     attempt_timeout,
@@ -400,16 +393,17 @@ impl TavilySearchClient {
 
     async fn search_once(
         &self,
-        client: &Client,
+        endpoint: &str,
         headers: &HeaderMap,
         request: &TavilySearchRequest,
         attempt_timeout: Duration,
         cancellation_token: &AgentCancellationToken,
     ) -> Result<Value, web_retry::AttemptFailure> {
+        let client =
+            web_retry::client_for_endpoint(endpoint, attempt_timeout, cancellation_token).await?;
         let response = client
-            .post(TAVILY_SEARCH_ENDPOINT)
+            .post(endpoint)
             .headers(headers.clone())
-            .timeout(attempt_timeout)
             .json(&request.to_payload())
             .send();
         let response = tokio::select! {
@@ -581,6 +575,34 @@ fn clean_domains(domains: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_rejects_redirect_without_replaying_authorization() {
+        let (endpoint, server) = web_retry::redirect_test_endpoint().await;
+        let request = TavilySearchRequest::from_args(
+            serde_json::from_value(json!({"query": "network route test"})).unwrap(),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-token"));
+        let failure = TavilySearchClient::new("test-token".to_string())
+            .search_once(
+                &endpoint,
+                &headers,
+                &request,
+                Duration::from_secs(5),
+                &AgentCancellationToken::new(),
+            )
+            .await
+            .expect_err("Tavily API redirects must be rejected");
+        let (request, followed) = server.await.unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token\r\n"));
+        assert!(!followed, "the redirected endpoint must not be contacted");
+        assert!(!failure.retryable);
+        assert!(failure.error.to_string().contains("307"));
+    }
 
     #[test]
     fn builds_bounded_tavily_payload() {

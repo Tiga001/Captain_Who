@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-10-03
 ---
 
 # 图片生成子系统
@@ -72,7 +72,7 @@ SQLite 只保存带后端标签的不透明引用。读取时按标签 fail clos
 2. Tool 解析 `generate` 或 `edit` 参数。prompt 最长 32 KiB；图生图输入最大 20 MiB，并必须通过现有文件授权边界解析 `inputPath`。
 3. Rust Core 创建配置执行快照：读取配置与 revision、解析凭据，再复读配置；若中途变化只重试一次，最终执行绑定到一个精确 revision。
 4. 调度器按 Run/call 身份准入。默认最多并发 2 个请求、总计接纳 8 个执行（包含正在运行和等待中的请求）；配置步骤默认 15 秒，完整执行默认 5 分钟。
-5. 适配器发起 Provider 请求。原始响应和远程 URL 只在 Rust Core 内处理，密钥在不再需要时清零。
+5. 适配器发起 Provider 请求。原始响应在 Rust Core 内处理；远程 URL 仅在 Rust Core 和受信 Host 的私有选路通道中短暂使用，不进入 Renderer、模型、Trace 或日志，密钥在不再需要时清零。
 6. 下载器按网络策略检查每次解析与重定向，完整下载后解码、验证格式和尺寸。
 7. 图片以内容哈希原子写入不可变私有存储，生成 `image-artifact://sha256/<hash>` 身份。
 8. Renderer event 投影只返回安全 Artifact 身份；内部 durable Tool history 为模型恢复兼容还会保留受管 `savedPath`，但 event projection 会在进入 Renderer 前删除该字段。Renderer 再通过精确身份和会话权限读取字节并展示。
@@ -80,6 +80,12 @@ SQLite 只保存带后端标签的不透明引用。读取时按标签 fail clos
 ### 副作用与重试
 
 Provider 调用可能产生费用，网络超时不代表请求未成功。执行日志以 Run/call 身份记录准入、开始和结果，并区分 `succeeded`、`failed`、`cancelled`、`outcomeIndeterminate` 和 `commitIndeterminate`。一旦远端生成可能已发生，系统不得自动重放请求来“修复”不确定结果，否则可能重复计费和生成。调用方必须把不确定状态原样呈现。
+
+生成成功后的 Artifact GET 最多尝试两次，共享原有 60 秒总预算。仅暂时性连接/响应体错误或可重试 HTTP 状态触发一次重试，每次重新选路、解析和验证地址，清空并回卷暂存文件，不能拼接两次下载的残片。取消、证书/协议拒绝、私网地址、格式/大小校验失败不重试。此边界不重发 Provider POST；执行终态的重复调用仍返回已有回执，不重新生成。URL 不持久化，因此此改动不提供应用重启后的下载恢复。
+
+桌面 Artifact 和公开 DNS 回退均使用 [Host 系统网络路线](../architecture/electron-host.md#系统网络路线)。Direct 固定批准 IP；HTTP(S) CONNECT/SOCKS 隧道指定批准 IP，隧道内 TLS SNI、证书校验和 HTTP Host 使用原域名。代理端点属于 Host 配置，不能由 Provider 输出指定；代理连接不能沿用“peer 必须是图片服务器 IP”的直接连接检查。显式代理下 Fake-IP 地址不能作为隧道目标，需先取得公开 DNS 地址；仅直连/TUN 路径保留既有精确域名 Fake-IP 例外。逐跳重定向检查、解码和发布限制仍由 Rust Core 执行。
+
+传输诊断仅记录固定阶段（代理 DNS/连接/认证、CONNECT、TLS 证书或传输、HTTP/响应体）和可重试性，不记录完整错误、域名、URL/query 或凭据。图片终态回执继续使用脱敏错误码；诊断阶段可从 Rust Core stderr 查看。
 
 ## Artifact 安全与读取
 

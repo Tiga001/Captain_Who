@@ -11,6 +11,7 @@ mod git_rpc;
 mod human_interaction_rpc;
 mod image_generation_rpc;
 mod mcp_rpc;
+mod network_routes;
 mod notification_rpc;
 mod office_rpc;
 mod outbound;

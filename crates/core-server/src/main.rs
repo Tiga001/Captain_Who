@@ -227,9 +227,8 @@ fn main() -> io::Result<()> {
         std::process::exit(mycopilot_core::office::run_office_browser_proxy());
     }
     mcp_trace_safety::install_mcp_safe_tracing().map_err(io::Error::other)?;
-    // The production GitHub adapter owns reqwest's blocking client. Build and retain every
-    // blocking dependency outside Tokio: reqwest deliberately panics when its blocking client is
-    // constructed inside an async runtime, and its final drop joins an internal runtime thread.
+    // Initialize synchronous services before entering Tokio. GitHub HTTP clients are now
+    // constructed per request on their blocking dispatcher, so proxy changes apply immediately.
     let bootstrap = CoreServerBootstrap::initialize()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -239,9 +238,7 @@ fn main() -> io::Result<()> {
         })?;
     let result = runtime.block_on(run_core_server(&bootstrap));
 
-    // Keep the bootstrap owner alive until after Tokio has stopped so the blocking GitHub client
-    // is also destroyed in a synchronous context. Runtime is declared after bootstrap, but the
-    // explicit order documents and protects this lifecycle invariant.
+    // Runtime tasks must finish before the services they use are destroyed.
     drop(runtime);
     drop(bootstrap);
     result
@@ -253,6 +250,7 @@ fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServic
         .expect("test image Artifact temporary directory should initialize")
         .keep();
     CoreRequestServices {
+        network_routes: None,
         automation_scheduler_wake: crate::application::automation::AutomationSchedulerWake::default(
         ),
         image_generation_configuration: Arc::new(ImageGenerationConfigurationService::new(

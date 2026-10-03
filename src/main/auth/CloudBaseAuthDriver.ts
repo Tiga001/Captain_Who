@@ -4,6 +4,7 @@ import type { AuthOptions } from '@cloudbase/js-sdk/oauth'
 import type { AuthErrorCode } from '@mycopilot/host-api'
 import { ACCOUNT_CONFIG } from './accountConfig'
 import type { SessionTokens } from './SessionStore'
+import { createCloudBaseNetworkRequest } from './CloudBaseNetworkRequest'
 
 export class AuthFailure extends Error {
   constructor(readonly code: AuthErrorCode) {
@@ -144,6 +145,7 @@ const DESKTOP_AUTH_OPTIONS: Pick<AuthOptions, 'captchaOptions'> & { persistence:
 }
 
 function createCloudAuth(): ReturnType<ReturnType<typeof cloudbase.init>['auth']> {
+  const options = { ...DESKTOP_AUTH_OPTIONS, baseRequest: createCloudBaseNetworkRequest() }
   return cloudbase
     .init({
       env: ACCOUNT_CONFIG.env,
@@ -154,7 +156,7 @@ function createCloudAuth(): ReturnType<ReturnType<typeof cloudbase.init>['auth']
       debug: false,
       auth: { detectSessionInUrl: false }
     })
-    .auth(DESKTOP_AUTH_OPTIONS)
+    .auth(options)
 }
 
 export class CloudBaseAuthDriver implements AuthDriver {

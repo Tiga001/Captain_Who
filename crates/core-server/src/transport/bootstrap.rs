@@ -464,6 +464,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .latest_notification_change_sequence()
         .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = crate::transport::outbound_channel();
+    // Install before any recovered delivery/scheduled task can issue a network request.
+    let network_routes = network_routes::NetworkRouteBridge::install(&outbound_tx)?;
     managed_playwright_bridge
         .attach_outbound(outbound_tx.clone())
         .map_err(|_| io::Error::other("failed to attach managed Playwright Host bridge"))?;
@@ -545,6 +547,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
         CoreRequestServices {
+            network_routes: network_routes.as_ref().map(|guard| Arc::clone(&guard.0)),
             storage: Arc::clone(&bootstrap.storage),
             automation_scheduler_wake,
             image_generation_configuration: Arc::clone(&bootstrap.image_generation_configuration),

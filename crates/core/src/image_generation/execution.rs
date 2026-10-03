@@ -977,6 +977,12 @@ impl ImageGenerationExecutionService {
         started: Instant,
         phase: ImageGenerationExecutionPhase,
     ) -> Result<ImageGenerationExecutionResult, ImageGenerationExecutionServiceError> {
+        // The receipt's http_status describes the generation POST. Preserve the distinct GET
+        // status in redacted diagnostics without logging an upstream message or signed URL.
+        eprintln!(
+            "image Artifact failure: code={:?} download_http_status={:?} download_retryable={}",
+            error.code, error.http_status, error.retryable
+        );
         let status = match error.code {
             ImageArtifactErrorCode::Cancelled => ImageGenerationExecutionStatus::Cancelled,
             ImageArtifactErrorCode::CommitIndeterminate => {
@@ -2246,6 +2252,7 @@ mod tests {
     struct TestProvider {
         profile: ImageGenerationProviderProfile,
         calls: Arc<AtomicUsize>,
+        http_endpoint: Option<String>,
         fail: bool,
         invalid_result: bool,
         invalid_prepared_profile: bool,
@@ -2259,6 +2266,7 @@ mod tests {
 
     struct TestProviderFactory {
         calls: Arc<AtomicUsize>,
+        http_endpoint: Option<String>,
         fail: bool,
         invalid_result: bool,
         invalid_prepared_profile: bool,
@@ -2276,6 +2284,7 @@ mod tests {
             Ok(Arc::new(TestProvider {
                 profile,
                 calls: Arc::clone(&self.calls),
+                http_endpoint: self.http_endpoint.clone(),
                 fail: self.fail,
                 invalid_result: self.invalid_result,
                 invalid_prepared_profile: self.invalid_prepared_profile,
@@ -2311,7 +2320,7 @@ mod tests {
         fn execute<'a>(
             &'a self,
             request: &'a PreparedImageGenerationRequest,
-            _credential: &'a CredentialSecret,
+            credential: &'a CredentialSecret,
         ) -> BoxFuture<'a, Result<ImageGenerationResult, ImageGenerationError>> {
             Box::pin(async move {
                 self.calls.fetch_add(1, AtomicOrdering::SeqCst);
@@ -2323,6 +2332,24 @@ mod tests {
                     )
                     .with_http_status(422));
                 }
+                let output_url = if let Some(endpoint) = &self.http_endpoint {
+                    let http = crate::image_generation::http::ImageHttpClient::new(
+                        crate::image_generation::ImageHttpClientConfig {
+                            endpoint_policy: crate::image_generation::ImageHttpEndpointPolicy::AllowLoopbackHttpForTests,
+                            ..crate::image_generation::ImageHttpClientConfig::default()
+                        },
+                    )?;
+                    let response = http
+                        .post_json(
+                            reqwest::Url::parse(endpoint).unwrap(),
+                            credential,
+                            &serde_json::json!({"prompt": request.normalized().prompt()}),
+                        )
+                        .await?;
+                    response.json()?["url"].as_str().unwrap().to_string()
+                } else {
+                    "https://artifact.invalid/signed?secret=hidden".to_string()
+                };
                 let mut result = ImageGenerationResult {
                     status: ImageGenerationResultStatus::Succeeded,
                     provider_profile_id: self.profile.id.clone(),
@@ -2332,9 +2359,7 @@ mod tests {
                     operation: request.normalized().operation(),
                     http_status: Some(200),
                     provider_request_id: Some(format!("sha256:{}", "c".repeat(32))),
-                    outputs: vec![ImageGenerationUrlOutput::new(
-                        "https://artifact.invalid/signed?secret=hidden".to_string(),
-                    )],
+                    outputs: vec![ImageGenerationUrlOutput::new(output_url)],
                     capabilities: None,
                 };
                 if self.invalid_result {
@@ -2476,6 +2501,7 @@ mod tests {
         adapters
             .register(Arc::new(TestProviderFactory {
                 calls: Arc::clone(&calls),
+                http_endpoint: None,
                 fail: provider_fails,
                 invalid_result,
                 invalid_prepared_profile,
@@ -2509,6 +2535,149 @@ mod tests {
                 "a safe test image",
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_get_retry_never_repeats_generation_post_and_replay_stays_local() {
+        use crate::image_generation::{
+            ImageArtifactNetworkPolicy, ImageArtifactStoreConfig,
+            ManagedImageGenerationArtifactStore,
+        };
+        use image::{DynamicImage, ImageFormat, RgbaImage};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut fixture = fixture(false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255])))
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let expected = encoded.into_inner();
+        let image_bytes = expected.clone();
+        let server = tokio::spawn(async move {
+            let mut observed = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(stream.read_u8().await.unwrap());
+                    assert!(headers.len() < 64 * 1024);
+                }
+                let headers = String::from_utf8(headers).unwrap();
+                let body_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                assert!(body_len < 64 * 1024);
+                let mut body = vec![0; body_len];
+                stream.read_exact(&mut body).await.unwrap();
+                if index == 0 {
+                    assert!(headers.starts_with("POST /generate HTTP/1.1\r\n"));
+                    assert!(headers
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer secret\r\n"));
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["prompt"],
+                        "a safe test image"
+                    );
+                    let response = serde_json::json!({"url": format!("http://{address}/image?signature=private")}).to_string();
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+                } else {
+                    assert!(headers.starts_with("GET /image?signature=private HTTP/1.1\r\n"));
+                    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", image_bytes.len()).as_bytes()).await.unwrap();
+                    stream
+                        .write_all(if index == 1 {
+                            &image_bytes[..8]
+                        } else {
+                            &image_bytes
+                        })
+                        .await
+                        .unwrap();
+                }
+                stream.shutdown().await.unwrap();
+                observed.push(headers.lines().next().unwrap().to_string());
+            }
+            observed
+        });
+
+        let mut adapters = ImageGenerationAdapterRegistry::new();
+        adapters
+            .register(Arc::new(TestProviderFactory {
+                calls: Arc::clone(&fixture.calls),
+                http_endpoint: Some(format!("http://{address}/generate")),
+                fail: false,
+                invalid_result: false,
+                invalid_prepared_profile: false,
+            }))
+            .unwrap();
+        fixture.service.adapters = Arc::new(adapters);
+        fixture.service.artifacts = Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                fixture.directory.path().join("managed-artifacts"),
+                ImageArtifactStoreConfig {
+                    network_policy: ImageArtifactNetworkPolicy::AllowLoopbackHttpForTests,
+                    connect_timeout: Duration::from_secs(1),
+                    download_timeout: Duration::from_secs(5),
+                    ..ImageArtifactStoreConfig::default()
+                },
+            )
+            .unwrap(),
+        );
+        let first = tokio::time::timeout(
+            Duration::from_secs(10),
+            fixture.service.execute(
+                request("execution-get-retry"),
+                AgentCancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            first.receipt.status,
+            ImageGenerationExecutionStatus::Succeeded
+        );
+        assert_eq!(
+            fs::read(&first.managed_artifact.as_ref().unwrap().absolute_path).unwrap(),
+            expected
+        );
+        assert_eq!(fixture.calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "POST /generate HTTP/1.1",
+                "GET /image?signature=private HTTP/1.1",
+                "GET /image?signature=private HTTP/1.1",
+            ]
+        );
+
+        // The listener is gone: replay must use the durable receipt and verified local image.
+        let replay = fixture
+            .service
+            .execute(
+                request("execution-get-retry"),
+                AgentCancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.receipt, first.receipt);
+        assert!(replay.managed_artifact.is_some());
+        assert_eq!(fixture.calls.load(AtomicOrdering::SeqCst), 1);
+        let saved = fixture
+            .service
+            .storage
+            .inspect_image_generation_execution("execution-get-retry")
+            .unwrap()
+            .unwrap();
+        let terminal = saved.terminal_result_json.unwrap();
+        assert!(!terminal.contains("signature=private"));
+        assert!(!terminal.contains("Bearer"));
     }
 
     #[tokio::test]

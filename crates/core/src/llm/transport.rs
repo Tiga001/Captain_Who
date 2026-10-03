@@ -507,7 +507,10 @@ async fn send_llm_request_with_stream_timeout(
     let adapter = ProviderAdapterRegistry::resolve(request)?;
     let payload = adapter.prepare_request(request)?;
     let headers = adapter.build_headers(request.api_token.trim())?;
-    let client_builder = provider_client_builder(request.api_url.trim());
+    let client_builder = tokio::select! {
+        _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+        builder = provider_client_builder(request.api_url.trim()) => builder?,
+    };
     let client_builder = if request.stream {
         client_builder
     } else {
@@ -614,19 +617,28 @@ async fn send_llm_request_with_stream_timeout(
 /// Local model endpoints must never be routed through a desktop/VPN proxy. Besides avoiding an
 /// unnecessary trust boundary, this keeps loopback providers usable when macOS system proxy
 /// resolution is slow or does not carry the expected bypass list.
-fn provider_client_builder(api_url: &str) -> reqwest::ClientBuilder {
+async fn provider_client_builder(api_url: &str) -> AgentResult<reqwest::ClientBuilder> {
     // Provider credentials are scoped to the exact endpoint selected by the Host. Never let an
     // upstream 3xx response replay them to another URL (or downgrade an HTTPS request to HTTP).
     // The Provider response remains visible to the normal status/error classifier instead.
-    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-    if provider_url_is_loopback(api_url) {
+    let builder = if provider_url_is_loopback(api_url) {
         // A loopback endpoint neither needs the system proxy nor enterprise Keychain roots. Keep
         // the bundled WebPKI roots available for an explicitly TLS-enabled local endpoint while
         // avoiding synchronous native proxy/certificate discovery on its request path.
-        builder.no_proxy().tls_built_in_native_certs(false)
+        reqwest::Client::builder()
+            .no_proxy()
+            .tls_built_in_native_certs(false)
     } else {
-        builder
-    }
+        crate::network::client_builder_for_url(api_url)
+            .await
+            .map_err(|_| {
+                LlmProviderFailure::from_local_transport_failure(
+                    "model request network route could not be resolved",
+                )
+                .to_agent_error()
+            })?
+    };
+    Ok(builder.redirect(reqwest::redirect::Policy::none()))
 }
 
 fn provider_url_is_loopback(api_url: &str) -> bool {

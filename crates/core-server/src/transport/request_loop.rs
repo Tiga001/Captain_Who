@@ -107,6 +107,7 @@ pub(crate) struct RequestOutbounds<'a> {
 /// because they have independent admission and shutdown lifecycles.
 #[derive(Clone)]
 pub(crate) struct CoreRequestServices {
+    pub(crate) network_routes: Option<Arc<network_routes::NetworkRouteBridge>>,
     pub(crate) storage: Arc<StorageService>,
     pub(crate) automation_scheduler_wake: crate::application::automation::AutomationSchedulerWake,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
@@ -141,6 +142,10 @@ where
     R: AsyncBufRead + Unpin,
 {
     let forks = ForkRequestDispatcher::new(outbounds.normal.clone());
+    let network_routes = services
+        .network_routes
+        .clone()
+        .map(network_routes::NetworkRouteGuard);
     let rpc = RpcRequestDispatcher::new(outbounds.normal.clone());
     let result = run_request_loop_inner(
         input,
@@ -154,6 +159,9 @@ where
         &rpc,
     )
     .await;
+    if let Some(bridge) = network_routes.as_ref() {
+        bridge.0.close();
+    }
     // Also drain on EOF and parse/transport failure; accepted writes never outlive their owner.
     let (rpc_result, fork_result) = tokio::join!(rpc.shutdown(), forks.shutdown());
     rpc_result?;
@@ -176,6 +184,7 @@ pub(super) async fn run_request_loop_inner<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    let network_routes = services.network_routes;
     let storage = services.storage;
     let automation_scheduler_wake = services.automation_scheduler_wake;
     let image_generation_configuration = services.image_generation_configuration;
@@ -226,7 +235,22 @@ where
             }
         };
 
+        if request.jsonrpc == "2.0" && request.method == network_routes::COMPLETE_METHOD {
+            let accepted = network_routes
+                .as_ref()
+                .is_some_and(|bridge| bridge.complete(request.params));
+            enqueue_outbound(
+                outbound,
+                response_success(request.id, json!({"accepted": accepted})),
+            )?;
+            continue;
+        }
+
         if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
+            // Wake routing waiters before draining the worker lanes that own their requests.
+            if let Some(bridge) = network_routes.as_ref() {
+                bridge.close();
+            }
             forks.begin_shutdown();
             rpc.begin_shutdown();
             let stopping_service = agent_service.clone();

@@ -10,6 +10,12 @@ const electronApp = vi.hoisted(() => ({
   isPackaged: false
 }))
 const spawnProcess = vi.hoisted(() => vi.fn())
+const resolveNetworkRoute = vi.hoisted(() => vi.fn())
+
+vi.mock('../network/NetworkRoutes', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../network/NetworkRoutes')>()),
+  resolveSystemNetworkRoute: resolveNetworkRoute
+}))
 
 vi.mock('electron', () => ({ app: electronApp }))
 vi.mock('node:child_process', async (importOriginal) => {
@@ -54,6 +60,7 @@ function spawnedEnvironment(): NodeJS.ProcessEnv {
 describe('CoreJsonRpcClient application data root', () => {
   beforeEach(() => {
     spawnProcess.mockReset()
+    resolveNetworkRoute.mockReset()
     electronApp.getPath.mockReset()
     electronApp.isPackaged = false
     spawnProcess.mockImplementation(
@@ -98,6 +105,7 @@ describe('CoreJsonRpcClient application data root', () => {
       client.start()
 
       expect(spawnedEnvironment().MYCOPILOT_APP_DATA_ROOT).toBe(appDataRoot)
+      expect(spawnedEnvironment().CAPTAIN_HOST_NETWORK_ROUTES).toBe('1')
       expect(spawnedEnvironment()).not.toHaveProperty('MYCOPILOT_STORAGE_DB')
       expect(process.env.MYCOPILOT_APP_DATA_ROOT).toBe(inheritedAppDataRoot)
       expect(process.env.MYCOPILOT_STORAGE_DB).toBe(inheritedStorageDatabase)
@@ -303,5 +311,106 @@ describe('CoreJsonRpcClient application data root', () => {
       'core-server is not running'
     )
     expect(spawnProcess).toHaveBeenCalledOnce()
+  })
+
+  it('completes routing over the existing child without exposing it as an agent event', async () => {
+    resolveNetworkRoute.mockResolvedValueOnce({ kind: 'httpProxy', host: '127.0.0.1', port: 7897 })
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'network-route') })
+    const observer = vi.fn()
+    client.onNotification('host.networkRoute.resolve', observer)
+    client.start()
+    const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+    const frames: string[] = []
+    child.stdin.on('data', (data: Buffer) => frames.push(data.toString()))
+    const requestId = '5f5d9ec8-4040-49ba-a776-b5fe24e4a199'
+    child.stdout.write(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'host.networkRoute.resolve',
+        params: { requestId, url: 'https://cdn.example/image' }
+      }) + '\n'
+    )
+    await vi.waitFor(() => expect(frames).toHaveLength(1))
+    const completion = JSON.parse(frames[0])
+    expect(completion.method).toBe('host.networkRoute.complete')
+    expect(completion.params).toEqual({
+      requestId,
+      route: { kind: 'httpProxy', host: '127.0.0.1', port: 7897 }
+    })
+    expect(observer).not.toHaveBeenCalled()
+    child.stdout.write(
+      JSON.stringify({ jsonrpc: '2.0', id: completion.id, result: { accepted: true } }) + '\n'
+    )
+    client.stop()
+  })
+
+  it('does not restart Core or complete into its replacement when a PAC response arrives late', async () => {
+    let complete!: (route: { kind: 'direct' }) => void
+    resolveNetworkRoute.mockReturnValueOnce(
+      new Promise((resolve) => {
+        complete = resolve
+      })
+    )
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'network-route-late') })
+    client.start()
+    const oldChild = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+    oldChild.stdout.write(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'host.networkRoute.resolve',
+        params: {
+          requestId: '5f5d9ec8-4040-49ba-a776-b5fe24e4a199',
+          url: 'https://cdn.example/image'
+        }
+      }) + '\n'
+    )
+    await vi.waitFor(() => expect(resolveNetworkRoute).toHaveBeenCalledOnce())
+    client.stop()
+    client.start()
+    const newChild = spawnProcess.mock.results[1]?.value as FakeCoreProcess
+    const frames: string[] = []
+    newChild.stdin.on('data', (data: Buffer) => frames.push(data.toString()))
+    complete({ kind: 'direct' })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(frames).toEqual([])
+    expect(spawnProcess).toHaveBeenCalledTimes(2)
+    client.stop()
+  })
+
+  it('bounds physical PAC requests even after their response deadlines expire', async () => {
+    vi.useFakeTimers()
+    const complete: Array<(route: null) => void> = []
+    resolveNetworkRoute.mockImplementation(() => new Promise((resolve) => complete.push(resolve)))
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'network-route-hung') })
+    try {
+      client.start()
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      const send = (): void => {
+        child.stdout.write(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'host.networkRoute.resolve',
+            params: {
+              requestId: '5f5d9ec8-4040-49ba-a776-b5fe24e4a199',
+              url: 'https://cdn.example/image'
+            }
+          }) + '\n'
+        )
+      }
+      for (let index = 0; index < 130; index += 1) send()
+      expect(resolveNetworkRoute).toHaveBeenCalledTimes(128)
+      await vi.advanceTimersByTimeAsync(10_001)
+      send()
+      expect(resolveNetworkRoute).toHaveBeenCalledTimes(128)
+      complete.forEach((resolve) => resolve(null))
+      await vi.advanceTimersByTimeAsync(0)
+      send()
+      expect(resolveNetworkRoute).toHaveBeenCalledTimes(129)
+      complete[128](null)
+      await vi.advanceTimersByTimeAsync(0)
+    } finally {
+      client.stop()
+      vi.useRealTimers()
+    }
   })
 })

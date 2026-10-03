@@ -20,6 +20,41 @@ pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Stop retrying unless at least this much of the call budget still remains.
 pub(super) const MIN_RETRY_REMAINING: Duration = Duration::from_secs(5);
 
+/// Every attempt uses the current route for the fixed Tavily API endpoint. Do not replay its
+/// bearer token through a provider redirect, including a redirect back to the same origin.
+pub(super) async fn client_for_endpoint(
+    endpoint: &str,
+    timeout: Duration,
+    cancellation_token: &AgentCancellationToken,
+) -> Result<reqwest::Client, AttemptFailure> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let builder = tokio::select! {
+        _ = cancellation_token.cancelled() => {
+            return Err(AttemptFailure::terminal(AgentError::cancelled()));
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            return Err(AttemptFailure::retryable(AgentError::new(
+                "Tavily 请求的网络路由解析超时。",
+            )));
+        }
+        result = crate::network::client_builder_for_url(endpoint) => {
+            result.map_err(|error| AttemptFailure::retryable(AgentError::new(
+                format!("无法解析 Tavily 请求的网络路由：{error}"),
+            )))?
+        }
+    };
+    builder
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            AttemptFailure::terminal(AgentError::new(format!(
+                "创建 Tavily HTTP 客户端失败：{error}"
+            )))
+        })
+}
+
 /// Base delay before the first retry; each further retry doubles it, plus bounded jitter.
 const RETRY_BACKOFF_BASE: Duration = Duration::from_millis(500);
 const RETRY_BACKOFF_JITTER: Duration = Duration::from_millis(250);
@@ -156,6 +191,58 @@ pub(super) async fn wait_before_retry(
         _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
         _ = tokio::time::sleep(wait) => Ok(()),
     }
+}
+
+#[cfg(test)]
+pub(super) async fn redirect_test_endpoint() -> (String, tokio::task::JoinHandle<(String, bool)>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.unwrap());
+            assert!(headers.len() < 64 * 1024);
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        let body_len = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        assert!(body_len < 64 * 1024);
+        stream.read_exact(&mut vec![0; body_len]).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/redirect-target\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        drop(stream);
+        let followed =
+            match tokio::time::timeout(Duration::from_millis(250), listener.accept()).await {
+                Ok(Ok((mut stream, _))) => {
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        headers.push(stream.read_u8().await.unwrap());
+                        assert!(headers.len() < 64 * 1024);
+                    }
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await
+                        .unwrap();
+                    true
+                }
+                Ok(Err(error)) => panic!("redirect test listener failed: {error}"),
+                Err(_) => false,
+            };
+        (headers, followed)
+    });
+    (format!("http://{address}/api"), server)
 }
 
 /// Maps a clock's sub-second microseconds to the jitter, in milliseconds.

@@ -1,6 +1,7 @@
 import type { AccountProfile } from '@mycopilot/host-api'
 import { ACCOUNT_CONFIG } from './accountConfig'
 import { AuthFailure, type CloudSession } from './CloudBaseAuthDriver'
+import { accountFetch } from './AccountNetwork'
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -44,7 +45,7 @@ export async function fetchAccountProfile(session: CloudSession): Promise<Accoun
   let response: Response
   try {
     // Profile refresh must not perform the separate daily license query.
-    response = await fetch(`${ACCOUNT_CONFIG.api}/v1/me?includeEntitlements=false`, {
+    response = await accountFetch(`${ACCOUNT_CONFIG.api}/v1/me?includeEntitlements=false`, {
       headers: { Authorization: `Bearer ${session.access_token}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(15_000),
       redirect: 'error',

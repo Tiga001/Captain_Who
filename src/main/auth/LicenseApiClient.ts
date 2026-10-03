@@ -1,5 +1,6 @@
 import type { LicenseError, LicenseReason } from '@mycopilot/host-api'
 import { ACCOUNT_CONFIG } from './accountConfig'
+import { accountFetch } from './AccountNetwork'
 
 export const LICENSE_CACHE_MS = 24 * 60 * 60_000
 export interface VerifiedLicense {
@@ -60,7 +61,7 @@ export async function fetchAccountLicense(
 ): Promise<VerifiedLicense> {
   let response: Response
   try {
-    response = await fetch(`${ACCOUNT_CONFIG.api}/v1/me/license`, {
+    response = await accountFetch(`${ACCOUNT_CONFIG.api}/v1/me/license`, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
       signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
       redirect: 'error',

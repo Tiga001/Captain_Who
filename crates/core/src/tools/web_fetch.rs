@@ -5,7 +5,6 @@ use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
-use reqwest::Client;
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -261,12 +260,6 @@ impl TavilyExtractClient {
                 .map_err(|_| AgentError::new("Tavily API Key 包含非法字符。"))?,
         );
 
-        let client = Client::builder()
-            .timeout(EXTRACT_ATTEMPT_TIMEOUT)
-            .connect_timeout(web_retry::CONNECT_TIMEOUT)
-            .build()
-            .map_err(|error| AgentError::new(format!("创建 Tavily HTTP 客户端失败：{error}")))?;
-
         let deadline = Instant::now() + EXTRACT_TOTAL_BUDGET;
         let mut last_outcome: Option<ExtractOutcome> = None;
         let mut retry_after: Option<Duration> = None;
@@ -304,7 +297,7 @@ impl TavilyExtractClient {
             let attempt_timeout = EXTRACT_ATTEMPT_TIMEOUT.min(remaining);
             let outcome = self
                 .extract_once(
-                    &client,
+                    TAVILY_EXTRACT_ENDPOINT,
                     &headers,
                     request,
                     attempt_timeout,
@@ -376,16 +369,17 @@ impl TavilyExtractClient {
 
     async fn extract_once(
         &self,
-        client: &Client,
+        endpoint: &str,
         headers: &HeaderMap,
         request: &TavilyExtractRequest,
         attempt_timeout: Duration,
         cancellation_token: &AgentCancellationToken,
     ) -> Result<Value, web_retry::AttemptFailure> {
+        let client =
+            web_retry::client_for_endpoint(endpoint, attempt_timeout, cancellation_token).await?;
         let response = client
-            .post(TAVILY_EXTRACT_ENDPOINT)
+            .post(endpoint)
             .headers(headers.clone())
-            .timeout(attempt_timeout)
             .json(&request.to_payload())
             .send();
         let response = tokio::select! {
@@ -938,6 +932,34 @@ fn format_failed_extract_error(requested_url: &str, failed_results: &[Value]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn extract_rejects_redirect_without_replaying_authorization() {
+        let (endpoint, server) = web_retry::redirect_test_endpoint().await;
+        let request = TavilyExtractRequest::from_args(
+            serde_json::from_value(json!({"url": "https://example.com/docs"})).unwrap(),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-token"));
+        let failure = TavilyExtractClient::new("test-token".to_string())
+            .extract_once(
+                &endpoint,
+                &headers,
+                &request,
+                Duration::from_secs(5),
+                &AgentCancellationToken::new(),
+            )
+            .await
+            .expect_err("Tavily API redirects must be rejected");
+        let (request, followed) = server.await.unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token\r\n"));
+        assert!(!followed, "the redirected endpoint must not be contacted");
+        assert!(!failure.retryable);
+        assert!(failure.error.to_string().contains("307"));
+    }
 
     #[test]
     fn builds_bounded_tavily_payload() {

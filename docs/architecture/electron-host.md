@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-03
 ---
 
 # Electron Host 与进程架构
@@ -48,6 +48,20 @@ Main 同时处理子进程 `error`、`exit` 与 stdin `error`：子进程先关�
 终端服务按需启动：第一个终端会话触发 `utilityProcess.fork()`。所有终端会话共享同一个 utility process，但 Main 使用 utility generation、Renderer WebContents 和 session id 共同约束所有权。
 
 浏览器侧栏页面是 Renderer 创建的 `<webview>`；网站弹窗由 Main 接管原生 WebContents 并显示为独立受管窗口，以保留 opener 和登录回传。两者的 guest、Session、网络策略、Target 和自动化附件均由 Main 管理，弹窗不获得主 Renderer 权限。详细边界见 [浏览器与自动化](../subsystems/browser-automation.md)。
+
+## 系统网络路线
+
+桌面远端模型请求、图片生成、图片下载、Tavily 搜索/抽取和 GitHub 技能 HTTP 请求均由 Host 按当前目标 URL 解析系统网络路线。`src/main/network/NetworkRoutes.ts` 使用独立非持久 Session 的 `resolveProxy`，支持系统 HTTP/HTTPS、SOCKS4/5、PAC 的逐 URL 选择与 DIRECT 绕过；每次请求及已有重试重新解析，不保留启动时的代理快照。PAC 的 `SOCKS` 表示 SOCKS4。当前选择候选列表中首个支持的路线，失败不擅自切换 DIRECT，也不自动轮询其他代理；需要代理认证的连接会报错，不将源站凭据作为代理凭据。
+
+Rust Core 的 `network` 模块经私有 stdio 通道发送 `host.networkRoute.resolve`，Main 用 `host.networkRoute.complete` 返回结构化路线或失败。该能力在任何恢复投递/调度器启动前安装；完成回执在控制面处理，不能排到正在等待选路的普通 RPC/技能队列之后。两端最多 128 个待处理请求，Host 10 秒回复超时、Rust Core 12 秒等待上限；Host 超时不释放尚未完成的物理 PAC 调用的并发槽。EOF/停机唤醒所有等待者，旧 child 的迟到回执不进入新 child。
+
+路线请求可以包含临时下载 URL，仅存在于 Host/Rust Core 内存和私有管道，不发往 Renderer、模型、Trace 或日志。Host 启动环境中的 `CAPTAIN_HOST_NETWORK_ROUTES=1` 只声明该内部能力；外部工具不能自行提供代理地址。独立运行的 Rust Core 普通请求保留 reqwest 的系统/环境代理行为；独立 Rust Core 的 Artifact 下载保留直接固定 IP 的策略。本地模型/回环请求始终直接访问。
+
+账号登录、资料和 License 使用单独的 `captain-who-account` 非持久 Session，跟随系统代理；CloudBase 通过正式 `baseRequest` 接口注入该传输。账号请求只接受 HTTPS，禁止重定向、Cookie 和缓存，15 秒超时包含 Session 初始化。它不共享受管浏览器的 Cookie 或认证状态。
+
+受管浏览器、浏览器下载和更新继续使用各自的 Chromium Session。外部 MCP/技能子进程的环境隔离、Office 离线渲染策略不因此放宽；favicon 的 Fake-IP 校验仍单独执行，不应通过放行任意私网地址解决兼容问题。
+
+回归入口：`src/main/core/networkRoutes.test.ts`、`jsonRpcClient.environment.test.ts`、`accountNetwork.test.ts`、`accountNetwork.electron.test.ts`，以及 Rust `network`、`transport::network_routes` 和图片 Artifact 传输测试。Electron fixture 仅使用临时 Session、本地 TLS 源站和代理，覆盖代理 A → B → DIRECT、Cookie 隔离、认证头和重定向拒绝，不修改系统 VPN。
 
 ## Main 启动顺序
 

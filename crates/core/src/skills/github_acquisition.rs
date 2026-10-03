@@ -2,7 +2,9 @@
 //!
 //! This adapter intentionally accepts structured GitHub coordinates instead
 //! of arbitrary URLs. Immutable SHAs bypass ref lookup; moving refs use a
-//! bounded `git ls-remote` lookup with GitHub's public API only as fallback.
+//! bounded `git ls-remote` lookup with GitHub's public API as fallback. Desktop
+//! Hosts use the API directly so reference lookup follows the same URL-specific
+//! network route as package downloads.
 //! The resulting full SHA is downloaded from codeload into a private bounded
 //! spool. Only a fully validated [`PreparedSkillPackage`] crosses the
 //! installation boundary.
@@ -429,7 +431,6 @@ impl GitHubArchive {
 /// non-interactive `git ls-remote` invocation. Redirects, credentials and
 /// model-controlled commands are deliberately unsupported.
 pub struct ReqwestGitHubTransport {
-    client: Client,
     api_rate_limit_until: Mutex<Option<Instant>>,
 }
 
@@ -443,17 +444,22 @@ impl fmt::Debug for ReqwestGitHubTransport {
 
 impl ReqwestGitHubTransport {
     pub fn new() -> Result<Self, GitHubTransportError> {
-        let client = Client::builder()
+        Ok(Self {
+            api_rate_limit_until: Mutex::new(None),
+        })
+    }
+
+    fn client_for_url(&self, url: &Url) -> Result<Client, GitHubTransportError> {
+        // This transport is shared for the process lifetime. Resolve each request's current
+        // route instead of retaining the proxy settings present when the application started.
+        crate::network::blocking_client_builder_for_url(url.as_str())
+            .map_err(|_| GitHubTransportError::NetworkUnavailable)?
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(GITHUB_CONNECT_TIMEOUT)
             .timeout(GITHUB_REQUEST_TIMEOUT)
             .user_agent(GITHUB_USER_AGENT)
             .build()
-            .map_err(|_| GitHubTransportError::Unavailable)?;
-        Ok(Self {
-            client,
-            api_rate_limit_until: Mutex::new(None),
-        })
+            .map_err(|_| GitHubTransportError::Unavailable)
     }
 
     fn resolve_ref(
@@ -472,12 +478,15 @@ impl ReqwestGitHubTransport {
         self.check_api_rate_limit()?;
         for attempt in 0..GITHUB_HTTP_ATTEMPTS {
             let result = self
-                .client
-                .get(url.clone())
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-                .send()
-                .map_err(map_reqwest_error)
+                .client_for_url(&url)
+                .and_then(|client| {
+                    client
+                        .get(url.clone())
+                        .header(ACCEPT, "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+                        .send()
+                        .map_err(map_reqwest_error)
+                })
                 .and_then(|response| read_success_response(response, GITHUB_API_BODY_BYTES, true));
             if let Err(GitHubTransportError::RateLimited { retry_after, .. }) = &result {
                 self.remember_api_rate_limit(*retry_after);
@@ -526,6 +535,9 @@ impl ReqwestGitHubTransport {
         if let GitHubReference::Commit(commit) = request.reference() {
             return Ok(commit.clone());
         }
+        if crate::network::has_host_route_resolver() {
+            return self.resolve_with_api(request);
+        }
         match resolve_with_git_ls_remote(request) {
             Ok(commit) => Ok(commit),
             Err(_) => self.resolve_with_api(request),
@@ -569,12 +581,15 @@ impl GitHubAcquisitionTransport for ReqwestGitHubTransport {
         let url = github_codeload_url(request.repository(), request.commit())?;
         for attempt in 0..GITHUB_HTTP_ATTEMPTS {
             let result = self
-                .client
-                .get(url.clone())
-                .timeout(GITHUB_REQUEST_TIMEOUT)
-                .header(ACCEPT, "application/zip")
-                .send()
-                .map_err(map_reqwest_error)
+                .client_for_url(&url)
+                .and_then(|client| {
+                    client
+                        .get(url.clone())
+                        .timeout(GITHUB_REQUEST_TIMEOUT)
+                        .header(ACCEPT, "application/zip")
+                        .send()
+                        .map_err(map_reqwest_error)
+                })
                 .and_then(spool_archive_response);
             if attempt + 1 < GITHUB_HTTP_ATTEMPTS
                 && result.as_ref().is_err_and(retryable_transport_error)

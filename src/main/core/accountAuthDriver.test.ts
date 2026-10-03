@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthError } from '@cloudbase/js-sdk/oauth'
 const sdk = vi.hoisted(() => ({
   init: vi.fn(),
+  auth: vi.fn(),
   login: vi.fn(),
   restore: vi.fn(),
   refresh: vi.fn(),
@@ -18,15 +19,14 @@ const tokens = { access_token: 'test-access', refresh_token: 'test-refresh' }
 const result = { data: { session: tokens }, error: null }
 beforeEach(() => {
   vi.resetAllMocks()
-  sdk.init.mockReturnValue({
-    auth: () => ({
-      signInWithPassword: sdk.login,
-      setSession: sdk.restore,
-      refreshSession: sdk.refresh,
-      signInWithOtp: sdk.sendCode,
-      getUser: sdk.getUser,
-      signOut: sdk.logout
-    })
+  sdk.init.mockReturnValue({ auth: sdk.auth })
+  sdk.auth.mockReturnValue({
+    signInWithPassword: sdk.login,
+    setSession: sdk.restore,
+    refreshSession: sdk.refresh,
+    signInWithOtp: sdk.sendCode,
+    getUser: sdk.getUser,
+    signOut: sdk.logout
   })
   sdk.login.mockResolvedValue(result)
   sdk.restore.mockResolvedValue(result)
@@ -50,6 +50,14 @@ describe('CloudBase 3.9.2 adapter', () => {
     expect(sdk.init).toHaveBeenCalledWith(
       expect.objectContaining({ persistence: 'none', auth: { detectSessionInUrl: false } })
     )
+    const options = sdk.auth.mock.calls[0][0]
+    expect(options.baseRequest).toBeTypeOf('function')
+    // Supplying `request` would bypass the SDK's captcha wrapper. Only replace its transport.
+    expect(options).not.toHaveProperty('request')
+    await expect(options.captchaOptions.openURIWithCallback()).rejects.toMatchObject({
+      message: 'CAPTAIN_WHO_INTERACTIVE_VERIFICATION_REQUIRED',
+      errorCode: 4001
+    })
   })
   it('uses OTP callback bound by the SDK and does not auto-register users', async () => {
     const driver = new CloudBaseAuthDriver()

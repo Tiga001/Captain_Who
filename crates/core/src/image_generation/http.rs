@@ -2,7 +2,7 @@ use super::credential_store::CredentialSecret;
 use super::types::{ImageGenerationError, ImageGenerationErrorCode};
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
-use reqwest::{Client, Url};
+use reqwest::Url;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -65,26 +65,13 @@ impl ImageHttpClientConfig {
 
 #[derive(Clone)]
 pub struct ImageHttpClient {
-    client: Client,
     config: ImageHttpClientConfig,
 }
 
 impl ImageHttpClient {
     pub fn new(config: ImageHttpClientConfig) -> Result<Self, ImageGenerationError> {
         let config = config.validate()?;
-        let client = Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .timeout(config.request_timeout)
-            // Redirects are deliberately disabled. In particular, a configured bearer token is
-            // never forwarded to an origin selected by an upstream redirect response.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| {
-                ImageGenerationError::invalid_configuration(
-                    "image-generation HTTP client could not be initialized",
-                )
-            })?;
-        Ok(Self { client, config })
+        Ok(Self { config })
     }
 
     #[must_use]
@@ -105,8 +92,26 @@ impl ImageHttpClient {
         // Revalidate at execution rather than trusting the constructor-time snapshot alone.
         let endpoint = validate_endpoint(endpoint.as_str(), self.config.endpoint_policy)?;
         let authorization = bearer_header(credential)?;
-        let response = self
-            .client
+        let client = crate::network::client_builder_for_url(endpoint.as_str())
+            .await
+            .map_err(|_| {
+                ImageGenerationError::new(
+                    ImageGenerationErrorCode::TransportFailed,
+                    "image-generation network route could not be resolved",
+                    true,
+                )
+            })?
+            .connect_timeout(self.config.connect_timeout)
+            .timeout(self.config.request_timeout)
+            // Resolve the route for this request and never replay its bearer token to a redirect.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| {
+                ImageGenerationError::invalid_configuration(
+                    "image-generation HTTP client could not be initialized",
+                )
+            })?;
+        let response = client
             .post(endpoint)
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .header(AUTHORIZATION, authorization)
@@ -359,6 +364,63 @@ fn opaque_provider_request_id(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn routed_image_post_does_not_follow_redirects_or_replay_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+                assert!(headers.len() < 64 * 1024);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            let body_len = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            assert!(body_len < 64 * 1024);
+            stream.read_exact(&mut vec![0; body_len]).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/other\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            drop(stream);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                    .await
+                    .is_err(),
+                "provider redirects must not dispatch a second generation request"
+            );
+            headers
+        });
+        let client = ImageHttpClient::new(ImageHttpClientConfig {
+            endpoint_policy: ImageHttpEndpointPolicy::AllowLoopbackHttpForTests,
+            ..ImageHttpClientConfig::default()
+        })
+        .unwrap();
+        let response = client
+            .post_json(
+                Url::parse(&format!("http://{address}/generate")).unwrap(),
+                &CredentialSecret::new("test-image-token").unwrap(),
+                &serde_json::json!({"prompt": "test"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 307);
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /generate HTTP/1.1\r\n"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-image-token\r\n"));
+    }
 
     #[test]
     fn production_policy_requires_https_and_rejects_credential_bearing_urls() {

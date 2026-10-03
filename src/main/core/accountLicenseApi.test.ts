@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+const network = vi.hoisted(() => ({ fetch: vi.fn() }))
+vi.mock('../auth/AccountNetwork', () => ({ accountFetch: network.fetch }))
 import { fetchAccountLicense } from '../auth/LicenseApiClient'
 import { fetchAccountProfile } from '../auth/AccountApiClient'
 import { ACCOUNT_CONFIG } from '../auth/accountConfig'
 
-afterEach(() => vi.unstubAllGlobals())
+beforeEach(() => network.fetch.mockReset())
 const result = {
   allowed: true,
   reason: 'active',
@@ -13,8 +15,7 @@ const result = {
 }
 describe('license-only account HTTP boundary', () => {
   it('sends only an authenticated GET, never device or usage data', async () => {
-    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: result })))
-    vi.stubGlobal('fetch', fetch)
+    const fetch = network.fetch.mockResolvedValue(new Response(JSON.stringify({ data: result })))
     expect(await fetchAccountLicense('synthetic-access', new AbortController().signal)).toEqual(
       result
     )
@@ -34,23 +35,19 @@ describe('license-only account HTTP boundary', () => {
     [429, { error: { code: 'RATE_LIMITED' } }, 'network', false],
     [200, { data: { allowed: true } }, 'invalidResponse', false]
   ])('does not invent permission for HTTP %s', async (status, body, code, unauthorized) => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: status as number }))
+    network.fetch.mockResolvedValue(
+      new Response(JSON.stringify(body), { status: status as number })
     )
     await expect(
       fetchAccountLicense('synthetic-access', new AbortController().signal)
     ).rejects.toMatchObject({ code, unauthorized })
   })
   it('requests profile without entitlements during ordinary account validation', async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ data: { userId: 'a', profile: { userId: 'a', status: 'active' } } })
-        )
+    const fetch = network.fetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: { userId: 'a', profile: { userId: 'a', status: 'active' } } })
       )
-    vi.stubGlobal('fetch', fetch)
+    )
     await fetchAccountProfile({
       access_token: 'synthetic-access',
       refresh_token: 'synthetic-refresh',

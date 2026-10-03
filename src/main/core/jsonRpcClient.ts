@@ -2,6 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { app } from 'electron'
 import { isAbsolute, join, normalize } from 'node:path'
+import {
+  NETWORK_ROUTE_COMPLETE_METHOD,
+  NETWORK_ROUTE_RESOLVE_METHOD,
+  parseNetworkRouteRequest,
+  resolveSystemNetworkRoute
+} from '../network/NetworkRoutes'
 
 import type {
   JsonRpcErrorResponse,
@@ -63,6 +69,7 @@ export class CoreJsonRpcClient {
   private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
   private readonly startedHandlers = new Set<() => void>()
+  private networkRouteRequests = 0
 
   constructor(options: CoreJsonRpcClientOptions = {}) {
     const appDataRoot = normalize(options.appDataRoot ?? app.getPath('userData'))
@@ -255,6 +262,10 @@ export class CoreJsonRpcClient {
     }
 
     if (this.isNotification(message)) {
+      if (message.method === NETWORK_ROUTE_RESOLVE_METHOD) {
+        this.resolveNetworkRoute(message.params)
+        return
+      }
       this.handleNotification(message)
       return
     }
@@ -291,6 +302,49 @@ export class CoreJsonRpcClient {
     }
 
     pending.resolve((response as JsonRpcSuccessResponse).result)
+  }
+
+  private resolveNetworkRoute(params: unknown): void {
+    const request = parseNetworkRouteRequest(params)
+    const child = this.child
+    if (!request || !child || !this.acceptingRequests) return
+    const finish = (route: Awaited<ReturnType<typeof resolveSystemNetworkRoute>>): void => {
+      // A late PAC completion must never start a new process or enter a replacement Core.
+      if (
+        this.child !== child ||
+        this.inputFailure ||
+        this.transportFailure ||
+        !this.acceptingRequests
+      )
+        return
+      void this.requestOnRunningChild(NETWORK_ROUTE_COMPLETE_METHOD, {
+        requestId: request.requestId,
+        route
+      }).catch(() => {
+        /* Core shutdown owns transport errors. Never log signed download URLs. */
+      })
+    }
+    if (this.networkRouteRequests >= 128) {
+      finish(null)
+      return
+    }
+    this.networkRouteRequests += 1
+    // resolveProxy has no cancellation API. Its physical slot stays occupied after our reply
+    // timeout until Chromium actually settles, preventing an unbounded backlog of hung PAC work.
+    const resolution = resolveSystemNetworkRoute(request.url).finally(() => {
+      this.networkRouteRequests -= 1
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    void Promise.race([
+      resolution,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 10_000)
+      })
+    ])
+      .then(finish, () => finish(null))
+      .finally(() => {
+        clearTimeout(timer)
+      })
   }
 
   private rejectAll(error: Error): void {
@@ -345,6 +399,8 @@ export class CoreJsonRpcClient {
     const configuredWordPdfRendererDirectory = process.env.MYCOPILOT_WORD_PDF_RENDERER_DIR
     const configuredArtifactRuntimeDirectory = process.env.MYCOPILOT_ARTIFACT_RUNTIME_DIR
     const environment = { ...process.env }
+    deleteEnvironmentVariableCaseInsensitively(environment, 'CAPTAIN_HOST_NETWORK_ROUTES')
+    environment.CAPTAIN_HOST_NETWORK_ROUTES = '1'
 
     // Electron Host owns this location for both development and packaged applications.
     // Never allow a parent shell to redirect the Core to a separate database.

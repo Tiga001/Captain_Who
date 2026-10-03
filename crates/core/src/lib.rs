@@ -24,6 +24,7 @@ pub mod human_interaction;
 pub mod image_generation;
 mod llm;
 mod model_request_observation;
+pub mod network;
 pub mod notification_subject;
 pub mod office;
 mod prompts;

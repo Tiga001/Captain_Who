@@ -16,6 +16,59 @@ const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const SKILL: &[u8] = b"---\nname: github-skill\ndescription: Acquired from GitHub.\n---\n\nFollow the GitHub workflow.\n";
 
+#[tokio::test]
+async fn shared_github_transport_retries_fresh_requests_and_rejects_redirects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for status in [
+            "503 Service Unavailable",
+            "200 OK",
+            "307 Temporary Redirect",
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+                assert!(headers.len() < 64 * 1024);
+            }
+            requests.push(String::from_utf8(headers).unwrap());
+            let response = format!(
+                "HTTP/1.1 {status}\r\nLocation: http://{address}/unexpected\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_err(),
+            "GitHub redirects must not dispatch another request"
+        );
+        requests
+    });
+    tokio::task::spawn_blocking(move || {
+        let transport = ReqwestGitHubTransport::new().unwrap();
+        let endpoint = Url::parse(&format!("http://{address}/repository")).unwrap();
+        assert_eq!(transport.get_bounded_json(endpoint.clone()).unwrap(), b"{}");
+        assert_eq!(
+            transport.get_bounded_json(endpoint).unwrap_err(),
+            GitHubTransportError::Rejected
+        );
+    })
+    .await
+    .unwrap();
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests
+        .iter()
+        .all(|request| request.starts_with("GET /repository HTTP/1.1\r\n")));
+    assert!(requests.iter().all(|request| request
+        .to_ascii_lowercase()
+        .contains("x-github-api-version:")));
+}
+
 #[derive(Default)]
 struct FakeState {
     resolve_requests: Vec<GitHubResolveRequest>,
