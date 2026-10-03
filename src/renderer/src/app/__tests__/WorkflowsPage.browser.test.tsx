@@ -40,9 +40,12 @@ vi.mock('../../host/hostClient', () => ({
 }))
 vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
 vi.mock('../../features/workflows/project/useWorkflowActivity', () => ({
-  useWorkflowActivity: (items: WorkflowInstance[]) =>
-    service.runningIds ??
-    new Set(items.filter((item) => item.enabled && item.running).map((item) => item.id))
+  useWorkflowActivity: (items: WorkflowInstance[]) => ({
+    runningInstanceIds:
+      service.runningIds ??
+      new Set(items.filter((item) => item.enabled && item.running).map((item) => item.id)),
+    activityByInstanceId: new Map(items.map((item) => [item.id, item.activity ?? null]))
+  })
 }))
 vi.mock('../../features/workflows/project/useWorkflowMonitor', () => ({
   useWorkflowMonitor: () => ({
@@ -706,6 +709,25 @@ describe('global organization management', () => {
     expect(cards.every((card) => !card.classList.contains('is-running'))).toBe(true)
     expect(cards.every((card) => card.getAnimations({ subtree: true }).length === 0)).toBe(true)
     expect(positions()).toEqual(before)
+  })
+
+  it('places the durable activity duration after the conversation count and omits it before first activity', async () => {
+    instances = [
+      {
+        ...instance('timed', '持续协作', [{ nodeId: 'analysis', conversationId: 'chat-a' }]),
+        activity: { startedAt: 1_000, completedAt: 94_028_000 }
+      },
+      instance('new', '尚未运行', [])
+    ]
+    await mount()
+    await expect.element(page.getByText('已连续运行 1d 2h 7m 7s', { exact: true })).toBeVisible()
+    const elapsed = document.querySelector<HTMLElement>('.project-workflows__elapsed')!
+    const metadata = elapsed.closest('.project-workflows__instance-meta')!
+    expect(metadata.textContent).toBe('1 个对话已连续运行 1d 2h 7m 7s')
+    expect(metadata.firstElementChild!.getBoundingClientRect().right).toBeLessThan(
+      elapsed.getBoundingClientRect().left
+    )
+    expect(document.querySelectorAll('.project-workflows__elapsed')).toHaveLength(1)
   })
 
   it('keeps every card component visually unchanged while an organization switch is pending', async () => {

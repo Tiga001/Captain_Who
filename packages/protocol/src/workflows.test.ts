@@ -425,6 +425,25 @@ describe('global workflow instance contract', () => {
       const withProject = { ...response, instances: [{ ...response.instances[0], projectId }] }
       expect(parseWorkflowResponse(withProject)).toEqual(withProject)
     }
+    for (const activity of [
+      null,
+      { startedAt: 1_000, completedAt: null },
+      { startedAt: 1_000, completedAt: 10_000 }
+    ]) {
+      const withActivity = { ...response, instances: [{ ...response.instances[0], activity }] }
+      expect(parseWorkflowResponse(withActivity)).toEqual(withActivity)
+    }
+    for (const activity of [
+      { startedAt: 1_000, completedAt: 999 },
+      { startedAt: -1, completedAt: null },
+      { startedAt: 1.5, completedAt: null },
+      { startedAt: 1_000 },
+      { startedAt: 1_000, completedAt: Infinity },
+      { startedAt: 1_000, completedAt: null, running: true }
+    ])
+      expect(() =>
+        parseWorkflowResponse({ ...response, instances: [{ ...response.instances[0], activity }] })
+      ).toThrow()
     for (const enabled of [undefined, null, 'true', 1]) {
       expect(() =>
         parseWorkflowResponse({ ...response, instances: [{ ...response.instances[0], enabled }] })

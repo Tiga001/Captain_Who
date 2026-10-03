@@ -97,6 +97,12 @@ export interface WorkflowInstanceBinding {
   nodeId: string
   conversationId: string
 }
+/** Most recent continuous activity interval, derived from durable turn timestamps. */
+export interface WorkflowActivity {
+  startedAt: number
+  /** Null while any turn in this interval is still active. */
+  completedAt: number | null
+}
 export interface WorkflowInstance {
   id: string
   /** Independent, editable organization configuration. */
@@ -115,6 +121,8 @@ export interface WorkflowInstance {
   enabled: boolean
   /** Activity in an enabled instance; no client operation starts graph execution. */
   running: boolean
+  /** Absent/null until an organization has a recorded activity interval. */
+  activity?: WorkflowActivity | null
 }
 export interface WorkflowEditingDraft {
   definition: WorkflowDefinition
@@ -686,9 +694,10 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
       'updatedAt',
       'needsReview',
       'enabled',
-      'running'
+      'running',
+      'activity'
     ],
-    ['projectId']
+    ['projectId', 'activity']
   )
   return {
     id: text(item.id),
@@ -705,6 +714,9 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
     needsReview: boolean(item.needsReview),
     enabled: boolean(item.enabled),
     running: boolean(item.running),
+    ...(item.activity !== undefined
+      ? { activity: item.activity === null ? null : parseWorkflowActivity(item.activity) }
+      : {}),
     bindings: array(
       item.bindings,
       (value) => {
@@ -714,4 +726,13 @@ function parseWorkflowInstance(value: unknown): WorkflowInstance {
       128
     )
   }
+}
+
+function parseWorkflowActivity(value: unknown): WorkflowActivity {
+  const item = object(value, ['startedAt', 'completedAt'])
+  const startedAt = integer(item.startedAt)
+  const completedAt = item.completedAt === null ? null : integer(item.completedAt)
+  if (completedAt !== null && completedAt < startedAt)
+    throw new Error('Invalid organization activity interval')
+  return { startedAt, completedAt }
 }

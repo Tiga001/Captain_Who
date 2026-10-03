@@ -35,6 +35,7 @@ import { hostClient } from '../../../host/hostClient'
 import { WorkflowColorPicker } from './WorkflowColorPicker'
 import { WorkflowMonitorPage } from './WorkflowMonitorPage'
 import { useWorkflowActivity } from './useWorkflowActivity'
+import { WorkflowActivityElapsed } from './WorkflowActivityElapsed'
 import { projectWorkflowText, pickUnusedWorkflowColor } from './projectWorkflowText'
 import '../workflows.css'
 import './projectWorkflows.css'
@@ -125,7 +126,10 @@ export function WorkflowsPage({
     setMonitorId(id)
     onMonitorChange?.(id)
   }
-  const runningInstanceIds = useWorkflowActivity(monitorId ? [] : instances, conversations)
+  const { runningInstanceIds, activityByInstanceId } = useWorkflowActivity(
+    monitorId ? [] : instances,
+    conversations
+  )
   const [loading, setLoading] = useState(true)
   const [hasSnapshot, setHasSnapshot] = useState(false)
   const [error, setErrorMessage] = useState('')
@@ -1296,11 +1300,17 @@ export function WorkflowsPage({
                   onClick={() => beginBinding(null, instance)}
                 >
                   <strong>{instance.name}</strong>
-                  <small>
-                    {t(
-                      `${instance.bindings.length} 个对话`,
-                      `${instance.bindings.length} conversations`
-                    )}
+                  <small className="project-workflows__instance-meta">
+                    <span>
+                      {t(
+                        `${instance.bindings.length} 个对话`,
+                        `${instance.bindings.length} conversations`
+                      )}
+                    </span>
+                    <WorkflowActivityElapsed
+                      activity={activityByInstanceId.get(instance.id)}
+                      language={language}
+                    />
                   </small>
                 </button>
                 <Tooltip content={switchTitle}>

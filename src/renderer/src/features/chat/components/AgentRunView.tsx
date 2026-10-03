@@ -479,11 +479,11 @@ export function AgentRunView({
       message.uiState?.timelineCollapsed ??
       !(hasGuidance || hasWorkflowDeliveries))
     : false
-  // Pending interaction entries and their surrounding narration stay in exact trace order even
-  // when technical activity is collapsed. Appending a detached entry after the final answer would
-  // erase the boundary between the question introduction and the model's subsequent work.
+  // Keep incoming mail in trace order while collapsed. Only open human interactions retain their
+  // surrounding narration; mail must not make the entire run's intermediate text stay visible.
   const showTimeline =
     hasTimeline && (!(canToggleTimeline && timelineCollapsed) || preserveInputSequence)
+  const showTimelineNarration = !(canToggleTimeline && timelineCollapsed) || hasInteractionEntries
   // A terminal failure arrives as both an Error event and Done.content. Keep both durable
   // projections, but use the visible error entry instead of rendering its text again as an
   // answer. Collapsing the timeline still leaves the failure explanation visible.
@@ -499,7 +499,7 @@ export function AgentRunView({
   const showFinalContent =
     hasDisplayableContent(finalAnswerContent) &&
     (runIsSettled || !hasTimeline) &&
-    !(showTimeline && finalAnswerRepresentedByTimeline) &&
+    !(showTimeline && showTimelineNarration && finalAnswerRepresentedByTimeline) &&
     !terminalErrorVisibleInTimeline
   const canShowThinkingActivity =
     !(canToggleTimeline && timelineCollapsed) &&
@@ -573,7 +573,7 @@ export function AgentRunView({
           canToggleTimeline && timelineCollapsed && preserveInputSequence
             ? block.items.filter(
                 (item) =>
-                  item.type === 'message' ||
+                  (item.type === 'message' && showTimelineNarration) ||
                   item.type === 'user_guidance' ||
                   item.type === 'workflow_delivery' ||
                   (item.type === 'tool_call' && interactionCallIds.has(item.callId))

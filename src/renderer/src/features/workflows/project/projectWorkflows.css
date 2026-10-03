@@ -204,8 +204,7 @@
   font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-strong);
 }
-.project-workflows__instance-main strong,
-.project-workflows__instance-main small {
+.project-workflows__instance-main strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -213,6 +212,26 @@
 .project-workflows__instance-main small {
   font-size: var(--mc-font-size-sm);
   color: var(--mc-color-text-muted);
+}
+.project-workflows__instance-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+.project-workflows__instance-meta > span {
+  min-width: 0;
+}
+.project-workflows__elapsed {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.project-workflows__elapsed::before {
+  content: '·';
+  margin-right: 8px;
+}
+.project-workflows__elapsed-duration {
+  white-space: nowrap;
 }
 .project-workflows__color-dot {
   width: 5px;

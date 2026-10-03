@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { WorkflowInstance } from '@mycopilot/protocol'
+import type { WorkflowActivity, WorkflowInstance } from '@mycopilot/protocol'
 import { hostClient } from '../../../host/hostClient'
 import { isAssistantMessageGenerating } from '../../chat/assistantGeneration'
 import type { ChatConversation } from '../../chat/chatTypes'
@@ -8,6 +8,24 @@ import { requestWorkflows } from '../workflowClient'
 const REFRESH_DELAY_MS = 100
 const PROGRESS_REFRESH_DELAY_MS = 1_000
 const RECOVERY_INTERVAL_MS = 5_000
+
+interface ActivitySnapshot {
+  running: boolean
+  activity: WorkflowActivity | null
+}
+
+function latestActivity(
+  instance: WorkflowInstance,
+  snapshot: ActivitySnapshot | undefined
+): WorkflowActivity | null {
+  const incoming = instance.activity
+  if (!snapshot) return incoming ?? null
+  const cached = snapshot.activity
+  if (!cached) return null
+  // A parent reload may carry a newer interval without changing the configuration revision.
+  if (incoming && incoming.startedAt > cached.startedAt) return incoming
+  return cached
+}
 
 function instanceKey(instance: WorkflowInstance): string {
   return JSON.stringify([
@@ -22,13 +40,45 @@ function instanceKey(instance: WorkflowInstance): string {
 export function useWorkflowActivity(
   instances: readonly WorkflowInstance[],
   conversations: readonly ChatConversation[]
-): ReadonlySet<string> {
+): {
+  runningInstanceIds: ReadonlySet<string>
+  activityByInstanceId: ReadonlyMap<string, WorkflowActivity | null>
+} {
   const latestInstances = useRef(instances)
   useLayoutEffect(() => {
     latestInstances.current = instances
   }, [instances])
-  const [activity, setActivity] = useState<ReadonlyMap<string, boolean>>(new Map())
+  const [activity, setActivity] = useState<ReadonlyMap<string, ActivitySnapshot>>(new Map())
   const subscriptionKey = JSON.stringify(instances.map(instanceKey).sort())
+  const intervalKey = JSON.stringify(
+    instances.map((instance) => [
+      instance.id,
+      instance.activity?.startedAt,
+      instance.activity?.completedAt
+    ])
+  )
+  const rootsKey = JSON.stringify(
+    [
+      ...new Set(
+        instances
+          .filter(
+            (instance) =>
+              instance.enabled ||
+              latestActivity(instance, activity.get(instanceKey(instance)))?.completedAt === null
+          )
+          .flatMap((instance) => instance.bindings.map((binding) => binding.conversationId))
+      )
+    ].sort()
+  )
+  const openActivityKey = JSON.stringify(
+    instances
+      .filter(
+        (instance) =>
+          latestActivity(instance, activity.get(instanceKey(instance)))?.completedAt === null
+      )
+      .map((instance) => instance.id)
+      .sort()
+  )
   const localRunningRoots = useMemo(
     () =>
       new Set(
@@ -42,11 +92,10 @@ export function useWorkflowActivity(
   const invalidate = useRef<(() => void) | null>(null)
 
   useEffect(() => {
-    const enabled = latestInstances.current.filter((instance) => instance.enabled)
-    const roots = new Set(
-      enabled.flatMap((instance) => instance.bindings.map((b) => b.conversationId))
-    )
-    if (roots.size === 0) return
+    // Disabling an organization does not stop its already active turns.
+    const roots = new Set<string>(JSON.parse(rootsKey))
+    // Admission freezes activity ownership, so an active interval can outlive every binding.
+    if (roots.size === 0 && openActivityKey === '[]') return
 
     let disposed = false
     let pending = false
@@ -69,14 +118,27 @@ export function useWorkflowActivity(
         if (disposed || !response.instances) return
         const current = new Set(latestInstances.current.map(instanceKey))
         const received = response.instances
-          .map((instance) => [instanceKey(instance), instance.running] as const)
+          .map(
+            (instance) =>
+              [
+                instanceKey(instance),
+                { running: instance.running, activity: instance.activity ?? null }
+              ] as const
+          )
           .filter(([key]) => requested.has(key) && current.has(key))
         setActivity((previous) => {
           const next = new Map([...previous].filter(([key]) => current.has(key)))
-          for (const [key, running] of received) next.set(key, running)
+          for (const [key, snapshot] of received) next.set(key, snapshot)
           if (
             next.size === previous.size &&
-            [...next].every(([key, value]) => previous.get(key) === value)
+            [...next].every(([key, value]) => {
+              const before = previous.get(key)
+              return (
+                before?.running === value.running &&
+                before?.activity?.startedAt === value.activity?.startedAt &&
+                before?.activity?.completedAt === value.activity?.completedAt
+              )
+            })
           )
             return previous
           return next
@@ -133,6 +195,7 @@ export function useWorkflowActivity(
     const interval = setInterval(recover, RECOVERY_INTERVAL_MS)
     window.addEventListener('focus', recover)
     document.addEventListener('visibilitychange', recover)
+    schedule()
     return () => {
       disposed = true
       invalidate.current = null
@@ -144,25 +207,32 @@ export function useWorkflowActivity(
       window.removeEventListener('focus', recover)
       document.removeEventListener('visibilitychange', recover)
     }
-  }, [subscriptionKey])
+  }, [subscriptionKey, rootsKey, openActivityKey])
 
   useEffect(() => {
     // Root messages update immediately; a completion also reconciles a previously running snapshot.
     invalidate.current?.()
-  }, [localActivityKey])
+  }, [localActivityKey, intervalKey])
 
   return useMemo(
-    () =>
-      new Set(
+    () => ({
+      runningInstanceIds: new Set(
         instances
           .filter(
             (instance) =>
               instance.enabled &&
               (instance.bindings.some((binding) => localRunningRoots.has(binding.conversationId)) ||
-                (activity.get(instanceKey(instance)) ?? instance.running))
+                (activity.get(instanceKey(instance))?.running ?? instance.running))
           )
           .map((instance) => instance.id)
       ),
+      activityByInstanceId: new Map(
+        instances.map((instance) => [
+          instance.id,
+          latestActivity(instance, activity.get(instanceKey(instance)))
+        ])
+      )
+    }),
     [instances, localRunningRoots, activity]
   )
 }

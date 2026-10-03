@@ -14,6 +14,13 @@ pub struct BindingInput {
     pub node_id: String,
     pub conversation_id: Option<String>,
 }
+/// The latest uninterrupted interval with at least one admitted member Turn active.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Activity {
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Instance {
@@ -32,6 +39,8 @@ pub struct Instance {
     pub needs_review: bool,
     pub running: bool,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

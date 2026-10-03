@@ -183,6 +183,7 @@ pub fn save_instance_definition(
     Ok(())
 }
 
+mod activity;
 mod management;
 
 fn list(

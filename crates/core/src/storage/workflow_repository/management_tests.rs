@@ -84,6 +84,56 @@ fn workflow_disable_preserves_busy_turns_and_live_edits_preserve_disabled_state(
 }
 
 #[test]
+fn organization_activity_list_uses_durable_admission_and_survives_disabling() {
+    let mut c = setup();
+    let created = call(&mut c, create("instance", None)).unwrap();
+    assert!(created.instances[0].activity.is_none());
+    let chat = created.instances[0].bindings[0].conversation_id.clone();
+    c.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('old-history',?1,'assistant','Old',1,0),('current',?1,'assistant','Working',10,1)",[&chat]).unwrap();
+    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at,completed_at) VALUES ('old-history',?1,'old-run',1,'completed',0,1,9,9)",[&chat]).unwrap();
+    assert!(call(&mut c, json!({"operation":"listInstances"}))
+        .unwrap()
+        .instances[0]
+        .activity
+        .is_none());
+    crate::storage::workflow_execution_repository::bind_run(&mut c, &chat, "current-run")
+        .unwrap()
+        .unwrap();
+    // An admission alone is insufficient until the actual Turn has been durably started.
+    assert!(call(&mut c, json!({"operation":"listInstances"}))
+        .unwrap()
+        .instances[0]
+        .activity
+        .is_none());
+    c.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES ('current',?1,'current-run',1,'in_progress',0,10,10)",[&chat]).unwrap();
+    let current = call(&mut c, json!({"operation":"listInstances"})).unwrap();
+    assert_eq!(
+        current.instances[0].activity,
+        Some(crate::workflow_management::Activity {
+            started_at: 10,
+            completed_at: None
+        })
+    );
+    let disabled = toggle(&mut c, "instance", false, 1).unwrap();
+    assert!(!disabled.instances[0].running);
+    assert_eq!(
+        disabled.instances[0].activity,
+        current.instances[0].activity
+    );
+    c.execute("UPDATE conversation_turn_traces SET terminal_status='completed',completed_at=50,updated_at=100 WHERE run_id='current-run'",[]).unwrap();
+    let settled = call(&mut c, json!({"operation":"listInstances"})).unwrap();
+    assert_eq!(
+        settled.instances[0].activity,
+        Some(crate::workflow_management::Activity {
+            started_at: 10,
+            completed_at: Some(50)
+        })
+    );
+    let json = serde_json::to_value(&settled.instances[0]).unwrap();
+    assert_eq!(json["activity"], json!({"startedAt":10,"completedAt":50}));
+}
+
+#[test]
 fn workflow_only_enabled_instances_reserve_colors_and_enabling_rechecks_occupancy() {
     let mut c = setup();
     let first = call(&mut c, create("first", None)).unwrap();

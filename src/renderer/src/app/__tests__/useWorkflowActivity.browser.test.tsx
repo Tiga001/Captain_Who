@@ -99,8 +99,13 @@ function Harness({
   instances: WorkflowInstance[]
   conversations?: ChatConversation[]
 }) {
-  const running = useWorkflowActivity(instances, conversations)
-  return <output data-testid="activity">{[...running].sort().join(',') || 'idle'}</output>
+  const { runningInstanceIds, activityByInstanceId } = useWorkflowActivity(instances, conversations)
+  return (
+    <>
+      <output data-testid="activity">{[...runningInstanceIds].sort().join(',') || 'idle'}</output>
+      <output data-testid="intervals">{JSON.stringify([...activityByInstanceId])}</output>
+    </>
+  )
 }
 const advance = async (ms = 100) => {
   await act(async () => {
@@ -129,10 +134,118 @@ describe('organization live activity', () => {
       <Harness instances={instances} conversations={[conversation(true)]} />
     )
     await expect.element(view.getByTestId('activity')).toHaveTextContent('workflow-a')
+    expect(view.getByTestId('intervals').element().textContent).toBe(
+      JSON.stringify([
+        ['workflow-a', null],
+        ['disabled', null]
+      ])
+    )
     await advance()
     await view.rerender(<Harness instances={instances} conversations={[conversation()]} />)
     await advance()
     await expect.element(view.getByTestId('activity')).toHaveTextContent('idle')
+  })
+
+  it('keeps durable interval boundaries through failed reads, settlement, a new segment and remount', async () => {
+    const first = { startedAt: 1_000, completedAt: null }
+    const initial = [workflow({ running: true, activity: first })]
+    mocks.request.mockResolvedValue(result(initial))
+    const view = await render(<Harness instances={initial} />)
+    await advance()
+    const interval = () => JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]
+    expect(interval()).toEqual(first)
+    mocks.request.mockRejectedValueOnce(new Error('offline'))
+    emitAgent({ type: 'done', runId: 'run', success: true })
+    await advance()
+    expect(interval()).toEqual(first)
+
+    const ended = { startedAt: 1_000, completedAt: 9_000 }
+    mocks.request.mockResolvedValue(result([workflow({ activity: ended })]))
+    emitAgent({ type: 'done', runId: 'run', success: true })
+    await advance()
+    expect(interval()).toEqual(ended)
+    await expect.element(view.getByTestId('activity')).toHaveTextContent('idle')
+    await advance(10_000)
+    expect(interval()).toEqual(ended)
+
+    const next = { startedAt: 30_000, completedAt: null }
+    const latest = [workflow({ running: true, activity: next })]
+    mocks.request.mockResolvedValue(result(latest))
+    emitCollaboration('chat-a', 'turn_started')
+    await advance()
+    expect(interval()).toEqual(next)
+    await view.unmount()
+    const remounted = await render(<Harness instances={latest} />)
+    expect(JSON.parse(remounted.getByTestId('intervals').element().textContent!)[0][1]).toEqual(
+      next
+    )
+  })
+
+  it('accepts a newer parent interval without a configuration revision change', async () => {
+    const initial = [workflow({ running: true, activity: { startedAt: 1_000, completedAt: null } })]
+    mocks.request.mockResolvedValue(result(initial))
+    const view = await render(<Harness instances={initial} />)
+    await advance()
+    const ended = { startedAt: 1_000, completedAt: 5_000 }
+    await view.rerender(<Harness instances={[workflow({ activity: ended })]} />)
+    // A parent snapshot must not freeze a newer background read of this same interval.
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toEqual(
+      initial[0].activity
+    )
+    const next = { startedAt: 8_000, completedAt: null }
+    await view.rerender(<Harness instances={[workflow({ activity: next })]} />)
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toEqual(next)
+  })
+
+  it('honors an authoritative null activity instead of restoring stale parent timestamps', async () => {
+    const initial = [workflow({ activity: { startedAt: 1_000, completedAt: null } })]
+    mocks.request.mockResolvedValue(result([workflow({ activity: null })]))
+    const view = await render(<Harness instances={initial} />)
+    await advance()
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toBeNull()
+    mocks.request.mockRejectedValue(new Error('offline'))
+    emitAgent({ type: 'done', runId: 'run', success: true })
+    await advance()
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toBeNull()
+  })
+
+  it('continues refreshing a disabled organization until its already active interval settles', async () => {
+    const open = workflow({ enabled: false, activity: { startedAt: 1_000, completedAt: null } })
+    mocks.request.mockResolvedValue(result([open]))
+    const view = await render(<Harness instances={[open]} />)
+    await advance()
+    await expect.element(view.getByTestId('activity')).toHaveTextContent('idle')
+    expect(mocks.agents.size).toBe(1)
+    const ended = { startedAt: 1_000, completedAt: 9_000 }
+    mocks.request.mockResolvedValue(result([{ ...open, activity: ended }]))
+    emitCollaboration('chat-a', 'turn_updated')
+    await advance(1_000)
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toEqual(ended)
+    expect(mocks.agents.size).toBe(0)
+    mocks.request.mockClear()
+    await advance(10_000)
+    expect(mocks.request).not.toHaveBeenCalled()
+  })
+
+  it('settles an open interval after all current member bindings have been removed', async () => {
+    const open = workflow({
+      enabled: false,
+      bindings: [],
+      activity: { startedAt: 1_000, completedAt: null }
+    })
+    mocks.request.mockResolvedValue(result([open]))
+    const view = await render(<Harness instances={[open]} />)
+    await advance()
+    expect(mocks.agents.size).toBe(1)
+    const ended = { startedAt: 1_000, completedAt: 8_000 }
+    mocks.request.mockResolvedValue(result([{ ...open, activity: ended }]))
+    // Recovery does not depend on the removed conversations still appearing in the binding set.
+    await advance(5_000)
+    expect(JSON.parse(view.getByTestId('intervals').element().textContent!)[0][1]).toEqual(ended)
+    expect(mocks.agents.size).toBe(0)
+    mocks.request.mockClear()
+    await advance(10_000)
+    expect(mocks.request).not.toHaveBeenCalled()
   })
 
   it('tracks metadata-only and child turns, replacing an initially running snapshot when all turns settle', async () => {

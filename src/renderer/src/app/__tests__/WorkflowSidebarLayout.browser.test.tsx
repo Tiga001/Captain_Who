@@ -13,7 +13,10 @@ vi.mock('../../host/hostClient', () => ({
 }))
 vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
 vi.mock('../../features/workflows/project/useWorkflowActivity', () => ({
-  useWorkflowActivity: () => new Set<string>()
+  useWorkflowActivity: (items: WorkflowInstance[]) => ({
+    runningInstanceIds: new Set<string>(),
+    activityByInstanceId: new Map(items.map((item) => [item.id, item.activity ?? null]))
+  })
 }))
 vi.mock('../../features/workflows/project/useWorkflowMonitor', () => ({
   useWorkflowMonitor: () => ({
@@ -132,6 +135,27 @@ function expectInsideSidebar(element: Element) {
   expect(rect.top).toBeGreaterThanOrEqual(bounds.top - 1)
   expect(rect.bottom).toBeLessThanOrEqual(bounds.bottom + 1)
 }
+
+it('keeps the full elapsed label and actions inside a narrow card with a long organization name', async () => {
+  const name = '为多个研究项目持续整理和验证分析结果的组织'
+  service.request.mockResolvedValue({
+    records: [record],
+    instances: [{ ...instance, name, activity: { startedAt: 1_000, completedAt: 94_028_000 } }],
+    issues: []
+  })
+  await render(sidebar(360))
+  await expect.element(page.getByText('已连续运行 1d 2h 7m 7s', { exact: true })).toBeVisible()
+  const card = document.querySelector<HTMLElement>('.project-workflows__instance')!
+  const label = card.querySelector<HTMLElement>('.project-workflows__elapsed')!
+  expectInsideSidebar(card)
+  expectInsideSidebar(label)
+  expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth)
+  expect(label.scrollWidth).toBeLessThanOrEqual(label.clientWidth)
+  for (const button of card.querySelectorAll('button')) expectInsideSidebar(button)
+  expect(label.getBoundingClientRect().right).toBeLessThanOrEqual(
+    card.querySelector('[role="switch"]')!.getBoundingClientRect().left
+  )
+})
 
 it.each([360, 560])(
   'keeps home and activation controls reachable in a %ipx sidebar',

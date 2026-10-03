@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
 import { page } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import type { ChatMessage, ChatWorkflowDeliveryTimelineItem } from '../chatTypes'
@@ -90,11 +91,35 @@ function conversationMessage(collapsed = false): ChatMessage {
     }
   }
 }
-function Fixture({ item }: { item: ChatMessage }) {
+function Fixture({
+  item,
+  onUiStateChange
+}: {
+  item: ChatMessage
+  onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+}) {
   return (
     <div style={{ width: 820, padding: 32 }} className="chat-conversation-page__messages">
-      <ChatMessageItem message={item} showTokenUsageDetails={false} />
+      <ChatMessageItem
+        message={item}
+        onUiStateChange={onUiStateChange}
+        showTokenUsageDetails={false}
+      />
     </div>
+  )
+}
+function InteractiveFixture({ item }: { item: ChatMessage }) {
+  const [uiState, setUiState] = useState(item.uiState)
+  return (
+    <Fixture
+      item={{ ...item, uiState }}
+      onUiStateChange={(_, nextUiState) => setUiState(nextUiState)}
+    />
+  )
+}
+function processHeader(container: HTMLElement) {
+  return page.elementLocator(
+    container.querySelector<HTMLButtonElement>('.agent-run__elapsed-button')!
   )
 }
 function visibleOrder(container: HTMLElement) {
@@ -122,6 +147,7 @@ describe('organization mail inside a run', () => {
       ...fixture,
       status: 'pending',
       content: '正在接着处理',
+      uiState: { timelineCollapsed: true },
       agentRun: {
         ...fixture.agentRun!,
         status: 'running',
@@ -167,18 +193,13 @@ describe('organization mail inside a run', () => {
     expect(visibleOrder(view.container).at(-1)).toBe('最终回复')
   })
 
-  it('keeps successive mail and replies in order, including collapsed technical activity and history restore', async () => {
+  it('keeps only mail and the final answer when execution details are collapsed and restored', async () => {
     const item = conversationMessage(true)
     const view = await render(<Fixture item={item} />)
-    expect(visibleOrder(view.container)).toEqual([
-      '接手之前的回复',
-      '实际邮件1',
-      '收到第一封，继续处理',
-      '实际邮件2',
-      '最终回复'
-    ])
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2', '最终回复'])
     expect(view.container.querySelectorAll('article')).toHaveLength(1)
     expect(view.container.querySelectorAll('.chat-guidance')).toHaveLength(0)
+    expect(view.container.querySelector('.agent-activity--workflow-query')).toBeNull()
     expect(view.container.textContent).not.toContain('公共背景')
     const restored = {
       ...item,
@@ -190,6 +211,18 @@ describe('organization mail inside a run', () => {
       }
     }
     await view.rerender(<Fixture item={restored} />)
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2', '最终回复'])
+    expect(view.container.querySelector('.agent-activity--workflow-query')).toBeNull()
+  })
+
+  it('restores the full sequence when the process header is expanded and hides narration again when collapsed', async () => {
+    const view = await render(<InteractiveFixture item={conversationMessage(true)} />)
+    const header = processHeader(view.container)
+    await expect.element(header).toHaveAttribute('aria-expanded', 'false')
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2', '最终回复'])
+
+    await header.click()
+    await expect.element(header).toHaveAttribute('aria-expanded', 'true')
     expect(visibleOrder(view.container)).toEqual([
       '接手之前的回复',
       '实际邮件1',
@@ -197,6 +230,68 @@ describe('organization mail inside a run', () => {
       '实际邮件2',
       '最终回复'
     ])
+    expect(view.container.querySelector('.agent-activity--workflow-query')).not.toBeNull()
+
+    await header.click()
+    await expect.element(header).toHaveAttribute('aria-expanded', 'false')
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2', '最终回复'])
+    expect(view.container.querySelector('.agent-activity--workflow-query')).toBeNull()
+    expect(view.container.querySelectorAll('.workflow-delivery')).toHaveLength(2)
+    expect(view.container.querySelectorAll('.chat-guidance')).toHaveLength(0)
+  })
+
+  it.each(['completed', 'cancelled'] as const)(
+    'does not promote narration into a final answer after a %s run without one',
+    async (status) => {
+      const fixture = conversationMessage(true)
+      const view = await render(
+        <InteractiveFixture
+          item={{
+            ...fixture,
+            // Stopped records can retain the delta accumulator, but it is not a final answer.
+            content: status === 'cancelled' ? '收到第一封，继续处理' : '',
+            agentRun: { ...fixture.agentRun!, status }
+          }}
+        />
+      )
+      expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2'])
+      await processHeader(view.container).click()
+      expect(visibleOrder(view.container)).toEqual([
+        '接手之前的回复',
+        '实际邮件1',
+        '收到第一封，继续处理',
+        '实际邮件2'
+      ])
+      await processHeader(view.container).click()
+      expect(visibleOrder(view.container)).toEqual(['实际邮件1', '实际邮件2'])
+    }
+  )
+
+  it('retains a failed run public partial answer even when the hidden timeline contains the same text', async () => {
+    const fixture = conversationMessage(true)
+    const partial = '已完成初步分析，连接中断前保留这些结果。'
+    const view = await render(
+      <InteractiveFixture
+        item={{
+          ...fixture,
+          content: partial,
+          agentRun: {
+            ...fixture.agentRun!,
+            status: 'failed',
+            interruption: { reason: 'stream_interrupted' },
+            timeline: [
+              mail(1),
+              { id: 'partial', type: 'message', content: partial, traceSequence: 3 }
+            ]
+          }
+        }}
+      />
+    )
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', partial])
+    await processHeader(view.container).click()
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', partial])
+    await processHeader(view.container).click()
+    expect(visibleOrder(view.container)).toEqual(['实际邮件1', partial])
   })
 
   it('shows the trusted source, expands and copies each mail independently', async () => {

@@ -35,13 +35,22 @@ fn instance_rows(c: &Connection, id: Option<&str>) -> Result<Vec<Instance>, Erro
                 enabled: r.get(9)?,
                 project_id: r.get(10)?,
                 bindings: vec![],
+                activity: None,
             })
         })
         .map_err(storage_error)?;
     let mut result: Vec<Instance> = rows
         .collect::<rusqlite::Result<_>>()
         .map_err(storage_error)?;
+    let mut activities = super::activity::latest_for_instances(
+        c,
+        &result
+            .iter()
+            .map(|instance| instance.id.as_str())
+            .collect::<Vec<_>>(),
+    )?;
     for instance in &mut result {
+        instance.activity = activities.remove(&instance.id);
         let mut query = c.prepare("SELECT node_id, conversation_id FROM workflow_instance_bindings WHERE instance_id=?1 ORDER BY node_id").map_err(storage_error)?;
         instance.bindings = query
             .query_map([&instance.id], |r| {
