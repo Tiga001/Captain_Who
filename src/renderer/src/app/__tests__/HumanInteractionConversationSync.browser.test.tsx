@@ -439,22 +439,70 @@ it('merges authoritative terminal progress with a favorite toggled during the re
   await screen.unmount()
 })
 
-it('refreshes loaded chats on Core reconnect and the active chat on focus without hydrating sidebar-only chats', async () => {
+it('reconnects the active and unfinished chats without reloading a large idle history or sidebar-only chats', async () => {
   const loaded = conversation(),
-    other = conversation('other'),
+    other = conversation('other', [assistant()]),
+    idle = Array.from({ length: 80 }, (_, index) => conversation(`idle-${index}`)),
     unloaded = { ...conversation('sidebar'), messagesLoaded: false }
-  const screen = await render(<Harness initial={[loaded, other, unloaded]} onRender={() => {}} />)
+  const screen = await render(
+    <Harness initial={[loaded, ...idle, other, unloaded]} onRender={() => {}} />
+  )
   await expect.poll(() => client.load).toHaveBeenCalledTimes(1)
   client.load.mockClear()
   for (const listener of client.resyncListeners) listener()
   await expect.poll(() => client.load).toHaveBeenCalledTimes(2)
-  expect(client.load.mock.calls.map(([id]) => id).sort()).toEqual(['chat', 'other'])
+  expect(client.load.mock.calls.map(([id]) => id)).toEqual(['chat', 'other'])
   client.load.mockClear()
   window.dispatchEvent(new Event('focus'))
   await expect.poll(() => client.load).toHaveBeenCalledExactlyOnceWith('chat')
   await screen.unmount()
   expect(client.requestListeners.size).toBe(0)
   expect(client.resyncListeners.size).toBe(0)
+})
+
+it('keeps in-flight reads across navigation and refreshes idle history when it becomes active', async () => {
+  const first = deferred<ChatConversation | null>()
+  const initial = [conversation(), conversation('other')]
+  client.load.mockReturnValueOnce(first.promise)
+  const onRender = () => {}
+  const screen = await render(<Harness initial={initial} onRender={onRender} />)
+  await expect.poll(() => client.load).toHaveBeenCalledTimes(1)
+  await screen.rerender(
+    <Harness initial={initial} activeConversationId="other" onRender={onRender} />
+  )
+  await expect.poll(() => client.load).toHaveBeenCalledTimes(2)
+  expect(client.load.mock.calls[1]).toEqual(['other'])
+  await screen.rerender(<Harness initial={initial} onRender={onRender} />)
+  expect(client.load).toHaveBeenCalledTimes(2)
+  first.resolve(initial[0])
+  await expect.poll(() => client.load).toHaveBeenCalledTimes(3)
+  expect(client.load.mock.calls[2]).toEqual(['chat'])
+  expect(client.requestListeners.size).toBe(1)
+  await screen.unmount()
+})
+
+it('coalesces updates during a failed read into its backoff instead of retrying immediately', async () => {
+  const first = deferred<ChatConversation | null>()
+  client.load.mockReturnValueOnce(first.promise)
+  const screen = await render(<Harness initial={[conversation()]} onRender={() => {}} />)
+  await expect.poll(() => client.load).toHaveBeenCalledTimes(1)
+  vi.useFakeTimers()
+  try {
+    notify()
+    first.reject(new Error('Read queue overloaded'))
+    await vi.advanceTimersByTimeAsync(0)
+    notify()
+    notify()
+    await vi.advanceTimersByTimeAsync(249)
+    expect(client.load).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(client.load).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(client.load).toHaveBeenCalledTimes(2)
+  } finally {
+    vi.useRealTimers()
+    await screen.unmount()
+  }
 })
 
 it('retries a reconnect read failure, but discards late responses after unmount', async () => {

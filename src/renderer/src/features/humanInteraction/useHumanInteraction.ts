@@ -80,34 +80,44 @@ export function useHumanInteraction({
     }
   }, [])
   const accessRef = useRef({ controller, conversationId, hasApproval, readOnly, approvalRefreshed })
+  const accessRevision = useRef(0)
+  useLayoutEffect(() => {
+    accessRevision.current += 1
+  }, [controller, conversationId, hasApproval, readOnly])
   useLayoutEffect(() => {
     accessRef.current = { controller, conversationId, hasApproval, readOnly, approvalRefreshed }
   }, [controller, conversationId, hasApproval, readOnly, approvalRefreshed])
   useEffect(() => controller?.connect(), [controller])
-  const refresh = useCallback(async () => {
-    if (controller && conversationId && !readOnly) {
-      const succeeded = await controller.refresh(conversationId)
-      const access = accessRef.current
-      if (
-        mountedRef.current &&
-        succeeded &&
-        access.controller === controller &&
-        access.conversationId === conversationId &&
-        !access.hasApproval &&
-        !access.readOnly
-      )
-        setRefreshedScope({ controller, conversationId })
-    }
-  }, [controller, conversationId, readOnly])
+  const refreshCurrent = useCallback(
+    async (background: boolean) => {
+      if (controller && conversationId && !readOnly) {
+        const revision = accessRevision.current
+        const succeeded = await controller.refresh(conversationId, { background, priority: true })
+        const access = accessRef.current
+        if (
+          mountedRef.current &&
+          succeeded &&
+          revision === accessRevision.current &&
+          access.controller === controller &&
+          access.conversationId === conversationId &&
+          !access.hasApproval &&
+          !access.readOnly
+        )
+          setRefreshedScope({ controller, conversationId })
+      }
+    },
+    [controller, conversationId, readOnly]
+  )
+  const refresh = useCallback(() => refreshCurrent(false), [refreshCurrent])
   useEffect(() => {
     setRefreshedScope(null)
-    if (!hasApproval) void refresh()
+    if (!hasApproval && document.visibilityState !== 'hidden') void refresh()
   }, [hasApproval, refresh])
   useEffect(() => {
     const refreshVisible = () => {
-      if (document.visibilityState !== 'hidden') void refresh()
+      if (!hasApproval && document.visibilityState !== 'hidden') void refreshCurrent(true)
     }
-    const unsubscribeResync = api?.onResync(() => void refresh())
+    const unsubscribeResync = api?.onResync(refreshVisible)
     window.addEventListener('focus', refreshVisible)
     window.addEventListener('online', refreshVisible)
     document.addEventListener('visibilitychange', refreshVisible)
@@ -117,7 +127,7 @@ export function useHumanInteraction({
       window.removeEventListener('online', refreshVisible)
       document.removeEventListener('visibilitychange', refreshVisible)
     }
-  }, [api, refresh])
+  }, [api, hasApproval, refreshCurrent])
   const requests = useMemo(
     () =>
       Object.values(state.requests)

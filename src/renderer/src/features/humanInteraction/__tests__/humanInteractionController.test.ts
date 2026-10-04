@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { HumanInteractionController } from '../humanInteractionController'
 import {
   humanInteractionResponseDisplay,
@@ -105,17 +105,83 @@ describe('independent human interaction controller', () => {
     controller.merge(old)
     expect(Object.keys(controller.getSnapshot().requests)).toEqual(['created-during-scan'])
   })
-  it('late overlapping refreshes cannot replace a newer result or pagination status', async () => {
+  it('coalesces overlapping refreshes into one trailing scan without deleting newer facts', async () => {
     const host = fakeHost([question()]),
       controller = new HumanInteractionController(host.api)
     const old = deferred<HostInvocationResult<HumanInteractionListOutput>>()
     host.api.listRequests.mockReturnValueOnce(old.promise)
+    controller.merge(question())
     const first = controller.refresh('chat')
-    await controller.refresh('chat')
+    const overlapping = Array.from({ length: 80 }, () => controller.refresh('chat'))
+    expect(overlapping.every((refresh) => refresh === first)).toBe(true)
+    expect(host.api.listRequests).toHaveBeenCalledTimes(1)
     old.resolve({ ok: true, value: { items: [], nextCursor: null } })
     await first
+    expect(host.api.listRequests).toHaveBeenCalledTimes(2)
     expect(controller.getSnapshot().requests.question.status).toBe('open')
     expect(controller.getSnapshot().loads.chat.status).toBe('ready')
+  })
+  it('bounds cross-conversation reads and prioritizes the latest visible conversation over previous visits', async () => {
+    const host = fakeHost(),
+      controller = new HumanInteractionController(host.api)
+    const pending = new Map<
+      string,
+      ReturnType<typeof deferred<HostInvocationResult<HumanInteractionListOutput>>>
+    >()
+    let active = 0,
+      peak = 0
+    host.api.listRequests.mockImplementation(({ conversationId }) => {
+      const page = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+      pending.set(conversationId, page)
+      peak = Math.max(peak, ++active)
+      return page.promise.finally(() => {
+        active -= 1
+      })
+    })
+    const reads = ['first', 'second', 'background', 'visible'].map((id) =>
+      controller.refresh(id, { background: true, priority: true })
+    )
+    expect([...pending.keys()]).toEqual(['first', 'second'])
+    const complete = (id: string) =>
+      pending.get(id)!.resolve({ ok: true, value: { items: [], nextCursor: null } })
+    complete('first')
+    await reads[0]
+    expect([...pending.keys()]).toEqual(['first', 'second', 'visible'])
+    complete('visible')
+    await reads[3]
+    expect([...pending.keys()]).toEqual(['first', 'second', 'visible', 'background'])
+    complete('second')
+    complete('background')
+    await Promise.all(reads)
+    expect(peak).toBe(2)
+  })
+  it('backs off automatic retry bursts but permits explicit retry and never retries without demand', async () => {
+    vi.useFakeTimers()
+    try {
+      const host = fakeHost([question()]),
+        controller = new HumanInteractionController(host.api)
+      host.api.listRequests.mockRejectedValueOnce(new Error('unavailable'))
+      expect(await controller.refresh('chat')).toBe(false)
+      const background = controller.refresh('chat', { background: true })
+      for (let index = 0; index < 80; index += 1)
+        expect(controller.refresh('chat', { background: true })).toBe(background)
+      await vi.advanceTimersByTimeAsync(499)
+      expect(host.api.listRequests).toHaveBeenCalledTimes(1)
+      host.api.listRequests.mockRejectedValueOnce(new Error('still unavailable'))
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await background).toBe(false)
+      const delayed = controller.refresh('chat', { background: true })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(host.api.listRequests).toHaveBeenCalledTimes(2)
+      const manual = controller.refresh('chat')
+      expect(manual).toBe(delayed)
+      expect(await manual).toBe(true)
+      expect(host.api.listRequests).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(host.api.listRequests).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('retains pages and draft text across selection, minimization and newer async preemption', () => {
     const host = fakeHost(),

@@ -1,5 +1,6 @@
-import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
+import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import type { ChatConversation, ChatMessage } from '../features/chat/chatTypes'
+import { isAssistantMessageGenerating } from '../features/chat/assistantGeneration'
 import { upsertWorkflowDeliveryTimelineItem } from '../features/agentRun/workflowDeliveryTimeline'
 import { loadConversation } from '../features/storage/storageClient'
 import { hostClient } from '../host/hostClient'
@@ -98,6 +99,8 @@ export function useHumanInteractionConversationSync({
   conversationsRef: MutableRefObject<ChatConversation[]>
   setConversations: Dispatch<SetStateAction<ChatConversation[]>>
 }) {
+  const activeIdRef = useRef(activeConversationId)
+  const refreshRef = useRef<((id: string) => Promise<void>) | null>(null)
   useEffect(() => {
     const api = hostClient.humanInteraction
     if (!api) return
@@ -107,6 +110,9 @@ export function useHumanInteractionConversationSync({
     const timers = new Map<string, number>()
     const refresh = async (conversationId: string, attempt = 0): Promise<void> => {
       if (disposed) return
+      // An already scheduled retry will read the latest state. Notifications must not bypass
+      // its backoff or leave an additional timer behind after a successful refresh.
+      if (timers.has(conversationId)) return
       if (pending.has(conversationId)) {
         dirty.add(conversationId)
         return
@@ -116,8 +122,10 @@ export function useHumanInteractionConversationSync({
       )
       if (!baseline || baseline.messagesLoaded === false) return
       pending.add(conversationId)
+      let succeeded = false
       try {
         const stored = await loadConversation(conversationId)
+        succeeded = true
         if (!disposed && stored)
           setConversations((current) =>
             current.map((conversation) =>
@@ -141,29 +149,50 @@ export function useHumanInteractionConversationSync({
           )
       } finally {
         pending.delete(conversationId)
-        if (dirty.delete(conversationId)) void refresh(conversationId)
+        const needsRefresh = dirty.delete(conversationId)
+        if (needsRefresh && succeeded) void refresh(conversationId)
       }
     }
+    refreshRef.current = refresh
     const unsubscribe = api.onRequestChanged((request) => {
       void refresh(request.conversationId)
     })
     const resync = () => {
-      for (const conversation of conversationsRef.current) void refresh(conversation.id)
+      // Prioritize the visible chat, then reconcile unfinished runs. Historical idle chats
+      // refresh when opened; reconnecting must not reload every chat ever visited.
+      if (activeIdRef.current) void refresh(activeIdRef.current)
+      for (const conversation of conversationsRef.current) {
+        if (
+          conversation.id !== activeIdRef.current &&
+          conversation.messages.some(isAssistantMessageGenerating)
+        )
+          void refresh(conversation.id)
+      }
     }
     const unsubscribeResync = api.onResync?.(resync)
     const focus = () => {
-      if (activeConversationId) void refresh(activeConversationId)
+      if (activeIdRef.current && document.visibilityState !== 'hidden')
+        void refresh(activeIdRef.current)
     }
     window.addEventListener('focus', focus)
     window.addEventListener('online', focus)
-    if (activeConversationId) void refresh(activeConversationId)
+    document.addEventListener('visibilitychange', focus)
     return () => {
       disposed = true
+      refreshRef.current = null
       unsubscribe()
       unsubscribeResync?.()
       for (const timer of timers.values()) window.clearTimeout(timer)
       window.removeEventListener('focus', focus)
       window.removeEventListener('online', focus)
+      document.removeEventListener('visibilitychange', focus)
     }
+  }, [conversationsRef, setConversations])
+
+  // Keep the in-flight and retry maps when navigation changes, so switching chats cannot
+  // abandon a read only to launch another copy of it through a new subscription.
+  useEffect(() => {
+    activeIdRef.current = activeConversationId
+    if (activeConversationId) void refreshRef.current?.(activeConversationId)
   }, [activeConversationId, conversationsRef, setConversations])
 }

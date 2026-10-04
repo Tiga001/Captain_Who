@@ -104,6 +104,128 @@ it('refreshes on window focus and Core reconnect without restoring another windo
   expect(host.resyncListeners.size).toBe(0)
 })
 
+it('resync reads only the visible conversation and revisiting cached conversations refreshes them on demand', async () => {
+  const host = fakeHost([question()])
+  let result!: HumanInteractionControllerView
+  const onRender = (value: HumanInteractionControllerView) => {
+    result = value
+  }
+  const screen = await render(<Harness api={host.api} onRender={onRender} />)
+  await expect.poll(() => result.activeBatch?.requestId).toBe('question')
+  for (let index = 0; index < 8; index += 1) {
+    await screen.rerender(
+      <Harness api={host.api} onRender={onRender} conversationId={`visited-${index}`} />
+    )
+    await expect.poll(() => result.status).toBe('ready')
+  }
+  host.database.set('question', { ...question(), status: 'cancelled', revision: 1, updatedAt: 20 })
+  host.api.listRequests.mockClear()
+  for (const resync of host.resyncListeners) resync()
+  await expect.poll(() => host.api.listRequests.mock.calls.length).toBe(1)
+  expect(host.api.listRequests.mock.calls[0][0].conversationId).toBe('visited-7')
+  await screen.rerender(<Harness api={host.api} onRender={onRender} />)
+  await expect.poll(() => result.requests[0]?.status).toBe('cancelled')
+  expect(result.activeBatch).toBeNull()
+  await screen.unmount()
+})
+
+it('defers reconnect reads while hidden and refreshes on becoming visible', async () => {
+  const host = fakeHost([question()])
+  let result!: HumanInteractionControllerView
+  const visibility = vi.spyOn(document, 'visibilityState', 'get')
+  const screen = await render(
+    <Harness
+      api={host.api}
+      onRender={(value) => {
+        result = value
+      }}
+    />
+  )
+  try {
+    await expect.poll(() => result.activeBatch?.requestId).toBe('question')
+    host.api.listRequests.mockClear()
+    visibility.mockReturnValue('hidden')
+    for (const resync of host.resyncListeners) resync()
+    window.dispatchEvent(new Event('focus'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(host.api.listRequests).not.toHaveBeenCalled()
+    host.database.set('question', {
+      ...question(),
+      status: 'cancelled',
+      revision: 1,
+      updatedAt: 20
+    })
+    visibility.mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await expect.poll(() => result.requests[0]?.status).toBe('cancelled')
+    expect(host.api.listRequests).toHaveBeenCalledTimes(1)
+  } finally {
+    visibility.mockRestore()
+    await screen.unmount()
+  }
+})
+
+it('shares in-flight reads between hook owners and applies the final refresh after a reconnect burst', async () => {
+  const host = fakeHost([question()])
+  const first = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+  const latest = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+  host.api.listRequests.mockReturnValueOnce(first.promise).mockReturnValueOnce(latest.promise)
+  let left!: HumanInteractionControllerView, right!: HumanInteractionControllerView
+  const screen = await render(
+    <>
+      <Harness
+        api={host.api}
+        onRender={(value) => {
+          left = value
+        }}
+      />
+      <Harness
+        api={host.api}
+        onRender={(value) => {
+          right = value
+        }}
+      />
+    </>
+  )
+  expect(host.api.listRequests).toHaveBeenCalledTimes(1)
+  for (let index = 0; index < 80; index += 1) for (const resync of host.resyncListeners) resync()
+  expect(host.api.listRequests).toHaveBeenCalledTimes(1)
+  first.resolve({ ok: true, value: { items: [question()], nextCursor: null } })
+  await expect.poll(() => host.api.listRequests.mock.calls.length).toBe(2)
+  expect(left.canInteract).toBe(false)
+  expect(right.canInteract).toBe(false)
+  const settled = { ...question(), status: 'cancelled' as const, revision: 1, updatedAt: 20 }
+  latest.resolve({ ok: true, value: { items: [settled], nextCursor: null } })
+  await expect.poll(() => left.canInteract && right.canInteract).toBe(true)
+  expect(left.activeBatch).toBeNull()
+  expect(right.activeBatch).toBeNull()
+  expect(left.requests[0].status).toBe('cancelled')
+  expect(right.requests[0].status).toBe('cancelled')
+  expect(host.api.listRequests).toHaveBeenCalledTimes(2)
+  await screen.unmount()
+})
+
+it('requires the trailing post-approval scan when approval changes during an existing read', async () => {
+  const host = fakeHost([question()])
+  const before = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+  const after = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+  host.api.listRequests.mockReturnValueOnce(before.promise).mockReturnValueOnce(after.promise)
+  let result!: HumanInteractionControllerView
+  const onRender = (value: HumanInteractionControllerView) => {
+    result = value
+  }
+  const screen = await render(<Harness api={host.api} onRender={onRender} />)
+  await screen.rerender(<Harness api={host.api} onRender={onRender} hasApproval />)
+  await screen.rerender(<Harness api={host.api} onRender={onRender} />)
+  before.resolve({ ok: true, value: { items: [question()], nextCursor: null } })
+  await expect.poll(() => host.api.listRequests.mock.calls.length).toBe(2)
+  expect(result.canInteract).toBe(false)
+  expect(result.activeBatch).toBeNull()
+  after.resolve({ ok: true, value: { items: [question()], nextCursor: null } })
+  await expect.poll(() => result.activeBatch?.requestId).toBe('question')
+  await screen.unmount()
+})
+
 it('retains in-memory draft and selection after the panel owner unmounts and remounts', async () => {
   const host = fakeHost([question()])
   let result!: HumanInteractionControllerView

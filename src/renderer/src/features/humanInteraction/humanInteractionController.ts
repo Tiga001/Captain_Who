@@ -46,6 +46,16 @@ const idleOperation: HumanInteractionOperation = {
   isDraftLocked: false,
   error: null
 }
+interface RefreshJob {
+  promise: Promise<boolean>
+  resolve: (succeeded: boolean) => void
+  running: boolean
+  again: boolean
+  background: boolean
+  priority: number
+  readyAt: number
+}
+const MAX_CONCURRENT_REFRESHES = 2
 
 export class HumanInteractionController {
   private state: HumanInteractionControllerSnapshot = {
@@ -60,7 +70,11 @@ export class HumanInteractionController {
   private readonly deleted = new Set<string>()
   private readonly touched = new Map<string, number>()
   private serial = 0
-  private readonly generations = new Map<string, number>()
+  private readonly refreshes = new Map<string, RefreshJob>()
+  private readonly refreshFailures = new Map<string, { count: number; retryAt: number }>()
+  private activeRefreshes = 0
+  private refreshPriority = 0
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private readonly attempts = new Map<string, Attempt>()
   private readonly submissionIds = new Map<string, Map<string, string>>()
   private readonly inFlight = new Map<string, Promise<void>>()
@@ -83,14 +97,9 @@ export class HumanInteractionController {
     this.references += 1
     if (this.references === 1) {
       const requests = this.api.onRequestChanged((request) => this.merge(request))
-      const resync = this.api.onResync?.(() => {
-        for (const conversationId of Object.keys(this.state.loads))
-          void this.refresh(conversationId)
-      })
-      this.cleanup = () => {
-        requests()
-        resync?.()
-      }
+      // The mounted hook refreshes its visible conversation on resync. Cached conversations
+      // are read when visited again, rather than fanning out reads for the entire session.
+      this.cleanup = requests
     }
     return () => {
       this.references -= 1
@@ -137,9 +146,81 @@ export class HumanInteractionController {
     }
     this.publish(patch)
   }
-  async refresh(conversationId: string): Promise<boolean> {
-    const generation = (this.generations.get(conversationId) ?? 0) + 1
-    this.generations.set(conversationId, generation)
+  refresh(
+    conversationId: string,
+    { background = false, priority = false }: { background?: boolean; priority?: boolean } = {}
+  ): Promise<boolean> {
+    const existing = this.refreshes.get(conversationId)
+    if (existing) {
+      // Invalidation during a scan requires one more complete scan, not a parallel request.
+      if (existing.running) existing.again = true
+      if (priority) existing.priority = ++this.refreshPriority
+      if (!background) {
+        existing.background = false
+        existing.readyAt = 0
+      }
+      this.drainRefreshes()
+      return existing.promise
+    }
+    let resolve!: RefreshJob['resolve']
+    const promise = new Promise<boolean>((settle) => {
+      resolve = settle
+    })
+    this.refreshes.set(conversationId, {
+      promise,
+      resolve,
+      running: false,
+      again: false,
+      background,
+      priority: priority ? ++this.refreshPriority : 0,
+      readyAt: background ? (this.refreshFailures.get(conversationId)?.retryAt ?? 0) : 0
+    })
+    this.drainRefreshes()
+    return promise
+  }
+  private drainRefreshes(): void {
+    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer)
+    this.refreshTimer = null
+    const queued = [...this.refreshes].filter(([, job]) => !job.running)
+    queued.sort((a, b) => b[1].priority - a[1].priority)
+    for (const [conversationId, job] of queued) {
+      if (this.activeRefreshes >= MAX_CONCURRENT_REFRESHES) break
+      if (job.readyAt > Date.now()) continue
+      job.running = true
+      job.background = true
+      this.activeRefreshes += 1
+      void this.readConversation(conversationId, job).then((succeeded) => {
+        this.activeRefreshes -= 1
+        job.running = false
+        if (succeeded) this.refreshFailures.delete(conversationId)
+        else {
+          const count = (this.refreshFailures.get(conversationId)?.count ?? 0) + 1
+          this.refreshFailures.set(conversationId, {
+            count,
+            retryAt: Date.now() + Math.min(30_000, 500 * 2 ** Math.min(count - 1, 6))
+          })
+        }
+        if (job.again) {
+          job.again = false
+          job.readyAt = job.background
+            ? (this.refreshFailures.get(conversationId)?.retryAt ?? 0)
+            : 0
+        } else {
+          this.refreshes.delete(conversationId)
+          job.resolve(succeeded)
+        }
+        this.drainRefreshes()
+      })
+    }
+    if (this.activeRefreshes < MAX_CONCURRENT_REFRESHES) {
+      const next = [...this.refreshes.values()]
+        .filter((job) => !job.running)
+        .reduce((earliest, job) => Math.min(earliest, job.readyAt), Infinity)
+      if (Number.isFinite(next))
+        this.refreshTimer = setTimeout(() => this.drainRefreshes(), Math.max(0, next - Date.now()))
+    }
+  }
+  private async readConversation(conversationId: string, job: RefreshJob): Promise<boolean> {
     const started = this.serial
     this.publish({
       loads: { ...this.state.loads, [conversationId]: { status: 'loading', error: null } }
@@ -152,7 +233,6 @@ export class HumanInteractionController {
         const page = parseHumanInteractionListOutput(
           unwrapHostInvocation(await this.api.listRequests({ conversationId, cursor, limit: 100 }))
         )
-        if (this.generations.get(conversationId) !== generation) return false
         for (const request of page.items) {
           if (request.conversationId !== conversationId)
             throw new Error('Question list ownership mismatch')
@@ -163,6 +243,9 @@ export class HumanInteractionController {
         if (cursor && cursors.has(cursor)) throw new Error('Question list cursor repeated')
         if (cursor) cursors.add(cursor)
       } while (cursor)
+      // A newer refresh is queued. Do not tombstone facts from this older cursor window or
+      // authorize post-approval interaction until the trailing scan has completed.
+      if (job.again) return true
       // Only a complete, successful scan can remove missing facts. Notifications received during
       // the scan are newer than its first page and cannot be erased by that page's cursor window.
       const requests = { ...this.state.requests }
@@ -182,7 +265,6 @@ export class HumanInteractionController {
       })
       return true
     } catch {
-      if (this.generations.get(conversationId) !== generation) return false
       this.publish({
         loads: { ...this.state.loads, [conversationId]: { status: 'error', error: 'load_failed' } }
       })
