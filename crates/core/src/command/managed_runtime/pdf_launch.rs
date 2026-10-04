@@ -28,6 +28,7 @@ pub(super) struct ManagedPdfToolPaths<'a> {
 
 #[derive(Debug)]
 pub(super) enum ManagedPdfShellLaunchError {
+    #[cfg(target_os = "macos")]
     InvalidCommand(String),
     Unavailable(String),
 }
@@ -57,10 +58,10 @@ pub(super) fn prepare_managed_pdf_shell_launch(
             pdf_cli,
             ripgrep,
         );
-        return Err(ManagedPdfShellLaunchError::Unavailable(
+        Err(ManagedPdfShellLaunchError::Unavailable(
             "Managed PDF Runtime 当前缺少受支持的 Host 文件系统沙箱，已拒绝裸进程执行。"
                 .to_string(),
-        ));
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -223,6 +224,7 @@ pub(super) fn prepare_managed_pdf_shell_launch(
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn replace_managed_environment_value(
     environment: &mut Vec<(OsString, OsString)>,
     key: &str,

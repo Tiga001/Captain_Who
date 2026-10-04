@@ -227,7 +227,9 @@ pub struct ManagedCommandWorkspaceLease {
 struct ManagedCommandWorkspaceInner {
     execution_root: PathBuf,
     outputs_root: PathBuf,
+    #[cfg(target_os = "macos")]
     home_root: PathBuf,
+    #[cfg(target_os = "macos")]
     temp_root: PathBuf,
     cleanup_requested: AtomicBool,
 }
@@ -256,7 +258,9 @@ impl ManagedCommandWorkspaceLease {
             inner: Arc::new(ManagedCommandWorkspaceInner {
                 execution_root,
                 outputs_root,
+                #[cfg(target_os = "macos")]
                 home_root,
+                #[cfg(target_os = "macos")]
                 temp_root,
                 cleanup_requested: AtomicBool::new(false),
             }),
@@ -281,10 +285,12 @@ impl ManagedCommandWorkspaceLease {
         &self.inner.outputs_root
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn home_root(&self) -> &Path {
         &self.inner.home_root
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn temp_root(&self) -> &Path {
         &self.inner.temp_root
     }

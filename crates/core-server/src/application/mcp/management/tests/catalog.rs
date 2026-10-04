@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use base64::Engine as _;
 use mycopilot_mcp_client::{
     BoxMcpFuture, McpCancellationToken, McpCapabilitySnapshot, McpConnectionState, McpConnector,
     McpPeer, McpProtocolSnapshot, McpToolCall, McpToolDescriptor, McpToolPage, McpToolResult,

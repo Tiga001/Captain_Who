@@ -8,9 +8,7 @@ const BORDER_MIX_AT_MAX = 55
 
 export function normalizeUiContrast(value: unknown): number {
   const numericValue =
-    typeof value === 'number' && Number.isFinite(value)
-      ? Math.round(value)
-      : DEFAULT_UI_CONTRAST
+    typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : DEFAULT_UI_CONTRAST
   return Math.min(MAX_UI_CONTRAST, Math.max(MIN_UI_CONTRAST, numericValue))
 }
 

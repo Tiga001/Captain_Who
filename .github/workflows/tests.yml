@@ -30,8 +30,8 @@ jobs:
         with:
           node-version: 22.23.1
           cache: pnpm
-      - name: Install Rust formatting component
-        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Install pinned Rust toolchain
+        run: rustc --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:test-layout
       - run: pnpm format:check
@@ -83,6 +83,10 @@ jobs:
           node-version: 22.23.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Install shell test dependencies
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Install Chromium Linux system dependencies
+        run: pnpm exec playwright install-deps chromium
       - run: pnpm test:unit
 
   browser:
@@ -130,8 +134,8 @@ jobs:
         with:
           node-version: 22.23.1
           cache: pnpm
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Install pinned Rust toolchain
+        run: rustc --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint:rust
       - run: pnpm test:rust
@@ -151,8 +155,8 @@ jobs:
         with:
           node-version: 22.23.1
           cache: pnpm
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+      - name: Install pinned Rust toolchain
+        run: rustc --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:electron
       - run: pnpm test:human-interaction-core-e2e
@@ -172,10 +176,24 @@ jobs:
         with:
           node-version: 22.23.1
           cache: pnpm
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+      - name: Install pinned Rust toolchain
+        run: rustc --version
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:automation-core-e2e
+      - name: Install native credential store dependencies
+        run: sudo apt-get update && sudo apt-get install -y dbus gnome-keyring libsecret-tools
+      - name: Run automation tests with an isolated native credential store
+        run: |
+          ci_keyring_root=$(mktemp -d "$RUNNER_TEMP/captain-keyring.XXXXXX")
+          trap 'rm -rf "$ci_keyring_root"' EXIT
+          mkdir -m 700 "$ci_keyring_root/data" "$ci_keyring_root/runtime"
+          XDG_DATA_HOME="$ci_keyring_root/data" XDG_RUNTIME_DIR="$ci_keyring_root/runtime" \
+            dbus-run-session -- bash -euo pipefail -c '
+              printf %s ci-fixture-keyring | gnome-keyring-daemon --unlock --components=secrets
+              printf %s ci-probe | secret-tool store --label=ci-probe application captain-ci
+              test "$(secret-tool lookup application captain-ci)" = ci-probe
+              secret-tool clear application captain-ci
+              pnpm test:automation-core-e2e
+            '
 
   multi-agent-release:
     name: Multi-Agent release gate
@@ -192,8 +210,8 @@ jobs:
         with:
           node-version: 22.23.1
           cache: pnpm
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+      - name: Install pinned Rust toolchain
+        run: rustc --version
       - run: pnpm install --frozen-lockfile
       - name: Install Chromium Linux system dependencies
         run: pnpm exec playwright install-deps chromium

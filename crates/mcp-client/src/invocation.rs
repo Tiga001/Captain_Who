@@ -259,12 +259,7 @@ impl McpDispatchTracker {
     }
 
     fn advance(&self, phase: McpDispatchPhase) {
-        let target = phase as u8;
-        let _ = self
-            .phase
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current < target).then_some(target)
-            });
+        self.phase.fetch_max(phase as u8, Ordering::AcqRel);
     }
 }
 

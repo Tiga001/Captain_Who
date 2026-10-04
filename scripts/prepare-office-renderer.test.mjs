@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -35,6 +35,9 @@ async function fixtureInstaller({ installRoot, manifest, target }, options = {})
     mode: 0o755
   })
   await writeFile(join(dirname(executable), 'icudtl.dat'), 'pinned browser fixture\n')
+  for (let index = 2; index < (options.fileCount ?? 2); index += 1) {
+    await writeFile(join(dirname(executable), `resource-${index}.dat`), 'resource fixture\n')
+  }
   if (options.emptyDirectory) await mkdir(join(installed, 'unexpected-empty-directory'))
   if (options.symlink) {
     await symlink('icudtl.dat', join(dirname(executable), 'linked-resource'))
@@ -195,6 +198,80 @@ test(
     })
     assert.equal(offline.reused, true)
     assert.equal(offline.receipt.bundleRevision, first.receipt.bundleRevision)
+  }
+)
+
+test(
+  'Linux x64 preparation and offline verification accept 287 files and enforce that bound',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-linux-count-'))
+    t.after(() => rm(parent, { recursive: true, force: true }))
+    const options = {
+      platform: 'linux',
+      arch: 'x64',
+      outputDirectory: join(parent, 'current')
+    }
+    const prepared = await prepareOfficeRenderer({
+      ...options,
+      installer: (context) => fixtureInstaller(context, { fileCount: 287 })
+    })
+    assert.equal(prepared.receipt.files.length, 287)
+    assert.equal((await prepareOfficeRenderer({ ...options, verifyOnly: true })).reused, true)
+
+    await writeFile(join(options.outputDirectory, 'browser', 'unexpected.txt'), 'pollution\n')
+    await assert.rejects(
+      prepareOfficeRenderer({ ...options, verifyOnly: true }),
+      /exceeds its file-count limit/
+    )
+
+    const oversizedReceipt = {
+      ...prepared.receipt,
+      files: [...prepared.receipt.files, { ...prepared.receipt.files[0], path: 'browser/extra' }]
+    }
+    oversizedReceipt.bundleRevision = computeBundleRevision(oversizedReceipt)
+    await writeFile(
+      join(options.outputDirectory, 'component-receipt.json'),
+      JSON.stringify(oversizedReceipt)
+    )
+    await assert.rejects(
+      prepareOfficeRenderer({ ...options, verifyOnly: true }),
+      /receipt files are invalid/
+    )
+
+    await assert.rejects(
+      prepareOfficeRenderer({
+        ...options,
+        forceRebuild: true,
+        installer: (context) => fixtureInstaller(context, { fileCount: 288 })
+      }),
+      /exceeds its file-count limit/
+    )
+    assert.deepEqual(await readdir(parent), ['current'])
+  }
+)
+
+test(
+  'the Linux x64 inventory allowance does not expand the other target limits',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-target-count-'))
+    t.after(() => rm(parent, { recursive: true, force: true }))
+    const manifest = await loadOfficeRendererManifest(manifestPath)
+    for (const target of Object.keys(manifest.targets).filter((key) => key !== 'linux-x64')) {
+      const [platform, arch] = target.split('-')
+      await assert.rejects(
+        prepareOfficeRenderer({
+          platform,
+          arch,
+          outputDirectory: join(parent, target),
+          installer: (context) => fixtureInstaller(context, { fileCount: 257 })
+        }),
+        /exceeds its file-count limit/,
+        target
+      )
+    }
+    assert.deepEqual(await readdir(parent), [])
   }
 )
 

@@ -107,7 +107,8 @@ vi.mock('../../skills/skillsClient', () => ({
     truncated: false
   })
 }))
-vi.mock('../../chat/chatAttachments', () => ({
+vi.mock('../../chat/chatAttachments', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../chat/chatAttachments')>()),
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   createComposerAttachmentsFromFiles: async () => [],
   loadComposerAttachmentImage: async () => undefined,

@@ -26,6 +26,7 @@ interface FixtureResult {
     secondRunTarget: boolean
     createdSurfaceId: string
     popupKeptOpenerActive: boolean
+    popupOpenerText: string
     popupTitle: string
     selectedRetainedText: string
     secondTitle: string
@@ -114,6 +115,7 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
           secondRunTarget: true,
           createdSurfaceId: 'right-sidebar-browser-electron-fixture-second',
           popupKeptOpenerActive: true,
+          popupOpenerText: 'applied:hidden',
           popupTitle: 'Browser Surface Fixture',
           selectedRetainedText: 'applied:hidden',
           secondTitle: 'Browser Surface Fixture',

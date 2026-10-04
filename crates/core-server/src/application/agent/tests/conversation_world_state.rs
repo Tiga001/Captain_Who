@@ -296,7 +296,7 @@ async fn workspace_source_patches_adopt_only_new_root_runs_and_preview_never_wri
     );
 
     for index in 1..=2 {
-        let before_replacement = (index == 2).then(&preview);
+        let before_replacement = (index == 2).then(preview);
         if index == 2 {
             // The public alias and logical path stay identical, but old file observations are stale.
             project.folders[0].id = "workspace-private-replacement-id".into();

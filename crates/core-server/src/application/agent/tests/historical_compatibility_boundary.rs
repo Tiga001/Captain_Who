@@ -466,15 +466,28 @@ fn persisted_resume_envelope_has_no_inert_agent_chat_compatibility_fields() {
 }
 
 #[test]
-fn canonical_schema_bootstrap_contains_no_incremental_upgrade_helpers() {
+fn fresh_database_bootstrap_contains_no_incremental_upgrade_helpers() {
     let migrations =
         std::fs::read_to_string(workspace_root().join("crates/core/src/storage/migrations.rs"))
             .expect("migrations source must be readable");
-    let production = rust_without_cfg_test_modules(&migrations);
-    for forbidden in ["ALTER TABLE", "fn upgrade_", "fn backfill_"] {
+    let start = migrations
+        .find("fn create_canonical_schema(")
+        .expect("fresh database bootstrap must exist");
+    let open = start
+        + migrations[start..]
+            .find('{')
+            .expect("fresh database bootstrap body must exist");
+    let end = matching_rust_brace(&migrations, open)
+        .expect("fresh database bootstrap body must terminate");
+    let bootstrap = &migrations[start..end];
+
+    // Existing databases have explicit, fingerprint-validated upgrade paths. Fresh databases
+    // must still execute the current canonical schema directly, without replaying old versions.
+    assert!(bootstrap.contains("transaction.execute_batch(CANONICAL_SCHEMA)?;"));
+    for forbidden in ["ALTER TABLE", "upgrade_", "backfill_", "canonical_schema_v"] {
         assert!(
-            !production.contains(forbidden),
-            "canonical schema bootstrap contains retired incremental migration marker `{forbidden}`"
+            !bootstrap.contains(forbidden),
+            "fresh database bootstrap contains incremental migration marker `{forbidden}`"
         );
     }
 }

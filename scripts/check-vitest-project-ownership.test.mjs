@@ -60,15 +60,49 @@ test('accepts exactly one owner per TS and TSX test file', async () => {
 test('keeps the repository test inventory in its intended projects', () => {
   const analysis = assertVitestProjectOwnership()
 
-  assert.equal(analysis.candidateFiles.length, 433)
-  assert.deepEqual(analysis.projectCounts, {
-    unit: 273,
-    browser: 151,
-    'electron-fixtures': 6,
-    'managed-playwright-e2e': 1,
-    'human-interaction-core-e2e': 1,
-    'automation-core-e2e': 1
-  })
+  assert.deepEqual(Object.keys(analysis.projectCounts).sort(), [
+    'automation-core-e2e',
+    'browser',
+    'electron-fixtures',
+    'human-interaction-core-e2e',
+    'managed-playwright-e2e',
+    'unit'
+  ])
+  for (const [project, count] of Object.entries(analysis.projectCounts)) {
+    assert.ok(count > 0, `${project} must select repository tests`)
+  }
+  assert.equal(
+    Object.values(analysis.projectCounts).reduce((total, count) => total + count, 0),
+    analysis.candidateFiles.length
+  )
+})
+
+test('repository rules route growing inventories to their intended projects', async () => {
+  await withFixture(
+    [
+      'src/main/core/newFeature.test.ts',
+      'packages/protocol/src/newFeature.test.ts',
+      'src/renderer/src/features/settings/__tests__/newFeature.test.tsx',
+      'src/renderer/src/features/settings/__tests__/newFeature.browser.test.tsx',
+      'src/renderer/src/features/chat/__tests__/newFeature.browser.test.tsx',
+      'src/main/core/newFeature.electron.test.ts',
+      'src/main/core/managedPlaywrightBridge.electron.test.ts',
+      'src/main/core/humanInteractionRealCore.integration.test.ts',
+      'src/main/core/automationHostRealCore.integration.test.ts'
+    ],
+    async (repositoryRoot) => {
+      const analysis = assertVitestProjectOwnership({ repositoryRoot })
+      assert.equal(analysis.candidateFiles.length, 9)
+      assert.deepEqual(analysis.projectCounts, {
+        unit: 3,
+        browser: 2,
+        'electron-fixtures': 1,
+        'managed-playwright-e2e': 1,
+        'human-interaction-core-e2e': 1,
+        'automation-core-e2e': 1
+      })
+    }
+  )
 })
 
 test('reports unowned test files', async () => {

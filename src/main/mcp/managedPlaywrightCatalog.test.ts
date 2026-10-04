@@ -2,13 +2,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createConnection } from '@playwright/mcp'
-import { chromium as officeChromium } from '@mycopilot/office-playwright-runtime'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it } from 'vitest'
+import officeRendererManifest from '../../../resources/office-renderer-manifest.json'
 
 import {
   MANAGED_PLAYWRIGHT_CAPABILITIES,
@@ -23,6 +23,13 @@ import {
 } from './managedPlaywrightCatalog'
 
 const cleanupDirectories = new Set<string>()
+const officeRendererTarget = (
+  officeRendererManifest.targets as Record<string, { executable: string }>
+)[`${process.platform}-${process.arch}`]
+if (!officeRendererTarget) {
+  throw new Error(`Office renderer is unavailable for ${process.platform}-${process.arch}`)
+}
+const browserExecutable = resolve('.cache/office-renderer/current', officeRendererTarget.executable)
 
 afterEach(async () => {
   const directories = [...cleanupDirectories]
@@ -380,7 +387,7 @@ describe('managed Playwright fixed Catalog', () => {
         '--codegen=none',
         '--image-responses=omit',
         `--caps=${MANAGED_PLAYWRIGHT_CAPABILITIES.join(',')}`,
-        `--executable-path=${officeChromium.executablePath()}`,
+        `--executable-path=${browserExecutable}`,
         `--output-dir=${outputDirectory}`
       ],
       stderr: 'pipe'
@@ -494,7 +501,7 @@ describe('managed Playwright fixed Catalog', () => {
         ...officialConfig(rawOutput),
         browser: {
           isolated: true,
-          launchOptions: { executablePath: officeChromium.executablePath(), headless: true }
+          launchOptions: { executablePath: browserExecutable, headless: true }
         }
       },
       undefined
@@ -515,7 +522,7 @@ describe('managed Playwright fixed Catalog', () => {
         '--codegen=none',
         '--image-responses=omit',
         `--caps=${MANAGED_PLAYWRIGHT_CAPABILITIES.join(',')}`,
-        `--executable-path=${officeChromium.executablePath()}`,
+        `--executable-path=${browserExecutable}`,
         `--output-dir=${externalOutput}`
       ],
       stderr: 'pipe'
@@ -610,50 +617,42 @@ async function runOfficialConformanceWorkflow(
   client: Client,
   fixtureUrl: string
 ): Promise<{ finalSnapshot: string; invalidArgumentsRejected: boolean }> {
-  await client.callTool({ name: 'browser_navigate', arguments: { url: fixtureUrl } })
-  const initial = toolText(await client.callTool({ name: 'browser_snapshot', arguments: {} }))
+  await callOfficialTool(client, 'browser_navigate', { url: fixtureUrl })
+  const initial = await callOfficialTool(client, 'browser_snapshot')
   const inputRef = officialSnapshotRef(initial, 'Value')
   const buttonRef = officialSnapshotRef(initial, 'Apply')
   const frameSubjectRef = officialSnapshotRef(initial, 'Frame Subject')
   const frameBodyRef = officialSnapshotRef(initial, 'Frame Body')
   const frameChineseRef = officialSnapshotRef(initial, 'Frame Chinese')
-  await client.callTool({
-    name: 'browser_fill_form',
-    arguments: {
-      fields: [
-        {
-          target: inputRef,
-          name: 'Value',
-          type: 'textbox',
-          value: 'conformance'
-        }
-      ]
-    }
+  await callOfficialTool(client, 'browser_fill_form', {
+    fields: [
+      {
+        target: inputRef,
+        name: 'Value',
+        type: 'textbox',
+        value: 'conformance'
+      }
+    ]
   })
-  await client.callTool({ name: 'browser_click', arguments: { target: buttonRef } })
-  await client.callTool({
-    name: 'browser_fill_form',
-    arguments: {
-      fields: [
-        {
-          target: frameSubjectRef,
-          name: 'Frame Subject',
-          type: 'textbox',
-          value: 'iframe-subject'
-        }
-      ]
-    }
+  await callOfficialTool(client, 'browser_click', { target: buttonRef })
+  await callOfficialTool(client, 'browser_fill_form', {
+    fields: [
+      {
+        target: frameSubjectRef,
+        name: 'Frame Subject',
+        type: 'textbox',
+        value: 'iframe-subject'
+      }
+    ]
   })
-  await client.callTool({
-    name: 'browser_type',
-    arguments: { target: frameBodyRef, text: 'ab', slowly: true }
+  await callOfficialTool(client, 'browser_type', {
+    target: frameBodyRef,
+    text: 'ab',
+    slowly: true
   })
-  await client.callTool({
-    name: 'browser_type',
-    arguments: { target: frameChineseRef, text: '你好' }
-  })
-  await client.callTool({ name: 'browser_wait_for', arguments: { text: 'applied:conformance' } })
-  const finalSnapshot = toolText(await client.callTool({ name: 'browser_snapshot', arguments: {} }))
+  await callOfficialTool(client, 'browser_type', { target: frameChineseRef, text: '你好' })
+  await callOfficialTool(client, 'browser_wait_for', { text: 'applied:conformance' })
+  const finalSnapshot = await callOfficialTool(client, 'browser_snapshot')
   let invalidArgumentsRejected = false
   try {
     const invalid = await client.callTool({ name: 'browser_click', arguments: {} })
@@ -662,6 +661,17 @@ async function runOfficialConformanceWorkflow(
     invalidArgumentsRejected = true
   }
   return { finalSnapshot, invalidArgumentsRejected }
+}
+
+async function callOfficialTool(
+  client: Client,
+  name: string,
+  args: Record<string, unknown> = {}
+): Promise<string> {
+  const result = await client.callTool({ name, arguments: args })
+  const text = toolText(result)
+  if (result.isError === true) throw new Error(`Official tool ${name} failed: ${text}`)
+  return text
 }
 
 function toolText(result: Awaited<ReturnType<Client['callTool']>>): string {

@@ -440,10 +440,11 @@ fn read_branch_remote(
 fn branch_from_ref(record: &RefRecord, default_base_ref: Option<&str>) -> Option<GitReviewBranch> {
     let (name, kind) = if let Some(name) = record.ref_name.strip_prefix("refs/heads/") {
         (name, GitReviewBranchKind::Local)
-    } else if let Some(name) = record.ref_name.strip_prefix("refs/remotes/") {
-        (name, GitReviewBranchKind::Remote)
     } else {
-        return None;
+        (
+            record.ref_name.strip_prefix("refs/remotes/")?,
+            GitReviewBranchKind::Remote,
+        )
     };
     Some(GitReviewBranch {
         name: name.to_string(),

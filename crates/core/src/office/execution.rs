@@ -2002,11 +2002,11 @@ fn redact_private_office_error(
     private_root: &Path,
     replacement: &str,
 ) -> OfficeEngineError {
-    let mut message = error
+    let message = error
         .message()
         .replace(private_root.to_string_lossy().as_ref(), replacement);
     #[cfg(target_vendor = "apple")]
-    {
+    let message = {
         let spelling = private_root.to_string_lossy();
         let alias = if spelling.starts_with("/var/") || spelling.starts_with("/tmp/") {
             Some(format!("/private{spelling}"))
@@ -2017,9 +2017,11 @@ fn redact_private_office_error(
                 .map(str::to_string)
         };
         if let Some(alias) = alias {
-            message = message.replace(&alias, replacement);
+            message.replace(&alias, replacement)
+        } else {
+            message
         }
-    }
+    };
     OfficeEngineError::new(error.code(), error.recovery(), message)
 }
 

@@ -22,6 +22,7 @@ const ALLOWED_PROVIDER_BOUNDARIES: &[&str] = &[
 const FORBIDDEN_GENERIC_PROVIDER_MARKERS: &[&str] = &[
     "ProviderProfileId::",
     "DeepSeek",
+    "Deepseek",
     "deepseek",
     "Moonshot",
     "moonshot",

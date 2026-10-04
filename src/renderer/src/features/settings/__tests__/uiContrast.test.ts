@@ -51,7 +51,9 @@ describe('uiContrast', () => {
     expect(boosted['--mc-color-settings-content-muted']).toContain('color-mix')
     expect(boosted['--mc-color-settings-content-text']).toContain('color-mix')
     expect(boosted['--mc-color-sidebar-text-secondary']).toContain('color-mix')
-    expect(boosted['--mc-color-sidebar-text-active']).toBe(baseline['--mc-color-sidebar-text-active'])
+    expect(boosted['--mc-color-sidebar-text-active']).toBe(
+      baseline['--mc-color-sidebar-text-active']
+    )
     expect(boosted['--mc-color-settings-content-title']).toBe(
       baseline['--mc-color-settings-content-title']
     )

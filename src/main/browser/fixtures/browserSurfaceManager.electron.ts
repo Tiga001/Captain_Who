@@ -316,7 +316,19 @@ async function main(): Promise<void> {
       manager.listSurfaces().find((surface) => surface.isActive)?.surfaceId === created.surfaceId
     // Restore the fixture's earlier content before continuing its existing lifecycle checks.
     await boundPageA.getByLabel('Message', { exact: true }).fill('hidden')
+    // Keep the background lease until the exact guest has observed the native input and click.
+    // Releasing it while input delivery is pending can race the next surface's focus change.
+    await boundPageA.waitForFunction(
+      () => document.querySelector<HTMLInputElement>('#message')?.value === 'hidden',
+      undefined,
+      { timeout: 5_000 }
+    )
     await boundPageA.getByRole('button', { name: 'Apply' }).click()
+    await boundPageA.waitForFunction(
+      () => document.querySelector('#output')?.textContent === 'applied:hidden',
+      undefined,
+      { timeout: 5_000 }
+    )
     leaseA.finish()
     const leaseB = await manager.beginToolSurfaceLease({ owner: runB })
     const secondRunTarget = leaseB.surfaceId === created.surfaceId
@@ -344,9 +356,8 @@ async function main(): Promise<void> {
       'window.open did not create a managed background surface'
     )
     const tabsAfterPopup = manager.listSurfaces()
-    const popupKeptOpenerActive =
-      manager.getActiveSurfaceIdentity()?.surfaceId === SURFACE_ID &&
-      (await selectedPage.locator('#output').textContent()) === 'applied:hidden'
+    const popupKeptOpenerActive = manager.getActiveSurfaceIdentity()?.surfaceId === SURFACE_ID
+    const popupOpenerText = await selectedPage.locator('#output').textContent()
     await manager.selectSurface({ surfaceId: POPUP_SURFACE_ID })
     const popupContext = await manager.getBrowserContext()
     const popupPage = popupContext.pages()[0]
@@ -395,6 +406,7 @@ async function main(): Promise<void> {
           selectedRetainedText,
           secondTitle,
           popupKeptOpenerActive,
+          popupOpenerText,
           popupTitle,
           tabsAfterBackgroundClose: tabsAfterBackgroundClose.length,
           tabsAfterCreate: tabsAfterCreate.length,

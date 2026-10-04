@@ -373,9 +373,9 @@ impl TavilySearchClient {
                             "terminal",
                             &reason,
                         );
-                        return Err(failure.error);
+                        return Err(*failure.error);
                     }
-                    last_error = Some(failure.error);
+                    last_error = Some(*failure.error);
                     retry_after = failure.retry_after;
                     if attempt + 1 == web_retry::MAX_ATTEMPTS {
                         web_retry::trace_retries_exhausted("web_search", attempt + 1, &reason);

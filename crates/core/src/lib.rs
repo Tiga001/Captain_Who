@@ -112,9 +112,9 @@ pub use cancellation::AgentCancellationToken;
 pub use context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionModelSourceItem,
-    ContextCompactionModelToolCall, ContextCompactionPrefix,
-    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextContinuitySnapshot, ContextHistoryRef, ContextJournalCursor, ContinuityIndexV2,
+    ContextCompactionModelToolCall, ContextCompactionPrefix, ContextCompactionSourceItem,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextContinuitySnapshot,
+    ContextHistoryRef, ContextJournalCursor, ContinuityIndexV2,
     CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONTEXT_CONTINUITY_HARD_MAX_TOKENS,
     CONTEXT_CONTINUITY_SCHEMA_VERSION, CONTEXT_CONTINUITY_TARGET_TOKENS,
 };

@@ -253,6 +253,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   approveAgentAction: vi.fn(),
   cancelAgentAction: vi.fn(),
   cancelAgentRun: vi.fn().mockResolvedValue(true),
+  continueConversationTurn: vi.fn(),
   getContextWindowSnapshot: vi.fn().mockResolvedValue({ modelConfigId: 'model-1' }),
   getManualContextCompactionStatus: vi.fn().mockResolvedValue({ operations: [] }),
   onManualContextCompaction: vi.fn(() => () => undefined),

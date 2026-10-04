@@ -1833,12 +1833,11 @@ fn resolve_default_office_engine() -> Arc<dyn OfficeEngine> {
 fn resolve_default_artifact_runtime() -> Option<Arc<ArtifactRuntimeProvider>> {
     let options = if let Some(directory) = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_DIR") {
         ArtifactRuntimeDiscoveryOptions::new().with_configured_component_dir(directory)
-    } else if let Some(directory) = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_COMPONENTS_DIR") {
-        ArtifactRuntimeDiscoveryOptions::new().with_application_resources_dir(directory)
     } else {
         // The managed runtime is an optional application component. Native Office tools and
         // ordinary commands must remain available when it has not been prepared or packaged.
-        return None;
+        let directory = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_COMPONENTS_DIR")?;
+        ArtifactRuntimeDiscoveryOptions::new().with_application_resources_dir(directory)
     };
 
     match ArtifactRuntimeProvider::discover(&options) {

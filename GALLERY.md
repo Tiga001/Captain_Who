@@ -10,49 +10,49 @@ All 26 supplied images are listed in upload order, with short English captions. 
 
 ![Captain Who in dark mode with a five-step presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
 
-*Track a presentation task while four research sub-agents work in parallel.*
+_Track a presentation task while four research sub-agents work in parallel._
 
 ### 02. 67350.PNG
 
 ![Chat showing generated campus illustrations beside lists of active and completed research sub-agents.](assets/screenshots/generated-artwork.png)
 
-*Generate presentation artwork while monitoring active and completed research sub-agents.*
+_Generate presentation artwork while monitoring active and completed research sub-agents._
 
 ### 03. 67351.PNG
 
 ![A Captain Who conversation introducing its capabilities, with a model selector and full-access indicator.](assets/screenshots/workspace-chat.png)
 
-*Chat in a project workspace with model and permission controls in the composer.*
+_Chat in a project workspace with model and permission controls in the composer._
 
 ### 04. 67354.PNG
 
 ![Light-mode workspace with a Python binary-search diff and an integrated terminal below.](assets/screenshots/code-review-terminal.png)
 
-*Review code changes beside the conversation and an integrated workspace terminal.*
+_Review code changes beside the conversation and an integrated workspace terminal._
 
 ### 05. 67355.PNG
 
 ![General settings showing default, full, and custom access controls, read/write scopes, and approval toggles.](assets/screenshots/permissions.png)
 
-*Configure workspace access and approval rules for file edits, commands, and built-in tools.*
+_Configure workspace access and approval rules for file edits, commands, and built-in tools._
 
 ### 06. 67356.PNG
 
 ![Appearance settings with system, light, and dark options, a code-diff preview, and font and sidebar preferences.](assets/screenshots/appearance.png)
 
-*Choose a theme and preview its code-diff styling.*
+_Choose a theme and preview its code-diff styling._
 
 ### 07. 67357.PNG
 
 ![Sub-agent settings showing an enabled visual-review specialist template with model and project assignments.](assets/screenshots/subagent-templates.png)
 
-*Enable sub-agents and manage reusable specialist templates.*
+_Enable sub-agents and manage reusable specialist templates._
 
 ### 08. 67358.PNG
 
 ![Skills settings with an installation dialog offering GitHub and local-folder sources.](assets/screenshots/install-skills.png)
 
-*Install skills from GitHub or a local folder and manage built-in capabilities.*
+_Install skills from GitHub or a local folder and manage built-in capabilities._
 
 ## Batch 2
 
@@ -60,37 +60,37 @@ All 26 supplied images are listed in upload order, with short English captions. 
 
 ![Slash-command menu over a chat, with model, context compression, capabilities, pin, rename, archive, branch, and new-chat actions.](assets/screenshots/chat-commands.png)
 
-*Use chat commands to switch models, compress context, and manage conversations.*
+_Use chat commands to switch models, compress context, and manage conversations._
 
 ### 10. d41fa0840a45066449f4c6fb6cace9e0.PNG
 
 ![Split view showing an MBTI Markdown document, a conversation, and a token-usage popover.](assets/screenshots/markdown-preview-tokens.png)
 
-*Preview a Markdown document beside chat and inspect per-message token usage.*
+_Preview a Markdown document beside chat and inspect per-message token usage._
 
 ### 11. Eng-github-social-preview.jpg
 
 ![English-language chat summarizing the Captain Who website beside the built-in browser and an open Contact us dialog.](assets/screenshots/browser-inspection-preview.jpg)
 
-*Inspect a webpage in the built-in browser without leaving the conversation.*
+_Inspect a webpage in the built-in browser without leaving the conversation._
 
 ### 12. Eng.png
 
 ![English-language chat summarizing the Captain Who website beside the built-in browser and an open Contact us dialog.](assets/screenshots/browser-inspection.png)
 
-*Inspect a webpage in the built-in browser without leaving the conversation.*
+_Inspect a webpage in the built-in browser without leaving the conversation._
 
 ### 13. Eng2.png
 
 ![English-language chat beside a Paperwork Refinement workflow graph connecting a coordinator, two copy editors, and a reviewer.](assets/screenshots/visual-workflow.png)
 
-*Inspect a visual workflow linking a coordinator, copy editors, and a reviewer.*
+_Inspect a visual workflow linking a coordinator, copy editors, and a reviewer._
 
 ### 14. IMG_9887.JPG
 
 ![A chat requests user action beside a Zhejiang University sign-in page in the built-in browser.](assets/screenshots/browser-login-handoff.jpg)
 
-*Pause browser automation for the user to complete a website sign-in.*
+_Pause browser automation for the user to complete a website sign-in._
 
 ## Batch 3
 
@@ -98,7 +98,7 @@ All 26 supplied images are listed in upload order, with short English captions. 
 
 ![Sub-agent settings showing an enabled visual-review specialist template with model and project assignments.](assets/screenshots/subagent-templates.png)
 
-*Enable sub-agents and manage reusable specialist templates.*
+_Enable sub-agents and manage reusable specialist templates._
 
 Repeated upload of image 07.
 
@@ -106,7 +106,7 @@ Repeated upload of image 07.
 
 ![Skills settings with an installation dialog offering GitHub and local-folder sources.](assets/screenshots/install-skills.png)
 
-*Install skills from GitHub or a local folder and manage built-in capabilities.*
+_Install skills from GitHub or a local folder and manage built-in capabilities._
 
 Repeated upload of image 08.
 
@@ -114,25 +114,25 @@ Repeated upload of image 08.
 
 ![MCP settings listing six local servers, with Filesystem marked ready and the other five disabled.](assets/screenshots/mcp-servers.png)
 
-*Manage local MCP servers and see which integrations are ready.*
+_Manage local MCP servers and see which integrations are ready._
 
 ### 18. 67360.PNG
 
 ![Usage dashboard with a seven-day chart, a model filter, token totals, cache-hit rate, and estimated cost.](assets/screenshots/usage-costs.png)
 
-*Track token usage, cache hits, and estimated costs by model and time range.*
+_Track token usage, cache hits, and estimated costs by model and time range._
 
 ### 19. 67361.PNG
 
 ![Model settings with provider/model fields, context size, pricing, an image-input toggle, endpoint URL, and a masked API token.](assets/screenshots/model-configuration.png)
 
-*Configure a model's endpoint, context window, token pricing, and image input.*
+_Configure a model's endpoint, context window, token pricing, and image input._
 
 ### 20. 67362.PNG
 
 ![Chat showing the first of twelve MBTI-style questions with two choices and a custom-answer field.](assets/screenshots/interactive-questions.png)
 
-*Collect structured answers with an interactive, multi-step question card.*
+_Collect structured answers with an interactive, multi-step question card._
 
 ## Batch 4
 
@@ -140,7 +140,7 @@ Repeated upload of image 08.
 
 ![Captain Who in dark mode with a five-step presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
 
-*Track a presentation task while four research sub-agents work in parallel.*
+_Track a presentation task while four research sub-agents work in parallel._
 
 Repeated upload of image 01.
 
@@ -148,7 +148,7 @@ Repeated upload of image 01.
 
 ![Chat showing generated campus illustrations beside lists of active and completed research sub-agents.](assets/screenshots/generated-artwork.png)
 
-*Generate presentation artwork while monitoring active and completed research sub-agents.*
+_Generate presentation artwork while monitoring active and completed research sub-agents._
 
 Repeated upload of image 02.
 
@@ -156,7 +156,7 @@ Repeated upload of image 02.
 
 ![A Captain Who conversation introducing its capabilities, with a model selector and full-access indicator.](assets/screenshots/workspace-chat.png)
 
-*Chat in a project workspace with model and permission controls in the composer.*
+_Chat in a project workspace with model and permission controls in the composer._
 
 Repeated upload of image 03.
 
@@ -164,7 +164,7 @@ Repeated upload of image 03.
 
 ![Light-mode workspace with a Python binary-search diff and an integrated terminal below.](assets/screenshots/code-review-terminal.png)
 
-*Review code changes beside the conversation and an integrated workspace terminal.*
+_Review code changes beside the conversation and an integrated workspace terminal._
 
 Repeated upload of image 04.
 
@@ -172,7 +172,7 @@ Repeated upload of image 04.
 
 ![General settings showing default, full, and custom access controls, read/write scopes, and approval toggles.](assets/screenshots/permissions.png)
 
-*Configure workspace access and approval rules for file edits, commands, and built-in tools.*
+_Configure workspace access and approval rules for file edits, commands, and built-in tools._
 
 Repeated upload of image 05.
 
@@ -180,8 +180,6 @@ Repeated upload of image 05.
 
 ![Appearance settings with system, light, and dark options, a code-diff preview, and font and sidebar preferences.](assets/screenshots/appearance.png)
 
-*Choose a theme and preview its code-diff styling.*
+_Choose a theme and preview its code-diff styling._
 
 Repeated upload of image 06.
-
-

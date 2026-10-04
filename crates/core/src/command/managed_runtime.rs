@@ -608,6 +608,7 @@ pub(crate) fn prepare_managed_command_session(
             Ok(launch) => launch,
             Err(error) => {
                 let (code, recovery, message) = match error {
+                    #[cfg(target_os = "macos")]
                     ManagedPdfShellLaunchError::InvalidCommand(message) => (
                         ERROR_INVALID_COMMAND,
                         ArtifactRuntimeRecovery::ChangeRequest.stable_name(),

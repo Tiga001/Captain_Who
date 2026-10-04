@@ -41,7 +41,8 @@ vi.mock('../../features/chat/components/ImagePreview', () => ({
   useImagePreview: () => vi.fn(),
   useImagePreviewNotice: () => vi.fn()
 }))
-vi.mock('../../features/chat/chatAttachments', () => ({
+vi.mock('../../features/chat/chatAttachments', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../features/chat/chatAttachments')>()),
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],

@@ -17,7 +17,6 @@ const PLAYWRIGHT_VERSION = '1.61.1'
 const BROWSER_VERSION = '149.0.7827.55'
 const BROWSER_REVISION = '1228'
 const BUNDLE_REVISION_PREFIX = 'office-render-runtime-sha256-v1:'
-const MAX_FILES = 256
 const MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 const MAX_FILE_BYTES = 512 * 1024 * 1024
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -30,6 +29,12 @@ const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, '..')
 const DEFAULT_MANIFEST_PATH = join(REPOSITORY_ROOT, 'resources', 'office-renderer-manifest.json')
 const DEFAULT_OUTPUT_DIRECTORY = join(REPOSITORY_ROOT, '.cache', 'office-renderer', 'current')
 const localRequire = createRequire(import.meta.url)
+
+function componentFileLimit(platform, arch) {
+  // The SHA-256-pinned Linux x64 archive contains 220 locale files, 52 hyphenation
+  // files and 15 root resources. Keep this bound aligned with render_runtime.rs.
+  return platform === 'linux' && arch === 'x64' ? 287 : 256
+}
 
 function plainObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -227,7 +232,7 @@ async function syncRegularFile(path) {
   }
 }
 
-async function inspectComponentTree(root) {
+async function inspectComponentTree(root, maxFiles) {
   const rootMetadata = await lstat(root)
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
     throw new Error('Office renderer component root must be a real, non-symlink directory')
@@ -255,7 +260,7 @@ async function inspectComponentTree(root) {
         throw new Error(`Office renderer entry is not a regular file: ${logical}`)
       }
       if (logical === RECEIPT_NAME) continue
-      if (files.length >= MAX_FILES) throw new Error('Office renderer exceeds its file-count limit')
+      if (files.length >= maxFiles) throw new Error('Office renderer exceeds its file-count limit')
       if (metadata.size > MAX_FILE_BYTES) {
         throw new Error(`Office renderer file exceeds its byte limit: ${logical}`)
       }
@@ -566,7 +571,11 @@ function validateReceipt(receipt, manifest, target, platform, arch) {
   if (JSON.stringify(value.archive) !== JSON.stringify(target.archive)) {
     throw new Error('Office renderer receipt archive identity does not match the pinned manifest')
   }
-  if (!Array.isArray(value.files) || value.files.length === 0 || value.files.length > MAX_FILES) {
+  if (
+    !Array.isArray(value.files) ||
+    value.files.length === 0 ||
+    value.files.length > componentFileLimit(platform, arch)
+  ) {
     throw new Error('Office renderer receipt files are invalid')
   }
   let priorPath
@@ -631,7 +640,7 @@ async function verifyReceipt(outputDirectory, manifest, target, platform, arch) 
   if (process.platform !== 'win32' && (executableMetadata.mode & 0o111) === 0) {
     throw new Error('Office renderer executable must have a Unix execute bit')
   }
-  const actual = await inspectComponentTree(outputDirectory)
+  const actual = await inspectComponentTree(outputDirectory, componentFileLimit(platform, arch))
   if (JSON.stringify(actual.files) !== JSON.stringify(receipt.files)) {
     throw new Error('Office renderer component files do not match the frozen receipt')
   }
@@ -680,7 +689,7 @@ export async function refreshOfficeRendererReceiptAfterSigning({
     }
   }
 
-  const actual = await inspectComponentTree(outputDirectory)
+  const actual = await inspectComponentTree(outputDirectory, componentFileLimit(platform, arch))
   if (JSON.stringify(actual.directories) !== JSON.stringify(directoriesForFiles(frozen.files))) {
     throw new Error('Office renderer directories changed during the signing transaction')
   }
@@ -789,7 +798,7 @@ export async function prepareOfficeRenderer({
     const browserRoot = join(staging, 'browser')
     await rename(installedRoot, browserRoot)
     await rm(installRoot, { recursive: true, force: true })
-    const inspected = await inspectComponentTree(staging)
+    const inspected = await inspectComponentTree(staging, componentFileLimit(platform, arch))
     if (
       JSON.stringify(inspected.directories) !== JSON.stringify(directoriesForFiles(inspected.files))
     ) {

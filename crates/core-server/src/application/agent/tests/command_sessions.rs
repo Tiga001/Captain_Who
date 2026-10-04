@@ -2264,7 +2264,8 @@ fn absolute_handoff_deadline_reclaims_a_noisy_session_while_guard_is_alive() {
         record.snapshot.status,
         AgentCommandSessionStatus::Interrupted
     );
-    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    // The terminal transaction commits before the lifecycle writer releases its admission lease.
+    wait_for_retained_admission_count(&fixture.registry, 0);
     assert!(tracker
         .active_run_ids_for_conversation(&fixture.conversation_id)
         .is_empty());

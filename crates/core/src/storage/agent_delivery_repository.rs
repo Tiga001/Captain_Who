@@ -308,7 +308,7 @@ pub fn bind_safe_boundary(
         return Ok((!delivery.messages.is_empty()).then_some(delivery));
     }
 
-    let claim_prefix = format!("batch-{}", &receipt.receipt_id);
+    let claim_prefix = format!("batch-{}", receipt.receipt_id);
     let maximum = input.maximum.min(MAX_SAFE_BOUNDARY_MESSAGES);
     let _ = agent_graph_repository::project_pending_agent_messages_in_transaction(
         &transaction,

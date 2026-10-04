@@ -27,6 +27,7 @@ pub(crate) struct ManagedPdfShellPlan {
     private_redirection_paths: Vec<String>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct ManagedPdfShellCompileTools<'a> {
     pub(crate) python: &'a Path,
     pub(crate) pdf_cli: &'a Path,
@@ -70,6 +71,7 @@ impl ManagedPdfShellPlan {
             .collect()
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn compile(
         &self,
         prepared_inputs: Option<&PreparedAgentFileInputs>,
@@ -141,6 +143,7 @@ impl ManagedPdfShellPlan {
     /// before launch. Dispatcher processes cannot create symlinks under the Seatbelt profile, and
     /// this check also rejects links left by a crashed or pre-upgrade run before unsandboxed Bash
     /// is allowed to open a redirection target.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn validate_private_redirections(
         &self,
         execution_root: &Path,
@@ -1268,6 +1271,7 @@ fn collect_output_redirections(
     Ok(results)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn compile_source_replacements(
     command: &str,
     mut replacements: Vec<(Range<usize>, String)>,
@@ -1285,10 +1289,12 @@ fn compile_source_replacements(
     Ok(chars.into_iter().collect())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote_path(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(shell_single_quote)

@@ -248,6 +248,9 @@ describe('MainPanelToolbar conversation menu', () => {
   })
 
   it('wobbles in place on the first clicks and speeds up consecutive taps', async () => {
+    // Keep tap timing independent of Playwright's actionability waits and CI load;
+    // the browser still runs and exposes the real Web Animations below.
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(10_000)
     const screen = await render(
       <div className="app-shell" style={shellStyle}>
         <MainPanelToolbar {...toolbarProps} />
@@ -261,6 +264,7 @@ describe('MainPanelToolbar conversation menu', () => {
     expect(firstDuration).toBeGreaterThan(400)
     expect(boat.element().getAnimations().length).toBeGreaterThan(0)
 
+    clock.mockReturnValue(10_100)
     await boat.click()
     await expect.element(boat).toHaveAttribute('data-motion', 'wobble')
     expect(animationDuration(boat.element())).toBeLessThan(firstDuration)

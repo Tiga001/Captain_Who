@@ -70,7 +70,11 @@ describe.runIf(process.platform === 'darwin')('managed native popup Electron fix
       const line = result.output.split(/\r?\n/u).find((value) => value.startsWith(marker))
       expect(line, result.output).toBeDefined()
       const observed = JSON.parse(line!.slice(marker.length)) as {
-        results: Array<Record<string, unknown>>
+        results: Array<
+          Record<string, unknown> & {
+            presentation: { workArea: { width: number; height: number } }
+          }
+        >
         post: Array<{ method: string; body: string }>
         noreferrer: Array<{ referer: string | null }>
         finalSurfaceCount: number
@@ -97,8 +101,10 @@ describe.runIf(process.platform === 'darwin')('managed native popup Electron fix
           surfaceRemoved: true,
           openerSurvived: true,
           presentation: {
-            width: 520,
-            height: 680,
+            // macOS constrains native windows to the display's usable area, which can be
+            // shorter than the requested 680px on a CI runner with a small display.
+            width: Math.min(520, popup.presentation.workArea.width),
+            height: Math.min(680, popup.presentation.workArea.height),
             centeredOnHost: true,
             titleMatchesUrl: true,
             pageTitleCannotOverride: true,

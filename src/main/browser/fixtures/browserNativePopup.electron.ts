@@ -7,7 +7,7 @@ import {
   createBrowserSurfaceBootstrapUrl,
   type BrowserSurfaceCommand
 } from '@mycopilot/protocol'
-import { app, BrowserWindow, session, webContents, type WebContents } from 'electron'
+import { app, BrowserWindow, screen, session, webContents, type WebContents } from 'electron'
 import { BrowserInternalPageStore } from '../BrowserInternalPageStore'
 import { BrowserNetworkGuard } from '../BrowserNetworkGuard'
 import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from '../BrowserNetworkPolicy'
@@ -345,9 +345,11 @@ async function main(): Promise<void> {
         await waitFor(() => popupWindow.isVisible(), `${label} native window visible`)
         const hostBounds = host.getBounds()
         const popupBounds = popupWindow.getBounds()
+        const workArea = screen.getDisplayMatching(hostBounds).workArea
         const presentation = {
           width: popupBounds.width,
           height: popupBounds.height,
+          workArea: { width: workArea.width, height: workArea.height },
           centeredOnHost:
             Math.abs(popupBounds.x + popupBounds.width / 2 - hostBounds.x - hostBounds.width / 2) <=
               1 &&

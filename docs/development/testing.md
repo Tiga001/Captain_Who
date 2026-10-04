@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # 测试策略与矩阵
@@ -13,7 +13,7 @@ last_verified: 2026-09-26
 
 - Node.js：`>=22 <23`
 - pnpm：`11.10.0`
-- Rust：workspace toolchain；Clippy、常规测试与专项 Cargo runner 均使用 Cargo lockfile
+- Rust：`rust-toolchain.toml` 锁定的 `1.99.0`；本地与 CI 共用同一版本及 rustfmt/Clippy，常规测试与专项 Cargo runner 均使用 Cargo lockfile
 - Browser tests：使用 `.cache/office-renderer/current` 中 manifest 锁定的 Chromium，不使用开发者系统浏览器
 - Electron E2E：真实 Electron fixture 与 Managed Playwright 项目均串行运行，`fileParallelism=false`
 
@@ -23,7 +23,7 @@ last_verified: 2026-09-26
 pnpm install --frozen-lockfile
 ```
 
-需要 Browser tests 时，`pnpm test:browser`（以及聚合入口 `pnpm test:web`）会先执行 `prepare:office-renderer`。`test:web:install` 是普通 Playwright Chromium 安装命令，但当前 Vitest browser project 的可执行真源仍是受管 Office renderer。
+`pnpm test:unit`、`pnpm test:electron` 和 `pnpm test:browser` 均先执行 `prepare:office-renderer`，保证从干净 checkout 运行时，Node 中的真实浏览器契约测试和 Electron fixture 也有可用的锁定 Chromium。Linux 还需安装 Chromium 系统依赖，终端 shell 契约测试需要 sh、bash 和 zsh；CI 会显式安装这些依赖。`test:web:install` 是普通 Playwright Chromium 安装命令，但当前 Vitest browser project 的可执行真源仍是受管 Office renderer。
 
 ## 2. 默认质量入口
 
@@ -229,7 +229,7 @@ pnpm test:automation-core-e2e
 
 **`test:automation-core-e2e` 不在 `test:web`、`test` 或 `check` 中。** 它会构建 debug Core Server，使用临时数据根，并通过生产 Preload bridge、Main IPC registrar 与 Core Server 完成 durable CRUD、revision CAS、`runNow` 入队、Run history 和 attention 调用。其 Electron transport 是进程内适配器，原生通知被模拟为不支持；它不驱动真实定时唤醒、模型完成、Approval 循环、OS 原生通知、进程重启恢复或 packaged Electron。
 
-该专项由 CI 的独立 `automation-real-core` job 自动执行，但仍不改变本地 `pnpm check` 的组成。
+该专项由 CI 的独立 `automation-real-core` job 自动执行，但仍不改变本地 `pnpm check` 的组成。模型测试凭据仍写入原生安全存储：Linux CI 在独立 D-Bus session 和临时 XDG 目录中启动、解锁 GNOME Keyring，并先验证 Secret Service 的写入、读取和删除；不依赖桌面登录会话，也不向生产代码注入明文或内存凭据后门。
 
 修改该子系统时可按层定位：
 

@@ -126,7 +126,7 @@ pub(super) fn trace_retry_recovered(tool: &str, attempts_used: usize) {
 
 /// A failed provider attempt together with its retry classification.
 pub(super) struct AttemptFailure {
-    pub(super) error: AgentError,
+    pub(super) error: Box<AgentError>,
     pub(super) retryable: bool,
     pub(super) retry_after: Option<Duration>,
 }
@@ -135,7 +135,7 @@ impl AttemptFailure {
     /// A failure worth another attempt: transport errors, unreadable bodies, 408/429/5xx.
     pub(super) fn retryable(error: AgentError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             retryable: true,
             retry_after: None,
         }
@@ -144,7 +144,7 @@ impl AttemptFailure {
     /// A failure that repeating the same request will not mend (other 4xx, cancellation).
     pub(super) fn terminal(error: AgentError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             retryable: false,
             retry_after: None,
         }

@@ -114,6 +114,9 @@ async fn assert_precommitted_wait_survives_terminal_settlement(
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
+    // Keep the complete report and its tool exchange below automatic compaction admission.
+    // This fixture serves collaboration turns, not the separate summary-generation protocol.
+    settings.models[0].context_window_tokens = Some(512_000);
     storage.save_model_settings(settings).unwrap();
     let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
         Arc::clone(&storage),

@@ -177,7 +177,19 @@ describe('Queue auto-send Chromium → production submission/lifecycle/IPC → r
       handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
         handlers.set(channel, handler)
     } as unknown as TrustedIpcMain
-    registerAgentIpc(ipc, core, () => undefined)
+    let executionRevision = 0
+    registerAgentIpc(ipc, core, async () => {
+      // Mirror the production Host admission lease. Allowing the Main IPC callback alone
+      // does not authorize a new root turn in the real Core.
+      const issuedAt = Date.now()
+      await core.setExecutionAccess({
+        revision: ++executionRevision,
+        identityEpoch: 1,
+        reason: 'allowed',
+        issuedAt,
+        validUntil: issuedAt + 60_000
+      })
+    })
     const unavailable = async (): Promise<never> => {
       throw new Error('Native platform action is outside this fixture')
     }
@@ -238,7 +250,7 @@ describe('Queue auto-send Chromium → production submission/lifecycle/IPC → r
       `${vite.resolvedUrls!.local[0]}src/renderer/src/app/__fixtures__/queueAutoSendRealCore.html`
     )
     await page.getByRole('button', { name: '开始初始回复' }).click()
-    await expect.poll(() => requests.length).toBe(1)
+    await waitForRequestCount(page, 1)
     await page.getByRole('button', { name: '加入三条队列' }).click()
     await page.getByRole('button', { name: '排队消息菜单' }).first().click()
     await page.getByRole('menuitem', { name: '打开队列自动发送' }).click()

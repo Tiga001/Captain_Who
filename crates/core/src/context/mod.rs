@@ -36,9 +36,9 @@ pub(crate) use compaction::{
 pub(crate) use compaction_summary::render_compaction_semantic_summary_for_context;
 pub use compaction_summary::{
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionModelSourceItem,
-    ContextCompactionModelToolCall, ContextCompactionPrefix,
-    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextJournalCursor, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    ContextCompactionModelToolCall, ContextCompactionPrefix, ContextCompactionSourceItem,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
+    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
 };
 pub use continuity::{
     ContextContinuitySnapshot, ContextHistoryRef, ContinuityIndexV2,

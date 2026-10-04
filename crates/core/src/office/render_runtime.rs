@@ -22,7 +22,6 @@ const EXPECTED_BROWSER_VERSION: &str = "149.0.7827.55";
 const EXPECTED_PLAYWRIGHT_VERSION: &str = "1.61.1";
 const EXPECTED_PLAYWRIGHT_REVISION: &str = "1228";
 const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
-const MAX_COMPONENT_FILES: usize = 256;
 const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_RENDER_MARKER_BYTES: u64 = 8 * 1024;
@@ -1200,9 +1199,10 @@ fn validate_receipt(receipt: &ComponentReceipt) -> Result<(), OfficeEngineError>
         ));
     }
     validate_relative_path(&receipt.browser.executable)?;
-    if receipt.files.is_empty() || receipt.files.len() > MAX_COMPONENT_FILES {
+    let max_files = component_file_limit(current_platform(), current_arch());
+    if receipt.files.is_empty() || receipt.files.len() > max_files {
         return Err(invalid_component(format!(
-            "The Office render runtime receipt must contain between 1 and {MAX_COMPONENT_FILES} files."
+            "The Office render runtime receipt must contain between 1 and {max_files} files."
         )));
     }
     let mut previous: Option<&str> = None;
@@ -1388,6 +1388,7 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
 }
 
 fn collect_component_files(root: &Path) -> Result<BTreeMap<String, PathBuf>, OfficeEngineError> {
+    let max_files = component_file_limit(current_platform(), current_arch());
     let mut files = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -1425,7 +1426,7 @@ fn collect_component_files(root: &Path) -> Result<BTreeMap<String, PathBuf>, Off
             if relative == COMPONENT_RECEIPT {
                 continue;
             }
-            if files.insert(relative, path).is_some() || files.len() > MAX_COMPONENT_FILES {
+            if files.insert(relative, path).is_some() || files.len() > max_files {
                 return Err(invalid_component(
                     "The Office render runtime contains too many or duplicate files.",
                 ));
@@ -1554,6 +1555,16 @@ fn current_arch() -> &'static str {
         "arm64"
     } else {
         "x64"
+    }
+}
+
+fn component_file_limit(platform: &str, arch: &str) -> usize {
+    // The pinned Linux x64 archive has 220 locale files, 52 hyphenation files,
+    // and 15 root resources. Keep this aligned with prepare-office-renderer.mjs.
+    if platform == "linux" && arch == "x64" {
+        287
+    } else {
+        256
     }
 }
 
@@ -1701,6 +1712,69 @@ mod tests {
             .runtime_revision()
             .starts_with(RUNTIME_REVISION_PREFIX));
         runtime.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn file_count_allowance_is_specific_to_the_pinned_linux_x64_archive() {
+        for platform in ["darwin", "linux", "win32"] {
+            for arch in ["arm64", "x64"] {
+                assert_eq!(
+                    component_file_limit(platform, arch),
+                    if platform == "linux" && arch == "x64" {
+                        287
+                    } else {
+                        256
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verifies_the_target_file_limit_and_rejects_oversized_trees_and_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        write_test_render_runtime(directory.path());
+        let receipt_path = directory.path().join(COMPONENT_RECEIPT);
+        let mut receipt: ComponentReceipt =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let max_files = component_file_limit(current_platform(), current_arch());
+        for index in 1..max_files {
+            let path = format!("browser/resource-{index:04}.dat");
+            fs::write(directory.path().join(&path), b"resource").unwrap();
+            receipt.files.push(FileReceipt {
+                path,
+                size: 8,
+                sha256: hex_lower(&Sha256::digest(b"resource")),
+            });
+        }
+        receipt
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        receipt.bundle_revision = compute_bundle_revision(&receipt).unwrap();
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        let runtime = OfficeRenderRuntime::discover(
+            &OfficeRenderRuntimeDiscoveryOptions::new()
+                .with_configured_component_dir(directory.path()),
+        )
+        .unwrap();
+        runtime.verify_integrity().unwrap();
+
+        let extra = FileReceipt {
+            path: "browser/unexpected.dat".to_string(),
+            size: 8,
+            sha256: hex_lower(&Sha256::digest(b"resource")),
+        };
+        fs::write(directory.path().join(&extra.path), b"resource").unwrap();
+        assert!(collect_component_files(directory.path())
+            .unwrap_err()
+            .message()
+            .contains("too many or duplicate files"));
+        receipt.files.push(extra);
+        receipt.bundle_revision = compute_bundle_revision(&receipt).unwrap();
+        assert!(validate_receipt(&receipt)
+            .unwrap_err()
+            .message()
+            .contains(&format!("between 1 and {max_files} files")));
     }
 
     #[test]

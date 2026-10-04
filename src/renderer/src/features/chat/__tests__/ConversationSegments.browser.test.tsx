@@ -761,6 +761,11 @@ it.each(['expanding history', 'debouncing results'] as const)(
     activateSelectionRegion(sidebar)
     historyShortcut('a')
     expect(window.getSelection()?.toString()).toBe('KEEP SIDEBAR FIND SELECTION')
+    // Search intentionally waits for batched history hydration. On a busy CI
+    // runner this can outlast the default one-second assertion timeout.
+    await expect
+      .poll(() => document.querySelector('[data-segment-placeholder]'), { timeout: 10_000 })
+      .toBeNull()
     await expect
       .poll(
         () =>

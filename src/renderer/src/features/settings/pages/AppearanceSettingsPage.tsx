@@ -3,11 +3,7 @@ import { appearanceSettingsNodes, COLOR_SCHEME_OPTIONS } from './AppearanceSetti
 import type { CSSProperties } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { getFrontendTheme } from '../../../config/frontendTheme'
-import {
-  MAX_UI_CONTRAST,
-  MIN_UI_CONTRAST,
-  normalizeUiContrast
-} from '../../../config/uiContrast'
+import { MAX_UI_CONTRAST, MIN_UI_CONTRAST, normalizeUiContrast } from '../../../config/uiContrast'
 import type {
   ColorScheme,
   ColorSchemePreference,
@@ -293,7 +289,10 @@ export function AppearanceSettingsPage({
                                   )
                                 }
                               />
-                              <span className="appearance-contrast-control__value" aria-hidden="true">
+                              <span
+                                className="appearance-contrast-control__value"
+                                aria-hidden="true"
+                              >
                                 {uiContrast}
                               </span>
                             </label>

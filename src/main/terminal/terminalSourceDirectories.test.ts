@@ -101,15 +101,17 @@ describe('terminal project source input', () => {
     expect(write).not.toHaveBeenCalled()
   })
 
-  it('executes only cd for shell metacharacters, spaces, quotes and unicode', () => {
-    const { auxiliary, primary } = fixture()
-    for (const shell of ['/bin/sh', '/bin/bash', '/bin/zsh']) {
+  it.each(['/bin/sh', '/bin/bash', '/bin/zsh'])(
+    'executes only cd in %s for shell metacharacters, spaces, quotes and unicode',
+    (shell) => {
+      const { auxiliary, primary } = fixture()
       const command = terminalChangeDirectoryCommand(auxiliary, shell).replace(/\r$/, '\n')
       const result = spawnSync(shell, ['-c', `${command}pwd`], { cwd: primary, encoding: 'utf8' })
+      expect(result.error, `Could not launch ${shell}: ${result.error?.message}`).toBeUndefined()
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout.trim()).toBe(auxiliary)
     }
-  })
+  )
 
   it('rejects terminal control bytes and unsupported shells; quotes PowerShell literally', () => {
     for (const path of ['/tmp/a\nb', '/tmp/a\rb', '/tmp/a\x1bb', '/tmp/a\x00b']) {
