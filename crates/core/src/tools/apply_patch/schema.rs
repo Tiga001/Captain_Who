@@ -1,6 +1,15 @@
 use super::*;
 
 pub(super) fn patch_input_schema() -> Value {
+    contract_schema().clone()
+}
+
+pub(super) fn contract_schema() -> &'static Value {
+    static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(build_input_schema)
+}
+
+fn build_input_schema() -> Value {
     let create_file_path = json!({
         "type": "string",
         "minLength": 1,
@@ -52,7 +61,7 @@ pub(super) fn patch_input_schema() -> Value {
                             "content": {
                                 "type": "string",
                                 "maxLength": MAX_INLINE_CONTENT_BYTES,
-                                "description": "Complete Direct file content, at most 32 KiB of UTF-8 bytes. Empty content creates an empty file."
+                                "description": "Complete Direct file content, at most 32 KiB (32,768 UTF-8 bytes). Empty content creates an empty file. JSON Schema maxLength counts characters; the Host additionally enforces the same numeric limit in UTF-8 bytes."
                             },
                             "summary": summary.clone()
                         },
@@ -69,7 +78,7 @@ pub(super) fn patch_input_schema() -> Value {
                             "content": {
                                 "type": "string",
                                 "maxLength": MAX_INLINE_CONTENT_BYTES,
-                                "description": "Complete replacement content, at most 32 KiB of UTF-8 bytes. For larger complete replacements use begin/update with strategy=rewrite."
+                                "description": "Complete replacement content, at most 32 KiB (32,768 UTF-8 bytes). JSON Schema maxLength counts characters; the Host additionally enforces the same numeric limit in UTF-8 bytes. For larger complete replacements use begin/update with strategy=rewrite."
                             },
                             "summary": summary.clone()
                         },
@@ -138,7 +147,7 @@ pub(super) fn patch_input_schema() -> Value {
                                 "type": "string",
                                 "minLength": 1,
                                 "maxLength": file_change_staged::MAX_STAGED_CHUNK_BYTES,
-                                "description": "One non-empty append chunk, at most 1 MiB of UTF-8 bytes. The complete transaction may not exceed 4 MiB."
+                                "description": "One non-empty append chunk, at most 1 MiB (1,048,576 UTF-8 bytes). JSON Schema maxLength counts characters; the Host additionally enforces the same numeric limit in UTF-8 bytes. The complete transaction may not exceed 4 MiB."
                             }
                         },
                         "required": ["action", "transactionId", "index", "expectedDraftRevision", "content"],

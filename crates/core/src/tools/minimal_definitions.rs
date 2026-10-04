@@ -45,13 +45,15 @@ fn minimal_description(name: &str) -> Option<&'static str> {
             "Directories require run_command, subject to its permissions and approval."
         ),
         "apply_patch" => concat!(
-            "One UTF-8 file. Only root argument: request; matching content/edits branch, no raw unified diff. ",
+            "One UTF-8 file. Only root argument: request; put summary there too. Use one content/edits branch, no raw unified diff. ",
+            "Common update: read_file({\"path\":\"notes.txt\"}); if fileChangeTarget returns filePath=notes.txt, observationId=OBS and content hello\\n, call ",
+            "{\"request\":{\"action\":\"apply\",\"operation\":\"update\",\"filePath\":\"notes.txt\",\"observationId\":\"OBS\",\"edits\":[{\"kind\":\"replace\",\"oldText\":\"hello\\n\",\"newText\":\"hello world\\n\"}]}}. OBS illustrates the returned ID; never invent it. ",
             "create omits observationId, including missing-file receipts; no pre-read. Host atomically refuses overwrite; success issues fileChangeTarget. ",
             "update/delete/begin-update need this Run's exact fileChangeTarget (filePath, observationId) from read_file or successful apply/commit; listings cannot substitute. ",
             "Successful update/delete or Staged update commit renews the same ID only after its Tool Result; reuse next model response, never across writes in one batch. ",
             "Failure/rejection/cancellation/conflict/outcome_unknown never renew. Missing fileChangeTarget, observationRefreshRequired, unknown/changed contents or match/conflict: reread; follow continueWith. ",
             "Staged: begin/create starts empty without observationId; begin/update needs valid credentials and modify/rewrite; no Staged delete. ",
-            "Direct content: complete UTF-8 file <=32 KiB (empty create allowed); larger replacements use begin/update strategy=rewrite. Append: non-empty <=1 MiB; transaction <=4 MiB. ",
+            "UTF-8 byte limits: Direct complete content <=32 KiB (empty create allowed); larger replacements use begin/update strategy=rewrite; non-empty append <=1 MiB; draft <=4 MiB. ",
             "Copy latest Host transactionId, index=nextIndex, expectedDraftRevision=draftRevision; never invent cursors or replay chunks. append/edit changes only the draft; only successful commit issues/renews fileChangeTarget. ",
             "Edits run in order with exact bytes, no trimming/normalization/fuzzy matching; replace needs one match unless replaceAll=true. ",
             "Follow allowedNextActions: drafting/ready permit same-transaction append/edit/commit/status/abort; waiting_approval/applying/outcome_unknown permit status only. ",

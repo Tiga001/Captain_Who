@@ -82,6 +82,62 @@ fn guidance_preserves_observation_lifecycle_and_staged_settlement() {
 }
 
 #[test]
+fn full_and_minimal_update_examples_work_with_the_actual_read_receipt() {
+    for minimal in [false, true] {
+        let mut definitions = vec![ApplyPatchTool.definition()];
+        if minimal {
+            crate::tools::minimal_definitions::apply_minimal_tool_descriptions(&mut definitions);
+        }
+        let description = &definitions[0].description;
+        let start = description
+            .find(r#"{"request":{"action":"apply","operation":"update""#)
+            .expect("both profiles include a complete update example");
+        let mut args = serde_json::Deserializer::from_str(&description[start..])
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .expect("the example uses valid JSON");
+        validate_wire_shape(&args).unwrap();
+
+        let workspace = TestWorkspace::new();
+        workspace.write("notes.txt", "hello\n");
+        let context = workspace.context();
+        let registry = ToolRegistry::defaults_with_search(None);
+        let read = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "example-read".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({"path":"notes.txt"}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(read.ok);
+        let projected = registry.model_projection(&read);
+        let target = &projected.result.as_ref().unwrap()["fileChangeTarget"];
+        // The example ID documents the shape, but must never authorize a write itself.
+        let fabricated = proposal(&context, args["request"].clone()).unwrap_err();
+        assert_eq!(
+            fabricated.code(),
+            Some("agent.apply_patch.observation_required")
+        );
+        args["request"]["filePath"] = target["filePath"].clone();
+        args["request"]["observationId"] = target["observationId"].clone();
+        let update = proposal(&context, args["request"].clone()).unwrap();
+        assert_eq!(
+            update.execution.target_content.as_deref(),
+            Some("hello world\n")
+        );
+        update.execution.validate().unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("notes.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+}
+
+#[test]
 fn create_path_guidance_does_not_require_an_existing_observation() {
     let schema = ApplyPatchTool.definition().input_schema;
     let branches = schema["properties"]["request"]["oneOf"].as_array().unwrap();

@@ -36,6 +36,7 @@ mod request;
 mod result;
 mod schema;
 mod support;
+mod wire_contract;
 
 use request::*;
 pub(crate) use request::{apply_patch_action, apply_patch_request, apply_patch_wire_is_valid};
@@ -64,8 +65,21 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Create, update, or delete one UTF-8 text file. Put one operation in request using only its schema branch. create (apply or begin) omits observationId and needs no prior read: the Host verifies the exact target is missing and creates it with atomic no-clobber; success returns its first fileChangeTarget. For update/delete or begin/update, copy the exact target's fileChangeTarget.filePath and observationId from read_file or a successful apply/commit in this run; read the target first if no reusable observation is available. Within the current run, a successful update/delete or Staged update commit renews the same observationId to the verified post-write state; reuse it only after receiving the successful Tool Result, never for multiple writes in the same Provider Tool Call batch. Do not reread solely for another ID. If fileChangeTarget is absent, observationRefreshRequired=true, current contents are unknown, or a match/file conflict occurs, follow continueWith and read_file again before correcting the change. Failure, rejection, cancellation, conflict and outcome_unknown do not renew observations. Direct create: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"content\":\"hello\\n\"}}. For larger content or multi-step assembly, use begin, append/edit, then commit. Copy the latest Host transactionId, nextIndex and draftRevision exactly; never invent them or replay persisted chunks. Use status for authoritative cursors and follow allowedNextActions. append/edit changes only the draft; only a successful commit issues or renews fileChangeTarget. Staged delete is unsupported. Settle every unfinished transaction with commit or abort before user-visible narration. Without a workspace, filePath must be an authorized absolute path or @home/@desktop/@documents/@downloads. Never bypass file-change approval with run_command, redirection or scripts."
-                .to_string(),
+            description: concat!(
+                "Create, update, or delete one UTF-8 text file. Put all fields, including summary, inside request; use only one schema branch. ",
+                "Common update: read_file({\"path\":\"notes.txt\"}), then copy that result's fileChangeTarget.filePath and observationId. ",
+                "If it returned {\"filePath\":\"notes.txt\",\"observationId\":\"OBS\"} and content hello\\n, call ",
+                "{\"request\":{\"action\":\"apply\",\"operation\":\"update\",\"filePath\":\"notes.txt\",\"observationId\":\"OBS\",\"edits\":[{\"kind\":\"replace\",\"oldText\":\"hello\\n\",\"newText\":\"hello world\\n\"}]}}. ",
+                "OBS illustrates a returned ID; never invent it. Copy exact oldText; it must match once unless replaceAll=true. ",
+                "For update/delete or begin/update, read the target first if no reusable observation is available. A successful update/delete or Staged update commit renews the same observationId to the verified post-write state; ",
+                "reuse it only after receiving the successful Tool Result, never for multiple writes in the same Provider Tool Call batch. Do not reread solely for another ID. ",
+                "Missing fileChangeTarget, observationRefreshRequired=true, unknown contents or a match/file conflict: follow continueWith and read_file again. Failure, rejection, cancellation, conflict and outcome_unknown do not renew observations. ",
+                "create (apply or begin) omits observationId and needs no prior read; the Host verifies Missing with atomic no-clobber; success returns its first fileChangeTarget. ",
+                "Direct create: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"content\":\"hello\\n\"}}. For larger content or multi-step assembly, use begin, append/edit, then commit. ",
+                "Copy Host transactionId, nextIndex and draftRevision exactly; never invent them or replay persisted chunks. Use status for authoritative cursors and follow allowedNextActions. ",
+                "append/edit changes only the draft; only a successful commit issues or renews fileChangeTarget. No Staged delete. Settle every unfinished transaction with commit or abort before user-visible narration. ",
+                "Without a workspace, use an authorized absolute path or @home/@desktop/@documents/@downloads. Never bypass file-change approval with run_command, redirection or scripts."
+            ).to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,

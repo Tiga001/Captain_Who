@@ -261,8 +261,42 @@ pub(super) enum DirectStagedRecovery {
 }
 
 pub(super) fn file_change_wire_error(error: FileChangeError, value: &Value) -> AgentError {
+    let oversized_append = error.code() == FileChangeErrorCode::ContentTooLarge
+        && apply_patch_action(value) == Some("append");
     let continuation = wire_safe_continuation(error.code(), value);
-    file_change_agent_error_with_continuation(error, continuation, Some(wire_expected_shape(value)))
+    let public_error = file_change_agent_error_with_continuation(
+        error,
+        continuation,
+        Some(wire_expected_shape(value)),
+    );
+    let issues = super::wire_contract::inspect(value);
+    let mut details = public_error
+        .details()
+        .cloned()
+        .expect("structured wire error");
+    details["outcome"] = json!("definitely_not_executed");
+    if oversized_append {
+        // The transaction is already staged; only the rejected chunk needs correction.
+        details["recovery"] = json!(crate::file_change::FileChangeRecovery::CorrectArguments);
+    }
+    details["diagnostics"] = json!(issues
+        .iter()
+        .map(|issue| &issue.details)
+        .collect::<Vec<_>>());
+    let message = match issues.first() {
+        Some(issue) => format!(
+            "{} {}: {}",
+            public_error,
+            issue.details["pointer"].as_str().unwrap_or_default(),
+            issue.details["message"].as_str().unwrap_or_default(),
+        ),
+        None => public_error.to_string(),
+    };
+    AgentError::structured(
+        public_error.code().expect("structured wire error code"),
+        message,
+        details,
+    )
 }
 
 fn wire_safe_continuation(code: FileChangeErrorCode, value: &Value) -> Option<Value> {
@@ -274,7 +308,7 @@ fn wire_safe_continuation(code: FileChangeErrorCode, value: &Value) -> Option<Va
         let observation_is_invalid = request
             .get("observationId")
             .and_then(Value::as_str)
-            .is_none_or(str::is_empty);
+            .is_none_or(|value| value.trim().is_empty() || value.chars().count() > 256);
         if observation_is_invalid && operation != Some("create") {
             return Some(read_file_continuation(file_path));
         }
@@ -446,180 +480,7 @@ fn staged_status_continuation(transaction_id: &str) -> Value {
 }
 
 pub(super) fn wire_expected_shape(value: &Value) -> Value {
-    let root = json!({
-        "requiredFields": ["request"],
-        "allowedFields": ["request"]
-    });
-    let Some(request) = apply_patch_request(value) else {
-        return json!({
-            "root": root,
-            "request": {
-                "allowedActions": ["apply", "begin", "append", "edit", "commit", "status", "abort"]
-            }
-        });
-    };
-    // A malformed call may omit the discriminator while still making exactly one branch clear.
-    // Infer only those unambiguous literals so the correction identifies the concrete current
-    // shape without echoing private content/edits back through the error channel.
-    let action = request
-        .get("action")
-        .and_then(Value::as_str)
-        .or_else(|| inferred_action_for_expected_shape(request));
-    let operation = request
-        .get("operation")
-        .and_then(Value::as_str)
-        .or_else(|| inferred_operation_for_expected_shape(action, request));
-    let (required, optional, constraints): (Vec<&str>, Vec<&str>, Vec<&str>) = match (
-        action, operation,
-    ) {
-        (Some("apply"), Some("create")) => (
-            vec!["action", "operation", "filePath", "content"],
-            vec!["summary"],
-            vec![
-                "content is complete UTF-8 text and at most 32 KiB",
-                "do not include observationId; create is atomic no-clobber",
-            ],
-        ),
-        (Some("apply"), Some("update")) if request.contains_key("edits") => (
-            vec!["action", "operation", "filePath", "observationId", "edits"],
-            vec!["summary"],
-            vec!["do not include content; use exactly one edit shape"],
-        ),
-        (Some("apply"), Some("update")) => (
-            vec![
-                "action",
-                "operation",
-                "filePath",
-                "observationId",
-                "content",
-            ],
-            vec!["summary"],
-            vec!["choose exactly one of content or edits; content is at most 32 KiB"],
-        ),
-        (Some("apply"), Some("delete")) => (
-            vec!["action", "operation", "filePath", "observationId"],
-            vec!["summary"],
-            vec!["do not include content or edits"],
-        ),
-        (Some("begin"), Some("create")) => (
-            vec!["action", "operation", "filePath"],
-            vec![],
-            vec!["do not include observationId, strategy, content, edits, or summary"],
-        ),
-        (Some("begin"), Some("update")) => (
-            vec![
-                "action",
-                "operation",
-                "filePath",
-                "observationId",
-                "strategy",
-            ],
-            vec![],
-            vec!["strategy is modify or rewrite; do not include content or edits"],
-        ),
-        (Some("append"), _) => (
-            vec![
-                "action",
-                "transactionId",
-                "index",
-                "expectedDraftRevision",
-                "content",
-            ],
-            vec![],
-            vec!["content is non-empty and at most 1 MiB; transaction total is at most 4 MiB"],
-        ),
-        (Some("edit"), _) => (
-            vec![
-                "action",
-                "transactionId",
-                "index",
-                "expectedDraftRevision",
-                "edits",
-            ],
-            vec![],
-            vec!["do not include content; every edit uses exactly one listed edit shape"],
-        ),
-        (Some("commit"), _) => (
-            vec!["action", "transactionId", "expectedDraftRevision"],
-            vec!["summary"],
-            vec![],
-        ),
-        (Some("status" | "abort"), _) => (vec!["action", "transactionId"], vec![], vec![]),
-        _ => {
-            return json!({
-                "root": root,
-                "request": {
-                    "allowedActions": ["apply", "begin", "append", "edit", "commit", "status", "abort"],
-                    "applyOperations": ["create", "update", "delete"],
-                    "beginOperations": ["create", "update"]
-                }
-            });
-        }
-    };
-    let mut allowed = required.clone();
-    allowed.extend(optional.iter().copied());
-    json!({
-        "root": root,
-        "request": {
-            "action": action,
-            "operation": operation,
-            "requiredFields": required,
-            "optionalFields": optional,
-            "allowedFields": allowed,
-            "constraints": constraints,
-            "editShapes": {
-                "replace": { "requiredFields": ["kind", "oldText", "newText"], "optionalFields": ["replaceAll"] },
-                "insert_before": { "requiredFields": ["kind", "anchor", "text"] },
-                "insert_after": { "requiredFields": ["kind", "anchor", "text"] },
-                "append": { "requiredFields": ["kind", "text"] },
-                "prepend": { "requiredFields": ["kind", "text"] }
-            }
-        }
-    })
-}
-
-fn inferred_action_for_expected_shape(request: &Map<String, Value>) -> Option<&'static str> {
-    match request.get("operation").and_then(Value::as_str) {
-        Some("delete") => Some("apply"),
-        Some("create" | "update")
-            if request.contains_key("content")
-                || request.contains_key("edits")
-                || request.contains_key("summary") =>
-        {
-            Some("apply")
-        }
-        Some("create" | "update") if request.contains_key("strategy") => Some("begin"),
-        Some("create")
-            if request.contains_key("filePath") && request.contains_key("observationId") =>
-        {
-            Some("begin")
-        }
-        _ => None,
-    }
-}
-
-fn inferred_operation_for_expected_shape(
-    action: Option<&str>,
-    request: &Map<String, Value>,
-) -> Option<&'static str> {
-    match action {
-        Some("apply") if request.contains_key("edits") => Some("update"),
-        Some("apply")
-            if !request.contains_key("content")
-                && !request.contains_key("edits")
-                && request.contains_key("filePath")
-                && request.contains_key("observationId") =>
-        {
-            Some("delete")
-        }
-        Some("begin") if request.contains_key("strategy") => Some("update"),
-        Some("begin")
-            if request.contains_key("filePath") && request.contains_key("observationId") =>
-        {
-            Some("create")
-        }
-        _ => None,
-    }
+    super::wire_contract::expected_shape(value)
 }
 
 pub(super) fn file_change_agent_error_with_continuation(

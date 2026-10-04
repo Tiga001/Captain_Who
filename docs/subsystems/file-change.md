@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # FileChange 子系统
@@ -42,6 +42,27 @@ read_file（update/delete）或 Host 私下证明 Missing（create）
 
 create 始终 no-clobber；update/delete 始终比较已观察 revision/identity。一次 proposal 只能改一个文件。
 
+常见更新按以下顺序调用：先 `read_file({"path":"notes.txt"})`，从结果复制该目标的
+`fileChangeTarget.filePath` 与 `fileChangeTarget.observationId`，再提交精确替换。假设这次读取
+返回 `filePath=notes.txt`、`observationId=OBS`，正文为 `hello\n`，对应调用为：
+
+```json
+{
+  "request": {
+    "action": "apply",
+    "operation": "update",
+    "filePath": "notes.txt",
+    "observationId": "OBS",
+    "edits": [{ "kind": "replace", "oldText": "hello\n", "newText": "hello world\n" }]
+  }
+}
+```
+
+`OBS` 只是本例中假定的返回值，实际调用必须复制当前 Run 的精确凭据。所有字段都位于 `request`
+内，可选 `summary` 也不能放在根节点或单条 edit 内。`oldText` 必须按字节精确匹配且默认只命中一次；
+多处替换必须显式使用 `replaceAll=true`。成功后按下文 Observation 规则复用返回凭据；出现内容、
+匹配或文件冲突时按 `continueWith` 重新读取，不通过模糊匹配猜测修改位置。
+
 ### Staged
 
 Staged 用于超过 Direct inline 边界或需要逐步组装的 create/update：
@@ -52,6 +73,26 @@ Staged 用于超过 Direct inline 边界或需要逐步组装的 create/update�
 4. Staged 不支持 delete。每个 append chunk 最多 1 MiB，每次 edit 接受 1–128 个 exact edit，整份草稿最多 4 MiB，草稿 TTL 为 7 天。
 
 Staged 持久状态包括 `drafting`、`ready`、`waiting_approval`、`applying`、`applied`、`already_applied`、`rejected`、`conflict`、`failed`、`outcome_unknown`、`aborted`、`expired`。结果只使用 `definitely_not_executed`、`applied`、`outcome_unknown` 三类 outcome；不能把超时或崩溃统一降格成“未执行”。
+
+### 调用契约与参数诊断
+
+[schema.rs 的 `contract_schema`](../../crates/core/src/tools/apply_patch/schema.rs) 是字段、分支、
+类型和限额的共同真源；[wire_contract.rs](../../crates/core/src/tools/apply_patch/wire_contract.rs)
+读取同一契约完成副作用前校验，并生成本次调用对应的 `expectedShape`。它是这个工具的专用校验器，
+不接受调用方提交 schema，也不代替后续路径、Observation、审批和提交检查。
+
+参数错误的 `details.diagnostics` 最多返回 16 项，每项包含 JSON Pointer `pointer`、`reason` 和
+具体 `message`。类型错误补充 `expectedType/actualType`，枚举错误补充 `allowedValues`。
+`expectedShape` 只列相关请求分支及本次实际尝试的 edit 类型，避免回传整套协议。缺少正文不会被
+解释为删除意图；Host 不补写路径、Observation 或修改内容。wire 拒绝明确标记
+`outcome=definitely_not_executed`。
+
+正文限额按 UTF-8 **字节数**计算，JSON Schema 的 `maxLength` 按字符计数，只构成必要条件。
+Host 同时校验字节限额；超限诊断给出 `actualBytes`、`maxBytes`、`actualCharacters`，并通过恢复信息
+指向适用的 Staged 路径或缩小 chunk。摘要的字符限额与正文的字节限额不能混用。
+
+本轮保持 Direct/Staged 共用一个工具以及现有 11 个分支。Provider 的严格参数生成功能、独立事务工具
+和 Host 自动转入 Staged 均未在这里启用；相关接口调整需要独立验证。
 
 ## 3. 路径与 Observation authority
 
