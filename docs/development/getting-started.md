@@ -71,7 +71,7 @@ Automation 新回合都需要有效的在线验证结果。保存的登录会话
 `pnpm check` 当前不自动包含 Multi-Agent release gate、Playwright release gate 或平台签名验证。发布前还
 需执行[测试体系](testing.md)和[构建与发布](build-and-release.md)指定的门禁。
 
-`.github/workflows/tests.yml` 会在 pull request、`main` push 和手动触发时分开执行 Linux 静态/脚本/Node/browser/Rust、macOS Electron、Automation 真实 Core Server 与 Multi-Agent release gate；它不是发布打包或签名流水线。
+`.github/workflows/tests.yml` 仅在手动触发（`workflow_dispatch`）时分开执行 Linux 静态/脚本/Node/browser/Rust、macOS Electron、Automation 真实 Core Server 与 Multi-Agent release gate；pull request 和 `main` push 不自动触发。可在 GitHub Actions 的 Tests 页面选择 Run workflow；它不是发布打包或签名流水线，本地测试命令保持不变。
 
 ## 数据与本地诊断
 

@@ -56,7 +56,7 @@ pnpm check
 
 这是一条覆盖广的本地门禁，但不是完整 release gate。
 
-仓库还通过 [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml) 在 pull request、`main` push 和手动触发时并行运行静态检查、脚本测试、Node unit、locked-browser、Linux Rust、macOS Electron fixture、Automation 真实 Core Server E2E 与 Multi-Agent release gate。该 workflow 是源码测试门禁，不构建发布包，也不执行真实签名、notarization 或完整 Managed Playwright release 组合。
+仓库还通过 [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml) 在手动触发（`workflow_dispatch`）时并行运行静态检查、脚本测试、Node unit、locked-browser、Linux Rust、macOS Electron fixture、Automation 真实 Core Server E2E 与 Multi-Agent release gate。pull request 和 `main` push 不再自动触发该 workflow；可在 GitHub Actions 的 Tests 页面选择 Run workflow。该 workflow 是手动源码测试入口，不构建发布包，也不执行真实签名、notarization 或完整 Managed Playwright release 组合。本地测试命令保持不变。
 
 ## 3. Vitest 项目
 
@@ -229,7 +229,7 @@ pnpm test:automation-core-e2e
 
 **`test:automation-core-e2e` 不在 `test:web`、`test` 或 `check` 中。** 它会构建 debug Core Server，使用临时数据根，并通过生产 Preload bridge、Main IPC registrar 与 Core Server 完成 durable CRUD、revision CAS、`runNow` 入队、Run history 和 attention 调用。其 Electron transport 是进程内适配器，原生通知被模拟为不支持；它不驱动真实定时唤醒、模型完成、Approval 循环、OS 原生通知、进程重启恢复或 packaged Electron。
 
-该专项由 CI 的独立 `automation-real-core` job 自动执行，但仍不改变本地 `pnpm check` 的组成。模型测试凭据仍写入原生安全存储：Linux CI 在独立 D-Bus session 和临时 XDG 目录中启动、解锁 GNOME Keyring，并先验证 Secret Service 的写入、读取和删除；不依赖桌面登录会话，也不向生产代码注入明文或内存凭据后门。
+手动触发 Tests workflow 后，该专项由 CI 的独立 `automation-real-core` job 执行，但仍不改变本地 `pnpm check` 的组成。模型测试凭据仍写入原生安全存储：Linux CI 在独立 D-Bus session 和临时 XDG 目录中启动、解锁 GNOME Keyring，并先验证 Secret Service 的写入、读取和删除；不依赖桌面登录会话，也不向生产代码注入明文或内存凭据后门。
 
 修改该子系统时可按层定位：
 
@@ -249,7 +249,7 @@ pnpm test:automation-core-e2e
 pnpm test:multi-agent-release
 ```
 
-运行 4 个 profile + 9 个 smoke，并拒绝声称成功但实际筛选到 0 项的 Rust 命令。它不在本地 `pnpm check` 内，但由 CI 的独立 `multi-agent-release` job 自动执行。详细阈值见 [Multi-Agent 发布门禁](../operations/multi-agent-release-gate.md)。
+运行 4 个 profile + 9 个 smoke，并拒绝声称成功但实际筛选到 0 项的 Rust 命令。它不在本地 `pnpm check` 内；手动触发 Tests workflow 后，由 CI 的独立 `multi-agent-release` job 执行。详细阈值见 [Multi-Agent 发布门禁](../operations/multi-agent-release-gate.md)。
 
 ### Managed Playwright
 
@@ -340,7 +340,7 @@ Scheduled Automation 或其共享 Electron Host/协议/存储链路有变化时�
 - Vitest projects：`vitest.config.ts`、`scripts/vitest-project-rules.mjs`
 - 测试布局检查：`scripts/check-vitest-project-ownership.mjs`、`scripts/check-ignored-rust-tests.mjs`
 - Rust ignored-test registry：`scripts/ignored-rust-tests.json`
-- 自动源码测试：`.github/workflows/tests.yml`
+- 手动源码测试：`.github/workflows/tests.yml`
 - Rust targets：workspace `Cargo.toml` 与各 crate `Cargo.toml`
 - Multi-Agent runner：`scripts/run-multi-agent-release-gate.mjs`
 - Scheduled Automation project：`vitest.config.ts`、`src/main/core/automationHostRealCore.integration.test.ts`
@@ -370,7 +370,7 @@ pnpm check
 
 ## 13. 当前限制
 
-- 仓库已有 Linux/macOS 源码测试 workflow；仍没有 Windows job、发布包矩阵、真实签名/notarization job，且 workflow 本身不能证明仓库侧已配置 required check。
+- 仓库已有手动触发的 Linux/macOS 源码测试 workflow；pull request 和 `main` push 不自动运行。仍没有 Windows job、发布包矩阵、真实签名/notarization job，且 workflow 本身不能证明仓库侧已配置 required check。
 - 没有统一 `release:verify` 命令把 `pnpm check`、专项 gate、package、签名和证据绑定起来。
 - macOS 是当前主要实测平台；Linux/Windows 的“有 manifest/target”不等于已完成 release acceptance。
 - ignored real-component tests 依赖本地 prepared component，不在默认 Cargo 测试中。

@@ -141,7 +141,7 @@ ADR；不要悄悄重写历史。
 - 未复制 Token、用户路径、日志中的敏感值或私有配置。
 
 `pnpm check` 已包含 `pnpm check:docs`、`pnpm check:public-docs` 与 Agent avatar 校验；
-`.github/workflows/tests.yml` 也复用这些仓库命令执行自动检查。仓库侧是否将对应 job 配置为 required check
+`.github/workflows/tests.yml` 仅在手动触发后复用这些仓库命令执行检查。仓库侧是否将对应 job 配置为 required check
 不由 workflow 文件本身决定；提交者在合并或发布前仍应按改动域完成本地与专项门禁，不能维护另一套不同规则。
 
 两套检查器的真源分别是 [`check-docs.mjs`](../../scripts/check-docs.mjs) 与
