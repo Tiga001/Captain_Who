@@ -18,6 +18,7 @@ import { revealStoredProjectFile } from '../../../storage/storageClient'
 import type { ChatFileChangePreview } from '../../chatTypes'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import { FileChangeDiffCard } from './FileChangeDiffCard'
+import { RollingLineCount } from './RollingLineCount'
 import { getSafeFileChangeFailureMessage } from './fileChangeFailurePresentation'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -604,8 +605,16 @@ function FileChangeRow({
           className="file-change-activity__stats"
           aria-label={`+${view.additions} -${view.deletions}`}
         >
-          <span className="file-change-activity__additions">+{view.additions}</span>
-          <span className="file-change-activity__deletions">-{view.deletions}</span>
+          <RollingLineCount
+            className="file-change-activity__additions"
+            sign="+"
+            value={view.additions}
+          />
+          <RollingLineCount
+            className="file-change-activity__deletions"
+            sign="-"
+            value={view.deletions}
+          />
         </span>
         {canPreview ? (
           <button
@@ -686,7 +695,7 @@ export function FileChangeToolActivityGroup({
             assistantMessageId={assistantMessageId}
             conversationId={conversationId}
             item={item}
-            key={item.call.id}
+            key={getPreviewTransactionId(item) ?? item.call.id}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             runId={runId}
