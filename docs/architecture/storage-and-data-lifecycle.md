@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-02
+last_verified: 2026-10-04
 ---
 
 # SQLite 存储与数据生命周期
@@ -74,6 +74,8 @@ last_verified: 2026-10-02
 `saveChatMessageState` 不修改创建时间。对已有 Trace 的助手消息，回存的 `agentRunJson.runId` 必须等于已接纳的 Run；未确认启动的本地失败/取消或其他 Run 的状态不能覆盖该消息。身份匹配后仍复用现有终态围栏，保留正常状态回存与同 Run 迟到 running checkpoint 的处理；纯本地未接纳消息不受 Run 绑定限制。Renderer 启动失败/取消也只本地展示，再通过新增接口保存尚不存在的失败 pair。
 
 成功完成的回答正文以 Host 提交的 `messages.content` 为准。终态提交、历史重建和 Renderer 终态显示都会移除 Timeline 中有 `streamId` 但没有 `traceSequence` 的临时回答流，并清空完成 Run 的 `messageStreamCheckpoints`；有 Trace 身份的过程说明完整保留，不按文字相同或前缀关系删除。迟到的 Renderer 快照不能覆盖已经完成的权威正文或复活临时流。取消、失败和等待审批不采用成功回答的流清理规则，以保留原有中断及恢复语义。
+
+完整聊天加载在同一次历史投影中读取并校验 Trace 与组织邮件来源，复用这份证据隐藏已经进入轮次时间线的重复邮件气泡，不为隐藏气泡再次读取和解析全部 Trace。助手运行 JSON 在引导和邮件投影都完成后统一序列化，避免中间序列化再解析。证据仅在本次读取内有效，不采用跨请求缓存；内部普通会话读取仍保留原始消息记录，前端传回的 JSON 不能作为隐藏邮件的依据。
 
 ## 附件导入与草稿引用
 

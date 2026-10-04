@@ -773,22 +773,26 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
     input: AgentObserverConversationRequest
   ): Promise<AgentObserverConversation | null> {
     const request = parseAgentObserverConversationRequest(input)
-    return this.rpc
-      .request<unknown, AgentObserverConversationRequest>(
-        AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
-        request
-      )
-      .then((value) => {
-        const response = parseAgentObserverConversation(value)
-        if (
-          response &&
-          (response.rootConversationId !== request.rootConversationId ||
-            response.conversationId !== request.conversationId)
-        ) {
-          throw new Error('Invalid observer Conversation response identity')
-        }
-        return response
-      })
+    return this.conversationReads.run(
+      JSON.stringify(['observer', request.rootConversationId, request.conversationId]),
+      () =>
+        this.rpc
+          .request<unknown, AgentObserverConversationRequest>(
+            AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
+            request
+          )
+          .then((value) => {
+            const response = parseAgentObserverConversation(value)
+            if (
+              response &&
+              (response.rootConversationId !== request.rootConversationId ||
+                response.conversationId !== request.conversationId)
+            ) {
+              throw new Error('Invalid observer Conversation response identity')
+            }
+            return response
+          })
+    )
   }
 
   listCollaborationEvents(input: CollaborationEventsRequest): Promise<CollaborationEventsPage> {

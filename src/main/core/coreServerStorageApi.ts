@@ -136,6 +136,7 @@ import {
 } from '@mycopilot/protocol'
 
 import { CoreJsonRpcClient } from './jsonRpcClient'
+import { QueuedConversationReads } from './queuedConversationReads'
 
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const SKILLS_LIST_METHOD = 'skills.list'
@@ -244,6 +245,7 @@ export type HostConfigurationDomain = 'modelSettings' | 'imageGeneration' | 'bui
 
 /** Request and invalidation facade. CoreServer owns the RPC process lifecycle. */
 export class CoreServerStorageApi {
+  protected readonly conversationReads = new QueuedConversationReads()
   private readonly configurationHandlers = new Map<HostConfigurationDomain, Set<() => void>>()
   private readonly conversationSummaryHandlers = new Set<() => void>()
 
@@ -568,7 +570,9 @@ export class CoreServerStorageApi {
   }
 
   loadConversations(): Promise<StorageChatConversationRecord[]> {
-    return this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
+    return this.conversationReads.run('all-conversations', () =>
+      this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
+    )
   }
 
   loadRunningConversationSummaries(): Promise<StorageRunningConversationSummary[]> {
@@ -584,9 +588,11 @@ export class CoreServerStorageApi {
   }
 
   loadConversation(conversationId: string): Promise<StorageChatConversationRecord | null> {
-    return this.rpc.request<StorageChatConversationRecord | null, { conversationId: string }>(
-      STORAGE_LOAD_CONVERSATION_METHOD,
-      { conversationId }
+    return this.conversationReads.run(JSON.stringify(['conversation', conversationId]), () =>
+      this.rpc.request<StorageChatConversationRecord | null, { conversationId: string }>(
+        STORAGE_LOAD_CONVERSATION_METHOD,
+        { conversationId }
+      )
     )
   }
 

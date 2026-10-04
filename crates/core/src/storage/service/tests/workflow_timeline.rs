@@ -4,6 +4,31 @@ use crate::{
 };
 use serde_json::{json, Value};
 
+thread_local! {
+    static HISTORY_QUERY_COUNTS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+fn count_history_queries(sql: &str) {
+    let index = if sql.contains("FROM conversation_turn_traces AS trace")
+        && sql.contains("trace.completed_at")
+    {
+        Some(0)
+    } else if sql.contains("FROM conversation_turn_trace_items AS item") {
+        Some(1)
+    } else if sql.contains("FROM workflow_mail_message_origins o JOIN workflow_mail_inputs") {
+        Some(2)
+    } else {
+        None
+    };
+    if let Some(index) = index {
+        HISTORY_QUERY_COUNTS.with(|counts| {
+            let mut next = counts.get();
+            next[index] += 1;
+            counts.set(next);
+        });
+    }
+}
+
 fn seed(service: &StorageService, startup: bool, proof: bool) {
     seed_with_trace_truncation(service, startup, proof, false);
 }
@@ -105,6 +130,57 @@ fn deliveries(chat: &ChatConversationRecord) -> Vec<Value> {
         })
         .filter(|item| item["type"] == "workflow_delivery")
         .collect()
+}
+
+#[test]
+fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
+    for bulk in [false, true] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        seed(&service, false, true);
+        HISTORY_QUERY_COUNTS.with(|counts| counts.set([0; 3]));
+        service
+            .state
+            .connection()
+            .unwrap()
+            .trace(Some(count_history_queries));
+        let view = if bulk {
+            service.load_conversation_views().unwrap().remove(0)
+        } else {
+            service
+                .load_conversation_view("mail-chat")
+                .unwrap()
+                .unwrap()
+        };
+        service.state.connection().unwrap().trace(None);
+        assert_eq!(
+            HISTORY_QUERY_COUNTS.with(std::cell::Cell::get),
+            [1, 1, 1],
+            "trace headers, trace bodies and mail origins must each be read only once"
+        );
+        assert_eq!(deliveries(&view.conversation).len(), 1);
+        assert!(!view
+            .conversation
+            .messages
+            .iter()
+            .any(|m| m.id == "delivery"));
+        // The evidence is presentation-only; internal and admission history retain the letter.
+        assert!(service
+            .load_conversation("mail-chat")
+            .unwrap()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.id == "delivery"));
+        assert!(service
+            .load_conversation_for_turn("mail-chat")
+            .unwrap()
+            .0
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.id == "delivery"));
+    }
 }
 
 #[test]

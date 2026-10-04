@@ -1,7 +1,25 @@
+/// In-memory evidence from the same durable read that produced the displayed timelines. Never
+/// derive hidden message IDs from renderer-persisted JSON or reuse this across separate loads.
+#[derive(Default)]
+struct ConversationProjectionEvidence {
+    workflow_delivery_ids: HashMap<String, HashSet<String>>,
+}
+
+impl ConversationProjectionEvidence {
+    fn retain_workflow_top_level_messages(&self, conversation: &mut ChatConversationRecord) {
+        if let Some(hidden) = self.workflow_delivery_ids.get(&conversation.id) {
+            conversation
+                .messages
+                .retain(|message| !hidden.contains(&message.id));
+        }
+    }
+}
+
 fn attach_message_guidance_timelines(
     connection: &rusqlite::Connection,
     conversations: &mut [ChatConversationRecord],
-) -> Result<(), String> {
+) -> Result<ConversationProjectionEvidence, String> {
+    let mut evidence = ConversationProjectionEvidence::default();
     for conversation in conversations {
         let traces = conversation_trace_repository::list_trace_records_for_conversation(
             connection,
@@ -98,16 +116,27 @@ fn attach_message_guidance_timelines(
                 mcp_actions,
                 message.created_at,
             )?;
-            message.agent_run_json = Some(insert_workflow_delivery_timeline(
-                projected,
-                workflow_deliveries
-                    .get(&message.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            )?);
+            let deliveries = workflow_deliveries
+                .get(&message.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            message.agent_run_json =
+                Some(insert_workflow_delivery_timeline(projected, deliveries)?);
+            // Only hide letters whose authoritative in-turn projection was actually built.
+            if !deliveries.is_empty() {
+                evidence
+                    .workflow_delivery_ids
+                    .entry(conversation.id.clone())
+                    .or_default()
+                    .extend(
+                        deliveries
+                            .iter()
+                            .map(|delivery| delivery.delivery_id.clone()),
+                    );
+            }
         }
     }
-    Ok(())
+    Ok(evidence)
 }
 
 fn discard_unproven_workflow_delivery_timeline(raw: &mut Option<String>) -> Result<(), String> {
@@ -134,14 +163,9 @@ fn discard_unproven_workflow_delivery_timeline(raw: &mut Option<String>) -> Resu
 }
 
 fn insert_workflow_delivery_timeline(
-    projected: String,
+    mut run: serde_json::Value,
     deliveries: &[crate::workflow_execution::DeliveryPresentation],
 ) -> Result<String, String> {
-    if deliveries.is_empty() {
-        return Ok(projected);
-    }
-    let mut run: serde_json::Value =
-        serde_json::from_str(&projected).map_err(|error| error.to_string())?;
     let timeline = run["timeline"]
         .as_array_mut()
         .ok_or("Organization mail delivery projection has no timeline")?;
@@ -159,39 +183,6 @@ fn insert_workflow_delivery_timeline(
     serde_json::to_string(&run).map_err(|error| error.to_string())
 }
 
-/// Only renderer views hide proven in-turn duplicates. Plain conversation loading and model
-/// history retain the original message records and their existing exclusion/authority rules.
-fn retain_workflow_top_level_messages(
-    connection: &rusqlite::Connection,
-    conversation: &mut ChatConversationRecord,
-) -> Result<(), String> {
-    let origins = crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
-        connection,
-        &conversation.id,
-    )?;
-    if origins.is_empty() {
-        return Ok(());
-    }
-    let traces =
-        conversation_trace_repository::list_traces_for_conversation(connection, &conversation.id)
-            .map_err(storage_error)?;
-    let hidden = traces
-        .iter()
-        .flat_map(|trace| {
-            crate::storage::workflow_execution_repository::delivery_presentations(
-                conversation,
-                trace,
-                &origins,
-            )
-        })
-        .map(|delivery| delivery.delivery_id)
-        .collect::<HashSet<_>>();
-    conversation
-        .messages
-        .retain(|message| !hidden.contains(&message.id));
-    Ok(())
-}
-
 fn project_guidance_timeline(
     existing_run_json: Option<&str>,
     trace_record: Option<&conversation_trace_repository::ConversationTurnTraceRecord>,
@@ -200,7 +191,7 @@ fn project_guidance_timeline(
     guidance_attachments: &HashMap<String, AttachmentRecord>,
     mcp_actions: &[AgentPendingActionRecord],
     fallback_started_at: i64,
-) -> Result<String, String> {
+) -> Result<serde_json::Value, String> {
     let trace = trace_record.map(|record| &record.trace);
     let trace_completed_at = trace_record.and_then(|record| record.completed_at);
     let (expected_run_id, fallback_status, fallback_completed_at) = trace
@@ -789,8 +780,7 @@ fn project_guidance_timeline(
         run.insert("status".to_string(), status.into());
     }
 
-    serde_json::to_string(&serde_json::Value::Object(run))
-        .map_err(|error| format!("serialize guidance timeline: {error}"))
+    Ok(serde_json::Value::Object(run))
 }
 
 fn timeline_item_is_rebuilt_from_durable_state(
@@ -1231,7 +1221,6 @@ mod request_owned_projection_tests {
             99,
         )
         .unwrap();
-        let projected: serde_json::Value = serde_json::from_str(&projected).unwrap();
         assert_eq!(projected["runId"], "legacy-run");
         assert_eq!(projected["startedAt"], 2);
         assert_eq!(projected["firstResponseAt"], 3);

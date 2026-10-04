@@ -130,22 +130,29 @@ impl StorageService {
     }
 
     pub fn load_conversations(&self) -> Result<Vec<ChatConversationRecord>, String> {
+        self.load_conversations_with_projection_evidence()
+            .map(|(conversations, _)| conversations)
+    }
+
+    fn load_conversations_with_projection_evidence(
+        &self,
+    ) -> Result<(Vec<ChatConversationRecord>, ConversationProjectionEvidence), String> {
         let connection = self.state.connection()?;
         let mut conversations =
             chat_repository::list_active_conversations(&connection).map_err(storage_error)?;
         let preview_attachments =
             self.attach_message_attachments(&connection, &mut conversations)?;
-        attach_message_guidance_timelines(&connection, &mut conversations)?;
+        let evidence = attach_message_guidance_timelines(&connection, &mut conversations)?;
         drop(connection);
         self.hydrate_message_attachment_previews(&mut conversations, preview_attachments);
-        Ok(conversations)
+        Ok((conversations, evidence))
     }
 
     /// Loads complete conversations for the renderer and decorates only forked tasks with their
     /// backend-owned continuation boundary. Internal Agent callers continue to use the plain
     /// conversation record and never consume presentation lineage.
     pub fn load_conversation_views(&self) -> Result<Vec<ChatConversationViewRecord>, String> {
-        let conversations = self.load_conversations()?;
+        let (conversations, evidence) = self.load_conversations_with_projection_evidence()?;
         let connection = self.state.connection()?;
         conversations
             .into_iter()
@@ -165,7 +172,7 @@ impl StorageService {
                 let mut conversation = conversation;
                 chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
                     .map_err(storage_error)?;
-                retain_workflow_top_level_messages(&connection, &mut conversation)?;
+                evidence.retain_workflow_top_level_messages(&mut conversation);
                 let continuation_origin = conversation_fork_repository::get_continuation_origin(
                     &connection,
                     &conversation.id,
@@ -203,17 +210,32 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<ChatConversationRecord>, String> {
+        self.load_conversation_with_projection_evidence(conversation_id)
+            .map(|(conversation, _)| conversation)
+    }
+
+    fn load_conversation_with_projection_evidence(
+        &self,
+        conversation_id: &str,
+    ) -> Result<
+        (
+            Option<ChatConversationRecord>,
+            ConversationProjectionEvidence,
+        ),
+        String,
+    > {
         let connection = self.state.connection()?;
         let mut conversation =
             chat_repository::get_active_conversation(&connection, conversation_id)
                 .map_err(storage_error)?;
-        let preview_attachments = if let Some(conversation) = &mut conversation {
+        let (preview_attachments, evidence) = if let Some(conversation) = &mut conversation {
             let preview_attachments =
                 self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
-            attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
-            preview_attachments
+            let evidence =
+                attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
+            (preview_attachments, evidence)
         } else {
-            Vec::new()
+            (Vec::new(), ConversationProjectionEvidence::default())
         };
         drop(connection);
         if let Some(conversation) = &mut conversation {
@@ -222,7 +244,7 @@ impl StorageService {
                 preview_attachments,
             );
         }
-        Ok(conversation)
+        Ok((conversation, evidence))
     }
 
     /// Loads a complete observer Conversation and its input provenance from one SQLite read cut.
@@ -351,13 +373,15 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<ChatConversationViewRecord>, String> {
-        let Some(mut conversation) = self.load_conversation(conversation_id)? else {
+        let (conversation, evidence) =
+            self.load_conversation_with_projection_evidence(conversation_id)?;
+        let Some(mut conversation) = conversation else {
             return Ok(None);
         };
         let connection = self.state.connection()?;
         chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
             .map_err(storage_error)?;
-        retain_workflow_top_level_messages(&connection, &mut conversation)?;
+        evidence.retain_workflow_top_level_messages(&mut conversation);
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, conversation_id)
                 .map_err(storage_error)?;
@@ -560,10 +584,10 @@ impl StorageService {
         let connection = self.state.connection()?;
         chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
             .map_err(storage_error)?;
-        attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))
-            .map_err(conversation_fork_repository::ConversationForkError::Other)?;
-        retain_workflow_top_level_messages(&connection, &mut conversation)
-            .map_err(conversation_fork_repository::ConversationForkError::Other)?;
+        let evidence =
+            attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))
+                .map_err(conversation_fork_repository::ConversationForkError::Other)?;
+        evidence.retain_workflow_top_level_messages(&mut conversation);
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
                 .map_err(storage_error)?;

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # Core Server 架构与运行时
@@ -115,6 +115,8 @@ request loop 当前按风险与阻塞特征分流：
 | 普通响应/notification  | 4 MiB 正文 + 512 KiB 控制预留，最多 8192 帧 | 单 FIFO、相邻正文合并、就绪批量写入；大非正文帧独立单 lease                              |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
+
+Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversationReads.ts) 在普通 RPC 准入前串行发送完整聊天读取（单会话、批量及 observer），避免多个大历史响应同时占满输出预算。只合并尚在排队的同身份请求；读取已经开始后收到的新请求保留一次后续读取，不复用旧快照，不跨请求缓存正文。Observer key 包含 root 与目标 conversation。轻量查询、写入和取消沿用原路径，不进入这个队列；失败释放读取槽并原样返回错误，不自动重试写入。Core Server 的并发、队列容量和输出字节预算均保持不变。
 
 组织按具体 `operation` 分类；未知操作保守进入修改队列，再由原 handler 拒绝非法输入。普通查询等待此前已接收修改完成，后续修改也等待此前控制操作完成，避免读取越过既有写入；响应仍通过 request ID 关联，不能依赖跨请求完成顺序。控制操作使用的 run/conversation key 只用于排队，不构成授权，最终仍经过原身份和终态校验。若此前存在按 conversation 排队的修改，按 run 取消会在有界阻塞工作池中解析其 conversation，并仅等待准入时捕获的对应依赖；解析也可能读取 SQLite，不能放回 stdin 循环。跨实例修改仍由领域准入锁、CAS 与终态校验裁决，不凭请求文本猜测多会话授权。共享数据库锁、对话准入锁仍可能造成等待，应与队列耗时分开测量。
 
