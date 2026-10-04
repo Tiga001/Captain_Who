@@ -40,6 +40,7 @@ import {
 import {
   appendMessageToTimeline,
   appendMessageDeltaToTimeline,
+  commitMessageStreamToTimeline,
   getFinalMessageContent,
   getFinalTimeline,
   getMessageContentAfterDelta,
@@ -382,16 +383,14 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'message_stream_committed') {
+    if (currentRun.runId !== agentEvent.runId) return message
     const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
     delete nextCheckpoints[agentEvent.streamId]
-    const timeline =
-      agentEvent.traceSequence === null
-        ? currentRun.timeline
-        : currentRun.timeline.map((item) =>
-            item.type === 'message' && item.streamId === agentEvent.streamId
-              ? { ...item, traceSequence: agentEvent.traceSequence ?? undefined }
-              : item
-          )
+    const timeline = commitMessageStreamToTimeline(
+      currentRun,
+      agentEvent.streamId,
+      agentEvent.traceSequence
+    )
     return {
       ...message,
       agentRun: {

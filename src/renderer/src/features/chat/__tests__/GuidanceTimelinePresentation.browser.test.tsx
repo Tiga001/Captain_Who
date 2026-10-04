@@ -133,6 +133,30 @@ function renderMessage(message: ChatMessage) {
 }
 
 describe('mid-turn guidance Timeline presentation', () => {
+  it.each(['running', 'completed'] as const)(
+    'renders one copy of restored narration alongside guidance when the stream shares its trace sequence (%s)',
+    async (status) => {
+      const message = settledGuidanceMessage(false)
+      message.agentRun!.status = status
+      message.status = status === 'running' ? 'pending' : 'sent'
+      message.agentRun!.timeline.splice(3, 0, {
+        id: 'message-stream-restored',
+        type: 'message',
+        streamId: 'restored',
+        content: '生效后的过程文本',
+        traceSequence: 2
+      })
+      const screen = await renderMessage(message)
+      expect(screen.container.textContent?.split('生效后的过程文本')).toHaveLength(2)
+      expect(textPosition(screen.container, '第一条追加消息')).toBeLessThan(
+        textPosition(screen.container, '生效后的过程文本')
+      )
+      expect(textPosition(screen.container, '生效后的过程文本')).toBeLessThan(
+        textPosition(screen.container, '第二条仍在排队')
+      )
+    }
+  )
+
   it('hydrates metadata-only guidance images before rendering their thumbnail', async () => {
     const message = settledGuidanceMessage(false)
     const guidance = message.agentRun!.timeline.find(

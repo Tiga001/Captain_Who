@@ -39,6 +39,76 @@ function retryingMessage(): ChatMessage {
 }
 
 describe('LLM retry Renderer projection', () => {
+  it('reconciles sequence zero with its authoritative narration without keeping a partial stream copy', () => {
+    const initial = runningMessage()
+    initial.agentRun!.timeline = [
+      { id: 'trace-message-0', type: 'message', content: '完整的执行说明。', traceSequence: 0 }
+    ]
+    const started = applyAgentEventToChatMessage(initial, {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-zero',
+      attempt: 1
+    })
+    const partial = applyAgentEventToChatMessage(started, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-zero',
+      delta: '完整的'
+    })
+    const commit = {
+      type: 'message_stream_committed' as const,
+      runId: 'run-retry',
+      streamId: 'stream-zero',
+      traceSequence: 0
+    }
+    expect(applyAgentEventToChatMessage(partial, { ...commit, runId: 'different-run' })).toBe(
+      partial
+    )
+    const reconciled = applyAgentEventToChatMessage(partial, commit)
+    expect(reconciled.agentRun!.timeline).toEqual(initial.agentRun!.timeline)
+    expect(reconciled.agentRun!.messageStreamCheckpoints).toEqual({})
+    expect(applyAgentEventToChatMessage(reconciled, commit)).toEqual(reconciled)
+  })
+
+  it('preserves genuinely repeated narration committed at different trace sequences', () => {
+    const text = '我确认一下各项收尾任务的执行状态。'
+    let message = runningMessage()
+    message.agentRun!.timeline = [
+      { id: 'trace-message-5', type: 'message', content: text, traceSequence: 5 }
+    ]
+    message = applyAgentEventToChatMessage(message, {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-next',
+      attempt: 1
+    })
+    message = applyAgentEventToChatMessage(message, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-next',
+      delta: text
+    })
+    const commit = {
+      type: 'message_stream_committed' as const,
+      runId: 'run-retry',
+      streamId: 'stream-next',
+      traceSequence: 22
+    }
+    const committed = applyAgentEventToChatMessage(message, commit)
+    expect(committed.agentRun!.timeline).toEqual([
+      { id: 'trace-message-5', type: 'message', content: text, traceSequence: 5 },
+      {
+        id: 'message-stream-stream-next',
+        type: 'message',
+        content: text,
+        streamId: 'stream-next',
+        traceSequence: 22
+      }
+    ])
+    expect(applyAgentEventToChatMessage(committed, commit)).toEqual(committed)
+  })
+
   it('projects only bounded structured retry metadata', () => {
     expect(retryingMessage().agentRun?.llmRetry).toEqual({
       category: 'rate_limited',

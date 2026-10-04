@@ -90,6 +90,46 @@ export function appendMessageToTimeline(
   ]
 }
 
+function reconcileCommittedMessages(timeline: ChatAgentTimelineItem[]): ChatAgentTimelineItem[] {
+  const positions = new Map<number, number>()
+  let duplicated = false
+  timeline.forEach((item, index) => {
+    if (item.type !== 'message' || item.traceSequence === undefined) return
+    const previousIndex = positions.get(item.traceSequence)
+    if (previousIndex === undefined) {
+      positions.set(item.traceSequence, index)
+      return
+    }
+    duplicated = true
+    const previous = timeline[previousIndex]
+    // The restored Trace owns the complete body and its ordered position. A stream can still
+    // contain only a suffix when history loading races the Renderer delta buffer.
+    if (previous.type === 'message' && previous.streamId && !item.streamId) {
+      positions.set(item.traceSequence, index)
+    }
+  })
+  if (!duplicated) return timeline
+  return timeline.filter(
+    (item, index) =>
+      item.type !== 'message' ||
+      item.traceSequence === undefined ||
+      positions.get(item.traceSequence) === index
+  )
+}
+
+export function commitMessageStreamToTimeline(
+  run: ChatAgentRunView,
+  streamId: string,
+  traceSequence: number | null
+): ChatAgentTimelineItem[] {
+  if (traceSequence === null) return run.timeline
+  return reconcileCommittedMessages(
+    run.timeline.map((item) =>
+      item.type === 'message' && item.streamId === streamId ? { ...item, traceSequence } : item
+    )
+  )
+}
+
 export function getMessageContentAfterDelta(content: string, delta: string) {
   return `${content}${delta}`
 }
@@ -99,7 +139,9 @@ export function getFinalMessageContent(currentContent: string, finalContent?: st
 }
 
 export function getFinalTimeline(run: ChatAgentRunView, finalContent?: string) {
-  const timeline = removeTransientToolTimelineItems(run.timeline)
+  // Both live and restored timelines may already contain presentation copies of one Trace event.
+  // Reconcile within this Run by durable identity, never by matching text or display IDs.
+  const timeline = reconcileCommittedMessages(removeTransientToolTimelineItems(run.timeline))
   // A completed answer belongs to ChatMessage.content. Its provisional stream has no Trace
   // sequence; committed tool-loop narration does. Use that identity rather than comparing text,
   // since the last persisted stream can lag behind the authoritative final answer.

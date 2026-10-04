@@ -4,7 +4,10 @@ import type {
   ChatMessage,
   ChatWorkflowDeliveryTimelineItem
 } from '../../features/chat/chatTypes'
-import { ensureAgentRun } from '../../features/agentRun/agentEventReducer'
+import {
+  applyAgentEventToChatMessage,
+  ensureAgentRun
+} from '../../features/agentRun/agentEventReducer'
 vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
 import { isRecoverableGuidanceItem } from '../recoverableGuidance'
 import { humanInteractionResponseDisplay } from '../../features/humanInteraction/humanInteractionState'
@@ -130,6 +133,136 @@ function runningConversation(): ChatConversation {
     ]
   }
 }
+
+const reconciledNarration = 'Let me read the current state of the files I need to edit.'
+it.each([reconciledNarration, 'Let me read'])(
+  'reconciles a durable refresh before delayed stream commit without moving mail, guidance or tools (delta: %s)',
+  (delta) => {
+    const before = runningConversation()
+    before.messages[1] = applyAgentEventToChatMessage(
+      {
+        ...before.messages[1],
+        agentRun: {
+          ...before.messages[1].agentRun!,
+          timeline: [...before.messages[1].agentRun!.timeline.slice(0, 2), delivery('incoming', 4)]
+        }
+      },
+      { type: 'message_stream_started', runId: 'run', streamId: 'stream-2', attempt: 1 }
+    )
+    const stored: ChatConversation = {
+      ...before,
+      messages: [
+        before.messages[0],
+        {
+          ...before.messages[1],
+          agentRun: {
+            ...before.messages[1].agentRun!,
+            timeline: [
+              ...before.messages[1].agentRun!.timeline,
+              {
+                id: 'trace-message-5',
+                type: 'message',
+                content: reconciledNarration,
+                traceSequence: 5
+              },
+              {
+                id: 'guidance',
+                type: 'user_guidance',
+                clientMessageId: 'guidance',
+                content: 'Please check the result',
+                attachments: [],
+                createdAt: 6,
+                status: 'applied',
+                traceSequence: 6
+              },
+              { id: 'read-files', type: 'tool_call', callId: 'read-files', traceSequence: 7 }
+            ]
+          }
+        }
+      ]
+    }
+    // The buffered delta has not touched the conversation yet, so the newer durable snapshot wins.
+    const restored = mergeHumanInteractionConversation(before, stored, before)
+    expect(restored.messages[1].agentRun!.timeline).toEqual(stored.messages[1].agentRun!.timeline)
+    const streamed = applyAgentEventToChatMessage(restored.messages[1], {
+      type: 'message_delta',
+      runId: 'run',
+      streamId: 'stream-2',
+      delta
+    })
+    const commit = {
+      type: 'message_stream_committed' as const,
+      runId: 'run',
+      streamId: 'stream-2',
+      traceSequence: 5
+    }
+    const committed = applyAgentEventToChatMessage(streamed, commit)
+    expect(committed.agentRun!.timeline).toEqual(stored.messages[1].agentRun!.timeline)
+    expect(committed.agentRun!.timeline.map((item) => item.id)).toEqual([
+      'before',
+      'accept',
+      'workflow-delivery-incoming',
+      'trace-message-5',
+      'guidance',
+      'read-files'
+    ])
+    expect(committed.agentRun!.messageStreamCheckpoints).toEqual({})
+    expect(applyAgentEventToChatMessage(committed, commit)).toEqual(committed)
+  }
+)
+
+it('keeps a normally committed stream singular when an equivalent historical snapshot arrives later', () => {
+  const before = runningConversation()
+  before.messages[1] = {
+    ...before.messages[1],
+    content: '',
+    agentRun: { ...before.messages[1].agentRun!, timeline: [] }
+  }
+  let streamed = applyAgentEventToChatMessage(before.messages[1], {
+    type: 'message_stream_started',
+    runId: 'run',
+    streamId: 'stream-2',
+    attempt: 1
+  })
+  streamed = applyAgentEventToChatMessage(streamed, {
+    type: 'message_delta',
+    runId: 'run',
+    streamId: 'stream-2',
+    delta: reconciledNarration
+  })
+  const commit = {
+    type: 'message_stream_committed' as const,
+    runId: 'run',
+    streamId: 'stream-2',
+    traceSequence: 5
+  }
+  streamed = applyAgentEventToChatMessage(streamed, commit)
+  const current = { ...before, messages: [before.messages[0], streamed] }
+  const stored: ChatConversation = {
+    ...current,
+    messages: [
+      current.messages[0],
+      {
+        ...streamed,
+        agentRun: {
+          ...streamed.agentRun!,
+          timeline: [
+            {
+              id: 'trace-message-5',
+              type: 'message',
+              content: reconciledNarration,
+              traceSequence: 5
+            }
+          ]
+        }
+      }
+    ]
+  }
+  const restored = mergeHumanInteractionConversation(current, stored, current)
+  expect(restored.messages[1].agentRun!.timeline).toEqual(streamed.agentRun!.timeline)
+  expect(restored.messages[1].agentRun!.timeline).toHaveLength(1)
+  expect(applyAgentEventToChatMessage(restored.messages[1], commit)).toEqual(restored.messages[1])
+})
 
 it.each([false, true])(
   'merges applied mail into a live turn without losing stream text (stream changed during read: %s)',
