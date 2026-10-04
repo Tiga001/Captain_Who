@@ -15,6 +15,7 @@ import type { ApprovalSubmissionResult } from './approvalSubmission'
 import {
   getAssistantFinalContent,
   getUserVisibleContent,
+  isRunSettled,
   shouldShowAssistantActions
 } from './chatMessageItemUtils'
 import { type CollaborationTimelineActivity } from '../../agentCollaboration/CollaborationTimelineActivity'
@@ -66,7 +67,28 @@ interface ChatMessageItemProps {
   turnDiffSummary?: GitTurnDiffSummary
 }
 
-function MessageContent({
+type MessageContentProps = Pick<
+  ChatMessageItemProps,
+  | 'collaborationTimelineActivities'
+  | 'collaborationTreeAgentIds'
+  | 'conversationId'
+  | 'humanInteraction'
+  | 'message'
+  | 'mode'
+  | 'onReviewLastTurn'
+  | 'onTimelineCollapsedChange'
+  | 'onUiStateChange'
+  | 'onOpenCollaborationAgent'
+  | 'onOpenWorkspaceReference'
+  | 'observerRootConversationId'
+  | 'projectId'
+  | 'timelineCollapsedOverride'
+  | 'turnDiffSummary'
+>
+
+// Sending a new turn changes historical action availability. Keep those toolbar updates
+// outside the body boundary so unchanged replies do not rebuild their tool timelines.
+const MessageContent = memo(function MessageContent({
   collaborationTimelineActivities,
   collaborationTreeAgentIds,
   conversationId,
@@ -82,7 +104,7 @@ function MessageContent({
   projectId,
   timelineCollapsedOverride,
   turnDiffSummary
-}: ChatMessageItemProps) {
+}: MessageContentProps) {
   if (message.role === 'assistant') {
     return (
       <AgentRunView
@@ -116,7 +138,7 @@ function MessageContent({
       projectId={projectId}
     />
   )
-}
+})
 
 function MessageInputOrigin({
   agentLabelsById,
@@ -183,13 +205,10 @@ export const ChatMessageItem = memo(function ChatMessageItem({
   isLastAssistantMessage = false,
   message,
   mode = 'interactive',
-  onApprove,
-  onCancel,
   onEditSubmit,
   onContinueInNewTask,
   onOpenCollaborationAgent,
   onOpenWorkspaceReference,
-  onReject,
   onReviewLastTurn,
   onTimelineCollapsedChange,
   onUiStateChange,
@@ -300,15 +319,17 @@ export const ChatMessageItem = memo(function ChatMessageItem({
             />
           ) : (
             <MessageContent
-              collaborationTimelineActivities={collaborationTimelineActivities}
+              // Settled runs render their persisted activities from message.agentRun.
+              collaborationTimelineActivities={
+                message.agentRun && !isRunSettled(message.agentRun)
+                  ? collaborationTimelineActivities
+                  : undefined
+              }
               collaborationTreeAgentIds={collaborationTreeAgentIds}
               conversationId={conversationId}
               humanInteraction={humanInteraction}
               message={message}
               mode={mode}
-              onApprove={onApprove}
-              onCancel={onCancel}
-              onReject={onReject}
               onReviewLastTurn={onReviewLastTurn}
               onTimelineCollapsedChange={onTimelineCollapsedChange}
               onUiStateChange={onUiStateChange}
@@ -316,7 +337,6 @@ export const ChatMessageItem = memo(function ChatMessageItem({
               onOpenWorkspaceReference={onOpenWorkspaceReference}
               observerRootConversationId={observerRootConversationId}
               projectId={projectId}
-              showTokenUsageDetails={showTokenUsageDetails}
               timelineCollapsedOverride={timelineCollapsedOverride}
               turnDiffSummary={turnDiffSummary}
             />

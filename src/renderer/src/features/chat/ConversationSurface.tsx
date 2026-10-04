@@ -247,7 +247,10 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 interface ChatMessageListProps {
   segments?: ConversationSegmentsController
   collaborationTreeAgentIds?: readonly string[]
-  humanInteraction?: HumanInteractionControllerView
+  humanInteraction?: Pick<
+    HumanInteractionControllerView,
+    'requests' | 'openRequests' | 'canInteract' | 'open'
+  >
   forkDisabledReason?: string
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
@@ -340,6 +343,12 @@ export const ChatMessageList = memo(function ChatMessageList({
         : undefined,
     [interactionRequests, canInteract, openInteraction]
   )
+  // Only request owners render interactive timeline entries. They still receive the full
+  // controller so another run's blocking question or approval updates their disabled state.
+  const interactionMessageIds = useMemo(
+    () => new Set(timelineInteraction?.openRequests.map((request) => request.assistantMessageId)),
+    [timelineInteraction]
+  )
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = onOpenCollaborationAgent
   const messageIdentities = useStableMessageIdentities(conversation.messages)
@@ -423,7 +432,11 @@ export const ChatMessageList = memo(function ChatMessageList({
         />
       )}
       <ChatMessageItem
-        humanInteraction={mode === 'interactive' ? timelineInteraction : undefined}
+        humanInteraction={
+          mode === 'interactive' && interactionMessageIds.has(message.id)
+            ? timelineInteraction
+            : undefined
+        }
         agentLabelsById={agentLabelsById}
         collaborationTimelineActivities={
           collaborationAgentNavigation
