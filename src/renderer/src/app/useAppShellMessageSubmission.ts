@@ -390,12 +390,9 @@ export function useAppShellMessageSubmission({
                 : item
             )
           )
-          if (
-            !behavior.preserveComposerContent &&
-            (!behavior.accessIdentity ||
-              behavior.accessIdentity.accountGeneration ===
-                accessIdentity.current.accountGeneration)
-          ) {
+          if (!behavior.preserveComposerContent) {
+            // A refused turn never took ownership of this local input. Recover it even
+            // after an account switch; only account-specific guidance needs the old login.
             updateDraft(
               conversationId,
               restoreRejectedDraft(
@@ -410,9 +407,14 @@ export function useAppShellMessageSubmission({
                 options
               )
             )
-            licenseRef.current?.handleDenied?.(error)
-            if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
-              accountAuthRef.current?.requestLogin()
+            if (
+              !behavior.accessIdentity ||
+              behavior.accessIdentity.accountGeneration === accessIdentity.current.accountGeneration
+            ) {
+              licenseRef.current?.handleDenied?.(error)
+              if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
+                accountAuthRef.current?.requestLogin()
+            }
           }
           return false
         }

@@ -6,6 +6,7 @@ import { AccountAuthContext } from '../../features/auth/AccountAuthContext'
 import { LicenseContext } from '../../features/license/LicenseContext'
 import { useAppShellMessageSubmission } from '../useAppShellMessageSubmission'
 import { createComposerDraft } from '../chatMessageFactory'
+import { NEW_CONVERSATION_DRAFT_ID } from '../appConstants'
 import type { ChatConversation, ChatComposerDraft } from '../../features/chat/chatTypes'
 
 const mocks = vi.hoisted(() => ({
@@ -123,11 +124,13 @@ function Submission({ newChat }: { newChat: boolean }) {
     newChat ? [] : [initialConversation]
   )
   const conversationsRef = useRef(conversations)
-  const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({ chat: initialDraft() })
+  const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
+    [newChat ? NEW_CONVERSATION_DRAFT_ID : 'chat']: initialDraft()
+  })
   const draftsRef = useRef(drafts)
   const activeRef = useRef<string | null>(newChat ? null : 'chat')
   const [activeId, setActiveId] = useState<string | null>(newChat ? null : 'chat')
-  const activeDraft = drafts[activeId ?? 'chat'] ?? initialDraft()
+  const activeDraft = drafts[activeId ?? NEW_CONVERSATION_DRAFT_ID] ?? initialDraft()
   const [refs] = useState(() => ({
     auto: { current: vi.fn() },
     attempts: { current: new Map() },
@@ -200,10 +203,31 @@ function Submission({ newChat }: { newChat: boolean }) {
         send
       </button>
       <button onClick={() => submission.toggleQueueAutoSend('chat')}>toggle queue</button>
+      <textarea
+        aria-label="Composer input"
+        value={activeDraft.message}
+        onChange={(event) =>
+          updateDraft(activeId ?? NEW_CONVERSATION_DRAFT_ID, {
+            ...activeDraft,
+            message: event.currentTarget.value,
+            updatedAt: Math.max(Date.now(), activeDraft.updatedAt + 1)
+          })
+        }
+      />
       <output data-testid="draft">{activeDraft.message}</output>
-      <output data-testid="queued">{drafts.chat.queuedMessages.length}</output>
+      <output data-testid="queued">{activeDraft.queuedMessages.length}</output>
+      <output data-testid="queued-content">
+        {activeDraft.queuedMessages.map((message) => message.content).join('\n')}
+      </output>
       <output data-testid="messages">
         {conversations.reduce((count, item) => count + item.messages.length, 0)}
+      </output>
+      <output data-testid="user-messages">
+        {conversations.flatMap((item) =>
+          item.messages
+            .filter((message) => message.role === 'user')
+            .map((message) => message.content)
+        )}
       </output>
       <output data-testid="queue-enabled">
         {String(submission.queueAutoSendConversationIds.has('chat'))}
@@ -240,6 +264,35 @@ it.each([false, true])(
   }
 )
 
+it.each(['two', null])(
+  'restores refused input and preserves newer local edits after account changes to %s',
+  async (account) => {
+    let reject!: (error: Error) => void
+    mocks.request.mockImplementation(
+      () =>
+        new Promise((_resolve, no) => {
+          reject = no
+        })
+    )
+    const screen = await render(<Harness />)
+    await screen.getByRole('button', { name: 'send', exact: true }).click()
+    await expect.poll(() => mocks.request.mock.calls.length).toBe(1)
+    await screen.rerender(<Harness account={account} />)
+    await screen.getByRole('textbox', { name: 'Composer input' }).fill('Newer local input')
+    reject(new Error('ACCOUNT_LICENSE_REQUIRED'))
+    await expect.element(screen.getByTestId('messages')).toHaveTextContent('0')
+    await expect.element(screen.getByTestId('draft')).toHaveTextContent('Keep my input')
+    await expect.element(screen.getByTestId('queued')).toHaveTextContent('2')
+    await expect
+      .element(screen.getByTestId('queued-content'))
+      .toHaveTextContent('Queued input Newer local input')
+    expect(mocks.request).toHaveBeenCalledOnce()
+    expect(mocks.denied).not.toHaveBeenCalled()
+    expect(mocks.access).not.toHaveBeenCalled()
+    expect(mocks.login).not.toHaveBeenCalled()
+  }
+)
+
 it('does not automatically revive an in-flight intent after license recovery', async () => {
   finishPersistence = () => undefined
   const screen = await render(<Harness />)
@@ -264,7 +317,9 @@ it.each(['ACCOUNT_LOGIN_REQUIRED', 'ACCOUNT_LICENSE_REQUIRED', 'ACCOUNT_LICENSE_
     const screen = await render(<Harness newChat />)
     await screen.getByRole('button', { name: 'send', exact: true }).click()
     await expect.poll(() => mocks.request.mock.calls.length).toBe(1)
-    await expect.element(screen.getByTestId('draft')).toHaveTextContent('Keep my input')
+    await expect.element(screen.getByTestId('draft')).toBeEmptyDOMElement()
+    await expect.element(screen.getByTestId('messages')).toHaveTextContent('2')
+    await expect.element(screen.getByTestId('user-messages')).toHaveTextContent('Keep my input')
     reject(new Error(code))
     await expect.element(screen.getByTestId('messages')).toHaveTextContent('0')
     await expect.element(screen.getByTestId('draft')).toHaveTextContent('Keep my input')
