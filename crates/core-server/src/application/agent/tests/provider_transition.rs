@@ -1,5 +1,183 @@
 use super::*;
 
+#[test]
+fn ordinary_send_preflight_skips_history_decoding_and_has_no_transition_authority() {
+    let fixture = tempdir().unwrap();
+    let path = fixture.path().join("ordinary-send.sqlite");
+    let storage = Arc::new(StorageService::open(&path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let id = "ordinary-send";
+    let conversation = conversation_with_completed_history(id, Some("model-1"));
+    let assistant = conversation.messages[1].id.clone();
+    storage.save_conversation(conversation).unwrap();
+    persist_completed_history(&storage, id, &assistant);
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    // A poisoned compressed journal makes any reconstruction fail. The preliminary check
+    // must only inspect metadata; actual turn preparation must still reject the bad journal.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute(
+        "UPDATE conversation_model_context_items SET payload = X'00' WHERE assistant_message_id = ?1",
+        [&assistant],
+    ).unwrap();
+    let ready = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: id.into(),
+            target_model_id: "model-1".into(),
+            for_send: true,
+        })
+        .unwrap();
+    assert_eq!(
+        ready.decision,
+        AgentProviderTransitionDecision::ReadyForSend
+    );
+    let wire = serde_json::to_value(&ready).unwrap();
+    assert_eq!(wire["decision"], "ready_for_send");
+    assert!(wire.get("operationId").is_none());
+    assert!(wire.get("transitionToken").is_none());
+    assert!(service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: id.into(),
+            target_model_id: "model-1".into(),
+            for_send: false,
+        })
+        .is_err());
+    service
+        .ensure_provider_transition_ready_for_send(id, "model-1")
+        .unwrap();
+    let before = storage.load_conversation(id).unwrap().unwrap();
+    let (notifications, _) = crate::transport::outbound_channel();
+    let error = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some(id.into()),
+                project_id: None,
+                model_id: "model-1".into(),
+                context_window_indicator_enabled: true,
+                content: "next".into(),
+                attachments: vec![],
+                folder_references: vec![],
+                skills: vec![],
+                title: None,
+                user_message_id: Some("next-user".into()),
+                assistant_message_id: Some("next-assistant".into()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            notifications,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("decompress"), "{error}");
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(storage.load_conversation(id).unwrap().unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn native_ordinary_send_requires_exact_protocol_and_visible_tool_coverage() {
+    let fixture = tempdir().unwrap();
+    let path = fixture.path().join("native-send.sqlite");
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage =
+        Arc::new(StorageService::open_with_model_credentials(&path, credentials.clone()).unwrap());
+    let mut settings = test_model_settings();
+    settings.models[0].provider_profile_config =
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
+    settings.models[0].provider_model_id = "deepseek-flash".into();
+    storage.save_model_settings(settings.clone()).unwrap();
+    let id = "native-send";
+    let conversation = conversation_with_completed_history(id, Some("model-1"));
+    let assistant = conversation.messages[1].id.clone();
+    storage.save_conversation(conversation.clone()).unwrap();
+    persist_completed_history(&storage, id, &assistant);
+    let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
+    let target = super::super::provider_transition::resolve_provider_transition_target(
+        &storage,
+        &conversation,
+        &snapshot,
+        "model-1",
+    )
+    .unwrap();
+    // Native tool history without its provider-owned turn must never take the shortcut.
+    assert!(!storage
+        .can_send_with_provider_protocol(id, &target.protocol)
+        .unwrap());
+    let continuation = seed_replayable_provider_turn(&path, id, &assistant, &history_call_id());
+    use sha2::{Digest, Sha256};
+    let digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&target.protocol).unwrap())
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute("UPDATE provider_continuations SET provider_protocol_digest = ?1 WHERE continuation_id = ?2",
+        rusqlite::params![digest, continuation]).unwrap();
+    assert!(storage
+        .can_send_with_provider_protocol(id, &target.protocol)
+        .unwrap());
+    let vault = Arc::new(
+        mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
+            storage.clone(),
+            credentials,
+        )
+        .unwrap(),
+    );
+    let mut service = AgentService::new_authorized_for_test(storage.clone());
+    service.provider_continuation_vault = Some(vault);
+    let ready = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: id.into(),
+            target_model_id: "model-1".into(),
+            for_send: true,
+        })
+        .unwrap();
+    assert_eq!(
+        ready.decision,
+        AgentProviderTransitionDecision::ReadyForSend
+    );
+    // The same ID with a different protocol revision must fall back to adaptation. Never trust
+    // the displayed model name or use a previous preflight result as admission authority.
+    settings.models[0].provider_profile_config = test_model_settings().models[0]
+        .provider_profile_config
+        .clone();
+    storage.save_model_settings(settings).unwrap();
+    let changed = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: id.into(),
+            target_model_id: "model-1".into(),
+            for_send: true,
+        })
+        .unwrap();
+    assert_eq!(
+        changed.decision,
+        AgentProviderTransitionDecision::RequiresCompaction
+    );
+    assert!(service
+        .ensure_provider_transition_ready_for_send(id, "model-1")
+        .is_err());
+    // Staged continuation recovery belongs to the full path, never the metadata probe.
+    connection
+        .execute(
+            "UPDATE provider_continuations SET activated_at = NULL WHERE continuation_id = ?1",
+            [&continuation],
+        )
+        .unwrap();
+    assert!(!storage
+        .can_send_with_provider_protocol(id, &target.protocol)
+        .unwrap());
+}
+
+#[test]
+fn ordinary_send_hint_defaults_off_for_existing_callers() {
+    let input: AgentProviderTransitionPreflightInput = serde_json::from_value(json!({
+        "conversationId": "conversation", "targetModelId": "model"
+    }))
+    .unwrap();
+    assert!(!input.for_send);
+}
+
 pub(super) fn conversation_with_completed_history(
     id: &str,
     model_id: Option<&str>,
@@ -159,12 +337,28 @@ fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
     let before = storage.load_conversation(conversation_id).unwrap().unwrap();
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
         .unwrap();
     assert_eq!(preflight.decision, AgentProviderTransitionDecision::Blocked);
     assert_eq!(preflight.reason, AgentProviderTransitionReason::ActiveRun);
+    let send_preflight = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: true,
+            conversation_id: conversation_id.to_string(),
+            target_model_id: "model-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        send_preflight.decision,
+        AgentProviderTransitionDecision::Blocked
+    );
+    assert_eq!(
+        send_preflight.reason,
+        AgentProviderTransitionReason::ActiveRun
+    );
     assert_eq!(
         serde_json::to_value(storage.load_conversation(conversation_id).unwrap().unwrap()).unwrap(),
         serde_json::to_value(before).unwrap()
@@ -242,6 +436,7 @@ fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_w
         .unwrap();
     let output = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: inactive_conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -273,6 +468,7 @@ fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_w
         .unwrap();
     let error = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: child_conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -442,6 +638,7 @@ fn conversation_history_without_a_frozen_source_model_fails_closed() {
 
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: "conversation-provider-transition-compatible".to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -481,6 +678,7 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
     let service = AgentService::new_authorized_for_test(storage.clone());
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -566,6 +764,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -631,6 +830,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         .is_some());
     let after = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -710,6 +910,7 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
             ));
         let preflight = service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: false,
                 conversation_id: conversation_id.clone(),
                 target_model_id: "model-2".to_string(),
             })
@@ -718,6 +919,18 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
             preflight.decision,
             AgentProviderTransitionDecision::RequiresCompaction,
             "marker must win for {suffix}"
+        );
+        let same_model_send = service
+            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: true,
+                conversation_id: conversation_id.clone(),
+                target_model_id: "model-1".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            same_model_send.decision,
+            AgentProviderTransitionDecision::RequiresCompaction,
+            "ordinary same-model send must honor the fork marker for {suffix}"
         );
         let (notifications, mut receiver) = crate::transport::outbound_channel();
         service
@@ -750,6 +963,21 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
         assert!(!storage
             .conversation_requires_context_adaptation(&conversation_id)
             .unwrap());
+        let stored = storage
+            .load_conversation(&conversation_id)
+            .unwrap()
+            .unwrap();
+        let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
+        let target = super::super::provider_transition::resolve_provider_transition_target(
+            &storage, &stored, &snapshot, "model-2",
+        )
+        .unwrap();
+        assert!(
+            storage
+                .can_send_with_provider_protocol(&conversation_id, &target.protocol)
+                .unwrap(),
+            "covered raw tool history must not keep future sends on the full path for {suffix}"
+        );
     }
 }
 
@@ -780,6 +1008,7 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
         .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -833,6 +1062,7 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
     );
     let after = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -878,6 +1108,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-1".to_string(),
         })
@@ -909,6 +1140,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         .is_some());
     let after = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-1".to_string(),
         })
@@ -938,6 +1170,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
         .with_context_compaction_summary_generator(failing_generator);
     let first_preflight = failing
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -972,6 +1205,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
 
     let second_preflight = failing
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })
@@ -1010,6 +1244,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let retry_preflight = retrying
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-2".to_string(),
         })

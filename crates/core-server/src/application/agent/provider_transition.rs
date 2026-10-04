@@ -57,10 +57,32 @@ impl AgentService {
         // The first turn creates its conversation as part of the normal durable handoff. With no
         // persisted history there is no Provider state to transition, so keep the established new
         // conversation path unchanged.
-        if self.storage.load_conversation(conversation_id)?.is_none() {
+        if self
+            .storage
+            .load_conversation_meta(conversation_id)?
+            .is_none()
+        {
             return Ok(());
         }
+        if let Some(output) = self.preflight_ordinary_send(conversation_id, target_model_id)? {
+            return match output.decision {
+                AgentProviderTransitionDecision::ReadyForSend => Ok(()),
+                _ => Err(AgentServiceError::structured(
+                    output
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "当前会话暂时不能发送。".into()),
+                    json!({
+                        "type": "providerTransition",
+                        "code": "provider_transition_blocked",
+                        "recovery": "retryPreflight",
+                        "preflight": output,
+                    }),
+                )),
+            };
+        }
         match self.prepare_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: target_model_id.to_string(),
         })? {
@@ -98,6 +120,14 @@ impl AgentService {
         input: AgentProviderTransitionPreflightInput,
     ) -> Result<AgentProviderTransitionPreflightOutput, AgentServiceError> {
         self.authorize_user_conversation_write(&input.conversation_id)?;
+        if input.for_send {
+            if let Some(output) = self.preflight_ordinary_send(
+                input.conversation_id.trim(),
+                input.target_model_id.trim(),
+            )? {
+                return Ok(output);
+            }
+        }
         match self.prepare_provider_transition(input)? {
             ProviderTransitionPreparation::Ready(prepared) => Ok(prepared.output),
             ProviderTransitionPreparation::Blocked(output) => Ok(output),
@@ -184,6 +214,7 @@ impl AgentService {
         }
         let prepared =
             match self.prepare_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: false,
                 conversation_id: input.conversation_id.clone(),
                 target_model_id: input.target_model_id.clone(),
             })? {
@@ -421,22 +452,97 @@ impl AgentService {
         Ok(AgentProviderTransitionGetStatusOutput { operations })
     }
 
-    fn prepare_provider_transition(
+    /// A preliminary send check deliberately grants no model-switch token. Repeat it under
+    /// admission, then let normal Turn preparation validate the actual immutable history.
+    fn preflight_ordinary_send(
         &self,
-        input: AgentProviderTransitionPreflightInput,
-    ) -> Result<ProviderTransitionPreparation, AgentServiceError> {
-        let conversation_id = input.conversation_id.trim();
-        let target_model_id = input.target_model_id.trim();
+        conversation_id: &str,
+        target_model_id: &str,
+    ) -> Result<Option<AgentProviderTransitionPreflightOutput>, AgentServiceError> {
         if conversation_id.is_empty() || target_model_id.is_empty() {
             return Err("conversationId 和 targetModelId 不能为空。"
                 .to_string()
                 .into());
         }
-        let (conversation, conversation_revision) =
-            self.storage.load_conversation_for_turn(conversation_id)?;
-        let conversation = conversation.ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
-        let conversation_revision = conversation_revision
-            .ok_or_else(|| "模型切换预检缺少 Conversation revision。".to_string())?;
+        let conversation = self
+            .storage
+            .load_conversation_meta(conversation_id)?
+            .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        if conversation.model_id.as_deref() != Some(target_model_id) {
+            return Ok(None);
+        }
+        if let Some(output) = self.provider_transition_blocker(conversation_id, target_model_id)? {
+            return Ok(Some(output));
+        }
+        if self
+            .storage
+            .conversation_requires_context_adaptation(conversation_id)?
+        {
+            return Ok(None);
+        }
+        let snapshot = self
+            .storage
+            .load_model_settings_snapshot_for_model(target_model_id, false)?
+            .ok_or_else(|| "请先配置模型。".to_string())?;
+        let protocol = (|| -> Result<ProviderProtocolKey, String> {
+            let model = snapshot
+                .settings
+                .models
+                .iter()
+                .find(|model| model.id == target_model_id && model.enabled)
+                .ok_or_else(|| "target model is unavailable".to_string())?;
+            let connection = snapshot.settings.effective_connection_for(model)?;
+            let dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
+            let profile = model
+                .resolved_provider_profile_config(dialect)
+                .map_err(|error| error.to_string())?;
+            let revision = snapshot
+                .provider_protocol_revisions
+                .get(target_model_id)
+                .cloned()
+                .ok_or_else(|| "target protocol revision is missing".to_string())?;
+            ProviderProtocolKey::new(
+                dialect,
+                &profile,
+                model.provider_model_id.clone(),
+                Some(revision),
+            )
+            .map_err(|error| error.to_string())
+        })();
+        let Ok(protocol) = protocol else {
+            return Ok(None);
+        };
+        let Ok(capabilities) = mycopilot_core::resolve_provider_runtime_capabilities(&protocol)
+        else {
+            return Ok(None);
+        };
+        if capabilities.private_replay() != mycopilot_core::ProviderPrivateReplaySemantics::None
+            && self.provider_continuation_vault.is_none()
+        {
+            return Ok(None);
+        }
+        if !self
+            .storage
+            .can_send_with_provider_protocol(conversation_id, &protocol)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(AgentProviderTransitionPreflightOutput {
+            conversation_id: conversation_id.to_string(),
+            target_model_id: target_model_id.to_string(),
+            decision: AgentProviderTransitionDecision::ReadyForSend,
+            reason: AgentProviderTransitionReason::SameProtocol,
+            operation_id: None,
+            transition_token: None,
+            message: None,
+        }))
+    }
+
+    fn provider_transition_blocker(
+        &self,
+        conversation_id: &str,
+        target_model_id: &str,
+    ) -> Result<Option<AgentProviderTransitionPreflightOutput>, AgentServiceError> {
         if let Some(agent) = self
             .storage
             .get_agent_node_by_conversation(conversation_id)
@@ -445,18 +551,16 @@ impl AgentService {
             if agent.parent_agent_id.is_some()
                 || agent.lifecycle != mycopilot_core::AgentLifecycle::Active
             {
-                return Ok(ProviderTransitionPreparation::Blocked(
-                    provider_transition_blocked_output(
-                        conversation_id,
-                        target_model_id,
-                        AgentProviderTransitionReason::UnsupportedTarget,
-                        if agent.parent_agent_id.is_some() {
-                            "子 Agent Conversation 是只读观察视图，不能由用户切换模型。"
-                        } else {
-                            "根 Agent 当前不可用，不能切换模型。"
-                        },
-                    ),
-                ));
+                return Ok(Some(provider_transition_blocked_output(
+                    conversation_id,
+                    target_model_id,
+                    AgentProviderTransitionReason::UnsupportedTarget,
+                    if agent.parent_agent_id.is_some() {
+                        "子 Agent Conversation 是只读观察视图，不能由用户切换模型。"
+                    } else {
+                        "根 Agent 当前不可用，不能切换模型。"
+                    },
+                )));
             }
         }
         if self
@@ -465,24 +569,20 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner())
             .contains_key(conversation_id)
         {
-            return Ok(ProviderTransitionPreparation::Blocked(
-                provider_transition_blocked_output(
-                    conversation_id,
-                    target_model_id,
-                    AgentProviderTransitionReason::ActiveRun,
-                    "当前会话正在切换模型。",
-                ),
-            ));
+            return Ok(Some(provider_transition_blocked_output(
+                conversation_id,
+                target_model_id,
+                AgentProviderTransitionReason::ActiveRun,
+                "当前会话正在切换模型。",
+            )));
         }
         if self.has_conversation_turn_occupancy(conversation_id)? {
-            return Ok(ProviderTransitionPreparation::Blocked(
-                provider_transition_blocked_output(
-                    conversation_id,
-                    target_model_id,
-                    AgentProviderTransitionReason::ActiveRun,
-                    "请等待当前回复完成后再切换模型。",
-                ),
-            ));
+            return Ok(Some(provider_transition_blocked_output(
+                conversation_id,
+                target_model_id,
+                AgentProviderTransitionReason::ActiveRun,
+                "请等待当前回复完成后再切换模型。",
+            )));
         }
         if self
             .pending_actions
@@ -499,14 +599,34 @@ impl AgentService {
                     )
             })
         {
-            return Ok(ProviderTransitionPreparation::Blocked(
-                provider_transition_blocked_output(
-                    conversation_id,
-                    target_model_id,
-                    AgentProviderTransitionReason::PendingApproval,
-                    "请先处理当前待审批操作。",
-                ),
-            ));
+            return Ok(Some(provider_transition_blocked_output(
+                conversation_id,
+                target_model_id,
+                AgentProviderTransitionReason::PendingApproval,
+                "请先处理当前待审批操作。",
+            )));
+        }
+        Ok(None)
+    }
+
+    fn prepare_provider_transition(
+        &self,
+        input: AgentProviderTransitionPreflightInput,
+    ) -> Result<ProviderTransitionPreparation, AgentServiceError> {
+        let conversation_id = input.conversation_id.trim();
+        let target_model_id = input.target_model_id.trim();
+        if conversation_id.is_empty() || target_model_id.is_empty() {
+            return Err("conversationId 和 targetModelId 不能为空。"
+                .to_string()
+                .into());
+        }
+        let (conversation, conversation_revision) =
+            self.storage.load_conversation_for_turn(conversation_id)?;
+        let conversation = conversation.ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        let conversation_revision = conversation_revision
+            .ok_or_else(|| "模型切换预检缺少 Conversation revision。".to_string())?;
+        if let Some(output) = self.provider_transition_blocker(conversation_id, target_model_id)? {
+            return Ok(ProviderTransitionPreparation::Blocked(output));
         }
         if conversation.model_id.is_none() && !conversation.messages.is_empty() {
             return Ok(ProviderTransitionPreparation::Blocked(

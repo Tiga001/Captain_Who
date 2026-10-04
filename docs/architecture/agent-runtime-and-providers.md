@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # Agent Runtime 与模型 Provider
@@ -108,6 +108,8 @@ Host 的 [`ModelProjection`](../../crates/core/src/storage/service/model_project
 普通回复与审批续跑的成功 `Done` 在终态提交、旧 Run 占用与并发许可释放、上下文清理之后发布。接收端可以据此请求下一轮，仍由 Turn admission 原子检查是否允许启动；等待审批或用户输入的 `Done` 不表示会话空闲。
 
 Turn admission 创建的 pending assistant message 正文为空；系统不再把“正在思考”之类 UI placeholder 写进消息。流式 narration/final content 与终态正文只能来自模型输出或明确的错误/取消结算路径，展示占位符不得进入可压缩历史或被当作模型主张。
+
+普通发送以 `agent.preflightProviderTransition` 的 `forSend: true` 请求轻量检查：同一模型、当前 Provider 协议指纹与持久重放元数据兼容，且不存在占用、待审批或 Fork 适配要求时，返回无切换令牌的 `ready_for_send`。此检查不加载完整历史、不解压模型日志、不构建或计量 ContextFrame；实际 Turn 接纳重新检查当前状态，并由正常准备路径读取、校验及恢复上下文。无法从元数据确认兼容、模型改变或需要历史适配时，回到完整预检。显式模型切换及其重试仍要求原有绑定历史与配置的 transition token；不能用发送就绪结果授权模型切换。Renderer 继续等待预检结果，不为此优化提前清空草稿或展示消息。
 
 ## 消息布局与动态能力
 

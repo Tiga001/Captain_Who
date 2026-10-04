@@ -4801,6 +4801,43 @@ describe('Host-owned turn acceptance', () => {
     })
   }
 
+  it('keeps the draft and timeline unchanged until lightweight send preflight returns', async () => {
+    prepareDraft()
+    mockSuccessfulTurnStarts()
+    const preflight = deferred<{
+      conversationId: string
+      targetModelId: string
+      decision: 'ready_for_send'
+      reason: 'same_protocol'
+    }>()
+    testState.preflightProviderTransition.mockReturnValueOnce(preflight.promise)
+    const screen = await renderSelectedConversation()
+    const previousIds = screen.getByTestId('conversation-message-ids').element().textContent
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.preflightProviderTransition.mock.calls.length).toBe(1)
+    expect(testState.preflightProviderTransition).toHaveBeenCalledWith({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      forSend: true
+    })
+    expect(screen.getByTestId('conversation-message-ids').element().textContent).toBe(previousIds)
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('read this file')
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    preflight.resolve({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'ready_for_send',
+      reason: 'same_protocol'
+    })
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0].attachments).toEqual([
+      submittedAttachment
+    ])
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
+  })
+
   it('keeps optimistic messages local while Host accepts the turn before a delayed metadata save', async () => {
     prepareDraft()
     const start = deferred<AgentConversationTurnOutput>()

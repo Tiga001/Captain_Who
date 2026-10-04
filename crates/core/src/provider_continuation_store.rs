@@ -938,7 +938,7 @@ fn parse_ref(value: &str) -> Result<ProviderContinuationRef, ProviderContinuatio
         .map_err(|_| ProviderContinuationStoreError::InvalidReference)
 }
 
-fn protocol_digest(
+pub(crate) fn protocol_digest(
     protocol: &ProviderProtocolKey,
 ) -> Result<String, ProviderContinuationStoreError> {
     protocol

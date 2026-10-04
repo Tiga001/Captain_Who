@@ -246,11 +246,15 @@ fn context_window_indicator_enabled_by_default() -> bool {
 pub struct AgentProviderTransitionPreflightInput {
     pub conversation_id: String,
     pub target_model_id: String,
+    /// Ordinary send may use a metadata-only check. It never grants transition authority.
+    #[serde(default)]
+    pub for_send: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentProviderTransitionDecision {
+    ReadyForSend,
     Compatible,
     RequiresCompaction,
     Blocked,

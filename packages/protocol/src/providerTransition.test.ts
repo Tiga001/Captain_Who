@@ -21,6 +21,36 @@ const runningOperation = {
 } as const
 
 describe('Provider transition protocol', () => {
+  it('separates ordinary send readiness from model transition authority', () => {
+    const ready = {
+      conversationId: 'conversation-1',
+      targetModelId: 'generic-model',
+      decision: 'ready_for_send',
+      reason: 'same_protocol'
+    }
+    expect(parseAgentProviderTransitionPreflightOutput(ready)).toEqual(ready)
+    for (const authority of [{ operationId: 'operation-1' }, { transitionToken: 'token-1' }]) {
+      expect(() => parseAgentProviderTransitionPreflightOutput({ ...ready, ...authority })).toThrow(
+        /must not carry transition authority/
+      )
+    }
+    expect(() =>
+      parseAgentProviderTransitionPreflightOutput({ ...ready, reason: 'api_provider_changed' })
+    ).toThrow(/invalid for ready_for_send/)
+    expect(() => parseAgentProviderTransitionStartInput(ready)).toThrow()
+    for (const forSend of [true, false]) {
+      const input = { conversationId: 'conversation-1', targetModelId: 'generic-model', forSend }
+      expect(parseAgentProviderTransitionPreflightInput(input)).toEqual(input)
+    }
+    expect(() =>
+      parseAgentProviderTransitionPreflightInput({
+        conversationId: 'conversation-1',
+        targetModelId: 'generic-model',
+        forSend: 'true'
+      })
+    ).toThrow(/forSend/)
+  })
+
   it('strictly parses preflight authority without projecting runtime capabilities', () => {
     expect(
       parseAgentProviderTransitionPreflightOutput({

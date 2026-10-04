@@ -170,6 +170,49 @@ async function startRunningTransition() {
 }
 
 describe('useProviderTransition terminal reconciliation', () => {
+  it('waits for lightweight Host readiness before allowing a send without a transition', async () => {
+    const ready = {
+      conversationId: 'conversation-1',
+      targetModelId: 'model-2',
+      decision: 'ready_for_send',
+      reason: 'same_protocol'
+    }
+    let resolve!: (value: typeof ready) => void
+    service.preflight.mockReturnValue(
+      new Promise((done) => {
+        resolve = done
+      })
+    )
+    const screen = await render(<TransitionHarness />)
+    await screen.getByRole('button', { name: 'request queued transition' }).click()
+    expect(service.preflight).toHaveBeenCalledWith({
+      conversationId: 'conversation-1',
+      targetModelId: 'model-2',
+      forSend: true
+    })
+    await expect.element(screen.getByTestId('outcome')).toHaveTextContent('idle')
+    expect(service.start).not.toHaveBeenCalled()
+    resolve(ready)
+    await expect.element(screen.getByTestId('outcome')).toHaveTextContent('ready')
+    expect(service.start).not.toHaveBeenCalled()
+    expect(service.onCompleted).not.toHaveBeenCalled()
+    await expect.element(screen.getByTestId('confirmation')).toHaveTextContent('none')
+  })
+
+  it('does not treat send readiness as permission to switch models', async () => {
+    service.preflight.mockResolvedValue({
+      conversationId: 'conversation-1',
+      targetModelId: 'model-2',
+      decision: 'ready_for_send',
+      reason: 'same_protocol'
+    })
+    const screen = await render(<TransitionHarness />)
+    await screen.getByRole('button', { name: 'request transition' }).click()
+    await expect.element(screen.getByTestId('outcome')).toHaveTextContent('failed')
+    expect(service.start).not.toHaveBeenCalled()
+    expect(service.onRequestError).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['compatible', 'same_protocol', 'ready', 0],
     ['compatible', 'no_incompatible_history', 'running', 1],

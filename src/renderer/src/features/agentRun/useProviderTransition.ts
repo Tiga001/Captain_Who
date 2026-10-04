@@ -358,9 +358,20 @@ export function useProviderTransition({
       const requestEpoch = (requestEpochsRef.current.get(conversationId) ?? 0) + 1
       requestEpochsRef.current.set(conversationId, requestEpoch)
       try {
-        const preflight = await preflightProviderTransition({ conversationId, targetModelId })
+        const preflight = await preflightProviderTransition({
+          conversationId,
+          targetModelId,
+          ...(options.allowUnchangedModel ? { forSend: true } : {})
+        })
         if (!shouldContinue() || requestEpochsRef.current.get(conversationId) !== requestEpoch) {
           return { status: 'superseded' }
+        }
+        if (preflight.decision === 'ready_for_send') {
+          if (!options.allowUnchangedModel) {
+            onRequestErrorRef.current()
+            return { status: 'failed' }
+          }
+          return { status: 'ready', modelId: preflight.targetModelId }
         }
         if (preflight.decision === 'blocked') {
           if (options.reportBlocked !== false) onBlockedRef.current(preflight.reason)
@@ -422,6 +433,10 @@ export function useProviderTransition({
           conversationId: operation.conversationId,
           targetModelId: operation.targetModelId
         })
+        if (preflight.decision === 'ready_for_send') {
+          onRequestErrorRef.current()
+          return { status: 'failed' }
+        }
         if (preflight.decision === 'blocked') {
           onBlockedRef.current(preflight.reason)
           return { status: 'blocked', reason: preflight.reason }

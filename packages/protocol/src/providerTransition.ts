@@ -1,4 +1,5 @@
 import {
+  expectBoolean,
   expectEnum,
   expectOnlyKeys,
   expectRecord,
@@ -29,7 +30,8 @@ const PROVIDER_TRANSITION_ERROR_CODES = [
   'provider_transition_interrupted'
 ] as const
 
-export type AgentProviderTransitionDecision = 'compatible' | 'requires_compaction' | 'blocked'
+export type AgentProviderTransitionDecision =
+  'ready_for_send' | 'compatible' | 'requires_compaction' | 'blocked'
 
 /** Renderer-safe classification only. It deliberately exposes no runtime capability or key. */
 export type AgentProviderTransitionReason =
@@ -44,12 +46,20 @@ export type AgentProviderTransitionReason =
 export interface AgentProviderTransitionPreflightInput {
   conversationId: string
   targetModelId: string
+  /** Allows a lightweight unchanged-model check. Turn admission still revalidates authority. */
+  forSend?: boolean
 }
 
 export type AgentProviderTransitionPreflightOutput = {
   conversationId: string
   targetModelId: string
 } & (
+  | {
+      /** Send readiness only; this grants no authority to start a model transition. */
+      decision: 'ready_for_send'
+      reason: 'same_protocol'
+      message?: string
+    }
   | {
       decision: 'compatible'
       reason: 'same_protocol' | 'no_incompatible_history'
@@ -138,7 +148,7 @@ export function parseAgentProviderTransitionPreflightInput(
 ): AgentProviderTransitionPreflightInput {
   const context = 'Provider transition preflight input'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['conversationId', 'targetModelId'] as const, context)
+  expectOnlyKeys(record, ['conversationId', 'targetModelId', 'forSend'] as const, context)
   return {
     conversationId: expectBoundedNonEmptyString(
       record.conversationId,
@@ -149,7 +159,10 @@ export function parseAgentProviderTransitionPreflightInput(
       record.targetModelId,
       `${context}.targetModelId`,
       MAX_ID_BYTES
-    )
+    ),
+    ...(record.forSend === undefined
+      ? {}
+      : { forSend: expectBoolean(record.forSend, `${context}.forSend`) })
   }
 }
 
@@ -185,7 +198,7 @@ export function parseAgentProviderTransitionPreflightOutput(
   }
   const decision = expectEnum(
     record.decision,
-    ['compatible', 'requires_compaction', 'blocked'] as const,
+    ['ready_for_send', 'compatible', 'requires_compaction', 'blocked'] as const,
     `${context}.decision`
   )
   const reason = expectEnum(
@@ -206,6 +219,16 @@ export function parseAgentProviderTransitionPreflightOutput(
     `${context}.message`,
     MAX_SAFE_MESSAGE_BYTES
   )
+
+  if (decision === 'ready_for_send') {
+    if (reason !== 'same_protocol') {
+      throw invalidProtocolValue(context, `reason ${reason} is invalid for ready_for_send`)
+    }
+    if (record.operationId !== undefined || record.transitionToken !== undefined) {
+      throw invalidProtocolValue(context, 'ready_for_send must not carry transition authority')
+    }
+    return { ...common, decision, reason, ...(message === undefined ? {} : { message }) }
+  }
 
   if (decision === 'compatible') {
     if (reason !== 'same_protocol' && reason !== 'no_incompatible_history') {

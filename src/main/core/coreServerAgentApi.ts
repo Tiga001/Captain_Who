@@ -429,6 +429,9 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
       .then((value) => {
         const output = parseAgentProviderTransitionPreflightOutput(value)
         validateProviderTransitionResponseIdentity(request, output)
+        if (output.decision === 'ready_for_send' && request.forSend !== true) {
+          throw new Error('Send readiness cannot authorize a model transition.')
+        }
         return output
       })
       .catch(() => {

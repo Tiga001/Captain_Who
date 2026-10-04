@@ -1499,6 +1499,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             .with_context_compaction_summary_generator(fork_transition_summary_generator());
         let preflight = transition_service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: false,
                 conversation_id: source_conversation_id.to_string(),
                 target_model_id: "model-2".to_string(),
             })

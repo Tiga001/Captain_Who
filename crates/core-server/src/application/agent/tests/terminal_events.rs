@@ -137,6 +137,7 @@ async fn assert_completed_done_admits_next_turn(require_approval: bool) {
     // polling, or waiting for worker cleanup may make these admission assertions pass.
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            for_send: false,
             conversation_id: conversation_id.to_string(),
             target_model_id: "model-1".to_string(),
         })

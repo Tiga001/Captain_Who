@@ -1000,6 +1000,7 @@ impl AgentService {
             .permissions;
         let transition =
             self.preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: false,
                 conversation_id: conversation_id.into(),
                 target_model_id: model_id.clone(),
             })?;

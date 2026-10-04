@@ -94,6 +94,28 @@ describe('CoreServer Provider transition client', () => {
     ).rejects.toThrow('Unable to check this model switch. Please try again.')
   })
 
+  it('forwards send preflight intent and rejects send-only results for explicit switches', async () => {
+    const ready = {
+      conversationId: 'conversation-1',
+      targetModelId: 'generic-model',
+      decision: 'ready_for_send',
+      reason: 'same_protocol'
+    }
+    rpcRequest.mockResolvedValue(ready)
+    const server = new CoreServer()
+    const input = { conversationId: 'conversation-1', targetModelId: 'generic-model' }
+    await expect(server.preflightProviderTransition({ ...input, forSend: true })).resolves.toEqual(
+      ready
+    )
+    expect(rpcRequest).toHaveBeenCalledWith('agent.preflightProviderTransition', {
+      ...input,
+      forSend: true
+    })
+    await expect(server.preflightProviderTransition(input)).rejects.toThrow(
+      'Unable to check this model switch. Please try again.'
+    )
+  })
+
   it('does not forward arbitrary Core RPC diagnostics', async () => {
     rpcRequest.mockRejectedValue(
       Object.assign(new Error('provider body with sensitive data'), {

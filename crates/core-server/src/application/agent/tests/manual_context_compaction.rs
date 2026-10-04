@@ -524,6 +524,7 @@ async fn exercise_manual_fork_after_later_turn(explicit_boundary: bool) {
         );
         let preflight = service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                for_send: false,
                 conversation_id: id.into(),
                 target_model_id: "model-2".into(),
             })

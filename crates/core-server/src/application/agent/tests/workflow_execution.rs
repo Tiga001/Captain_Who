@@ -1348,6 +1348,7 @@ async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_onc
                 "{error}; retry={:?}; preflight={:?}",
                 service.workflow_retry.lock().unwrap(),
                 service.preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                    for_send: false,
                     conversation_id: target.clone(),
                     target_model_id: "model-2".into()
                 })
@@ -1436,6 +1437,7 @@ async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads(
             panic!(
                 "{error}; preflight={:?}",
                 service.preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                    for_send: false,
                     conversation_id: target.clone(),
                     target_model_id: "model-1".into()
                 })
