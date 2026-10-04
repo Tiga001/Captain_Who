@@ -61,19 +61,128 @@ fn staged_tool_exchange(
     ]
 }
 
+// Build both durable projections through the runtime recorder. In particular, apply_patch
+// arguments retain their bodies in model context but never in the audit/search trace.
+fn commit_current_fork_fixture_trace(
+    connection: &mut Connection,
+    raw_trace: &ConversationTurnTrace,
+    started_at: i64,
+    completed_at: i64,
+) {
+    use crate::conversation_trace::ConversationTraceRecorder;
+    use crate::llm::{LlmMessage, LlmToolCall};
+
+    let mut recorder = ConversationTraceRecorder::default();
+    let mut calls = HashMap::new();
+    for item in &raw_trace.items {
+        let sequence = match item {
+            ConversationTurnTraceItem::AssistantNarration { content, .. } => {
+                recorder.record_narration(content).unwrap().unwrap()
+            }
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation,
+                approval_status,
+                ..
+            } => {
+                let call = crate::AgentToolCall {
+                    id: call_id.clone(),
+                    tool: tool.clone(),
+                    args: operation.clone(),
+                    approval_status: *approval_status,
+                    reason: None,
+                };
+                let sequence = recorder.record_tool_call(&call).unwrap();
+                recorder
+                    .record_model_message(
+                        sequence,
+                        0,
+                        &LlmMessage::assistant(
+                            "",
+                            vec![LlmToolCall {
+                                id: call.id.clone(),
+                                name: call.tool.clone(),
+                                args: call.args.clone(),
+                            }],
+                        ),
+                    )
+                    .unwrap();
+                calls.insert(call_id, call);
+                sequence
+            }
+            ConversationTurnTraceItem::ToolResult {
+                call_id,
+                tool,
+                success,
+                observation,
+                approval_status,
+                error,
+                ..
+            } => {
+                let call = calls.get_mut(call_id).unwrap();
+                call.approval_status = *approval_status;
+                let result = AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    ok: *success,
+                    result: Some(observation.clone()),
+                    error: error.clone(),
+                };
+                let sequence = recorder.record_tool_result(call, &result).unwrap();
+                recorder
+                    .record_model_message(
+                        sequence,
+                        0,
+                        &LlmMessage::tool_result(call_id, observation.to_string(), !success),
+                    )
+                    .unwrap();
+                sequence
+            }
+            _ => panic!("fixture expects narration and tool exchanges only"),
+        };
+        assert_eq!(sequence, item.sequence());
+    }
+    let snapshot = recorder.snapshot();
+    let trace = recorder.finish(
+        &raw_trace.run_id,
+        &raw_trace.conversation_id,
+        &raw_trace.assistant_message_id,
+        raw_trace.terminal_status,
+        raw_trace.terminal_error.as_deref(),
+    );
+    trace
+        .validate_complete_model_context(&snapshot.model_context_items)
+        .unwrap();
+    conversation_trace_repository::replace_trace(connection, &trace, started_at, completed_at)
+        .unwrap();
+    conversation_model_context_repository::commit_items_in_connection(
+        connection,
+        &trace.conversation_id,
+        &trace.assistant_message_id,
+        &snapshot.model_context_items,
+    )
+    .unwrap();
+}
+
 fn apply_patch_args(request: Value) -> Value {
     json!({ "request": request })
 }
 
 fn staged_mutation_receipt(transaction_id: &str, index: u64) -> String {
+    staged_mutation_receipt_for_content(transaction_id, index, "after\n")
+}
+
+fn staged_mutation_receipt_for_content(transaction_id: &str, index: u64, content: &str) -> String {
     serde_json::to_string(&crate::file_change::FileChangeMutationReceipt {
         schema_version: 1,
         transaction_id: transaction_id.to_string(),
         index,
         draft_revision: index + 1,
         next_index: index + 1,
-        byte_count: 6,
-        line_count: 1,
+        byte_count: content.len() as u64,
+        line_count: content.lines().count() as u64,
         allowed_next_actions: vec![
             crate::file_change::FileChangeStagedAction::Append,
             crate::file_change::FileChangeStagedAction::Edit,
@@ -156,6 +265,7 @@ fn apply_patch_observation(
 
 include!("tests/planning.rs");
 include!("tests/commit.rs");
+include!("tests/staged_observation.rs");
 include!("tests/continuity.rs");
 include!("tests/manual_boundary.rs");
 include!("tests/recovery.rs");
@@ -165,3 +275,4 @@ include!("tests/workspace_binding.rs");
 
 include!("tests/planning_reuse.rs");
 include!("tests/trace_journal.rs");
+include!("tests/file_change_binding.rs");

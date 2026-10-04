@@ -1,20 +1,21 @@
-fn remapped_file_change_call_digest(
-    traces: &[ForkTrace],
+fn file_change_trace_operation<'a>(
+    traces: &'a [ForkTrace],
     source_call_id: &str,
-    source_digest: &str,
     expected_tool_name: &str,
-    replacements: &HashMap<String, String>,
-) -> Result<String, ConversationForkError> {
+) -> Result<(&'a ForkTrace, u64, &'a Value), ConversationForkError> {
     let mut matching_operations = traces
         .iter()
-        .flat_map(|trace| trace.trace.items.iter())
-        .filter_map(|item| match item {
+        .flat_map(|trace| trace.trace.items.iter().map(move |item| (trace, item)))
+        .filter_map(|(trace, item)| match item {
             crate::ConversationTurnTraceItem::ToolCall {
+                sequence,
                 call_id,
                 tool,
                 operation,
                 ..
-            } if call_id == source_call_id && tool == expected_tool_name => Some(operation),
+            } if call_id == source_call_id && tool == expected_tool_name => {
+                Some((trace, *sequence, operation))
+            }
             _ => None,
         });
     let source_operation = matching_operations.next().ok_or_else(|| {
@@ -25,6 +26,82 @@ fn remapped_file_change_call_digest(
             "文件变更事务引用了重复的源 Tool Call。".to_string(),
         ));
     }
+    Ok(source_operation)
+}
+
+/// Staged begin/mutation records bind the original model arguments, whereas their audit Trace
+/// intentionally contains no file bodies. Verify both representations before cloning either;
+/// never compare a private request digest with the body-free Trace digest.
+fn remapped_staged_file_change_call_digest(
+    traces: &[ForkTrace],
+    source_run_id: &str,
+    source_call_id: &str,
+    source_digest: &str,
+    expected_action: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<String, ConversationForkError> {
+    let (trace, sequence, source_operation) =
+        file_change_trace_operation(traces, source_call_id, "apply_patch")?;
+    if trace.source_run_id != source_run_id {
+        return Err(ConversationForkError::Other(
+            "文件变更事务的 Tool Call 所属运行与历史不一致。".to_string(),
+        ));
+    }
+    let mut matching_calls = trace
+        .model_context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter().map(move |call| (item, call)))
+        .filter(|(_, call)| call.id == source_call_id);
+    let (item, call) = matching_calls.next().ok_or_else(|| {
+        ConversationForkError::Other("文件变更事务缺少源 Tool Call 的模型上下文。".to_string())
+    })?;
+    if matching_calls.next().is_some()
+        || item.sequence != sequence
+        || call.name != "apply_patch"
+        || call.args.pointer("/request/action").and_then(Value::as_str) != Some(expected_action)
+    {
+        return Err(ConversationForkError::Other(
+            "文件变更事务的模型上下文 Tool Call 身份与历史不一致。".to_string(),
+        ));
+    }
+    let computed_source_digest = crate::file_change::proposal_digest(&call.args).map_err(|_| {
+        ConversationForkError::Other("无法验证文件变更原始 Tool Call。".to_string())
+    })?;
+    if computed_source_digest != source_digest {
+        return Err(ConversationForkError::Other(
+            "文件变更事务的原始 Tool Call digest 与模型上下文不一致。".to_string(),
+        ));
+    }
+    let projected =
+        crate::file_change_support::apply_patch_trace_operation(&call.args).map_err(|_| {
+            ConversationForkError::Other("文件变更原始 Tool Call 参数无效。".to_string())
+        })?;
+    if projected != *source_operation {
+        return Err(ConversationForkError::Other(
+            "文件变更事务的 Tool Call 投影与历史不一致。".to_string(),
+        ));
+    }
+    let mut target_args = call.args.clone();
+    rewrite_apply_patch_request_ids(&mut target_args, replacements);
+    crate::file_change::proposal_digest(&target_args)
+        .map_err(|_| ConversationForkError::Other("无法复制文件变更原始 Tool Call。".to_string()))
+}
+
+fn remapped_file_change_trace_digest(
+    traces: &[ForkTrace],
+    source_run_id: &str,
+    source_call_id: &str,
+    source_digest: &str,
+    expected_tool_name: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<String, ConversationForkError> {
+    let (trace, _, source_operation) =
+        file_change_trace_operation(traces, source_call_id, expected_tool_name)?;
+    if trace.source_run_id != source_run_id {
+        return Err(ConversationForkError::Other(
+            "文件修改审计的 Tool Call 所属运行与历史不一致。".to_string(),
+        ));
+    }
     let computed_source_digest = crate::file_change::proposal_digest(source_operation)
         .map_err(|_| ConversationForkError::Other("无法验证文件变更 Tool Call。".to_string()))?;
     if computed_source_digest != source_digest {
@@ -33,7 +110,7 @@ fn remapped_file_change_call_digest(
         ));
     }
     let mut target_operation = source_operation.clone();
-    rewrite_exact_ids(&mut target_operation, replacements);
+    rewrite_apply_patch_request_ids(&mut target_operation, replacements);
     crate::file_change::proposal_digest(&target_operation)
         .map_err(|_| ConversationForkError::Other("无法复制文件变更 Tool Call。".to_string()))
 }
@@ -159,8 +236,9 @@ fn remap_terminal_file_change_action_audit(
         &file_change.execution.observation.source_tool_call_id,
         "文件修改审计 observation Tool Call",
     )?;
-    let target_trace_args_digest = remapped_file_change_call_digest(
+    let target_trace_args_digest = remapped_file_change_trace_digest(
         traces,
+        &audit.run_id,
         &source_tool_call_id,
         &file_change.execution.trace_args_digest,
         "apply_patch",

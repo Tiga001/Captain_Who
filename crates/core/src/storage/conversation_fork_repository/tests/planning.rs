@@ -902,13 +902,12 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
             truncated: false,
             items,
         };
-        conversation_trace_repository::replace_trace(
+        commit_current_fork_fixture_trace(
             &mut connection,
             &trace,
             message.created_at,
             message.created_at + 1,
-        )
-        .unwrap();
+        );
     }
     let begin_args = apply_patch_args(
         json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))}),
@@ -1062,15 +1061,20 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
     )
     .unwrap()
     .unwrap();
-    let call_args = target_trace
+    assert!(target_trace.items.iter().any(|item| matches!(item,
+        ConversationTurnTraceItem::ToolCall { operation, .. }
+        if operation["request"]["action"] == "append" && operation["request"].get("content").is_none())));
+    let target_context = conversation_model_context_repository::get_log_for_message(
+        &connection,
+        &plan.message_id_map["assistant-b"],
+    )
+    .unwrap()
+    .unwrap();
+    let call_args = target_context
         .items
         .iter()
-        .filter_map(|item| match item {
-            ConversationTurnTraceItem::ToolCall {
-                call_id, operation, ..
-            } => Some((call_id.as_str(), operation)),
-            _ => None,
-        })
+        .flat_map(|item| &item.tool_calls)
+        .map(|call| (call.id.as_str(), &call.args))
         .collect::<HashMap<_, _>>();
     assert_eq!(
         crate::file_change::proposal_digest(

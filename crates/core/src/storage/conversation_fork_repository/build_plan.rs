@@ -562,12 +562,16 @@ fn build_single_conversation_fork_plan_at_point(
             )?;
             let target_observation_id = global_id_replacements
                 .get(&source_change.observation_id)
+                .or_else(|| file_observation_id_map.get(&source_change.observation_id))
                 .cloned()
                 .unwrap_or_else(|| format!("fobs_{}", Uuid::new_v4().simple()));
-            file_observation_id_map.insert(
-                source_change.observation_id.clone(),
-                target_observation_id.clone(),
-            );
+            // Successful writes can renew the same observation for another staged transaction.
+            // Every copied begin must bind to the same ID used in the final model-context map.
+            insert_global_replacement(
+                &mut file_observation_id_map,
+                &source_change.observation_id,
+                &target_observation_id,
+            )?;
             let mut change_replacements = global_id_replacements.clone();
             change_replacements.extend(run_id_map.clone());
             change_replacements.extend(tool_call_id_map.clone());
@@ -577,22 +581,24 @@ fn build_single_conversation_fork_plan_at_point(
                 source_change.observation_id.clone(),
                 target_observation_id.clone(),
             );
-            let target_source_tool_arguments_digest = remapped_file_change_call_digest(
+            let target_source_tool_arguments_digest = remapped_staged_file_change_call_digest(
                 &traces,
+                source_run_id,
                 &source_change.source_tool_call_id,
                 &source_change.source_tool_arguments_digest,
-                &source_change.source_tool_name,
+                "begin",
                 &change_replacements,
             )?;
             for chunk in &mut history.chunks {
                 chunk.transaction_id = target_transaction_id.clone();
             }
             for operation in &mut history.operations {
-                operation.source_tool_arguments_digest = remapped_file_change_call_digest(
+                operation.source_tool_arguments_digest = remapped_staged_file_change_call_digest(
                     &traces,
+                    source_run_id,
                     &operation.source_tool_call_id,
                     &operation.source_tool_arguments_digest,
-                    &source_change.source_tool_name,
+                    &operation.action,
                     &change_replacements,
                 )?;
                 operation.transaction_id = target_transaction_id.clone();
@@ -662,6 +668,9 @@ fn build_single_conversation_fork_plan_at_point(
                             mapped_id(&tool_call_id_map, call_id, "文件变更最终 Tool Call")
                         })
                         .transpose()?,
+                    // Terminal commit records retain the original execution digest as lineage,
+                    // just like their frozen audit binding. Forks never replay that approval;
+                    // only the separately checked Trace digest is rebound to the copied call.
                     final_action_arguments_digest: source_change.final_action_arguments_digest,
                     final_permission_revision: source_change.final_permission_revision,
                     final_tool_set_revision: source_change.final_tool_set_revision,

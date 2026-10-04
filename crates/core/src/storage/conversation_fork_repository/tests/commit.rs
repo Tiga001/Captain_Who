@@ -1,18 +1,30 @@
-#[test]
-fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
-    use crate::file_change::{
-        FileChangeBase, FileChangeDirectBinding, FileChangeMutation, FileChangeMutationReceipt,
-        FileChangeOperation, FileChangeOutcome, FileChangePlanRequest, FileChangePlanner,
-        FileChangeProposal, FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
-        FileObservationState, FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
-        FILE_CHANGE_SCHEMA_VERSION,
-    };
+const SOURCE_TRANSACTION_ID: &str = "file-change-apply-source";
+const READ_CALL_ID: &str = "call-apply-read";
+const BEGIN_CALL_ID: &str = "call-apply-begin";
+const APPEND_CALL_ID: &str = "call-apply-append";
+const EDIT_CALL_ID: &str = "call-apply-edit";
+const COMMIT_CALL_ID: &str = "call-apply-commit";
 
-    const SOURCE_TRANSACTION_ID: &str = "file-change-apply-source";
-    const READ_CALL_ID: &str = "call-apply-read";
-    const BEGIN_CALL_ID: &str = "call-apply-begin";
-    const APPEND_CALL_ID: &str = "call-apply-append";
-    const COMMIT_CALL_ID: &str = "call-apply-commit";
+struct CurrentApplyPatchStagedForkFixture {
+    connection: Connection,
+    _directory: tempfile::TempDir,
+    source: ChatConversationRecord,
+    canonical_target: std::path::PathBuf,
+    observation_id: String,
+    source_observation: crate::file_change::FileObservationCheckpoint,
+    frozen_plan: crate::file_change::FileChangePlan,
+}
+
+fn current_apply_patch_staged_fork_fixture(
+    initial_content: &str,
+    final_content: &str,
+) -> CurrentApplyPatchStagedForkFixture {
+    use crate::file_change::{
+        FileChangeBase, FileChangeDirectBinding, FileChangeMutation, FileChangeOperation,
+        FileChangeOutcome, FileChangePlanRequest, FileChangePlanner, FileChangeProposal,
+        FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
+        FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
+    };
 
     let fixture = tempfile::tempdir().unwrap();
     let canonical_target = fixture.path().join("notes.md");
@@ -46,12 +58,19 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         "transactionId": SOURCE_TRANSACTION_ID,
         "index": 0,
         "expectedDraftRevision": 0,
-        "content": "after\n",
+        "content": initial_content,
+    }));
+    let edit_args = apply_patch_args(json!({
+        "action": "edit",
+        "transactionId": SOURCE_TRANSACTION_ID,
+        "index": 1,
+        "expectedDraftRevision": 1,
+        "edits": [{"kind": "replace", "oldText": initial_content, "newText": final_content, "replaceAll": false}],
     }));
     let commit_args = apply_patch_args(json!({
         "action": "commit",
         "transactionId": SOURCE_TRANSACTION_ID,
-        "expectedDraftRevision": 1,
+        "expectedDraftRevision": 2,
         "summary": "replace notes",
     }));
 
@@ -65,9 +84,13 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             let mut items = staged_tool_exchange(0, READ_CALL_ID, "read_file", read_args.clone());
             if let ConversationTurnTraceItem::ToolResult { observation, .. } = &mut items[1] {
                 *observation = json!({
-                    "filePath": "notes.md",
+                    "path": "notes.md",
                     "revision": base_revision,
                     "observationId": observation_id,
+                    "fileChangeTarget": {
+                        "filePath": "notes.md", "observationId": observation_id, "state": "existing",
+                    },
+                    "content": "before\n",
                 });
             }
             items.extend(staged_tool_exchange(
@@ -82,8 +105,14 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
                 "apply_patch",
                 append_args.clone(),
             ));
+            items.extend(staged_tool_exchange(
+                6,
+                EDIT_CALL_ID,
+                "apply_patch",
+                edit_args.clone(),
+            ));
             let mut commit =
-                staged_tool_exchange(6, COMMIT_CALL_ID, "apply_patch", commit_args.clone());
+                staged_tool_exchange(8, COMMIT_CALL_ID, "apply_patch", commit_args.clone());
             if let ConversationTurnTraceItem::ToolCall {
                 approval_status, ..
             } = &mut commit[0]
@@ -96,10 +125,6 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             {
                 *approval_status = AgentApprovalStatus::Approved;
             }
-            if let ConversationTurnTraceItem::ToolCall { operation, .. } = &mut commit[0] {
-                *operation =
-                    crate::file_change_support::apply_patch_trace_operation(&commit_args).unwrap();
-            }
             items.extend(commit);
             items
         } else {
@@ -111,7 +136,7 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
                 truncated: false,
             }]
         };
-        conversation_trace_repository::replace_trace(
+        commit_current_fork_fixture_trace(
             &mut connection,
             &ConversationTurnTrace {
                 schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
@@ -125,8 +150,7 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             },
             message.created_at,
             message.created_at + 1,
-        )
-        .unwrap();
+        );
     }
 
     file_change_repository::insert_file_change(
@@ -151,14 +175,14 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             status: "applied".to_string(),
             base_revision: Some(base_revision.clone()),
             base_content: "before\n".to_string(),
-            content: "after\n".to_string(),
-            draft_revision: 1,
-            next_mutation_index: 1,
+            content: final_content.to_string(),
+            draft_revision: 2,
+            next_mutation_index: 2,
             additions: 1,
             deletions: 1,
             line_count: 1,
-            byte_count: 6,
-            mutation_count: 1,
+            byte_count: final_content.len() as u64,
+            mutation_count: 2,
             stats_final: true,
             summary: Some("replace notes".to_string()),
             final_action_id: Some(COMMIT_CALL_ID.to_string()),
@@ -178,10 +202,11 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         .execute(
             "INSERT INTO agent_file_change_chunks (
                  transaction_id, mutation_index, content_digest, byte_count, created_at
-             ) VALUES (?1, 0, ?2, 6, 39)",
+             ) VALUES (?1, 0, ?2, ?3, 38)",
             params![
                 SOURCE_TRANSACTION_ID,
-                crate::file_change::content_digest(b"after\n")
+                crate::file_change::content_digest(initial_content.as_bytes()),
+                initial_content.len() as u64
             ],
         )
         .unwrap();
@@ -191,13 +216,30 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
                  transaction_id, mutation_index, source_tool_call_id,
                  source_tool_arguments_digest, action, payload_digest,
                  draft_revision, receipt_json, created_at
-             ) VALUES (?1, 0, ?2, ?3, 'append', ?4, 1, ?5, 39)",
+             ) VALUES (?1, 0, ?2, ?3, 'append', ?4, 1, ?5, 38)",
             params![
                 SOURCE_TRANSACTION_ID,
                 APPEND_CALL_ID,
                 crate::file_change::proposal_digest(&append_args).unwrap(),
-                crate::file_change::content_digest(b"after\n"),
-                staged_mutation_receipt(SOURCE_TRANSACTION_ID, 0),
+                crate::file_change::proposal_digest(&append_args).unwrap(),
+                staged_mutation_receipt_for_content(SOURCE_TRANSACTION_ID, 0, initial_content),
+            ],
+        )
+        .unwrap();
+
+    connection
+        .execute(
+            "INSERT INTO agent_file_change_operations (
+                 transaction_id, mutation_index, source_tool_call_id,
+                 source_tool_arguments_digest, action, payload_digest,
+                 draft_revision, receipt_json, created_at
+             ) VALUES (?1, 1, ?2, ?3, 'edit', ?4, 2, ?5, 39)",
+            params![
+                SOURCE_TRANSACTION_ID,
+                EDIT_CALL_ID,
+                crate::file_change::proposal_digest(&edit_args).unwrap(),
+                crate::file_change::proposal_digest(&edit_args).unwrap(),
+                staged_mutation_receipt_for_content(SOURCE_TRANSACTION_ID, 1, final_content),
             ],
         )
         .unwrap();
@@ -210,7 +252,7 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
                 content: "before\n",
                 revision: &base_revision,
             },
-            mutation: FileChangeMutation::Complete("after\n".to_string()),
+            mutation: FileChangeMutation::Complete(final_content.to_string()),
         })
         .unwrap();
     let execution = FileChangeDirectBinding {
@@ -252,10 +294,10 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         conversation_id: source.id.clone(),
         project_id: None,
         run_id: "run-source-1".to_string(),
-        staged_transaction_revision: Some(1),
+        staged_transaction_revision: Some(2),
         canonical_target: canonical_target.to_string_lossy().into_owned(),
         base_content: Some("before\n".to_string()),
-        target_content: Some("after\n".to_string()),
+        target_content: Some(final_content.to_string()),
         delete_journal: None,
         receipt: None,
         permission_revision: "permission-1".to_string(),
@@ -277,7 +319,7 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             additions: frozen_plan.additions,
             deletions: frozen_plan.deletions,
             line_count: 1,
-            byte_count: 6,
+            byte_count: final_content.len() as u64,
             approval_status: AgentApprovalStatus::Approved,
             execution: Box::new(execution),
         },
@@ -316,6 +358,38 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         .unwrap()
     );
 
+    CurrentApplyPatchStagedForkFixture {
+        connection,
+        _directory: fixture,
+        source,
+        canonical_target,
+        observation_id,
+        source_observation,
+        frozen_plan,
+    }
+}
+
+#[test]
+fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
+    use crate::file_change::{
+        FileChangeMutationReceipt, FileObservationCheckpoint, FileObservationState,
+    };
+    let CurrentApplyPatchStagedForkFixture {
+        mut connection,
+        _directory,
+        source,
+        canonical_target,
+        observation_id,
+        source_observation,
+        frozen_plan,
+    } = current_apply_patch_staged_fork_fixture("draft\n", "after\n");
+    let source_commit_digest =
+        file_change_repository::get_file_change(&connection, SOURCE_TRANSACTION_ID)
+            .unwrap()
+            .unwrap()
+            .final_action_arguments_digest
+            .unwrap();
+
     let plan = build_assistant_reply_fork_plan(
         &connection,
         "fork-current-apply-patch-staged",
@@ -344,6 +418,10 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         Some(COMMIT_CALL_ID)
     );
     assert_ne!(target_change.observation_id, observation_id);
+    assert_eq!(
+        target_change.final_action_arguments_digest.as_deref(),
+        Some(source_commit_digest.as_str())
+    );
 
     let target_observation: FileObservationCheckpoint =
         serde_json::from_str(&target_change.observation_json).unwrap();
@@ -370,14 +448,14 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
     )
     .unwrap();
     assert_eq!(target_history.chunks.len(), 1);
-    assert_eq!(target_history.operations.len(), 1);
+    assert_eq!(target_history.operations.len(), 2);
     assert_eq!(
         target_history.chunks[0].transaction_id,
         target_transaction_id
     );
     assert_eq!(
         target_history.chunks[0].content_digest,
-        crate::file_change::content_digest(b"after\n")
+        crate::file_change::content_digest(b"draft\n")
     );
     let target_operation = &target_history.operations[0];
     assert_eq!(target_operation.transaction_id, target_transaction_id);
@@ -428,10 +506,7 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         target_observation.source_tool_call_id
     );
     assert_eq!(target_begin.0.as_str(), target_change.source_tool_call_id);
-    assert_eq!(
-        target_begin.2["request"]["observationId"],
-        target_change.observation_id
-    );
+    assert!(target_begin.2["request"].get("observationId").is_none());
     assert_eq!(
         target_append.0.as_str(),
         target_operation.source_tool_call_id
@@ -440,10 +515,65 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         target_append.2["request"]["transactionId"],
         target_transaction_id
     );
+    let target_context = conversation_model_context_repository::get_log_for_message(
+        &connection,
+        &plan.message_id_map["assistant-b"],
+    )
+    .unwrap()
+    .unwrap();
+    let raw_calls = target_context
+        .items
+        .iter()
+        .flat_map(|item| &item.tool_calls)
+        .map(|call| (call.id.as_str(), &call.args))
+        .collect::<HashMap<_, _>>();
     assert_eq!(
-        crate::file_change::proposal_digest(target_append.2).unwrap(),
-        target_operation.source_tool_arguments_digest
+        raw_calls[target_begin.0.as_str()]["request"]["observationId"],
+        target_change.observation_id
     );
+    for (call_id, digest) in std::iter::once((
+        target_change.source_tool_call_id.as_str(),
+        &target_change.source_tool_arguments_digest,
+    ))
+    .chain(target_history.operations.iter().map(|operation| {
+        (
+            operation.source_tool_call_id.as_str(),
+            &operation.source_tool_arguments_digest,
+        )
+    })) {
+        let raw_args = raw_calls[call_id];
+        let trace_args = calls
+            .iter()
+            .find(|(id, _, _)| id.as_str() == call_id)
+            .unwrap()
+            .2;
+        assert_eq!(
+            &crate::file_change::proposal_digest(raw_args).unwrap(),
+            digest
+        );
+        assert_eq!(
+            &crate::file_change_support::apply_patch_trace_operation(raw_args).unwrap(),
+            trace_args
+        );
+        assert_ne!(
+            raw_args, trace_args,
+            "staged digest must not be computed from body-free trace"
+        );
+    }
+    assert_eq!(
+        raw_calls[target_append.0.as_str()]["request"]["content"],
+        "draft\n"
+    );
+    let target_edit = calls
+        .iter()
+        .find(|(_, _, args)| args["request"]["action"] == "edit")
+        .unwrap();
+    assert_eq!(
+        raw_calls[target_edit.0.as_str()]["request"]["edits"][0]["newText"],
+        "after\n"
+    );
+    assert!(target_append.2["request"].get("content").is_none());
+    assert!(target_edit.2["request"].get("edits").is_none());
     assert_eq!(
         target_commit.0.as_str(),
         target_change.final_action_id.as_deref().unwrap()
@@ -467,8 +597,8 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         .unwrap();
     assert_eq!(target_read_result.0, target_read.0);
     assert_eq!(
-        target_read_result.1["observationId"],
-        target_change.observation_id
+        target_read_result.1["revision"],
+        crate::content_revision(b"before\n")
     );
 
     assert!(file_change_repository::get_file_change_for_owner(
@@ -530,6 +660,14 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
     );
     assert_eq!(target_audit_change.execution.run_id, target_run_id);
     assert_eq!(
+        target_audit_change.execution.source_args_digest,
+        source_commit_digest
+    );
+    assert_eq!(
+        target_audit_change.execution.trace_args_digest,
+        crate::file_change::proposal_digest(target_commit.2).unwrap()
+    );
+    assert_eq!(
         target_audit_change.execution.base_content.as_deref(),
         Some("before\n")
     );
@@ -578,6 +716,10 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
     );
     assert_eq!(recursive_change.execution.run_id, recursive_run_id);
     assert_eq!(
+        recursive_change.execution.source_args_digest,
+        source_commit_digest
+    );
+    assert_eq!(
         recursive_change.execution.base_content.as_deref(),
         Some("before\n")
     );
@@ -585,6 +727,207 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         recursive_change.execution.target_content.as_deref(),
         Some("after\n")
     );
+}
+
+fn assert_staged_apply_patch_bodies_survive_recursive_forks(
+    initial_content: &str,
+    final_content: &str,
+) {
+    let mut fixture = current_apply_patch_staged_fork_fixture(initial_content, final_content);
+    let mut source_id = fixture.source.id.clone();
+    let mut message_id = "assistant-c".to_string();
+    let mut tool_message_id = "assistant-b".to_string();
+    let mut transaction_id = SOURCE_TRANSACTION_ID.to_string();
+    let mut append_call_id = APPEND_CALL_ID.to_string();
+    let mut edit_call_id = EDIT_CALL_ID.to_string();
+    for generation in 0..2 {
+        let plan = build_assistant_reply_fork_plan(
+            &fixture.connection,
+            &format!("fork-id-shaped-body-{generation}"),
+            &source_id,
+            &message_id,
+            100 + generation,
+        )
+        .unwrap();
+        commit_fork_plan(&mut fixture.connection, &plan).unwrap();
+        let cloned_transaction = &plan.file_changes[0].target;
+        assert_ne!(cloned_transaction.id, transaction_id);
+        assert_eq!(cloned_transaction.content, final_content);
+        let target_context = conversation_model_context_repository::get_log_for_message(
+            &fixture.connection,
+            &plan.message_id_map[&tool_message_id],
+        )
+        .unwrap()
+        .unwrap();
+        let calls = target_context
+            .items
+            .iter()
+            .flat_map(|item| &item.tool_calls)
+            .map(|call| (call.id.as_str(), &call.args))
+            .collect::<HashMap<_, _>>();
+        let target_append_id = &plan.id_replacements[&append_call_id];
+        let target_edit_id = &plan.id_replacements[&edit_call_id];
+        assert_eq!(
+            calls[target_append_id.as_str()]["request"]["transactionId"],
+            cloned_transaction.id
+        );
+        assert_eq!(
+            calls[target_append_id.as_str()]["request"]["content"],
+            initial_content
+        );
+        assert_eq!(
+            calls[target_edit_id.as_str()]["request"]["transactionId"],
+            cloned_transaction.id
+        );
+        assert_eq!(
+            calls[target_edit_id.as_str()]["request"]["edits"][0]["oldText"],
+            initial_content
+        );
+        assert_eq!(
+            calls[target_edit_id.as_str()]["request"]["edits"][0]["newText"],
+            final_content
+        );
+        for operation in &plan.file_changes[0].history.operations {
+            assert_eq!(
+                operation.source_tool_arguments_digest,
+                crate::file_change::proposal_digest(calls[operation.source_tool_call_id.as_str()])
+                    .unwrap()
+            );
+        }
+        source_id = plan.target.id.clone();
+        message_id = plan.message_id_map[&message_id].clone();
+        tool_message_id = plan.message_id_map[&tool_message_id].clone();
+        transaction_id = cloned_transaction.id.clone();
+        append_call_id = target_append_id.clone();
+        edit_call_id = target_edit_id.clone();
+    }
+}
+
+#[test]
+fn fork_preserves_staged_apply_patch_bodies_that_equal_source_ids_recursively() {
+    assert_staged_apply_patch_bodies_survive_recursive_forks(SOURCE_TRANSACTION_ID, READ_CALL_ID);
+}
+
+#[test]
+fn fork_preserves_staged_apply_patch_data_uri_text_recursively() {
+    assert_staged_apply_patch_bodies_survive_recursive_forks(
+        "data:image/png;base64,aGVsbG8=",
+        "data:image/png;base64,d29ybGQ=",
+    );
+}
+
+fn assert_current_staged_fork_rejected(
+    fixture: &CurrentApplyPatchStagedForkFixture,
+    expected: &str,
+) {
+    let error = build_assistant_reply_fork_plan(
+        &fixture.connection,
+        "fork-corrupted-current-staged",
+        &fixture.source.id,
+        "assistant-c",
+        100,
+    )
+    .unwrap_err();
+    assert!(
+        error.message().contains(expected),
+        "unexpected error: {}",
+        error.message()
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM conversations", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM conversation_forks", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn fork_rejects_tampered_staged_apply_patch_original_arguments() {
+    for (call_id, pointer) in [
+        (BEGIN_CALL_ID, "/request/filePath"),
+        (APPEND_CALL_ID, "/request/content"),
+        (EDIT_CALL_ID, "/request/edits/0/newText"),
+    ] {
+        let fixture = current_apply_patch_staged_fork_fixture("draft\n", "after\n");
+        let mut context = conversation_model_context_repository::get_log_for_message(
+            &fixture.connection,
+            "assistant-b",
+        )
+        .unwrap()
+        .unwrap();
+        let call = context
+            .items
+            .iter_mut()
+            .flat_map(|item| &mut item.tool_calls)
+            .find(|call| call.id == call_id)
+            .unwrap();
+        *call.args.pointer_mut(pointer).unwrap() = json!("changed");
+        // Simulate internally consistent storage corruption: hashes/compression are valid,
+        // but the exact original request no longer matches the frozen staged transaction.
+        fixture.connection.execute("DELETE FROM conversation_model_context_items WHERE assistant_message_id='assistant-b'", []).unwrap();
+        conversation_model_context_repository::insert_validated_suffix(
+            &fixture.connection,
+            "assistant-b",
+            &context.items,
+        )
+        .unwrap();
+        assert_current_staged_fork_rejected(&fixture, "原始 Tool Call digest 与模型上下文不一致");
+    }
+}
+
+#[test]
+fn fork_rejects_tampered_staged_apply_patch_trace_projection() {
+    for (call_id, field) in [
+        (BEGIN_CALL_ID, "filePath"),
+        (APPEND_CALL_ID, "contentDigest"),
+        (EDIT_CALL_ID, "editsDigest"),
+    ] {
+        let fixture = current_apply_patch_staged_fork_fixture("draft\n", "after\n");
+        let trace = conversation_trace_repository::get_trace_for_message(
+            &fixture.connection,
+            "assistant-b",
+        )
+        .unwrap()
+        .unwrap();
+        let mut item = trace
+            .items
+            .into_iter()
+            .find(|item| {
+                matches!(item,
+            ConversationTurnTraceItem::ToolCall { call_id: id, .. } if id == call_id)
+            })
+            .unwrap();
+        let ConversationTurnTraceItem::ToolCall { operation, .. } = &mut item else {
+            unreachable!()
+        };
+        operation["request"][field] = json!("tampered");
+        fixture.connection.execute("UPDATE conversation_turn_trace_items SET item_json=?1 WHERE assistant_message_id='assistant-b' AND sequence=?2",
+            params![serde_json::to_string(&item).unwrap(), item.sequence()]).unwrap();
+        assert_current_staged_fork_rejected(&fixture, "Tool Call 投影与历史不一致");
+    }
+}
+
+#[test]
+fn fork_rejects_staged_apply_patch_without_original_model_context() {
+    let fixture = current_apply_patch_staged_fork_fixture("draft\n", "after\n");
+    fixture
+        .connection
+        .execute(
+            "DELETE FROM conversation_model_context_items WHERE assistant_message_id='assistant-b'",
+            [],
+        )
+        .unwrap();
+    assert_current_staged_fork_rejected(&fixture, "缺少源 Tool Call 的模型上下文");
 }
 
 #[test]

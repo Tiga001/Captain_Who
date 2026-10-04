@@ -165,6 +165,22 @@ fn rewrite_certified_question_agent_run_receipts(
     }
 }
 
+/// apply_patch bodies, edit text, paths and summaries are authored content, even when they
+/// exactly equal a Host identifier. Only these two request fields carry fork-local identities.
+fn rewrite_apply_patch_request_ids(value: &mut Value, replacements: &HashMap<String, String>) {
+    let Some(request) = value.get_mut("request").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for key in ["transactionId", "observationId"] {
+        let Some(Value::String(current)) = request.get_mut(key) else {
+            continue;
+        };
+        if let Some(replacement) = replacements.get(current) {
+            *current = replacement.clone();
+        }
+    }
+}
+
 pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
     // Frozen question/answer text is user-authored history, including strings that happen to
     // equal a Run/message/call ID. Only the enclosing ToolResult identity is fork-local.
@@ -183,6 +199,9 @@ pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String
             }
         }
         Value::Object(values) => {
+            let apply_patch = ["tool", "name"]
+                .iter()
+                .any(|key| values.get(*key).and_then(Value::as_str) == Some("apply_patch"));
             let human_questions = ["tool", "name"].iter().any(|key| {
                 matches!(
                     values.get(*key).and_then(Value::as_str),
@@ -190,6 +209,10 @@ pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String
                 )
             });
             for (key, value) in values.iter_mut() {
+                if apply_patch && matches!(key.as_str(), "args" | "operation") {
+                    rewrite_apply_patch_request_ids(value, replacements);
+                    continue;
+                }
                 if human_questions && matches!(key.as_str(), "args" | "operation")
                     && serde_json::from_value::<crate::human_interaction::HumanInteractionToolInput>(value.clone())
                         .is_ok_and(|input| crate::human_interaction::validate_human_interaction_tool_input(&input).is_ok())

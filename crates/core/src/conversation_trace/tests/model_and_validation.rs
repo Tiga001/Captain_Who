@@ -1,4 +1,103 @@
 #[test]
+fn model_context_preserves_valid_apply_patch_text_while_public_trace_stays_body_free() {
+    let before = "data:image/png;base64,aGVsbG8=";
+    let after = "data:image/png;base64,d29ybGQ=";
+    let requests = [
+        json!({"action":"apply","operation":"create","filePath":"fixture.txt",
+            "content":before,"summary":after}),
+        json!({"action":"append","transactionId":"transaction-text","index":0,
+            "expectedDraftRevision":0,"content":before}),
+        json!({"action":"edit","transactionId":"transaction-text","index":1,
+            "expectedDraftRevision":1,"edits":[{"kind":"replace","oldText":before,"newText":after}]}),
+        json!({"action":"apply","operation":"update","filePath":"fixture.txt",
+            "observationId":"observation-text","edits":[{"kind":"insert_before","anchor":before,"text":after}]}),
+        json!({"action":"commit","transactionId":"transaction-text",
+            "expectedDraftRevision":2,"summary":after}),
+    ];
+    for request in requests {
+        let args = json!({"request":request});
+        assert!(crate::tools::apply_patch_wire_is_valid(&args));
+        assert_ne!(sanitize_runtime_value(&args).0, args);
+        let call = AgentToolCall {
+            id: "file-text-call".into(),
+            tool: "apply_patch".into(),
+            args: args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        record_open_call(&mut recorder, &call);
+        let snapshot = recorder.snapshot();
+        let model_item = &snapshot.model_context_items[0];
+        assert_eq!(model_item.tool_calls[0].args, args);
+        assert_eq!(
+            recorder.checkpoint_snapshot().model_context_items[0],
+            *model_item
+        );
+        assert_eq!(
+            crate::file_change::proposal_digest(&model_item.tool_calls[0].args).unwrap(),
+            crate::file_change::proposal_digest(&call.args).unwrap(),
+        );
+        let restored: ConversationModelContextItem =
+            serde_json::from_str(&serde_json::to_string(model_item).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, *model_item);
+        let resumed = ConversationTraceRecorder::from_durable_snapshot(snapshot.clone());
+        assert_eq!(
+            resumed.checkpoint_snapshot().model_context_items[0],
+            restored
+        );
+        let ConversationTurnTraceItem::ToolCall { operation, .. } = &snapshot.items[0] else {
+            panic!("expected durable Tool Call");
+        };
+        assert_eq!(
+            operation,
+            &crate::file_change_support::apply_patch_trace_operation(&args).unwrap()
+        );
+        let public_json = serde_json::to_string(&snapshot.items).unwrap();
+        assert!(!public_json.contains(before));
+        assert!(!public_json.contains(after));
+        assert!(operation["request"].get("content").is_none());
+        assert!(operation["request"].get("edits").is_none());
+    }
+}
+
+#[test]
+fn model_context_file_text_exception_rejects_invalid_calls_and_other_tools() {
+    let data_uri = "data:image/png;base64,aGVsbG8=";
+    let valid_args = json!({"request":{"action":"apply","operation":"create",
+        "filePath":"fixture.txt","content":data_uri}});
+    let mut unknown_field = valid_args.clone();
+    unknown_field["request"]["imageBase64"] = json!("aGVsbG8=");
+    let mut oversized_content = valid_args.clone();
+    oversized_content["request"]["content"] = json!(format!("{data_uri}{}", "x".repeat(32 * 1024)));
+    for (tool, args) in [
+        ("apply_patch", unknown_field),
+        ("apply_patch", oversized_content),
+        ("mcp_apply_patch", valid_args),
+        ("read_image", json!({"imageDataUrl":data_uri})),
+    ] {
+        assert!(!is_exact_file_text_model_call(tool, &args));
+        let message = LlmMessage::assistant(
+            "",
+            vec![crate::llm::LlmToolCall {
+                id: "binary-control".into(),
+                name: tool.into(),
+                args: args.clone(),
+            }],
+        );
+        let (item, redacted) = model_context_item_from_message(0, 0, &message).unwrap();
+        assert!(redacted);
+        assert_eq!(item.tool_calls[0].args, sanitize_runtime_value(&args).0);
+        assert_ne!(item.tool_calls[0].args, args);
+        item.validate().unwrap();
+        let mut unredacted = item;
+        unredacted.tool_calls[0].args = args;
+        assert!(unredacted.validate().is_err());
+    }
+}
+
+#[test]
 fn precommitted_wait_uses_the_same_archive_metadata_as_runtime_terminal_projection() {
     assert_precommitted_wait_matches_runtime_terminal("small child result", false);
     assert_precommitted_wait_matches_runtime_terminal(&"x".repeat(16_000), true);
@@ -536,13 +635,21 @@ fn completed_trace_rejects_a_missing_model_context_suffix() {
 #[test]
 fn active_trace_accepts_a_valid_staged_call_without_treating_it_as_closed_context() {
     let mut recorder = ConversationTraceRecorder::default();
-    recorder.record_narration("Inspecting the current state.").unwrap();
+    recorder
+        .record_narration("Inspecting the current state.")
+        .unwrap();
     record_open_call(&mut recorder, &call("pending-read"));
     let snapshot = recorder.snapshot();
     let trace = snapshot.in_progress_audit_trace("run", "conversation", "assistant");
-    trace.validate_complete_model_context(&snapshot.model_context_items).unwrap();
-    trace.validate_complete_model_context(&snapshot.committed_prefix().model_context_items).unwrap();
-    assert!(trace.validate_complete_model_context(&snapshot.model_context_items[1..]).is_err());
+    trace
+        .validate_complete_model_context(&snapshot.model_context_items)
+        .unwrap();
+    trace
+        .validate_complete_model_context(&snapshot.committed_prefix().model_context_items)
+        .unwrap();
+    assert!(trace
+        .validate_complete_model_context(&snapshot.model_context_items[1..])
+        .is_err());
     let mut corrupted = snapshot.model_context_items;
     corrupted.last_mut().unwrap().sequence += 1;
     assert!(trace.validate_complete_model_context(&corrupted).is_err());

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # FileChange 子系统
@@ -155,6 +155,10 @@ FileChange 对不同消费者使用不同投影：
 
 `apply_patch` 的 durable call Trace 不保存完整 content、old/new text 或 Observation ID，而保存安全 operation 与 digest。successor Observation 只进入模型投影和私有 checkpoint；Event、Trace、Archive 以及持久公共结果都会剥离这些字段。
 
+持久模型上下文另行保存通过当前 `apply_patch` 契约校验的精确文本调用参数，包括文件中合法的
+`data:…;base64,` 字符串，以便核验参数摘要和复制历史。这个文本工具的专用规则不改变公开
+Trace/Event 的正文清理，也不适用于其他工具或未通过契约校验的参数。
+
 ### 模型上下文的三种寿命
 
 固定操作规则保留在稳定 System Prompt 与 `apply_patch` 工具说明中。调用与结算结果沿原时间位置进入
@@ -213,6 +217,15 @@ summary、settlements、固定操作长文或已终态事务。没有未完成�
 三类分页默认 50,000 字符，`maxChars` 被夹在 1,000–100,000。当前 Conversation 的用户写权限或“精确根 Conversation 观察精确子 Conversation”才能读取；调用方不能用猜测 ID 探测其他会话。
 
 Conversation fork 会复制并重映射可见的 Staged tables，以及已完成/失败/取消/拒绝的 terminal FileChange action audit；pending/executing action 不复制。`agent_file_change_run_grants` 是 runtime-only，分叉绝不继承。引用继承的非阻塞问题的 digest 谱系与 durable Trace 使用同一替换集重算，重复分叉不会因身份改写而拒绝历史。历史卡片使用 lazy-loaded、分页的 split Diff review；Git review 中的路径展示保持 project-relative，但展示路径不参与 FileChange 授权。
+
+Staged `begin/append/edit` 的 `source_tool_arguments_digest` 绑定实际调用参数，不能与去掉正文和
+Observation 的 Trace operation 混算。分叉从同一回复、同一 sequence、同一 Tool Call 的持久模型
+上下文核验参数 digest，再核验这些参数生成的 canonical Trace operation；缺失或不一致时拒绝。
+Direct/Staged commit 的 terminal audit 则继续使用独立的 `trace_args_digest` 校验展示轨迹。
+重映射 `apply_patch` 参数时只改 `transactionId/observationId`，不改文件正文、精确替换文本、路径
+或摘要；多个 Staged transaction 复用同一 Observation 时也共享同一个目标映射。目标参数与各自
+digest 必须在连续分叉后仍一致。这里不提供旧格式迁移或缺失
+证据时的兼容降级，也不重新执行历史文件修改。
 
 ## 8. 当前边界快照
 

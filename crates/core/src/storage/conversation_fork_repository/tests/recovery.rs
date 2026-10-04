@@ -234,7 +234,7 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
             json!({"action":"commit","transactionId":transaction_id,"expectedDraftRevision":1}),
         ),
     ));
-    conversation_trace_repository::replace_trace(
+    commit_current_fork_fixture_trace(
         &mut connection,
         &ConversationTurnTrace {
             schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
@@ -248,8 +248,7 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
         },
         20,
         21,
-    )
-    .unwrap();
+    );
     let base_revision = crate::content_revision(b"before");
     let (observation_id, observation_json) = file_change_observation(
         &source.id,

@@ -194,6 +194,8 @@ pub struct ConversationCommandSessionLifecycle {
 /// safely survive a process restart until context compaction covers it. Process-only MCP
 /// arguments, raw Tool output, and binary delivery data never enter this record; they belong to
 /// transient provider messages or the Exact History Archive as appropriate.
+/// Contract-valid `apply_patch` arguments remain exact UTF-8 file text, including text that looks
+/// like a data URI. Their public audit projection still omits file bodies.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationModelContextItem {
@@ -255,7 +257,9 @@ impl ConversationModelContextItem {
                         );
                     }
                     previous_provider_index = Some(call.provider_identity.provider_tool_index);
-                    ensure_no_binary_value("model context tool call", &call.args)?;
+                    if !is_exact_file_text_model_call(&call.name, &call.args) {
+                        ensure_no_binary_value("model context tool call", &call.args)?;
+                    }
                 }
             }
             "tool" => {
@@ -272,6 +276,10 @@ impl ConversationModelContextItem {
         }
         Ok(())
     }
+}
+
+fn is_exact_file_text_model_call(tool: &str, args: &Value) -> bool {
+    tool == "apply_patch" && crate::tools::apply_patch_wire_is_valid(args)
 }
 
 pub(crate) fn model_context_item_from_message(
@@ -309,7 +317,15 @@ fn model_context_item_from_message_with_identities(
     let mut tool_calls = Vec::with_capacity(effective_tool_calls.len());
     let mut tool_call_redacted = false;
     for call in effective_tool_calls {
-        let (args, redacted) = sanitize_runtime_value(&call.args);
+        // A text file may legitimately contain a data URI. Redacting it would break the exact
+        // execution-argument digest needed by staged history and recursive forks. Only the
+        // closed, current apply_patch contract gets this exception; malformed calls and every
+        // other tool keep the binary sanitizer. Durable public Trace projection is separate.
+        let (args, redacted) = if is_exact_file_text_model_call(&call.name, &call.args) {
+            (call.args.clone(), false)
+        } else {
+            sanitize_runtime_value(&call.args)
+        };
         tool_call_redacted |= redacted;
         let provider_identity = provider_identities.get(&call.id).cloned().ok_or_else(|| {
             "assistant model context tool call is missing its Provider/Runtime identity".to_string()
