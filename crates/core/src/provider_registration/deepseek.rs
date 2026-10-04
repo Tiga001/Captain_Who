@@ -5,9 +5,9 @@
 use super::{
     ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
     ProviderContextProjectionSemantics, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
-    ProviderModelFamilyId, ProviderModelIdPolicy, ProviderPartialTraceSemantics,
-    ProviderPrivateReplaySemantics, ProviderProfileId, ProviderProfileRef,
-    ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
+    ProviderModelFamilyId, ProviderModelIdPolicy, ProviderOutputReservation,
+    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileId,
+    ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
     ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics,
     ProviderToolExchangeSemantics, ProviderUsageSemantics, ProviderVendorDescriptor,
     ProviderVendorId, ProviderVendorSettingsKind,
@@ -31,6 +31,13 @@ const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
         terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
         checkpoint_private_arguments:
             ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
+        // Verified 2026-09-19: https://api-docs.deepseek.com/api/create-chat-completion/
+        // Thinking is enabled by default; these reservations include reasoning and visible text.
+        output_reservation: ProviderOutputReservation::ReasoningDependent {
+            disabled: 8 * 1024,
+            standard: 64 * 1024,
+            max_effort: 128 * 1024,
+        },
     }
 }
 

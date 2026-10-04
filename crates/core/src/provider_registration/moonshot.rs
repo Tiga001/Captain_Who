@@ -6,11 +6,11 @@ use super::{
     ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
     ProviderContextProjectionSemantics, ProviderFamilySettings, ProviderFamilySettingsDescriptor,
     ProviderImageInputPolicy, ProviderModelFamilyId, ProviderModelIdPolicy,
-    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileId,
-    ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
-    ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics,
-    ProviderToolExchangeSemantics, ProviderUsageSemantics, ProviderVendorDescriptor,
-    ProviderVendorId, ProviderVendorSettingsKind,
+    ProviderOutputReservation, ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics,
+    ProviderProfileId, ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect,
+    ProviderRegistration, ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics,
+    ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderUsageSemantics,
+    ProviderVendorDescriptor, ProviderVendorId, ProviderVendorSettingsKind,
 };
 use crate::provider_profile::{
     MoonshotK26ThinkingMode, ProviderReasoningEffort, MOONSHOT_K2_6_CHAT_PROFILE_VERSION,
@@ -20,7 +20,9 @@ use crate::provider_profile::{
 const K3_MODEL_IDS: &[&str] = &["kimi-k3"];
 const K2_7_CODE_MODEL_IDS: &[&str] = &["kimi-k2.7-code", "kimi-k2.7-code-highspeed"];
 const K2_6_MODEL_IDS: &[&str] = &["kimi-k2.6"];
-const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
+const fn runtime_capabilities(
+    output_reservation: ProviderOutputReservation,
+) -> ProviderRuntimeCapabilities {
     ProviderRuntimeCapabilities {
         tool_exchange: ProviderToolExchangeSemantics::ExactProviderGrouped,
         private_replay: ProviderPrivateReplaySemantics::AdapterClassified,
@@ -33,6 +35,7 @@ const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
         terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
         checkpoint_private_arguments:
             ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
+        output_reservation,
     }
 }
 
@@ -99,7 +102,8 @@ pub(crate) static MOONSHOT_K3_CHAT_REGISTRATION: ProviderRegistration = Provider
     ProviderModelFamilyId::MoonshotK3Chat,
     ProviderProtocolDialect::OpenAiChatCompletions,
     ProviderModelIdPolicy::Exact(K3_MODEL_IDS),
-    runtime_capabilities(),
+    // https://www.kimi.com/help/kimi-api/api-troubleshooting documents K3's default.
+    runtime_capabilities(ProviderOutputReservation::Fixed(128 * 1024)),
     ProviderAdapterKind::MoonshotK3Chat,
     "Moonshot Kimi K3",
     ProviderProfileSettingsKind::None,
@@ -121,7 +125,7 @@ pub(crate) static MOONSHOT_K2_7_CODE_CHAT_REGISTRATION: ProviderRegistration =
         ProviderModelFamilyId::MoonshotK27CodeChat,
         ProviderProtocolDialect::OpenAiChatCompletions,
         ProviderModelIdPolicy::Exact(K2_7_CODE_MODEL_IDS),
-        runtime_capabilities(),
+        runtime_capabilities(ProviderOutputReservation::Unknown),
         ProviderAdapterKind::MoonshotK27CodeChat,
         "Moonshot Kimi K2.7 Code",
         ProviderProfileSettingsKind::None,
@@ -142,7 +146,7 @@ pub(crate) static MOONSHOT_K2_6_CHAT_REGISTRATION: ProviderRegistration = Provid
     ProviderModelFamilyId::MoonshotK26Chat,
     ProviderProtocolDialect::OpenAiChatCompletions,
     ProviderModelIdPolicy::Exact(K2_6_MODEL_IDS),
-    runtime_capabilities(),
+    runtime_capabilities(ProviderOutputReservation::Unknown),
     ProviderAdapterKind::MoonshotK26Chat,
     "Moonshot Kimi K2.6",
     ProviderProfileSettingsKind::None,

@@ -2,9 +2,8 @@
 //! A reservation never becomes a wire limit just because the provider default is unknown.
 
 use crate::protocol::{AgentApiStyle, AgentChatInput, AgentError, AgentResult};
-use crate::provider_profile::{
-    ProviderFamilySettings, ProviderProfileConfig, ProviderReasoningEffort, ReasoningMode,
-};
+use crate::provider_profile::ProviderProfileConfig;
+use crate::provider_registration::resolve_provider_registration;
 
 /// Compatibility estimate only; this is NOT a default limit for chat requests.
 const UNKNOWN_PROVIDER_OUTPUT_RESERVE: u32 = 30_000;
@@ -59,30 +58,26 @@ pub(crate) fn resolve_profile_output_budget(
         });
     }
 
-    let reserved_output_tokens = match profile.and_then(|profile| profile.family_settings()) {
-        // Verified 2026-09-19: https://api-docs.deepseek.com/api/create-chat-completion/
-        // Thinking is enabled by default. These budgets include reasoning, not just text.
-        Some(
-            ProviderFamilySettings::DeepseekFlashChat { reasoning }
-            | ProviderFamilySettings::DeepseekProChat { reasoning },
-        ) => {
-            // Profile validation rejects disabled thinking with a non-default effort.
-            if reasoning.mode == ReasoningMode::Disabled {
-                8 * 1024
-            } else if reasoning.effort == ProviderReasoningEffort::Max {
-                128 * 1024
-            } else {
-                64 * 1024
-            }
+    let provider_reservation = match profile {
+        Some(profile) => {
+            let registration = resolve_provider_registration(profile.profile(), api_style.into())
+                .map_err(|error| {
+                AgentError::new(format!(
+                    "Provider profile configuration is invalid: {error}"
+                ))
+            })?;
+            registration
+                .runtime_capabilities()
+                .output_token_reservation(
+                    profile.reasoning_mode(),
+                    profile.provider_reasoning_effort(),
+                )
         }
-        // https://www.kimi.com/help/kimi-api/api-troubleshooting documents K3's default.
-        Some(ProviderFamilySettings::MoonshotK3Chat { .. }) => 128 * 1024,
-        // Unknown provider defaults remain estimates. Never infer a family from model name
-        // substrings or advertise this estimate as a guaranteed provider output allowance.
-        _ => UNKNOWN_PROVIDER_OUTPUT_RESERVE,
+        None => None,
     };
     Ok(OutputBudget {
         request_max_tokens: None,
-        reserved_output_tokens,
+        // Unknown defaults remain estimates, not a guaranteed provider output allowance.
+        reserved_output_tokens: provider_reservation.unwrap_or(UNKNOWN_PROVIDER_OUTPUT_RESERVE),
     })
 }

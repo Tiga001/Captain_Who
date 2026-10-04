@@ -6,11 +6,11 @@ use super::{
     ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
     ProviderContextProjectionSemantics, ProviderFamilySettings, ProviderFamilySettingsDescriptor,
     ProviderImageInputPolicy, ProviderModelFamilyId, ProviderModelIdPolicy,
-    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileId,
-    ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
-    ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics,
-    ProviderToolExchangeSemantics, ProviderUsageSemantics, ProviderVendorDescriptor,
-    ProviderVendorId, ProviderVendorSettingsKind,
+    ProviderOutputReservation, ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics,
+    ProviderProfileId, ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect,
+    ProviderRegistration, ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics,
+    ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderUsageSemantics,
+    ProviderVendorDescriptor, ProviderVendorId, ProviderVendorSettingsKind,
 };
 use crate::provider_profile::{
     GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION, GENERIC_OPENAI_CHAT_PROFILE_VERSION,
@@ -26,6 +26,7 @@ const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
         tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
         terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
         checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics::Reject,
+        output_reservation: ProviderOutputReservation::Unknown,
     }
 }
 

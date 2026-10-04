@@ -254,9 +254,44 @@ pub struct ProviderRuntimeCapabilities {
     tool_call_source: ProviderToolCallSourceSemantics,
     terminal_batch: ProviderTerminalBatchSemantics,
     checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics,
+    output_reservation: ProviderOutputReservation,
+}
+
+/// Provider defaults used for context planning only, never inferred request wire limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProviderOutputReservation {
+    Unknown,
+    Fixed(u32),
+    ReasoningDependent {
+        disabled: u32,
+        standard: u32,
+        max_effort: u32,
+    },
 }
 
 impl ProviderRuntimeCapabilities {
+    pub(crate) fn output_token_reservation(
+        self,
+        reasoning_mode: ReasoningMode,
+        reasoning_effort: ProviderReasoningEffort,
+    ) -> Option<u32> {
+        match self.output_reservation {
+            ProviderOutputReservation::Unknown => None,
+            ProviderOutputReservation::Fixed(tokens) => Some(tokens),
+            ProviderOutputReservation::ReasoningDependent {
+                disabled,
+                standard,
+                max_effort,
+            } => Some(if reasoning_mode == ReasoningMode::Disabled {
+                disabled
+            } else if reasoning_effort == ProviderReasoningEffort::Max {
+                max_effort
+            } else {
+                standard
+            }),
+        }
+    }
+
     pub const fn tool_exchange(self) -> ProviderToolExchangeSemantics {
         self.tool_exchange
     }
@@ -988,6 +1023,7 @@ mod tests {
             terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
             checkpoint_private_arguments:
                 ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
+            output_reservation: ProviderOutputReservation::Unknown,
         };
         assert!(independently_enabled.requires_provider_native_tool_calls());
         assert!(independently_enabled.allows_encrypted_checkpoint_rehydration());
@@ -1007,6 +1043,7 @@ mod tests {
             tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
             terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
             checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics::Reject,
+            output_reservation: ProviderOutputReservation::Unknown,
         };
         assert!(!independently_disabled.requires_provider_native_tool_calls());
         assert!(!independently_disabled.allows_encrypted_checkpoint_rehydration());
