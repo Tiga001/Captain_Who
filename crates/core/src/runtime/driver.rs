@@ -652,83 +652,20 @@ impl AgentRuntime {
                                 )?;
                             }
                     }
-                    if let (Some(inbox), Some(conversation_id), Some(assistant_message_id)) = (
-                        collaboration_inbox.as_ref(),
-                        trace_conversation_id.as_deref(),
-                        trace_assistant_message_id.as_deref(),
-                    ) {
-                        let expected_next_trace_sequence = conversation_trace
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .next_sequence();
-                        if let Some(delivery) = inbox.bind_for_model_batch(
-                            AgentSamplingBoundaryRequest {
-                                conversation_id: conversation_id.to_string(),
-                                run_id: run_id.clone(),
-                                assistant_message_id: assistant_message_id.to_string(),
-                                model_batch_index: u64::try_from(
-                                    next_model_request_index.saturating_add(1),
-                                )
-                                .unwrap_or(u64::MAX),
-                                expected_next_trace_sequence,
-                            },
-                        )? {
-                            apply_agent_mailbox_delivery(
-                                &delivery,
-                                &mut active_context,
-                                &conversation_trace,
-                                trace_observer.as_ref(),
-                                assistant_message_id,
-                            )?;
-                        }
-                    }
-                    if interactive_root {
-                        if let (Some(inbox), Some(conversation_id), Some(assistant_message_id)) = (
-                            workflow_inbox.as_ref(), trace_conversation_id.as_deref(), trace_assistant_message_id.as_deref(),
-                        ) {
-                            let expected_next_trace_sequence = conversation_trace.lock()
-                                .unwrap_or_else(|e| e.into_inner()).next_sequence();
-                            let boundary = AgentSamplingBoundaryRequest {
-                                conversation_id: conversation_id.to_string(), run_id: run_id.clone(),
-                                assistant_message_id: assistant_message_id.to_string(),
-                                model_batch_index: u64::try_from(next_model_request_index.saturating_add(1)).unwrap_or(u64::MAX),
-                                expected_next_trace_sequence,
-                            };
-                            let deliveries = inbox.bind_for_model_batch(boundary.clone())
-                                .or_else(|_| inbox.bind_for_model_batch(boundary))?;
-                            if workflow_only_bootstrap && next_model_request_index == 0 && deliveries.is_empty() {
-                                return Err(AgentError::new("Organization startup mail is no longer available; no model request was sent."));
-                            }
-                            apply_workflow_deliveries(&deliveries, &mut active_context,
-                                &conversation_trace, trace_observer.as_ref(), assistant_message_id)?;
-                        }
-                    }
-                    if interactive_root {
-                        if let (Some(host), Some(conversation_id), Some(assistant_message_id)) = (
-                            human_interaction_runtime.as_ref(),
-                            trace_conversation_id.as_deref(),
-                            trace_assistant_message_id.as_deref(),
-                        ) {
-                            let expected_next_trace_sequence = conversation_trace
-                                .lock().unwrap_or_else(|error| error.into_inner()).next_sequence();
-                            let boundary = AgentSamplingBoundaryRequest {
-                                conversation_id: conversation_id.to_string(),
-                                run_id: run_id.clone(),
-                                assistant_message_id: assistant_message_id.to_string(),
-                                model_batch_index: u64::try_from(next_model_request_index.saturating_add(1)).unwrap_or(u64::MAX),
-                                expected_next_trace_sequence,
-                            };
-                            // Retry only this idempotent storage binding on the same boundary.
-                            // A commit-unknown return must not lose its already recorded facts;
-                            // no Provider request has been issued and no model request is retried.
-                            let events = host.bind_ignored_events(boundary.clone())
-                                .or_else(|_| host.bind_ignored_events(boundary))?;
-                            apply_human_interaction_ignored_events(
-                                &events, &mut active_context, &conversation_trace,
-                                trace_observer.as_ref(), assistant_message_id,
-                            )?;
-                        }
-                    }
+                    sampling_inbox::bind_sampling_inboxes(sampling_inbox::SamplingInboxContext {
+                        collaboration_inbox: collaboration_inbox.as_deref(),
+                        workflow_inbox: workflow_inbox.as_deref(),
+                        human_interaction_runtime: human_interaction_runtime.as_deref(),
+                        trace_conversation_id: trace_conversation_id.as_deref(),
+                        trace_assistant_message_id: trace_assistant_message_id.as_deref(),
+                        run_id: &run_id,
+                        next_model_request_index,
+                        interactive_root,
+                        workflow_only_bootstrap,
+                        active_context: &mut active_context,
+                        conversation_trace: &conversation_trace,
+                        trace_observer: trace_observer.as_ref(),
+                    })?;
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
                     runtime_extensions.prepare_model_request()?;
@@ -1111,145 +1048,22 @@ impl AgentRuntime {
                         request_context,
                         effective_tool_set.dynamic_definitions(),
                     );
-                    let mut committed_message_stream_id = None;
-                    let mut received_model_output = false;
-                    let llm_response_result = if request.stream {
-                        let delta_run_id = run_id.clone();
-                        let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
-                        let delta_cancellation_token = cancellation_token.clone();
-                        let mut tool_input_stream = ToolInputStreamObservers::default();
-                        complete_chat_streaming(
-                            request,
-                            cancellation_token.clone(),
-                            |stream_event| {
-                                if delta_cancellation_token.is_cancelled() {
-                                    return;
-                                }
-                                received_model_output |= matches!(&stream_event,
-                                    LlmStreamEvent::Delta(delta) if !delta.is_empty())
-                                    || matches!(&stream_event, LlmStreamEvent::ToolInputProgress { .. });
-                                match stream_event {
-                                    LlmStreamEvent::AttemptStarted {
-                                        attempt,
-                                        max_attempts,
-                                    } => {
-                                        tool_input_stream.start_attempt(attempt);
-                                        if !user_text_blocked {
-                                            let _ = max_attempts;
-                                            event_stream.emit(AgentEvent::MessageStreamStarted {
-                                                run_id: delta_run_id.clone(),
-                                                stream_id: stream_id.clone(),
-                                                attempt,
-                                            });
-                                        }
-                                    }
-                                    LlmStreamEvent::Delta(delta)
-                                        if !user_text_blocked && !delta.is_empty() =>
-                                    {
-                                        event_stream.emit(AgentEvent::MessageDelta {
-                                            run_id: delta_run_id.clone(),
-                                            stream_id: Some(stream_id.clone()),
-                                            delta,
-                                        });
-                                    }
-                                    LlmStreamEvent::ToolInputProgress {
-                                        tool_call_index,
-                                        tool,
-                                        input_delta,
-                                        received_bytes,
-                                    } => {
-                                        // Stream fragments are provisional. Correlate them by
-                                        // stream/attempt/index and leave Tool Call ID unset until
-                                        // the complete response receives its canonical identity.
-                                        let observation = tool_input_stream.on_delta(
-                                            tool_registry.as_ref(),
-                                            &tool_context,
-                                            &stream_id,
-                                            tool_call_index,
-                                            None,
-                                            &tool,
-                                            &input_delta,
-                                            received_bytes,
-                                        );
-                                        if observation.as_ref().is_ok_and(|value| !value.handled) {
-                                            event_stream.emit_transient(
-                                                AgentEvent::ToolInputProgress {
-                                                    run_id: delta_run_id.clone(),
-                                                    stream_id: stream_id.clone(),
-                                                    attempt: tool_input_stream.attempt(),
-                                                    tool_call_index,
-                                                    tool_call_id: None,
-                                                    tool: tool.clone(),
-                                                    received_bytes,
-                                                },
-                                            );
-                                        }
-                                        if let Ok(observation) = observation {
-                                            if let Some(preview) = observation.preview {
-                                                emit_tool_input_preview(
-                                                    &mut event_stream,
-                                                    &delta_run_id,
-                                                    preview,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    LlmStreamEvent::AttemptReset { reason } => {
-                                        event_stream.emit_transient(
-                                            AgentEvent::FileChangePreviewCleared {
-                                                run_id: delta_run_id.clone(),
-                                                stream_id: stream_id.clone(),
-                                                attempt: tool_input_stream.attempt(),
-                                            },
-                                        );
-                                        tool_input_stream.reset();
-                                        if !user_text_blocked {
-                                            event_stream.emit(AgentEvent::MessageStreamReset {
-                                                run_id: delta_run_id.clone(),
-                                                stream_id: stream_id.clone(),
-                                                reason,
-                                            });
-                                        }
-                                    }
-                                    LlmStreamEvent::Retrying {
-                                        attempt,
-                                        max_attempts,
-                                        category,
-                                        provider_code,
-                                        delay_ms,
-                                        retry_at,
-                                    } => {
-                                        event_stream.emit(AgentEvent::LlmRetry {
-                                            run_id: delta_run_id.clone(),
-                                            stream_id: stream_id.clone(),
-                                            attempt,
-                                            max_attempts,
-                                            category,
-                                            provider_code,
-                                            delay_ms,
-                                            retry_at,
-                                        });
-                                    }
-                                    LlmStreamEvent::Committed => {
-                                        for preview in tool_input_stream.flush() {
-                                            emit_tool_input_preview(
-                                                &mut event_stream,
-                                                &delta_run_id,
-                                                preview,
-                                            );
-                                        }
-                                        if !user_text_blocked {
-                                            committed_message_stream_id = Some(stream_id.clone());
-                                        }
-                                    }
-                                    LlmStreamEvent::Delta(_) => {}
-                                }
-                            },
-                        )
-                        .await
-                    } else {
-                        complete_chat(request, cancellation_token.clone()).await
-                    };
+                    let model_sampling::ModelSamplingResult {
+                        response: llm_response_result,
+                        received_model_output,
+                        mut committed_message_stream_id,
+                    } = model_sampling::sample_model(
+                        request,
+                        cancellation_token.clone(),
+                        model_sampling::ModelSamplingContext {
+                            run_id: &run_id,
+                            model_request_index,
+                            user_text_blocked,
+                            event_stream: &mut event_stream,
+                            tool_registry: tool_registry.as_ref(),
+                            tool_context: &tool_context,
+                        },
+                    ).await;
                     let llm_response = match llm_response_result {
                         Ok(response) => {
                             let observation = observation_builder.completed(
@@ -1504,117 +1318,25 @@ impl AgentRuntime {
                         return Err(AgentError::new(message));
                     }
 
-                    assistant_turn.set_runtime_visible_text(retained_assistant_content);
-                    if assistant_turn.provider_tool_calls().is_empty() && !tool_bindings.is_empty()
-                    {
-                        if provider_runtime_capabilities.requires_provider_native_tool_calls() {
-                            return Err(AgentError::structured(
-                                "provider_context_boundary_required",
-                                "当前 Provider Profile 只能执行 Provider 原生 Tool Call，不能把文本猜测为工具协议。",
-                                json!({
-                                    "type": "providerContextBoundary",
-                                    "recovery": "requestNativeProviderToolCalls"
-                                }),
-                            ));
-                        }
-                        let provider_protocol = assistant_turn
-                            .provider_protocol()
-                            .cloned()
-                            .ok_or_else(|| {
-                                AgentError::new(
-                                    "Split-projection assistant turn 不能产生新的 text-fallback Tool Call。",
-                                )
-                            })?;
-                        let fallback_provider_calls = tool_bindings
-                            .iter()
-                            .map(|binding| crate::llm::LlmToolCall {
-                                id: binding.provider_call_id.clone(),
-                                name: binding.runtime_call.name.clone(),
-                                args: binding.runtime_call.args.clone(),
-                            })
-                            .collect();
-                        assistant_turn = crate::llm::LlmAssistantTurn::from_provider(
-                            provider_protocol,
-                            assistant_turn.provider_visible_text(),
-                            fallback_provider_calls,
-                        )?;
-                        assistant_turn.set_runtime_visible_text(retained_assistant_content);
-                    }
-                    let context_bindings = tool_bindings
-                        .iter()
-                        .map(|binding| -> AgentResult<_> {
-                            let model_call = tool_registry.model_call_projection(&AgentToolCall {
-                                id: binding.runtime_call.id.clone(),
-                                tool: binding.runtime_call.name.clone(),
-                                args: binding.runtime_call.args.clone(),
-                                approval_status: AgentApprovalStatus::NotRequired,
-                                reason: None,
-                            });
-                            let provider_call = assistant_turn
-                                .provider_tool_calls()
-                                .get(binding.provider_tool_index)
-                                .ok_or_else(|| {
-                                    AgentError::new(
-                                        "Runtime Tool Call 映射引用了不存在的 Provider Tool Call。",
-                                    )
-                                })?;
-                            Ok(crate::llm::LlmRuntimeToolCallBinding::new(
-                                binding.provider_tool_index,
-                                provider_call,
-                                crate::llm::LlmToolCall {
-                                    id: model_call.id,
-                                    name: model_call.tool,
-                                    args: model_call.args,
-                                },
-                            ))
-                        })
-                        .collect::<AgentResult<Vec<_>>>()?;
-                    assistant_turn.set_runtime_tool_bindings(context_bindings)?;
-                    let has_provider_continuation =
-                        assistant_turn.provider_continuation().is_some();
-                    let provider_turn_policy = provider_runtime_capabilities.classify_turn(
-                        !assistant_turn.provider_tool_calls().is_empty(),
-                        has_provider_continuation,
-                        llm_request.provider_profile_config.reasoning_mode(),
-                    );
-                    let continuation_requirement =
-                        provider_turn_policy.continuation_requirement();
-                    if matches!(
-                        (continuation_requirement, has_provider_continuation),
-                        (ProviderContinuationRequirement::Required, false)
-                            | (ProviderContinuationRequirement::Forbidden, true)
-                    ) {
-                        return Err(provider_continuation_runtime_error(
-                            crate::ProviderContinuationStoreError::InvalidTurn,
-                        ));
-                    }
-                    settles_entire_provider_tool_batch_on_terminal =
-                        provider_turn_policy.settles_entire_batch_on_terminal();
-                    tool_batch = ToolCallBatch::from_provider_response(
-                        &run_id,
-                        model_request_index,
+                    let provider_tool_batch::PreparedProviderToolBatch {
+                        batch,
+                        policy: provider_turn_policy,
+                    } = provider_tool_batch::prepare_provider_tool_batch(
                         assistant_turn,
                         tool_bindings,
-                        suppressed_narration,
-                        |call| {
-                            let projected =
-                                tool_registry.checkpoint_call_projection(&AgentToolCall {
-                                    id: call.id.clone(),
-                                    tool: call.name.clone(),
-                                    args: call.args.clone(),
-                                    approval_status: AgentApprovalStatus::NotRequired,
-                                    reason: None,
-                                });
-                            (
-                                crate::llm::LlmToolCall {
-                                    id: projected.id,
-                                    name: projected.tool,
-                                    args: projected.args,
-                                },
-                                tool_registry.checkpoint_persistence(&call.name),
-                            )
+                        provider_tool_batch::ProviderToolBatchContext {
+                            run_id: &run_id,
+                            model_request_index,
+                            retained_assistant_content,
+                            suppressed_narration,
+                            provider_runtime_capabilities,
+                            reasoning_mode: llm_request.provider_profile_config.reasoning_mode(),
+                            tool_registry: tool_registry.as_ref(),
                         },
                     )?;
+                    settles_entire_provider_tool_batch_on_terminal =
+                        provider_turn_policy.settles_entire_batch_on_terminal();
+                    tool_batch = batch;
                     if provider_turn_policy.requires_private_replay() {
                         let vault = provider_continuation_vault.as_ref().cloned().ok_or_else(|| {
                             provider_continuation_runtime_error(
@@ -1751,293 +1473,36 @@ impl AgentRuntime {
                         vec![queued_tool_call.checkpoint_call.clone()],
                     );
                     let tool_request = queued_tool_call.call;
-                    let reason = extract_reason_from_args(&tool_request.args);
-                    // The effective definitions are both the model contract and the execution
-                    // allowlist. The registry may retain tools hidden by the current permission
-                    // mode; a hallucinated or text-fallback call must not resurrect one.
-                    let tool_is_exposed = effective_tool_set.contains(&tool_request.name);
-                    let definition_requires_approval = tool_is_exposed
-                        && tool_registry
-                            .requires_approval_for_call(&tool_request.name, &tool_request.args);
-                    let mut call = AgentToolCall {
-                        id: tool_request.id,
-                        tool: tool_request.name,
-                        args: tool_request.args,
-                        approval_status: if definition_requires_approval {
-                            AgentApprovalStatus::Required
-                        } else {
-                            AgentApprovalStatus::NotRequired
-                        },
-                        reason,
-                    };
-                    // Re-load at dispatch time instead of relying on the state observed before
-                    // the model request. An earlier Tool Call in the same provider batch may have
-                    // opened a transaction, and no later call may cross that newly-active fence.
-                    let dispatch_file_transactions = FileTransactionState::load(
-                        transaction_storage.as_deref(),
-                        &run_id,
-                        trace_conversation_id.as_deref(),
-                        run_context
-                            .as_ref()
-                            .and_then(|context| context.project_id.as_deref()),
-                    )?;
-                    let file_transaction_fence_blocked = dispatch_file_transactions
-                        .blocks_user_text()
-                        && !dispatch_file_transactions.allows_tool_call(&call.tool, &call.args);
-                    let is_policy_process_tool =
-                        call.tool == "run_command" || call.tool == "skills_run_script";
-                    let mut prepared_policy_action = None;
-                    let mut file_change_run_grant_ref = None;
-                    let mut policy_preflight_failure = None;
-                    let mut terminate_after_repeat_guard_result = false;
-                    let mut auto_execute_policy_action = false;
-                    let mut requires_approval = definition_requires_approval;
-                    let duplicate_in_batch = matches!(
+                    let tool_preflight::PreparedToolCall {
+                        call,
+                        mut prepared_policy_action,
+                        file_change_run_grant_ref,
+                        mut policy_preflight_failure,
+                        terminate_after_repeat_guard_result,
+                        requires_approval,
+                        duplicate_in_batch,
+                        tool_identity,
+                        is_mcp_tool,
+                        is_policy_process_tool,
+                        auto_execute_host_action,
+                    } = tool_preflight::prepare_tool_call(
+                        tool_request,
                         batch_claim,
-                        ToolCallBatchClaim::Duplicate { .. }
-                            | ToolCallBatchClaim::FileObservationReused
-                    );
-                    let tool_identity = tool_registry.identity(&call.tool).cloned().unwrap_or_else(
-                        || AgentToolIdentity::Unregistered {
-                            tool_name: call.tool.clone(),
+                        tool_preflight::ToolPreflightContext {
+                            effective_tool_set: &effective_tool_set,
+                            tool_registry: tool_registry.as_ref(),
+                            tool_context: &tool_context,
+                            transaction_storage: transaction_storage.as_deref(),
+                            run_id: &run_id,
+                            trace_conversation_id: trace_conversation_id.as_deref(),
+                            run_context: run_context.as_ref(),
+                            tool_failure_guard: &mut tool_failure_guard,
+                            command_permissions,
+                            command_workspace_root: command_workspace_root.as_deref(),
+                            command_auto_approve,
+                            patch_auto_approve,
                         },
-                    );
-                    let is_mcp_tool = matches!(&tool_identity, AgentToolIdentity::Mcp { .. });
-
-                    if let ToolCallBatchClaim::Duplicate {
-                        semantic_fingerprint,
-                    } = &batch_claim
-                    {
-                        let message = format!(
-                            "Tool `{}` repeated the same semantic operation in one model response. \
-                             The duplicate was not executed; use the result from the earlier call.",
-                            call.tool
-                        );
-                        policy_preflight_failure = Some(AgentToolResult {
-            exact_archive_file: None,
-                            call_id: call.id.clone(),
-                            tool: call.tool.clone(),
-                            ok: false,
-                            result: Some(json!({
-                                "type": "runtime_guard",
-                                "code": "duplicateToolCallInBatch",
-                                "errorCode": "agent.duplicate_tool_call_in_batch",
-                                "recovery": "useEarlierCallResult",
-                                "tool": call.tool,
-                                "semanticFingerprint": semantic_fingerprint,
-                                "executed": false,
-                                "message": message,
-                            })),
-                            error: Some(message),
-                        });
-                        requires_approval = false;
-                        call.approval_status = AgentApprovalStatus::NotRequired;
-                    }
-
-                    if matches!(batch_claim, ToolCallBatchClaim::FileObservationReused) {
-                        let message = "同一模型响应中的较早文件修改已经使用了这个 observationId；当前调用未执行。请等待较早调用返回后，再使用其结果中续约后的同一 ID。".to_string();
-                        policy_preflight_failure = Some(AgentToolResult {
-                            exact_archive_file: None,
-                            call_id: call.id.clone(),
-                            tool: call.tool.clone(),
-                            ok: false,
-                            result: Some(json!({
-                                "type": "runtime_guard",
-                                "code": "fileObservationReusedInBatch",
-                                "errorCode": "agent.file_observation_reused_in_batch",
-                                "recovery": "waitForEarlierCallResult",
-                                "executed": false,
-                                "message": message,
-                            })),
-                            error: Some(message),
-                        });
-                        requires_approval = false;
-                        call.approval_status = AgentApprovalStatus::NotRequired;
-                    }
-
-                    if policy_preflight_failure.is_none() && file_transaction_fence_blocked {
-                        let message = "FileChange transaction 尚未结算；当前调用已在副作用前拒绝。请使用 apply_patch 继续或结算返回的 exact transactionId。".to_string();
-                        policy_preflight_failure = Some(AgentToolResult {
-                            exact_archive_file: None,
-                            call_id: call.id.clone(),
-                            tool: call.tool.clone(),
-                            ok: false,
-                            result: Some(json!({
-                                "type": "runtime_guard",
-                                "code": "fileChangeTransactionUnsettled",
-                                "errorCode": "agent.file_change_transaction_unsettled",
-                                "recovery": "continueExactApplyPatchTransaction",
-                                "executed": false,
-                                "message": message,
-                            })),
-                            error: Some(message),
-                        });
-                        requires_approval = false;
-                        call.approval_status = AgentApprovalStatus::NotRequired;
-                    }
-
-                    if policy_preflight_failure.is_none() {
-                        if let Some(block) = tool_failure_guard.before_call(&call) {
-                            terminate_after_repeat_guard_result = block.terminate_after_result;
-                            policy_preflight_failure = Some(block.result);
-                            requires_approval = false;
-                            call.approval_status = AgentApprovalStatus::NotRequired;
-                        }
-                    }
-
-                    if policy_preflight_failure.is_none() && !tool_is_exposed {
-                        let unavailable_error =
-                            unavailable_tool_error(&effective_tool_set, &call.tool);
-                        policy_preflight_failure = Some(failed_tool_call_result(
-                            &call,
-                            unavailable_error,
-                        ));
-                    }
-
-                    if policy_preflight_failure.is_none()
-                        && is_policy_process_tool
-                        && tool_is_exposed
-                    {
-                        match tool_registry
-                            .proposed_action_async(&tool_context, &call)
-                            .await
-                        {
-                            Ok(action) => match if call.tool == "run_command" {
-                                prepare_command_dispatch_in_workspace(
-                                    &call,
-                                    action,
-                                    command_permissions,
-                                    &crate::workspace::WorkspaceResolver::from_context(run_context.as_ref().and_then(|context| context.workspace.as_ref())),
-                                    command_auto_approve,
-                                )
-                            } else {
-                                prepare_skill_script_dispatch(
-                                    &call,
-                                    action,
-                                    command_permissions,
-                                    command_workspace_root.as_deref(),
-                                    command_auto_approve,
-                                )
-                            } {
-                                CommandDispatch::ExecuteAutomatically(action) => {
-                                    prepared_policy_action = Some(action);
-                                    auto_execute_policy_action = true;
-                                    requires_approval = false;
-                                    call.approval_status = AgentApprovalStatus::Approved;
-                                }
-                                CommandDispatch::RequireApproval(action) => {
-                                    prepared_policy_action = Some(action);
-                                    requires_approval = true;
-                                    call.approval_status = AgentApprovalStatus::Required;
-                                }
-                                CommandDispatch::Reject(result) => {
-                                    policy_preflight_failure = Some(result);
-                                    requires_approval = false;
-                                    call.approval_status = AgentApprovalStatus::NotRequired;
-                                }
-                            },
-                            Err(error) => {
-                                policy_preflight_failure = Some(failed_tool_call_result(&call, error));
-                                requires_approval = false;
-                                call.approval_status = AgentApprovalStatus::NotRequired;
-                            }
-                        }
-                    }
-
-                    let uses_file_change_policy = tool_registry
-                        .permission_policy(&call.tool)
-                        .uses_file_change_approval();
-                    if !is_policy_process_tool
-                        && policy_preflight_failure.is_none()
-                        && uses_file_change_policy
-                        && definition_requires_approval
-                        && file_change_approval_route(command_permissions)
-                            == FileChangeApprovalRoute::Denied
-                    {
-                        policy_preflight_failure = Some(failed_tool_call_result(
-                            &call,
-                            AgentError::structured(
-                                "agent.file_change_permission_denied",
-                                "The current permission policy does not allow file changes.",
-                                json!({
-                                    "type": "file_change_policy",
-                                    "code": "writePermissionDenied",
-                                    "recovery": "changePermissions",
-                                }),
-                            ),
-                        ));
-                        requires_approval = false;
-                    }
-                    if policy_preflight_failure.is_none()
-                        && call.tool == "apply_patch"
-                        && uses_file_change_policy
-                        && definition_requires_approval
-                        && !patch_auto_approve
-                    {
-                        match tool_registry
-                            .proposed_action_async(&tool_context, &call)
-                            .await
-                        {
-                            Ok(action) => {
-                                match tool_context.resolve_active_file_change_run_grant(&action) {
-                                    Ok(grant) => file_change_run_grant_ref = grant,
-                                    Err(error) => {
-                                        let _ = tool_registry.invalidate_proposed_action(&action);
-                                        policy_preflight_failure =
-                                            Some(failed_tool_call_result(&call, error));
-                                    }
-                                }
-                                if policy_preflight_failure.is_none() {
-                                    prepared_policy_action = Some(action);
-                                }
-                            }
-                            Err(error) => {
-                                policy_preflight_failure =
-                                    Some(failed_tool_call_result(&call, error));
-                            }
-                        }
-                    }
-                    let auto_execute_patch = policy_preflight_failure.is_none()
-                        && uses_file_change_policy
-                        && (patch_auto_approve || file_change_run_grant_ref.is_some())
-                        && definition_requires_approval;
-                    let auto_execute_mcp_action = policy_preflight_failure.is_none()
-                        && tool_registry.auto_executes_prepared_action(&call.tool);
-                    // Built-in capability actions still need their typed Host preparation even
-                    // when the effective permission skips the human prompt. In particular,
-                    // activation mints a run-bound capability grant and sensitive MCP calls mint
-                    // a target-bound one-shot grant. Only calls whose reviewed call-level policy
-                    // actually requires approval enter this route, so Dynamic tools with benign
-                    // arguments continue through the ordinary direct execution path.
-                    let auto_execute_builtin_action = policy_preflight_failure.is_none()
-                        && auto_executes_builtin_prepared_action(
-                            command_permissions.builtin_execution,
-                            definition_requires_approval,
-                            &tool_identity,
-                        );
-                    let auto_execute_host_action = auto_execute_policy_action
-                        || auto_execute_patch
-                        || auto_execute_mcp_action
-                        || auto_execute_builtin_action;
-                    if !is_policy_process_tool {
-                        if policy_preflight_failure.is_some() {
-                            // A rejected or unavailable call is terminal for this attempt. Never
-                            // turn a policy failure back into a pending approval merely because
-                            // the underlying tool normally writes files.
-                            requires_approval = false;
-                            call.approval_status = AgentApprovalStatus::NotRequired;
-                        } else {
-                            requires_approval =
-                                definition_requires_approval && !auto_execute_host_action;
-                            call.approval_status = if auto_execute_host_action {
-                                AgentApprovalStatus::Approved
-                            } else if requires_approval {
-                                AgentApprovalStatus::Required
-                            } else {
-                                AgentApprovalStatus::NotRequired
-                            };
-                        }
-                    }
+                    ).await?;
                     if pending_assistant_context
                         .as_ref()
                         .is_some_and(|(_, _, batch_group)| batch_group != &tool_exchange_group)

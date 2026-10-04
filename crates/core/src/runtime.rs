@@ -10,11 +10,15 @@ mod conversation_world_state;
 mod events;
 mod extensions;
 mod file_transactions;
+mod model_sampling;
 mod output_budget;
 mod preparation;
+mod provider_tool_batch;
+mod sampling_inbox;
 mod tool_failure_guard;
 mod tool_flow;
 mod tool_input_stream;
+mod tool_preflight;
 mod trace;
 mod world_state;
 
@@ -529,8 +533,9 @@ impl Default for AgentRuntime {
     }
 }
 
-// The runtime driver remains one lexical state machine: moving it to a source shard does not add
-// a second owner for request ordering, continuation state, cancellation, or effect settlement.
+// The driver owns request ordering, continuation state, cancellation, and effect settlement.
+// Sampling, inbox binding, provider batch assembly, and tool policy helpers borrow its state;
+// run guards and all terminal transitions remain in the driver.
 include!("runtime/driver.rs");
 include!("runtime/tool_settlement.rs");
 include!("runtime/projection_and_steering.rs");

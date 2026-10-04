@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # Agent Runtime 与模型 Provider
@@ -34,6 +34,20 @@ Rust Core 与 Core Server 的边界是有意的：Runtime 可以提出动作并�
 - `ProviderProfile`：用户可选的模型端点和设置，带 schema/revision；它不是运行时能力判定的真源。协议语义使用 `provider_protocol_revision`，URL/credential 等连接身份使用独立的 `provider_connection_revision`，两者不能互相替代。
 - `EffectiveToolSet`：在权限、运行时可用性、Skill/Capability 激活后冻结的本次请求 Tool 契约。
 - `AgentRunCheckpoint`：审批或恢复边界保存的安全状态。Checkpoint 的 schema 是版本化协议，不能直接序列化任意运行内存。
+
+### Runtime 内部职责
+
+[`runtime/driver.rs`](../../crates/core/src/runtime/driver.rs) 持有 Run 状态、模型请求顺序、暂停与终态转换，
+并在所有运行结果上收口 Trace。以下私有模块接收明确的输入或借用当前状态，不创建第二个执行循环：
+
+- [`sampling_inbox.rs`](../../crates/core/src/runtime/sampling_inbox.rs)：仅在工具批次清空、Steering 已处理后，按协作邮件、组织邮件、人机交互事实的顺序绑定输入；每次绑定重新读取 Trace sequence，仅重试各自允许幂等重试的 Host 操作。
+- [`model_sampling.rs`](../../crates/core/src/runtime/model_sampling.rs)：执行流式或非流式模型调用，处理重试、临时工具输入预览和文字抑制；返回是否收到模型输出及已提交的 stream ID。请求观测、错误恢复与再次采样的决定仍在 Driver。
+- [`provider_tool_batch.rs`](../../crates/core/src/runtime/provider_tool_batch.rs)：校验 Provider 工具映射和 continuation 要求，构造带模型与 Checkpoint 投影的工具批次；不执行工具或持久化 Provider 私有状态。
+- [`tool_preflight.rs`](../../crates/core/src/runtime/tool_preflight.rs)：逐调用检查重复操作、文件事务、失败防护、工具可见性和审批策略，返回准备好的调用与动作；同一批次内每次调用都重新读取文件事务，不能复用模型请求前的状态。
+
+Steering 关闭守卫和文件事务 Run guard 保持在 Driver 的原有作用域；文件事务 guard 在恢复前建立，
+仅在持久暂停后保留权限、在成功终态事件前完成结算。Provider continuation 的 staging、promote、release
+以及审批 Checkpoint 的提交顺序也由 Driver 控制。
 
 ## 当前 Provider
 
