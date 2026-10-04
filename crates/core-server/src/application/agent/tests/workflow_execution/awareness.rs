@@ -430,7 +430,12 @@ async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_deli
         );
     }
     let inbox = tool_result(&samples[5], "organization_get_mailbox");
+    assert_eq!(inbox["view"], "overview");
+    assert_eq!(inbox["counts"]["total"], 0);
     assert!(inbox["messages"].as_array().unwrap().is_empty());
+    assert_eq!(inbox["history"]["total"], 0);
+    assert!(inbox["history"]["messages"].as_array().unwrap().is_empty());
+    assert!(inbox["history"]["nextCursor"].is_null());
     let runtime = storage.workflow_execution_runtime("instance").unwrap();
     assert_eq!(runtime.inputs.len(), 1);
     assert!(runtime.paused_conversation_ids.contains(&target));

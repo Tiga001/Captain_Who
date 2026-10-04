@@ -362,6 +362,10 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                     }
                     3 => {
                         let mail = awareness::tool_result(&request, "organization_get_mailbox");
+                        assert_eq!(mail["view"], "overview");
+                        assert_eq!(mail["counts"]["pending"], 1);
+                        assert_eq!(mail["counts"]["processed"], 0);
+                        assert_eq!(mail["history"]["total"], 0);
                         assert_eq!(mail["messages"][0]["content"], "Accepted payload 42931");
                         assert_eq!(mail["messages"][0]["status"], "pending");
                         Some((
@@ -387,6 +391,61 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                         let receipt = awareness::tool_result(&request, "organization_complete");
                         assert_eq!(receipt["messages"][0]["success"], true);
                         assert_eq!(receipt["messages"][0]["status"], "processed");
+                        Some((
+                            "inspect-history",
+                            "organization_get_mailbox",
+                            json!({"direction":"inbox"}),
+                        ))
+                    }
+                    6 => {
+                        let mail = awareness::tool_result(&request, "organization_get_mailbox");
+                        assert_eq!(mail["view"], "overview");
+                        assert!(mail["messages"].as_array().unwrap().is_empty());
+                        assert_eq!(mail["counts"]["total"], 1);
+                        assert_eq!(mail["counts"]["pending"], 0);
+                        assert_eq!(mail["counts"]["processing"], 0);
+                        assert_eq!(mail["counts"]["processed"], 1);
+                        assert_eq!(mail["history"]["total"], 1);
+                        assert!(mail["history"]["nextCursor"].is_null());
+                        let history = mail["history"]["messages"].as_array().unwrap();
+                        assert_eq!(history.len(), 1);
+                        assert_eq!(history[0]["status"], "processed");
+                        assert_eq!(history[0]["from"], "Boss");
+                        assert!(history[0]["createdAt"].is_number());
+                        assert!(history[0]["messageId"].is_string());
+                        assert!(history[0].get("content").is_none());
+                        assert!(history[0].get("body").is_none());
+                        assert!(
+                            !mail.to_string().contains("Accepted payload 42931"),
+                            "the default inbox must not repeat completed letter bodies"
+                        );
+                        assert_eq!(
+                            history[0]["bodyRetrieval"]["tool"],
+                            "organization_get_mailbox"
+                        );
+                        let mut lookup = history[0]["bodyRetrieval"]["arguments"].clone();
+                        assert_eq!(lookup["messageId"], history[0]["messageId"]);
+                        assert_eq!(lookup["direction"], "inbox");
+                        // A precise lookup remains usable after the message changes status,
+                        // regardless of filters left over from a previous list request.
+                        lookup["status"] = json!("pending");
+                        lookup["cursor"] = json!(0);
+                        Some(("inspect-history-body", "organization_get_mailbox", lookup))
+                    }
+                    7 => {
+                        let mail = awareness::tool_result(&request, "organization_get_mailbox");
+                        let completed = awareness::tool_result(&request, "organization_complete");
+                        assert_eq!(mail["view"], "message");
+                        assert!(mail.get("history").is_none());
+                        let messages = mail["messages"].as_array().unwrap();
+                        assert_eq!(messages.len(), 1);
+                        assert_eq!(messages[0]["content"], "Accepted payload 42931");
+                        assert_eq!(messages[0]["status"], "processed");
+                        assert_eq!(
+                            messages[0]["messageId"],
+                            completed["messages"][0]["messageId"]
+                        );
+                        assert_eq!(mail["counts"]["processed"], 1);
                         None
                     }
                     _ => panic!("recipient unexpectedly started another turn"),
@@ -585,7 +644,7 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
             .iter()
             .filter(|sample| sample.to_string().contains("Target waiting 81762"))
             .count(),
-        5
+        7
     );
     scheduler.shutdown().await.unwrap();
     provider.abort();

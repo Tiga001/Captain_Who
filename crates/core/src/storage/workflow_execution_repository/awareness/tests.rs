@@ -116,8 +116,279 @@ fn workflow_awareness_mailbox_status_filter_pagination_and_body_budget_are_expli
         ..Default::default()
     };
     let messages = mailbox_for_run(&c, &chat, "run-b", &filter).unwrap();
-    assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(messages["messages"][0]["status"], "recalled");
+    assert!(messages["messages"].as_array().unwrap().is_empty());
+    assert_eq!(messages["history"]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(messages["history"]["messages"][0]["status"], "recalled");
+    assert!(messages["history"]["messages"][0].get("content").is_none());
+}
+
+fn mailbox_with_every_status() -> (Connection, SendReceipt) {
+    let mut c = fixture();
+    let receipt = send_mail(
+        &mut c,
+        "mixed-mail",
+        &[
+            ("b", "pending body"),
+            ("b", "processing body"),
+            ("b", "processed body"),
+            ("b", "stopped body"),
+            ("b", "failed body"),
+            ("b", "recalled body"),
+            ("b", "second processed body"),
+            ("b", "second processing body"),
+            ("c", "someone else's private body"),
+        ],
+    );
+    for (message, status) in receipt.messages.iter().zip([
+        "pending",
+        "processing",
+        "processed",
+        "stopped",
+        "failed",
+        "recalled",
+        "processed",
+        "processing",
+        "pending",
+    ]) {
+        c.execute(
+            "UPDATE workflow_mail_messages SET mail_status=?1 WHERE message_id=?2",
+            params![status, message.id],
+        )
+        .unwrap();
+    }
+    start_run(&mut c, "b", "run-b");
+    (c, receipt)
+}
+
+#[test]
+fn workflow_awareness_inbox_overview_separates_active_bodies_and_minimal_history() {
+    let (c, receipt) = mailbox_with_every_status();
+    let chat = conversation(&c, "b");
+    let result = mailbox_for_run(&c, &chat, "run-b", &MailboxQuery::default()).unwrap();
+    assert_eq!(result["view"], "overview");
+    assert_eq!(result["countsScope"], "entire_selected_mailbox");
+    assert_eq!(
+        result["counts"],
+        value!({"total":8,"pending":1,"processing":2,"processed":2,"stopped":1,"failed":1,"recalled":1})
+    );
+    assert_eq!(result["messages"].as_array().unwrap().len(), 3);
+    assert!(result["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(
+            |message| matches!(message["status"].as_str(), Some("pending" | "processing"))
+                && message["bodyAvailable"] == true
+        ));
+    assert_eq!(result["history"]["total"], 5);
+    let history = result["history"]["messages"].as_array().unwrap();
+    assert_eq!(history.len(), 5);
+    for item in history {
+        assert_eq!(
+            item.as_object().unwrap().len(),
+            5,
+            "history has only the agreed index fields"
+        );
+        assert_eq!(item["sourceNodeName"], "a");
+        assert!(item.get("content").is_none());
+        assert_eq!(
+            item["bodyRetrieval"],
+            value!({"tool":"organization_get_mailbox","arguments":{"direction":"inbox","messageId":item["messageId"]}})
+        );
+    }
+    assert!(!result.to_string().contains("processed body"));
+    assert!(!result.to_string().contains("someone else's private body"));
+    assert_eq!(
+        load_input(&c, &receipt.input_ids[0])
+            .unwrap()
+            .unwrap()
+            .mail_status,
+        MailStatus::Pending,
+        "viewing does not accept pending mail"
+    );
+
+    let outbox = mailbox_for_run(
+        &c,
+        &conversation(&c, "a"),
+        "run-a",
+        &MailboxQuery {
+            direction: MailboxDirection::Outbox,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(outbox["counts"]["total"], 9);
+    assert_eq!(outbox["messages"].as_array().unwrap().len(), 9);
+    assert!(outbox.to_string().contains("processed body"));
+    assert!(outbox.get("history").is_none());
+}
+
+#[test]
+fn workflow_awareness_inbox_active_and_history_cursors_are_independent_and_counts_ignore_filters() {
+    let (c, receipt) = mailbox_with_every_status();
+    let chat = conversation(&c, "b");
+    let query = MailboxQuery {
+        limit: 1,
+        ..Default::default()
+    };
+    let first = mailbox_for_run(&c, &chat, "run-b", &query).unwrap();
+    assert_eq!(first["messages"][0]["messageId"], receipt.messages[7].id);
+    assert_eq!(
+        first["history"]["messages"][0]["messageId"],
+        receipt.messages[6].id
+    );
+    let active_next = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            cursor: first["nextCursor"].as_u64(),
+            ..query.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        active_next["messages"][0]["messageId"],
+        receipt.messages[1].id
+    );
+    assert_eq!(active_next["history"], first["history"]);
+    let history_next = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            history_cursor: first["history"]["nextCursor"].as_u64(),
+            ..query.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(history_next["messages"], first["messages"]);
+    assert_eq!(
+        history_next["history"]["messages"][0]["messageId"],
+        receipt.messages[5].id
+    );
+    assert_eq!(history_next["history"]["total"], 5);
+
+    for status in [
+        MailStatus::Pending,
+        MailStatus::Processing,
+        MailStatus::Processed,
+        MailStatus::Stopped,
+        MailStatus::Failed,
+        MailStatus::Recalled,
+    ] {
+        let filtered = mailbox_for_run(
+            &c,
+            &chat,
+            "run-b",
+            &MailboxQuery {
+                status: Some(status),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered["counts"], first["counts"]);
+        let (selected, empty) = if status.is_terminal() {
+            (&filtered["history"]["messages"], &filtered["messages"])
+        } else {
+            (&filtered["messages"], &filtered["history"]["messages"])
+        };
+        assert_eq!(selected[0]["status"], status.as_str());
+        assert!(empty.as_array().unwrap().is_empty());
+    }
+    let input_filtered = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            input_id: Some(receipt.input_ids[2].clone()),
+            ..query
+        },
+    )
+    .unwrap();
+    assert_eq!(input_filtered["counts"], first["counts"]);
+    assert_eq!(input_filtered["history"]["total"], 1);
+    assert_eq!(
+        input_filtered["history"]["messages"][0]["messageId"],
+        receipt.messages[2].id
+    );
+    assert!(input_filtered["history"]["nextCursor"].is_null());
+}
+
+#[test]
+fn workflow_awareness_precise_historical_lookup_returns_only_the_owned_letter() {
+    let (c, receipt) = mailbox_with_every_status();
+    let chat = conversation(&c, "b");
+    for index in 2..=6 {
+        let result = mailbox_for_run(
+            &c,
+            &chat,
+            "run-b",
+            &MailboxQuery {
+                message_id: Some(receipt.messages[index].id.clone()),
+                cursor: Some(0),
+                history_cursor: Some(0),
+                status: Some(MailStatus::Pending),
+                input_id: Some("stale-filter".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result["view"], "message");
+        assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["messages"][0]["content"],
+            receipt.messages[index].content
+        );
+        assert!(result["nextCursor"].is_null());
+        assert!(result.get("history").is_none());
+    }
+    let foreign = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            message_id: Some(receipt.messages[8].id.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(foreign["messages"].as_array().unwrap().is_empty());
+    assert!(!foreign.to_string().contains("private body"));
+}
+
+#[test]
+fn workflow_awareness_historical_index_does_not_deserialize_body_payloads() {
+    let (mut c, receipt) = mailbox_with_every_status();
+    // The compact index does not need the body schema at all; only an explicit body lookup does.
+    c.execute("UPDATE workflow_mail_messages SET message_json=json_set(message_json,'$.content',json('{\"notAString\":true}')) WHERE message_id=?1",[&receipt.messages[6].id]).unwrap();
+    let chat = conversation(&c, "b");
+    SUMMARY_SQL.with(|statements| statements.borrow_mut().clear());
+    c.trace(Some(record_summary_sql));
+    let result = mailbox_for_run(&c, &chat, "run-b", &MailboxQuery::default()).unwrap();
+    c.trace(None);
+    assert_eq!(
+        result["history"]["messages"][0]["messageId"],
+        receipt.messages[6].id
+    );
+    let statements = SUMMARY_SQL.with(|statements| statements.borrow().clone());
+    let bodies = statements
+        .iter()
+        .filter(|sql| sql.contains("SELECT m.sequence,m.message_json"))
+        .collect::<Vec<_>>();
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].contains("m.mail_status IN ('pending','processing')"));
+    assert!(bodies[0].contains("LIMIT 21"));
+    assert!(mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            message_id: Some(receipt.messages[6].id.clone()),
+            ..Default::default()
+        }
+    )
+    .is_err());
 }
 #[test]
 fn workflow_awareness_mailbox_ownership_is_frozen_to_real_sender_and_recipient() {

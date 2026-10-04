@@ -535,6 +535,58 @@ mod tests {
         );
     }
     #[test]
+    fn model_mail_history_index_preserves_individual_lookup_and_separate_pagination() {
+        let raw = crate::AgentToolResult {
+            call_id: "mail-overview".into(),
+            tool: "organization_get_mailbox".into(),
+            ok: true,
+            result: Some(json!({
+                "instanceId":"internal-org", "workflowName":"Writing team", "direction":"inbox", "view":"overview",
+                "counts":{"total":24,"pending":2,"processing":1,"processed":18,"stopped":1,"failed":1,"recalled":1},
+                "countsScope":"entire_selected_mailbox",
+                "messages":[{"messageId":"pending-1","sourceNodeName":"Boss","status":"pending","content":"Please review","bodyAvailable":true}],
+                "nextCursor":10,
+                "history":{"total":21,"nextCursor":8,"messages":[{
+                    "messageId":"history-1", "sourceNodeName":"Editor", "sourceConversationId":"internal-source",
+                    "status":"processed", "createdAt":123,
+                    "bodyRetrieval":{"tool":"organization_get_mailbox","arguments":{"direction":"inbox","messageId":"history-1"}}
+                }]}
+            })),
+            error: None,
+            exact_archive_file: None,
+        };
+        let projected = organization_mail_model_projection(&raw);
+        let value = projected.result.as_ref().unwrap();
+        assert_eq!(value["messages"][0]["content"], "Please review");
+        assert_eq!(value["history"]["messages"][0]["from"], "Editor");
+        assert_eq!(value["history"]["messages"][0]["messageId"], "history-1");
+        assert_eq!(
+            value["history"]["messages"][0]["bodyRetrieval"],
+            json!({
+                "tool":"organization_get_mailbox","arguments":{"direction":"inbox","messageId":"history-1"}
+            })
+        );
+        assert!(value["history"]["messages"][0].get("content").is_none());
+        assert_eq!(value["counts"]["processed"], 18);
+        assert_eq!(value["countsScope"], "entire_selected_mailbox");
+        assert_eq!(value["nextCursor"], 10);
+        assert_eq!(value["history"]["total"], 21);
+        assert_eq!(value["history"]["nextCursor"], 8);
+        assert!(!value.to_string().contains("internal-"));
+        assert_eq!(
+            serde_json::to_value(crate::tools::model_projection_for_persisted_continuation(
+                &raw
+            ))
+            .unwrap(),
+            serde_json::to_value(&projected).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(organization_mail_model_projection(&projected)).unwrap(),
+            serde_json::to_value(projected).unwrap()
+        );
+    }
+
+    #[test]
     fn model_mail_history_preserves_bodies_and_message_identity_without_routing_ids() {
         let mut raw = crate::AgentToolResult {
             call_id: "tool-call".into(),

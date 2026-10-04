@@ -16,42 +16,12 @@
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }
-.workflow-query__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.workflow-query__header > span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.workflow-query__header small {
-  display: block;
-}
 .workflow-query small,
 .workflow-query__muted,
 .workflow-query__message-meta,
 .workflow-query__withheld {
   color: var(--mc-color-text-secondary);
   font-size: 12px;
-}
-.workflow-query__header button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  background: transparent;
-  padding: 4px 0;
-  flex-shrink: 0;
-}
-.workflow-query__header button:hover {
-  text-decoration: underline;
-}
-.workflow-query__header svg {
-  width: 14px;
-  height: 14px;
 }
 .workflow-query__status {
   font-size: 12px;

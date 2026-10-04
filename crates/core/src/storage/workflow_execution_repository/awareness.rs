@@ -301,7 +301,104 @@ pub fn mailbox_for_run(
     let tx = c.unchecked_transaction().map_err(db)?;
     let (_, identity) = scope(&tx, conversation_id, run_id)?;
     let inbox = query.direction == MailboxDirection::Inbox;
-    let mut s=tx.prepare("SELECT m.sequence,m.message_json,m.mail_status,m.input_id,i.run_id,t.terminal_status,json_extract(i.input_json,'$.error'),i.delivery_id FROM workflow_mail_messages m LEFT JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND ((?2=1 AND m.node_id=?3 AND m.recipient_conversation_id=?4) OR (?2=0 AND json_extract(m.message_json,'$.sourceNodeId')=?3 AND json_extract(m.message_json,'$.sourceConversationId')=?4)) AND (?5 IS NULL OR m.sequence<?5) AND (?6 IS NULL OR m.message_id=?6) AND (?7 IS NULL OR m.input_id=?7) AND (?9 IS NULL OR m.mail_status=?9) ORDER BY m.sequence DESC LIMIT ?8").map_err(db)?;
+    let focused = query.message_id.is_some();
+    let counts = mailbox_counts(&tx, &identity, conversation_id, inbox)?;
+    let (messages, next) = mailbox_message_page(&tx, &identity, conversation_id, query)?;
+    let mut result = value!({"available":true,"instanceId":identity.instance_id,
+        "workflowName":identity.name,"nodeId":identity.node_id,"direction":query.direction,
+        "observedAt":now_ms(),"view":if focused {"message"} else {"overview"},
+        "counts":counts,"countsScope":"entire_selected_mailbox",
+        "messages":messages,"nextCursor":next,
+        "handlingRule":"Reading pending mail does not accept it. It remains eligible to wake a future turn; use organization_accept to handle it now. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."});
+    if inbox && !focused {
+        result["history"] = mailbox_history_page(&tx, &identity, conversation_id, query)?;
+    }
+    Ok(result)
+}
+
+// Both recipient and sender identity include the original bound conversation. Current membership
+// alone must not expose mail belonging to a previous occupant or a different organization.
+fn mailbox_scope(inbox: bool) -> &'static str {
+    if inbox {
+        // Keep recipient predicates outside an OR so counts and pages can use the mailbox index.
+        "m.instance_id=?1 AND ?2=1 AND m.node_id=?3 AND m.recipient_conversation_id=?4"
+    } else {
+        "m.instance_id=?1 AND ?2=0 AND json_extract(m.message_json,'$.sourceNodeId')=?3
+            AND json_extract(m.message_json,'$.sourceConversationId')=?4"
+    }
+}
+
+fn mailbox_counts(
+    c: &Connection,
+    identity: &ConversationSnapshot,
+    conversation_id: &str,
+    inbox: bool,
+) -> Result<Value, String> {
+    let scope = mailbox_scope(inbox);
+    let mut counts = value!({"total":0,"pending":0,"processing":0,"processed":0,
+        "stopped":0,"failed":0,"recalled":0});
+    let mut statement = c
+        .prepare(&format!(
+            "SELECT m.mail_status,COUNT(*) FROM workflow_mail_messages m
+         WHERE {scope} GROUP BY m.mail_status"
+        ))
+        .map_err(db)?;
+    let mut total = 0_u64;
+    for row in statement
+        .query_map(
+            params![
+                identity.instance_id,
+                inbox,
+                identity.node_id,
+                conversation_id
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)),
+        )
+        .map_err(db)?
+    {
+        let (status, count) = row.map_err(db)?;
+        counts[status] = value!(count);
+        total += count;
+    }
+    counts["total"] = value!(total);
+    Ok(counts)
+}
+
+fn mailbox_message_page(
+    c: &Connection,
+    identity: &ConversationSnapshot,
+    conversation_id: &str,
+    query: &MailboxQuery,
+) -> Result<(Vec<Value>, Option<u64>), String> {
+    let inbox = query.direction == MailboxDirection::Inbox;
+    let scope = mailbox_scope(inbox);
+    let focused = query.message_id.is_some();
+    // A precise lookup is independent of a previous page/status filter: the mail may have
+    // changed state since its index was read. Mailbox ownership remains mandatory.
+    let cursor = if focused { None } else { query.cursor };
+    let input_id = if focused {
+        None
+    } else {
+        query.input_id.as_deref()
+    };
+    let status = if focused {
+        None
+    } else {
+        query.status.map(|s| s.as_str())
+    };
+    let limit = if focused { 1 } else { query.limit };
+    let mut s = c.prepare(&format!(
+        "SELECT m.sequence,m.message_json,m.mail_status,m.input_id,i.run_id,t.terminal_status,
+                json_extract(i.input_json,'$.error'),i.delivery_id
+         FROM workflow_mail_messages m
+         LEFT JOIN workflow_mail_inputs i ON i.input_id=m.input_id
+         LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id
+         WHERE {scope}
+           AND (?5 IS NULL OR m.sequence<?5) AND (?6 IS NULL OR m.message_id=?6)
+           AND (?7 IS NULL OR m.input_id=?7) AND (?9 IS NULL OR m.mail_status=?9)
+           AND (?10=0 OR m.mail_status IN ('pending','processing'))
+         ORDER BY m.sequence DESC LIMIT ?8"
+    )).map_err(db)?;
     let mut messages = vec![];
     let mut bytes = 0;
     for row in s
@@ -311,11 +408,12 @@ pub fn mailbox_for_run(
                 inbox,
                 identity.node_id,
                 conversation_id,
-                query.cursor,
+                cursor,
                 query.message_id,
-                query.input_id,
-                query.limit + 1,
-                query.status.map(|s| s.as_str())
+                input_id,
+                limit + 1,
+                status,
+                inbox && !focused
             ],
             |r| {
                 Ok((
@@ -334,6 +432,12 @@ pub fn mailbox_for_run(
     {
         let (sequence, raw, status, input_id, processing_run, run_status, error, delivery_id) =
             row.map_err(db)?;
+        if messages.len() == limit {
+            let next = messages
+                .last()
+                .and_then(|item: &Value| item["sequence"].as_u64());
+            return Ok((messages, next));
+        }
         let message: SourceMessage = parse(&raw)?;
         let mut item = serde_json::to_value(&message).map_err(db)?;
         item["messageId"] = value!(message.id);
@@ -355,12 +459,74 @@ pub fn mailbox_for_run(
         }
         messages.push(item);
     }
-    let more = messages.len() > query.limit;
-    messages.truncate(query.limit);
-    let next = more.then(|| messages.last().unwrap()["sequence"].clone());
-    Ok(
-        value!({"available":true,"instanceId":identity.instance_id,"workflowName":identity.name,"nodeId":identity.node_id,"direction":query.direction,"observedAt":now_ms(),"messages":messages,"nextCursor":next,"handlingRule":"Reading pending mail does not accept it. It remains eligible to wake a future turn; use organization_accept to handle it now. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."}),
-    )
+    Ok((messages, None))
+}
+
+fn mailbox_history_page(
+    c: &Connection,
+    identity: &ConversationSnapshot,
+    conversation_id: &str,
+    query: &MailboxQuery,
+) -> Result<Value, String> {
+    let scope = mailbox_scope(true);
+    let filter = format!(
+        "{scope} AND m.mail_status IN ('processed','stopped','failed','recalled')
+         AND (?5 IS NULL OR m.input_id=?5) AND (?6 IS NULL OR m.mail_status=?6)"
+    );
+    let status = query.status.map(|s| s.as_str());
+    let total: u64 = c
+        .query_row(
+            &format!("SELECT COUNT(*) FROM workflow_mail_messages m WHERE {filter}"),
+            params![
+                identity.instance_id,
+                true,
+                identity.node_id,
+                conversation_id,
+                query.input_id,
+                status
+            ],
+            |r| r.get(0),
+        )
+        .map_err(db)?;
+    // Select only index fields; never deserialize complete historical envelopes to build a list.
+    let mut statement = c.prepare(&format!(
+        "SELECT m.sequence,m.message_id,json_extract(m.message_json,'$.sourceNodeName'),m.created_at,m.mail_status
+         FROM workflow_mail_messages m WHERE {filter}
+           AND (?7 IS NULL OR m.sequence<?7) ORDER BY m.sequence DESC LIMIT ?8"
+    )).map_err(db)?;
+    let mut rows = statement
+        .query_map(
+            params![
+                identity.instance_id,
+                true,
+                identity.node_id,
+                conversation_id,
+                query.input_id,
+                status,
+                query.history_cursor,
+                query.limit + 1
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, u64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .map_err(db)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db)?;
+    let more = rows.len() > query.limit;
+    rows.truncate(query.limit);
+    let next = more.then(|| rows.last().unwrap().0);
+    let messages = rows.into_iter().map(|(_,id,source,created_at,status)|value!({
+        "messageId":id,"sourceNodeName":source,"createdAt":created_at,"status":status,
+        "bodyRetrieval":{"tool":"organization_get_mailbox","arguments":{"direction":"inbox","messageId":id}}
+    })).collect::<Vec<_>>();
+    Ok(value!({"total":total,"messages":messages,"nextCursor":next}))
 }
 #[cfg(test)]
 mod tests;

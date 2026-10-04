@@ -1,0 +1,22 @@
+.workflow-mail-carousel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.workflow-mail-carousel > div {
+  min-width: 0;
+}
+.workflow-mail-carousel__navigation {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+.workflow-mail-carousel__navigation span {
+  min-width: 36px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}

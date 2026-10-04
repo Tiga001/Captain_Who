@@ -78,6 +78,15 @@ describe('organization send presentation', () => {
     const summary = view.getByText('正在向组织【新功能开发】的节点【开发、验收】发送邮件')
     await expect.element(summary).toBeVisible()
     await summary.click()
+    await expect.element(view.getByText('1 / 2')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '上一封' })).toBeDisabled()
+    expect(view.container.querySelectorAll('.workflow-send-message')).toHaveLength(1)
+    expect(view.container.querySelector('.workflow-mail-carousel__heading')).toBeNull()
+    const actions = view.container.querySelector('.workflow-send-message__actions')!
+    const navigation = actions.querySelector('nav')!
+    const jump = actions.querySelector('button[aria-label="打开对话 · 开发"]')!
+    expect(navigation).not.toBeNull()
+    expect(navigation.compareDocumentPosition(jump) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
     await expect.element(view.getByText('暗号：升龙拳\n保留换行')).toBeVisible()
     await page.screenshot({
       element: view.container.firstElementChild as HTMLElement,
@@ -88,6 +97,14 @@ describe('organization send presentation', () => {
     await view.getByRole('button', { name: '打开对话 · 开发' }).click()
     expect(open).toHaveBeenCalledExactlyOnceWith('chat-a')
     expect(view.getByRole('button', { name: '打开对话 · 验收' }).elements()).toHaveLength(0)
+    await view.getByRole('button', { name: '下一封' }).click()
+    await expect.element(view.getByText('请验收')).toBeVisible()
+    await expect.element(view.getByRole('button', { name: '下一封' })).toBeDisabled()
+    expect(view.container.querySelectorAll('.workflow-send-message')).toHaveLength(1)
+    expect(view.container.textContent).not.toContain('暗号：升龙拳')
+    expect(view.getByRole('button', { name: '打开对话 · 开发' }).elements()).toHaveLength(0)
+    await view.getByRole('button', { name: '复制邮件 · 验收' }).click()
+    expect(copy).toHaveBeenLastCalledWith('请验收')
     expect(view.container.textContent).not.toContain('organization_send')
     expect(view.container.textContent).not.toContain('flow-a')
   })
@@ -144,6 +161,7 @@ describe('organization send presentation', () => {
     await expect.element(view.getByText('正在向组织成员【验收】发送邮件')).toBeVisible()
     await view.getByText('正在向组织成员【验收】发送邮件').click()
     await expect.element(view.getByText('原邮件发送者')).toBeVisible()
+    await view.getByRole('button', { name: '下一封' }).click()
     await expect.element(view.getByText('验收', { exact: true })).toBeVisible()
     expect(view.container.textContent).not.toContain('private-reply-id')
     const open = vi.fn()
@@ -158,9 +176,44 @@ describe('organization send presentation', () => {
     expect(view.container.querySelectorAll('.workflow-send-message')[0].textContent).toContain(
       '回复来信'
     )
-    expect(view.container.querySelectorAll('.workflow-send-message')[1].textContent).toContain(
+    await view.getByRole('button', { name: '下一封' }).click()
+    expect(view.container.querySelectorAll('.workflow-send-message')[0].textContent).toContain(
       '直接发送'
     )
+  })
+
+  it('preserves selection on collapse and same-call receipts, clamps shorter results and resets a new call', async () => {
+    const view = await render(<WorkflowSendToolActivity call={call} result={receipt} />)
+    const label = '已向组织【新功能开发】的节点【开发、验收】发送了邮件'
+    await view.getByText(label).click()
+    await view.getByRole('button', { name: '下一封' }).click()
+    await view.getByText(label).click()
+    await view.getByText(label).click()
+    await expect.element(view.getByText('2 / 2')).toBeVisible()
+    await view.rerender(<WorkflowSendToolActivity call={{ ...call }} result={{ ...receipt }} />)
+    await expect.element(view.getByText('2 / 2')).toBeVisible()
+    const shorter = {
+      ...call,
+      args: {
+        ...(call.args as Record<string, unknown>),
+        messages: [{ to: '开发', message: '只剩第一封' }]
+      }
+    }
+    await view.rerender(<WorkflowSendToolActivity call={shorter} result={receipt} />)
+    expect(view.container.querySelector('nav')).toBeNull()
+    await expect.element(view.getByText('只剩第一封')).toBeVisible()
+    await view.rerender(<WorkflowSendToolActivity call={call} result={receipt} />)
+    await expect.element(view.getByText('1 / 2')).toBeVisible()
+    await view.getByRole('button', { name: '下一封' }).click()
+    await view.rerender(
+      <WorkflowSendToolActivity
+        call={{ ...call, id: 'next-call' }}
+        result={{ ...receipt, callId: 'next-call' }}
+      />
+    )
+    await expect.element(view.getByText('1 / 2')).toBeVisible()
+    await expect.element(view.getByText('暗号：升龙拳\n保留换行')).toBeVisible()
+    expect(view.container.textContent).not.toContain('请验收')
   })
 
   it('preserves failure and cancellation wording instead of claiming delivery', async () => {

@@ -1,11 +1,12 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { Check, Copy, ArrowUpRight, Network } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Tooltip } from '../../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { useConversationNavigation } from '../../ConversationNavigationContext'
 import { copyTextToClipboard } from '../clipboard'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
+import { WorkflowMailCarousel } from './WorkflowMailCarousel'
 import type { SettledToolStatus } from './toolActivityUtils'
 import './WorkflowSendToolActivity.css'
 
@@ -37,12 +38,14 @@ export function WorkflowMessageBox({
   name,
   message,
   conversationId,
-  chinese
+  chinese,
+  navigation
 }: {
   name: string
   message: string
   conversationId?: string
   chinese: boolean
+  navigation?: ReactNode
 }) {
   const openConversation = useConversationNavigation()
   const [copied, setCopied] = useState(false)
@@ -58,6 +61,7 @@ export function WorkflowMessageBox({
       <div className="workflow-send-message__header">
         <span className="workflow-send-message__target">{name}</span>
         <div className="workflow-send-message__actions">
+          {navigation}
           {conversationId && openConversation && (
             <Tooltip content={jumpLabel}>
               <button
@@ -109,6 +113,7 @@ export function WorkflowSendToolActivity({
     // Receipts preserve request order, including replies whose recipient is resolved by the Host.
     const target = destinations[index]
     return {
+      id: text(target?.messageId) ?? index,
       name:
         text(target?.targetNodeName) ??
         text(output.to) ??
@@ -178,9 +183,16 @@ export function WorkflowSendToolActivity({
       label={label}
     >
       <div className="workflow-send-messages">
-        {messages.map((message, index) => (
-          <WorkflowMessageBox key={index} {...message} chinese={chinese} />
-        ))}
+        <WorkflowMailCarousel
+          key={call.id}
+          messages={messages}
+          chinese={chinese}
+          messageKey={(message) => message.id}
+        >
+          {(message, _index, navigation) => (
+            <WorkflowMessageBox {...message} chinese={chinese} navigation={navigation} />
+          )}
+        </WorkflowMailCarousel>
         {result?.error && <p className="workflow-send-messages__error">{result.error}</p>}
       </div>
     </AgentActivityDisclosure>

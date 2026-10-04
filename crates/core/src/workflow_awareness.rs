@@ -65,6 +65,7 @@ pub struct MailboxQuery {
     #[serde(default)]
     pub direction: MailboxDirection,
     pub cursor: Option<u64>,
+    pub history_cursor: Option<u64>,
     #[serde(default = "default_limit", deserialize_with = "deserialize_limit")]
     pub limit: usize,
     pub message_id: Option<String>,
@@ -91,6 +92,7 @@ impl Default for MailboxQuery {
         Self {
             direction: MailboxDirection::Inbox,
             cursor: None,
+            history_cursor: None,
             limit: default_limit(),
             message_id: None,
             input_id: None,
@@ -173,6 +175,9 @@ impl MailboxQuery {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=50).contains(&self.limit)
             || self.cursor.is_some_and(|value| value > i64::MAX as u64)
+            || self
+                .history_cursor
+                .is_some_and(|value| value > i64::MAX as u64)
         {
             return Err("Invalid organization mailbox page".into());
         }
@@ -292,6 +297,24 @@ pub fn state_for_model(mut result: serde_json::Value, query: &StateQuery) -> ser
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn mailbox_history_cursor_is_independent_and_bounded() {
+        let query: MailboxQuery = serde_json::from_value(json!({
+            "cursor":12,"historyCursor":34,"limit":1
+        }))
+        .unwrap();
+        assert_eq!(query.cursor, Some(12));
+        assert_eq!(query.history_cursor, Some(34));
+        assert!(query.validate().is_ok());
+        assert!(MailboxQuery {
+            history_cursor: Some(u64::MAX),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(serde_json::from_value::<MailboxQuery>(json!({"historyCursor":-1})).is_err());
+    }
 
     fn raw_runtime() -> Value {
         json!({"available":true,"observedAt":123,"instanceId":"org-id","currentNodeId":"a",

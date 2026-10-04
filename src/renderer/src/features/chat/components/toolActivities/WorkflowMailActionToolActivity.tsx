@@ -6,6 +6,7 @@ import {
   WorkflowRecallIcon
 } from './WorkflowMailboxIcons'
 import { WorkflowMessageBox } from './WorkflowSendToolActivity'
+import { WorkflowMailCarousel } from './WorkflowMailCarousel'
 import { record, records, text, type WorkflowQueryProps } from './workflowQueryPresentation'
 
 export function WorkflowMailActionToolActivity({
@@ -23,7 +24,7 @@ export function WorkflowMailActionToolActivity({
         ? 'complete'
         : 'recall'
   const data = record(result?.result),
-    messages = records(data.messages)
+    messages = records(data.messages).map((row) => ({ ...record(row.message), ...row }))
   const action = {
     accept: { zh: '接手', en: 'Accept', done: 'Accepted', icon: WorkflowAcceptIcon },
     complete: { zh: '标记已处理', en: 'Complete', done: 'Completed', icon: WorkflowCompleteIcon },
@@ -75,28 +76,35 @@ export function WorkflowMailActionToolActivity({
       className="agent-activity--workflow-mail-action"
     >
       <div className="workflow-send-messages">
-        {messages.map((row, index) => {
-          const message = { ...record(row.message), ...row }
-          const name =
-            text(kind === 'recall' ? message.targetNodeName : message.sourceNodeName) ||
-            (chinese ? '组织邮件' : 'Organization message')
-          const conversationId = text(
-            kind === 'recall' ? message.targetConversationId : message.sourceConversationId
-          )
-          return (
-            <div key={text(message.messageId) || text(message.id) || index}>
-              <WorkflowMessageBox
-                name={name}
-                message={text(message.content)}
-                conversationId={conversationId}
-                chinese={chinese}
-              />
-              {text(message.error) && (
-                <p className="workflow-send-messages__error">{text(message.error)}</p>
-              )}
-            </div>
-          )
-        })}
+        <WorkflowMailCarousel
+          key={call.id}
+          messages={messages}
+          chinese={chinese}
+          messageKey={(message, index) => text(message.messageId) || text(message.id) || index}
+        >
+          {(message, _index, navigation) => {
+            const name =
+              text(kind === 'recall' ? message.targetNodeName : message.sourceNodeName) ||
+              (chinese ? '组织邮件' : 'Organization message')
+            const conversationId = text(
+              kind === 'recall' ? message.targetConversationId : message.sourceConversationId
+            )
+            return (
+              <div>
+                <WorkflowMessageBox
+                  name={name}
+                  message={text(message.content)}
+                  conversationId={conversationId}
+                  chinese={chinese}
+                  navigation={navigation}
+                />
+                {text(message.error) && (
+                  <p className="workflow-send-messages__error">{text(message.error)}</p>
+                )}
+              </div>
+            )
+          }}
+        </WorkflowMailCarousel>
         {result?.error && <p className="workflow-send-messages__error">{result.error}</p>}
       </div>
     </AgentActivityDisclosure>

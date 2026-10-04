@@ -36,6 +36,7 @@
 .workflow-send-message__actions {
   display: flex;
   flex: none;
+  align-items: center;
   gap: 4px;
 }
 
@@ -52,7 +53,7 @@
   cursor: pointer;
 }
 
-.workflow-send-message__actions button:hover {
+.workflow-send-message__actions button:hover:not(:disabled) {
   background: var(--mc-color-state-hover);
   color: var(--mc-color-text-primary);
 }

@@ -1,11 +1,12 @@
 import { ArrowUpRight, Check, Copy } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Tooltip } from '../../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { useConversationNavigation } from '../../ConversationNavigationContext'
 import { copyTextToClipboard } from '../clipboard'
 import { WorkflowInboxIcon, WorkflowOutboxIcon } from './WorkflowMailboxIcons'
 import { WorkflowQueryFrame } from './WorkflowQueryFrame'
+import { WorkflowMailCarousel } from './WorkflowMailCarousel'
 import {
   queryLabel,
   queryStatus,
@@ -21,62 +22,102 @@ import {
 } from './workflowQueryPresentation'
 import './WorkflowSendToolActivity.css'
 
+const mailStates = ['pending', 'processing', 'processed', 'stopped', 'failed', 'recalled'] as const
+const historyStates = ['processed', 'stopped', 'failed', 'recalled'] as const
+function mailboxCounts(value: unknown): Record<string, number> | null {
+  const counts = record(value)
+  if (
+    !['total', ...mailStates].every(
+      (key) =>
+        typeof counts[key] === 'number' && Number.isSafeInteger(counts[key]) && counts[key] >= 0
+    ) ||
+    mailStates.reduce((sum, key) => sum + (counts[key] as number), 0) !== counts.total
+  )
+    return null
+  return counts as Record<string, number>
+}
+
 export function WorkflowMailboxToolActivity(props: WorkflowQueryProps) {
   const { language } = useFrontendConfig()
   const chinese = language === 'zh-CN' || language === 'zh-TW'
   const l: Localize = (zh, en) => (chinese ? zh : en)
   const data = record(props.result?.result)
   const outbox = (data.direction ?? record(props.call.args).direction) === 'outbox'
-  const messages = records(data.messages)
+  const returned = records(data.messages)
+  const messageId = text(record(props.call.args).messageId).trim()
+  const detail = data.view === 'message' || Boolean(messageId)
+  const messages = detail
+    ? (messageId
+        ? returned.filter((message) => text(message.messageId) === messageId)
+        : returned
+      ).slice(0, 1)
+    : outbox
+      ? returned
+      : returned.filter(
+          (message) => message.status === 'pending' || message.status === 'processing'
+        )
+  const counts = !outbox && !detail ? mailboxCounts(data.counts) : null
   let label = queryLabel(
     props,
     outbox ? l('组织发件箱', 'organization outbox') : l('组织收件箱', 'organization inbox'),
     l
   )
-  if (queryStatus(props) === 'completed')
-    label += messages.length
-      ? l(` · 本次查到 ${messages.length} 封邮件`, ` · ${messages.length} messages in this result`)
-      : l(' · 暂无邮件', ' · No messages')
-  const groups = new Map<string, RecordValue[]>()
-  for (const message of messages) {
-    const status = text(message.status)
-    const group =
-      status === 'pending' ? 'pending' : status === 'processing' ? 'processing' : 'history'
-    groups.set(group, [...(groups.get(group) ?? []), message])
+  if (queryStatus(props) === 'completed') {
+    if (counts) {
+      label += counts.total
+        ? l(` · 共 ${counts.total} 封邮件`, ` · ${counts.total} messages total`)
+        : l(' · 暂无邮件', ' · No messages')
+      for (const state of mailStates)
+        if (counts[state]) label += ` · ${stateLabel(state, l)} ${counts[state]}`
+    } else {
+      const count = detail ? messages.length : returned.length
+      label += count
+        ? l(` · 本次查到 ${count} 封邮件`, ` · ${count} messages in this result`)
+        : l(' · 暂无邮件', ' · No messages')
+      // Old receipts contain full historical bodies. They remain summary-only unless the
+      // tool explicitly queried one message; never restore the old wall of historical mail.
+      if (!outbox && !detail) {
+        for (const state of historyStates) {
+          const count = returned.filter((message) => message.status === state).length
+          if (count) label += ` · ${stateLabel(state, l)} ${count}`
+        }
+      }
+    }
   }
   return (
     <WorkflowQueryFrame
       query={props}
       label={label}
       icon={outbox ? WorkflowOutboxIcon : WorkflowInboxIcon}
-      l={l}
       hasMessages={messages.length > 0}
     >
-      {['pending', 'processing', 'history']
-        .filter((key) => groups.has(key))
-        .map((key) => (
-          <div key={key} className="workflow-query__group">
-            <small>
-              {key === 'pending'
-                ? l('待处理', 'Pending')
-                : key === 'processing'
-                  ? l('处理中', 'Processing')
-                  : l('历史邮件', 'History')}
-            </small>
-            {groups.get(key)!.map((message, index) => (
-              <MailboxMessage
-                key={text(message.messageId) || index}
-                message={message}
-                outbox={outbox}
-                language={language}
-                l={l}
-              />
-            ))}
-          </div>
-        ))}
-      {data.nextCursor != null && (
+      <WorkflowMailCarousel
+        key={props.call.id}
+        messages={messages}
+        chinese={chinese}
+        messageKey={(message, index) => text(message.messageId) || index}
+      >
+        {(message, _index, navigation) => (
+          <MailboxMessage
+            message={message}
+            outbox={outbox}
+            language={language}
+            l={l}
+            navigation={navigation}
+          />
+        )}
+      </WorkflowMailCarousel>
+      {!detail && data.nextCursor != null && (
         <p className="workflow-query__muted">
-          {l('还有更多记录，本次查询未全部返回。', 'More records exist beyond this query result.')}
+          {outbox
+            ? l(
+                '还有更多邮件，本次查询未全部返回。',
+                'More messages exist beyond this query result.'
+              )
+            : l(
+                '还有未返回的待处理或处理中的邮件。',
+                'More pending or processing messages exist beyond this result.'
+              )}
         </p>
       )}
     </WorkflowQueryFrame>
@@ -87,12 +128,14 @@ export function MailboxMessage({
   message,
   outbox,
   language,
-  l
+  l,
+  navigation
 }: {
   message: RecordValue
   outbox: boolean
   language: string
   l: Localize
+  navigation?: ReactNode
 }) {
   const openConversation = useConversationNavigation()
   const [expanded, setExpanded] = useState(false)
@@ -127,6 +170,7 @@ export function MailboxMessage({
           {name}
         </span>
         <div className="workflow-send-message__actions">
+          {navigation}
           {conversationId && openConversation && (
             <Tooltip content={jumpLabel}>
               <button
