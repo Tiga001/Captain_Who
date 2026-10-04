@@ -64,6 +64,8 @@ const DO_NOT_COPY_TABLES: &[&str] = &[
     "browser_downloads",
     "notification_batch_items",
     "notification_events",
+    // The organization-wide activity stream stays with its source instance.
+    "workflow_mail_events",
 ];
 
 const RUNTIME_ONLY_TABLES: &[&str] = &[
@@ -97,6 +99,16 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "human_interaction_deliveries",
     "human_interaction_suspensions",
     "human_interaction_async_bindings",
+    // A history fork is an independent conversation, not another organization member. Do not
+    // inherit its membership, queued work, execution snapshots or idempotent tool receipts.
+    "organization_personnel_receipts",
+    "workflow_instance_bindings",
+    "workflow_mail_inputs",
+    "workflow_mail_messages",
+    "workflow_mail_mutations",
+    "workflow_mail_pauses",
+    "workflow_mail_runs",
+    "workflow_mail_sends",
 ];
 
 const DEDICATED_FORK_LOGIC_TABLES: &[&str] = &[
@@ -115,6 +127,8 @@ const DEDICATED_FORK_LOGIC_TABLES: &[&str] = &[
     "provider_continuation_tool_calls",
     "provider_continuations",
     "provider_transition_terminal_records",
+    // Visible mail provenance is remapped with copied message/conversation identities.
+    "workflow_mail_message_origins",
 ];
 
 fn declared_policies() -> BTreeMap<&'static str, ForkDataPolicy> {
@@ -229,6 +243,14 @@ fn high_risk_fork_policies_stay_explicit() {
         policies.get("agent_usage_records"),
         Some(&ForkDataPolicy::DoNotCopy)
     );
+    assert_eq!(
+        policies.get("workflow_mail_events"),
+        Some(&ForkDataPolicy::DoNotCopy)
+    );
+    assert_eq!(
+        policies.get("workflow_mail_message_origins"),
+        Some(&ForkDataPolicy::DedicatedForkLogic)
+    );
     for table in [
         "agent_context_profile_run_policies",
         "agent_context_profile_wake_policies",
@@ -236,6 +258,14 @@ fn high_risk_fork_policies_stay_explicit() {
         "human_interaction_deliveries",
         "human_interaction_suspensions",
         "human_interaction_async_bindings",
+        "organization_personnel_receipts",
+        "workflow_instance_bindings",
+        "workflow_mail_inputs",
+        "workflow_mail_messages",
+        "workflow_mail_mutations",
+        "workflow_mail_pauses",
+        "workflow_mail_runs",
+        "workflow_mail_sends",
     ] {
         assert_eq!(policies.get(table), Some(&ForkDataPolicy::RuntimeOnly));
     }
