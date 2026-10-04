@@ -13,6 +13,7 @@ mod attachments;
 mod conversations;
 mod guidance;
 mod ignored_history;
+mod incremental_turns;
 mod message_deletion;
 mod notifications;
 mod reconciliation;

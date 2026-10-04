@@ -1037,13 +1037,24 @@ fn prepare_conversation_turn_from_source(
                     Err(error) => return Err(error.into()),
                 }
             } else {
+                let new_messages = match &source {
+                    ConversationTurnInputSource::ExistingAgentProjection { .. }
+                    | ConversationTurnInputSource::HumanContinuation(_) => {
+                        vec![turn_output.assistant_message.clone()]
+                    }
+                    _ => vec![
+                        turn_output.user_message.clone(),
+                        turn_output.assistant_message.clone(),
+                    ],
+                };
                 storage
-                    .save_conversation_and_begin_turn_with_execution_access(
+                    .append_conversation_and_begin_turn_with_execution_access(
                         conversation,
                         expected_revision,
                         trusted_wake,
                         permission_source,
                         &preloaded_agent_message_ids,
+                        &new_messages,
                         &initial_trace,
                         assistant_created_at,
                         now_ms().max(assistant_created_at),

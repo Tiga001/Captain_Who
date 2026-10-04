@@ -108,6 +108,7 @@ impl StorageService {
                 None,
                 None,
                 check_execution_access,
+                None,
             )?;
         if !matches!(outcome, super::ConversationTurnRewriteBeginOutcome::Started) {
             return Err(
@@ -119,6 +120,60 @@ impl StorageService {
                 "ordinary Turn admission unexpectedly consumed an automation claim".to_string(),
             );
         }
+        Ok((conversation, permissions))
+    }
+
+    /// Admits a new Turn by inserting only its new messages. The supplied Conversation remains
+    /// the prepared read snapshot; its historical message projections are never written back.
+    /// Metadata, message inserts, the Trace, frozen authority, and the revision check still share
+    /// the same transaction. Reusing any persisted message ID fails instead of rewriting it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_conversation_and_begin_turn_with_execution_access(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        new_messages: &[ChatMessageRecord],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+    ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
+        let valid_messages = match new_messages {
+            [assistant] => {
+                assistant.role == "assistant" && assistant.id == trace.assistant_message_id
+            }
+            [user, assistant] => {
+                user.role == "user"
+                    && assistant.role == "assistant"
+                    && assistant.id == trace.assistant_message_id
+                    && user.id != assistant.id
+            }
+            _ => false,
+        };
+        if !valid_messages || conversation.id != trace.conversation_id {
+            return Err(
+                "New Turn messages do not match its Conversation and assistant Trace.".into(),
+            );
+        }
+        let (conversation, permissions, _, _, _) = self.save_conversation_and_begin_turn_internal(
+            conversation,
+            expected_revision,
+            trusted_wake,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            None,
+            None,
+            None,
+            None,
+            check_execution_access,
+            Some(new_messages),
+        )?;
         Ok((conversation, permissions))
     }
 
@@ -163,6 +218,7 @@ impl StorageService {
                 Some((automation_admission, check_execution_access)),
                 None,
                 Some(check_execution_access),
+                None,
             )?;
         if !matches!(
             rewrite_outcome,
@@ -252,6 +308,7 @@ impl StorageService {
                 None,
                 None,
                 check_execution_access,
+                None,
             )?;
         if automation_outcome.is_some() {
             return Err("rewrite admission unexpectedly consumed an automation claim".to_string());
@@ -277,6 +334,7 @@ impl StorageService {
             &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
         >,
         check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+        new_messages: Option<&[ChatMessageRecord]>,
     ) -> Result<ConversationTurnAdmissionResult, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
@@ -522,8 +580,17 @@ impl StorageService {
                 &transaction, &conversation, trace, admission,
             ).map_err(|error| error.to_string())?;
         }
-        chat_repository::save_conversation_in_connection(&transaction, &conversation)
+        if let Some(new_messages) = new_messages {
+            chat_repository::append_turn_messages_in_connection(
+                &transaction,
+                &conversation,
+                new_messages,
+            )
             .map_err(storage_error)?;
+        } else {
+            chat_repository::save_conversation_in_connection(&transaction, &conversation)
+                .map_err(storage_error)?;
+        }
         if let Some(prepared) = prepared_attachments {
             let rewrite = rewrite.ok_or_else(|| {
                 "prepared rewrite attachments require a rewrite admission".to_string()
@@ -551,17 +618,30 @@ impl StorageService {
         .map_err(storage_error)?;
         // A continuation's first Host event is its durable request receipt as well as the
         // exact model input. Persist both journals with the assistant, before any worker can run.
-        if let [crate::ConversationTurnTraceItem::BackendState { sequence, event_id, content, .. }] = trace.items.as_slice() {
+        if let [crate::ConversationTurnTraceItem::BackendState {
+            sequence,
+            event_id,
+            content,
+            ..
+        }] = trace.items.as_slice()
+        {
             if event_id.starts_with("user-continuation:") {
                 conversation_model_context_repository::commit_items_in_connection(
                     &transaction,
                     &conversation.id,
                     &trace.assistant_message_id,
                     &[crate::ConversationModelContextItem {
-                        sequence: *sequence, ordinal: 0, role: "user".into(), content: content.clone(),
-                        images: Vec::new(), tool_call_id: None, tool_calls: Vec::new(), is_error: false,
+                        sequence: *sequence,
+                        ordinal: 0,
+                        role: "user".into(),
+                        content: content.clone(),
+                        images: Vec::new(),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        is_error: false,
                     }],
-                ).map_err(storage_error)?;
+                )
+                .map_err(storage_error)?;
             }
         }
         crate::storage::agent_collaboration_run_policy_repository::freeze_run(
@@ -796,6 +876,7 @@ impl StorageService {
                 None,
                 Some(admission),
                 check_execution_access,
+                None,
             )?;
         Ok((
             conversation,

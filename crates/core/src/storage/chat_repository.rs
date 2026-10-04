@@ -552,35 +552,54 @@ pub fn save_conversation(
     transaction.commit()
 }
 
-/// Applies the complete Conversation/message projection inside a caller-owned transaction.
-/// Turn admission uses this together with its empty trace lease so cross-Host races cannot expose
-/// one half of startup.
-pub(crate) fn save_conversation_in_connection(
+/// Appends the explicit delta for a newly admitted Turn. The caller owns the transaction and
+/// must validate the Conversation revision and Turn identity before invoking this helper.
+/// Never upsert: an existing ID, including one owned by another Conversation, is a conflict.
+pub(crate) fn append_turn_messages_in_connection(
+    connection: &Connection,
+    conversation: &ChatConversationRecord,
+    new_messages: &[ChatMessageRecord],
+) -> rusqlite::Result<()> {
+    let next_position: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
+        [&conversation.id],
+        |row| row.get(0),
+    )?;
+    save_conversation_metadata_in_connection(connection, conversation)?;
+    for (offset, message) in new_messages.iter().enumerate() {
+        connection.execute(
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                folder_references_json, created_at, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '[]'), ?8, ?9)",
+            params![
+                &message.id,
+                &conversation.id,
+                &message.role,
+                &message.content,
+                &message.status,
+                &message.agent_run_json,
+                &message.folder_references_json,
+                message.created_at,
+                next_position + offset as i64,
+            ],
+        )?;
+        if message.ui_state_json.is_some() {
+            update_message_ui_state(
+                connection,
+                &conversation.id,
+                &message.id,
+                message.ui_state_json.as_deref(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn save_conversation_metadata_in_connection(
     connection: &Connection,
     conversation: &ChatConversationRecord,
 ) -> rusqlite::Result<()> {
-    let agent_bound = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE conversation_id = ?1)",
-        [&conversation.id],
-        |row| row.get::<_, bool>(0),
-    )?;
-    // In-turn workflow bubbles may be absent from the renderer view. Their persisted rows and
-    // positions remain delivery evidence; a later full conversation save must retain both.
-    let workflow_message_ids = {
-        let mut statement = connection.prepare(
-            "SELECT message_id FROM workflow_mail_message_origins WHERE conversation_id=?1",
-        )?;
-        let ids = statement
-            .query_map([&conversation.id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<HashSet<_>>>()?;
-        ids
-    };
-    let mut next_agent_position = connection.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
-        [&conversation.id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
     connection.execute(
         "
         INSERT INTO conversations (
@@ -616,6 +635,40 @@ pub(crate) fn save_conversation_in_connection(
             conversation.unread_at
         ],
     )?;
+
+    Ok(())
+}
+
+/// Applies the complete Conversation/message projection inside a caller-owned transaction.
+/// Turn admission uses this together with its empty trace lease so cross-Host races cannot expose
+/// one half of startup.
+pub(crate) fn save_conversation_in_connection(
+    connection: &Connection,
+    conversation: &ChatConversationRecord,
+) -> rusqlite::Result<()> {
+    let agent_bound = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE conversation_id = ?1)",
+        [&conversation.id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    // In-turn workflow bubbles may be absent from the renderer view. Their persisted rows and
+    // positions remain delivery evidence; a later full conversation save must retain both.
+    let workflow_message_ids = {
+        let mut statement = connection.prepare(
+            "SELECT message_id FROM workflow_mail_message_origins WHERE conversation_id=?1",
+        )?;
+        let ids = statement
+            .query_map([&conversation.id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        ids
+    };
+    let mut next_agent_position = connection.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
+        [&conversation.id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    save_conversation_metadata_in_connection(connection, conversation)?;
 
     for (index, message) in conversation.messages.iter().enumerate() {
         let existing_identity = connection

@@ -63,7 +63,7 @@ fn record_storage_sql(sql: &str) {
     TRACED_STORAGE_SQL.with(|statements| statements.borrow_mut().push(sql.to_string()));
 }
 
-fn trace_storage_selects<T>(
+pub(super) fn trace_storage_selects<T>(
     service: &StorageService,
     operation: impl FnOnce() -> T,
 ) -> (T, Vec<String>) {

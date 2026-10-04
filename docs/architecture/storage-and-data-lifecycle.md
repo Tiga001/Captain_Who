@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 ---
 
 # SQLite 存储与数据生命周期
@@ -66,6 +66,8 @@ last_verified: 2026-10-04
 ## 消息创建与重试归属
 
 普通发送由 Host 的 `startConversationTurn` 在接纳事务中创建消息与 Run。Renderer 可乐观展示，不能同时把初始 user/assistant pair 排队写入存储；未建立 Run 的失败输入才通过独立新增接口保存，便于恢复输入、附件和错误。
+
+普通新 Turn 使用明确的新消息列表增量接纳：`append_conversation_and_begin_turn_with_execution_access` 只 INSERT 本轮 user/assistant，继续任务或可信 Wake 可以只追加 assistant。位置取数据库中的真实尾部，不依赖 Renderer 已加载的历史长度；历史正文、附件、文件夹、UI 状态和隐藏投影不回写。Conversation revision、活跃 Turn、账号许可、Agent 权限、初始 Trace 和运行权限冻结仍在同一事务内校验或提交；任意消息 ID 冲突使整个事务回滚。编辑重发、自动化和异步回答等独立业务入口继续保留各自的事务契约。
 
 `storage.upsertChatMessages` 是新增及幂等重试边界：同会话已存在的 ID 返回原持久化事实，不覆盖时间、正文、角色、运行状态或消息位置；与另一会话冲突的 ID 使整批事务回滚。保留首次事实也适用于已持久化的本地失败消息，后续状态更新走专用接口。agent/snapshot 原有不可变校验保持不变；Host Turn 接纳、流式与终态写入、编辑重发及分支各自的事务路径不受该新增接口影响。
 
