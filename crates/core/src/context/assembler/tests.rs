@@ -15,6 +15,7 @@ use serde_json::json;
 fn compaction_summary() -> ContextCompactionSummary {
     let covered_through = ContextJournalCursor::message("assistant-old");
     let prefix = crate::ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-revision-1".to_string(),
         covered_through: covered_through.clone(),

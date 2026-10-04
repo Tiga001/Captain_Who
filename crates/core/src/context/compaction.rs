@@ -16,7 +16,8 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const COMPACTION_TRIGGER_PERCENT: u64 = 90;
-const COMPACTION_TARGET_PERCENT: u64 = 15;
+const RECENT_CONTEXT_TARGET_TOKENS: u64 = 24_000;
+const SUMMARY_TARGET_TOKENS: u64 = 12_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,11 +121,26 @@ impl ContextCompactionPlanner {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn plan(
         &self,
         query: &ContextCompactionQuery,
         items: &[ContextFramePlanningItem],
         protect_current_user: bool,
+    ) -> ContextCompactionPlan {
+        self.plan_with_headroom(query, items, protect_current_user, 0, false)
+    }
+
+    /// `probe` selects the same complete prefix below the soft threshold so the Host can
+    /// measure the actual summary request before it becomes too large. It never splits a turn
+    /// or initiates model work. Headroom accounts for growth between safe request boundaries.
+    pub(crate) fn plan_with_headroom(
+        &self,
+        query: &ContextCompactionQuery,
+        items: &[ContextFramePlanningItem],
+        protect_current_user: bool,
+        growth_headroom: u64,
+        probe: bool,
     ) -> ContextCompactionPlan {
         let units = build_atomic_units(items, &self.tool_safety);
         let latest_user_index = items
@@ -264,13 +280,28 @@ impl ContextCompactionPlanner {
         }
 
         let soft_trigger_input_tokens =
-            percent_ceil(available_input_tokens, COMPACTION_TRIGGER_PERCENT);
-        let target_input_tokens = percent_ceil(available_input_tokens, COMPACTION_TARGET_PERCENT);
+            percent_ceil(available_input_tokens, COMPACTION_TRIGGER_PERCENT)
+                .min(available_input_tokens.saturating_sub(growth_headroom));
+        // Recent evidence and the summary have independent budgets. A fixed percentage of
+        // the entire window used to squeeze a 400K history into a ~3K summary when protected
+        // material occupied most of the target. Scale down only for small context windows.
+        let recent_target = RECENT_CONTEXT_TARGET_TOKENS.min(available_input_tokens / 5);
+        let summary_target = SUMMARY_TARGET_TOKENS
+            .min(available_input_tokens / 10)
+            .max(1);
+        let target_input_tokens = protected
+            .input_tokens
+            .saturating_add(recent_target)
+            .saturating_add(summary_target)
+            // A growth spike advances the trigger, but must not also erase the recent-history
+            // and summary targets. Leave at least 20% working room after a successful summary.
+            .min(available_input_tokens.saturating_sub(available_input_tokens / 5));
         let thresholds = ContextCompactionThresholds {
             request_trigger_input_tokens: Some(soft_trigger_input_tokens),
             request_target_input_tokens: Some(target_input_tokens),
         };
-        let request_pressure = query.request_input_tokens >= soft_trigger_input_tokens
+        let request_pressure = probe
+            || query.request_input_tokens >= soft_trigger_input_tokens
             || query.status == ContextBudgetStatus::OverBudget;
         if !request_pressure {
             return empty_plan(
@@ -288,14 +319,16 @@ impl ContextCompactionPlanner {
 
         let mut selected = Vec::<CompactionCandidate>::new();
         for candidate in &candidates {
-            if maximum_reclaimable_tokens(&selected) >= required_reclaimed_tokens {
+            if maximum_reclaimable_tokens(&selected)
+                >= required_reclaimed_tokens.saturating_add(summary_target)
+            {
                 break;
             }
             selected.push(candidate.clone());
         }
         normalize_unified_journal_prefix(&mut selected, &units, &candidates);
 
-        let steps = build_steps(&selected, required_reclaimed_tokens);
+        let steps = build_steps(&selected, required_reclaimed_tokens, summary_target);
         let planned_reclaimed_tokens = steps
             .iter()
             .map(|step| step.expected_reclaimed_tokens)
@@ -517,8 +550,9 @@ fn maximum_reclaimable_tokens(selected: &[CompactionCandidate]) -> u64 {
 fn build_steps(
     selected: &[CompactionCandidate],
     required_reclaimed_tokens: u64,
+    summary_target: u64,
 ) -> Vec<ContextCompactionStep> {
-    if selected.is_empty() {
+    if selected.is_empty() || required_reclaimed_tokens == 0 {
         return Vec::new();
     }
     let mut candidates = selected.iter().collect::<Vec<_>>();
@@ -533,11 +567,12 @@ fn build_steps(
         .map(|candidate| candidate.unit.tokens)
         .sum::<u64>();
     let reclaimable_input_tokens = source_input_tokens.saturating_sub(retained_input_tokens);
-    let expected_reclaimed_tokens = reclaimable_input_tokens.min(required_reclaimed_tokens);
     // The exact latest user instruction is restored beside the summary after commit, so the
-    // summary budget excludes those retained tokens.
-    let target_replacement_tokens =
-        reclaimable_input_tokens.saturating_sub(expected_reclaimed_tokens);
+    // summary budget excludes those retained tokens. It is independent of how close the
+    // protected request remainder happens to be to the post-compaction target.
+    let target_replacement_tokens = summary_target.min(reclaimable_input_tokens / 4);
+    let expected_reclaimed_tokens =
+        reclaimable_input_tokens.saturating_sub(target_replacement_tokens);
     if expected_reclaimed_tokens == 0 {
         return Vec::new();
     }
@@ -839,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_compaction_exactly_when_the_full_request_ring_reaches_ninety_percent() {
+    fn uses_ninety_percent_as_the_fallback_trigger_without_growth_pressure() {
         let planner = ContextCompactionPlanner::for_tools(&[]);
         let below_items = vec![
             item(
@@ -910,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn one_request_threshold_uses_a_fifteen_percent_post_compaction_target() {
+    fn small_windows_scale_recent_history_and_summary_budgets_independently() {
         let items = vec![
             item(
                 0,
@@ -954,8 +989,8 @@ mod tests {
             ),
         ];
 
-        // The full request reaches the one 90% trigger. The run item has no journal origin, so it
-        // remains protected and this attempt is explicitly best-effort.
+        // The run item has no journal origin and remains protected. A small window retains
+        // a separate recent-history allowance and nonzero summary budget beside that material.
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
@@ -971,12 +1006,15 @@ mod tests {
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert_eq!(plan.soft_trigger_input_tokens, Some(9_000));
-        assert_eq!(plan.target_input_tokens, Some(1_500));
-        assert_eq!(plan.required_reclaimed_tokens, 7_500);
+        assert_eq!(plan.protected.input_tokens, 2_000);
+        assert_eq!(plan.target_input_tokens, Some(5_000));
+        assert_eq!(plan.required_reclaimed_tokens, 4_000);
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].source_input_tokens, 7_000);
-        assert_eq!(plan.steps[0].target_replacement_tokens, 0);
-        assert!(plan.best_effort);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 1_000);
+        assert_eq!(plan.projected_request_input_tokens, 3_000);
+        assert!(plan.request_target_satisfied);
+        assert!(!plan.best_effort);
     }
 
     #[test]
@@ -1014,8 +1052,156 @@ mod tests {
         );
 
         let step = &plan.steps[0];
-        assert_eq!(step.target_replacement_tokens, 21_500);
-        assert_eq!(step.expected_reclaimed_tokens, 178_500);
+        assert_eq!(step.target_replacement_tokens, 12_000);
+        assert_eq!(step.expected_reclaimed_tokens, 188_000);
+    }
+
+    fn uniform_history(
+        fixed_tokens: u64,
+        messages: usize,
+        tokens_per_message: u64,
+    ) -> Vec<ContextFramePlanningItem> {
+        let mut items = vec![item(
+            0,
+            ContextUsageClass::Fixed,
+            fixed_tokens,
+            LlmMessageRole::System,
+            ContextSource::BackendSystemPrompt,
+            None,
+        )];
+        for index in 1..=messages {
+            items.push(item(
+                index,
+                ContextUsageClass::Durable,
+                tokens_per_message,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message(format!(
+                    "assistant-{index}"
+                ))),
+            ));
+        }
+        items
+    }
+
+    #[test]
+    fn fixed_material_does_not_squeeze_the_summary_or_recent_history_allowances() {
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+        for fixed_tokens in [20_000, 40_000] {
+            let items = uniform_history(fixed_tokens, 130, 4_000);
+            let plan = planner.plan(
+                &query(
+                    ContextBudgetStatus::WithinBudget,
+                    Some(600_000),
+                    fixed_tokens,
+                    520_000,
+                    0,
+                    0,
+                ),
+                &items,
+                false,
+            );
+
+            assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+            assert_eq!(plan.protected.input_tokens, fixed_tokens);
+            assert_eq!(plan.target_input_tokens, Some(fixed_tokens + 36_000));
+            assert_eq!(plan.steps.len(), 1);
+            let step = &plan.steps[0];
+            assert_eq!(step.target_replacement_tokens, 12_000);
+            assert_eq!(step.source_input_tokens, 496_000);
+            // The latest six 4K messages remain verbatim, independently of the fixed prefix.
+            assert_eq!(
+                plan.compactable_input_tokens - step.source_input_tokens,
+                24_000
+            );
+            assert_eq!(
+                step.durable_prefix.as_ref().unwrap().covered_through,
+                ContextJournalCursor::message("assistant-124")
+            );
+            assert_eq!(plan.projected_request_input_tokens, fixed_tokens + 36_000);
+            assert!(plan.request_target_satisfied);
+            assert!(!plan.best_effort);
+        }
+    }
+
+    #[test]
+    fn low_usage_does_not_compact_merely_because_it_exceeds_the_post_compaction_target() {
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+        let items = uniform_history(20_000, 50, 4_000);
+        let budget = query(
+            ContextBudgetStatus::WithinBudget,
+            Some(600_000),
+            20_000,
+            200_000,
+            0,
+            0,
+        );
+
+        for growth_headroom in [0, 20_000, 80_000] {
+            let plan = planner.plan_with_headroom(&budget, &items, false, growth_headroom, false);
+            assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
+            assert!(plan.request_input_tokens > plan.target_input_tokens.unwrap());
+            assert!(plan.steps.is_empty());
+            assert_eq!(plan.projected_request_input_tokens, 220_000);
+        }
+    }
+
+    #[test]
+    fn observed_batch_growth_triggers_early_without_reducing_retention_budgets() {
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+        let items = uniform_history(20_000, 115, 4_000);
+        let budget = query(
+            ContextBudgetStatus::WithinBudget,
+            Some(600_000),
+            20_000,
+            460_000,
+            0,
+            0,
+        );
+        let ordinary = planner.plan_with_headroom(&budget, &items, false, 20_000, false);
+        let growing = planner.plan_with_headroom(&budget, &items, false, 160_000, false);
+
+        assert_eq!(ordinary.status, ContextCompactionPlanStatus::NotRequired);
+        assert_eq!(ordinary.soft_trigger_input_tokens, Some(540_000));
+        assert_eq!(growing.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(growing.soft_trigger_input_tokens, Some(440_000));
+        assert_eq!(ordinary.target_input_tokens, Some(56_000));
+        assert_eq!(growing.target_input_tokens, ordinary.target_input_tokens);
+        assert_eq!(growing.steps[0].target_replacement_tokens, 12_000);
+        assert_eq!(growing.steps[0].source_input_tokens, 436_000);
+        assert_eq!(growing.projected_request_input_tokens, 56_000);
+    }
+
+    #[test]
+    fn very_large_growth_does_not_zero_the_target_or_consume_all_recent_history() {
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+        let items = uniform_history(10_000, 20, 4_000);
+        let plan = planner.plan_with_headroom(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(100_000),
+                10_000,
+                80_000,
+                0,
+                0,
+            ),
+            &items,
+            false,
+            60_000,
+            false,
+        );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.soft_trigger_input_tokens, Some(40_000));
+        assert_eq!(plan.target_input_tokens, Some(40_000));
+        assert_eq!(plan.steps[0].target_replacement_tokens, 10_000);
+        assert_eq!(plan.steps[0].source_input_tokens, 60_000);
+        assert_eq!(
+            plan.compactable_input_tokens - plan.steps[0].source_input_tokens,
+            20_000
+        );
+        assert_eq!(plan.projected_request_input_tokens, 40_000);
+        assert!(plan.request_target_satisfied);
     }
 
     #[test]
@@ -1075,7 +1261,7 @@ mod tests {
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::message("user-current"))
+            Some(&ContextJournalCursor::message("assistant-old"))
         );
     }
 
@@ -1157,7 +1343,7 @@ mod tests {
                 },
                 ContextCompactionItemRange {
                     start_index: 4,
-                    end_index_exclusive: 6,
+                    end_index_exclusive: 5,
                 },
             ]
         );
@@ -1166,7 +1352,7 @@ mod tests {
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::message("user-current"))
+            Some(&ContextJournalCursor::message("assistant-old"))
         );
     }
 
@@ -1381,7 +1567,8 @@ mod tests {
         let step = &plan.steps[0];
         assert_eq!(step.source_input_tokens, 6_000);
         assert_eq!(step.retained_input_tokens, 1_000);
-        assert_eq!(step.expected_reclaimed_tokens, 5_000);
+        assert_eq!(step.target_replacement_tokens, 400);
+        assert_eq!(step.expected_reclaimed_tokens, 4_600);
         assert_eq!(
             step.durable_prefix.as_ref().unwrap().covered_through,
             ContextJournalCursor::trace_item("assistant-old", 2)
@@ -1710,15 +1897,16 @@ mod tests {
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].atomic_unit_count, 431);
+        assert_eq!(plan.steps[0].atomic_unit_count, 401);
         assert_eq!(
             plan.steps[0]
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::trace_item("assistant-current", 859))
+            Some(&ContextJournalCursor::trace_item("assistant-current", 799))
         );
-        assert!(plan.projected_request_input_tokens <= 15_000);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 10_000);
+        assert_eq!(plan.projected_request_input_tokens, 31_000);
     }
 
     #[test]
@@ -1758,8 +1946,8 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert!(plan.best_effort);
         assert!(plan.planned_reclaimed_tokens > 0);
-        assert_eq!(plan.steps[0].target_replacement_tokens, 0);
-        assert_eq!(plan.steps[0].expected_reclaimed_tokens, 1_500);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 375);
+        assert_eq!(plan.steps[0].expected_reclaimed_tokens, 1_125);
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use crate::content_revision;
 use crate::context::{
-    ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
-    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextJournalCursor,
+    ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionModelSourceItem,
+    ContextCompactionModelToolCall, ContextCompactionPrefix, ContextCompactionSourceItem,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
 };
 use crate::storage::{
     context_compaction_receipt_repository, conversation_context_adaptation_repository,
-    conversation_trace_repository, provider_continuation_repository, world_state_repository,
+    conversation_model_context_repository, conversation_trace_repository,
+    provider_continuation_repository, world_state_repository,
 };
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -347,6 +348,7 @@ pub fn prepare_prefix(
         &entries[..=boundary_index],
     )?;
     let prefix = ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: conversation_id.to_string(),
         source_revision,
         covered_through: covered_through.clone(),
@@ -1031,6 +1033,176 @@ fn rollback_world_state_epoch_for_summary(
         ));
     }
     Ok(())
+}
+
+/// Build the summary input from the same durable model projection used by ordinary requests.
+/// Keep `list_journal_entries` unchanged: its raw journal still owns revision checks, history
+/// retrieval, continuity and the compaction cursor, including UI-only message identities.
+pub(crate) fn project_model_source_items(
+    connection: &Connection,
+    prefix: &ContextCompactionPrefix,
+) -> Result<Vec<ContextCompactionModelSourceItem>, ContextCompactionRepositoryError> {
+    prefix
+        .validate()
+        .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    // The origins also survive workflow UI projection recovery; trace-derived IDs cover inherited
+    // snapshots whose original workflow input is no longer owned by this conversation.
+    let mut statement = connection.prepare(
+        "SELECT delivery_id FROM workflow_mail_inputs
+         WHERE conversation_id = ?1 AND delivery_id IS NOT NULL
+         UNION SELECT message_id FROM workflow_mail_message_origins WHERE conversation_id = ?1
+         UNION SELECT 'workflow-message-' || json_extract(item.item_json, '$.inputId')
+         FROM conversation_turn_trace_items AS item
+         INNER JOIN conversation_turn_traces AS trace
+             ON trace.assistant_message_id = item.assistant_message_id
+         WHERE trace.conversation_id = ?1 AND item.item_kind = 'workflow_delivery'",
+    )?;
+    let workflow_projection_ids = statement
+        .query_map([&prefix.conversation_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    let mut selected_sequences = HashMap::<&str, HashSet<u64>>::new();
+    for source in &prefix.source_items {
+        if let ContextCompactionSourceItem::TraceItem { cursor, item, .. } = source {
+            selected_sequences
+                .entry(cursor.message_id())
+                .or_default()
+                .insert(item.sequence());
+        }
+    }
+    let mut logs = HashMap::<String, Vec<crate::ConversationModelContextItem>>::new();
+    let mut projected = Vec::new();
+    for source in &prefix.source_items {
+        match source {
+            ContextCompactionSourceItem::Message {
+                cursor,
+                role,
+                content,
+                created_at,
+                terminal_status,
+                terminal_error,
+                ..
+            } => {
+                if workflow_projection_ids.contains(cursor.message_id()) {
+                    continue;
+                }
+                let content = if role == "user" {
+                    super::agent_message_model_projection::project_message(
+                        connection,
+                        &prefix.conversation_id,
+                        cursor.message_id(),
+                    )
+                    .map_err(ContextCompactionRepositoryError::Invalid)?
+                    .unwrap_or_else(|| content.clone())
+                } else {
+                    content.clone()
+                };
+                projected.push(ContextCompactionModelSourceItem {
+                    cursor: cursor.clone(),
+                    created_at: *created_at,
+                    source_kind: "message".into(),
+                    role: role.clone(),
+                    content,
+                    images: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    is_error: false,
+                    terminal_status: *terminal_status,
+                    terminal_error: terminal_error.clone(),
+                });
+            }
+            ContextCompactionSourceItem::TraceItem {
+                cursor,
+                created_at,
+                item,
+                ..
+            } => {
+                if !item.is_model_visible() {
+                    continue;
+                }
+                let created_at = match item.as_ref() {
+                    crate::ConversationTurnTraceItem::UserGuidance { created_at, .. }
+                    | crate::ConversationTurnTraceItem::BackendState { created_at, .. }
+                    | crate::ConversationTurnTraceItem::ContextMaterial { created_at, .. }
+                    | crate::ConversationTurnTraceItem::AgentMailboxDelivery {
+                        created_at, ..
+                    }
+                    | crate::ConversationTurnTraceItem::WorkflowDelivery { created_at, .. } => {
+                        *created_at
+                    }
+                    _ => *created_at,
+                };
+                let message_id = cursor.message_id();
+                if !logs.contains_key(message_id) {
+                    let trace = conversation_trace_repository::get_trace_for_message(
+                        connection, message_id,
+                    )?
+                    .ok_or_else(|| {
+                        ContextCompactionRepositoryError::Invalid(format!(
+                            "压缩源缺少会话轨迹：{message_id}"
+                        ))
+                    })?;
+                    if trace.conversation_id != prefix.conversation_id {
+                        return Err(ContextCompactionRepositoryError::Invalid(
+                            "压缩源模型日志不属于当前会话。".into(),
+                        ));
+                    }
+                    let rows = conversation_model_context_repository::load_items_for_message(
+                        connection, message_id,
+                    )?;
+                    trace
+                        .validate_complete_model_context(&rows)
+                        .map_err(ContextCompactionRepositoryError::Invalid)?;
+                    logs.insert(message_id.to_string(), rows);
+                }
+                let rows = &logs[message_id];
+                // Mirror ordinary-context narration ownership: the first ToolCall already owns
+                // this text. Equal strings alone are not evidence of a duplicate.
+                if let crate::ConversationTurnTraceItem::AssistantNarration {
+                    first_tool_call_id: Some(first_call_id),
+                    ..
+                } = item.as_ref()
+                {
+                    if rows.iter().any(|row| {
+                        row.sequence > item.sequence()
+                            && selected_sequences[message_id].contains(&row.sequence)
+                            && row.role == "assistant"
+                            && !row.content.is_empty()
+                            && row.tool_calls.iter().any(|call| &call.id == first_call_id)
+                    }) {
+                        continue;
+                    }
+                }
+                let first = rows.partition_point(|row| row.sequence < item.sequence());
+                for row in rows[first..]
+                    .iter()
+                    .take_while(|row| row.sequence == item.sequence())
+                {
+                    projected.push(ContextCompactionModelSourceItem {
+                        cursor: cursor.clone(),
+                        created_at,
+                        source_kind: item.kind().to_string(),
+                        role: row.role.clone(),
+                        content: row.content.clone(),
+                        images: row.images.clone(),
+                        tool_calls: row
+                            .tool_calls
+                            .iter()
+                            .map(|call| ContextCompactionModelToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                args: call.args.clone(),
+                            })
+                            .collect(),
+                        tool_call_id: row.tool_call_id.clone(),
+                        is_error: row.is_error,
+                        terminal_status: None,
+                        terminal_error: None,
+                    });
+                }
+            }
+        }
+    }
+    Ok(projected)
 }
 
 fn list_journal_entries(

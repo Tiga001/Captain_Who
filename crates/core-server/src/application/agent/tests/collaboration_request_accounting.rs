@@ -590,7 +590,12 @@ async fn automatic_compaction_plans_and_sent_requests_use_the_same_collaboration
     // Use a real completed turn so the historical trace, request observations and World State
     // journal have exactly the same boundaries as production compaction inputs.
     let (history_turn, mut history_events) = fixture.start(99);
-    next_request(&mut requests).await.release.send(()).unwrap();
+    let historical_request = next_request(&mut requests).await;
+    let original_tools = historical_request.body["tools"].as_array().unwrap().clone();
+    assert!(original_tools
+        .iter()
+        .all(|tool| tool["function"]["name"] != "conversation_history"));
+    historical_request.release.send(()).unwrap();
     fixture
         .finish(&history_turn.run_id, &mut history_events)
         .await;
@@ -673,9 +678,27 @@ async fn automatic_compaction_plans_and_sent_requests_use_the_same_collaboration
     let after_compaction = fixture.preview();
     assert!(after_compaction.input_tokens < before_compaction.input_tokens);
     assert!(after_compaction.cost_breakdown.summary_tokens > 0);
+    let compacted_tools = sent.body["tools"].as_array().unwrap();
     assert_eq!(
-        before_compaction.cost_breakdown.tool_schema_tokens,
+        compacted_tools
+            .iter()
+            .filter(|tool| tool["function"]["name"] == "conversation_history")
+            .count(),
+        1,
+        "the first summary unlocks the history tool on the actual Provider wire"
+    );
+    assert_eq!(
+        compacted_tools
+            .iter()
+            .filter(|tool| tool["function"]["name"] != "conversation_history")
+            .collect::<Vec<_>>(),
+        original_tools.iter().collect::<Vec<_>>(),
+        "compaction must preserve all existing collaboration and builtin schemas"
+    );
+    assert!(
         after_compaction.cost_breakdown.tool_schema_tokens
+            > before_compaction.cost_breakdown.tool_schema_tokens,
+        "the preview must include the additional history schema sent to the Provider"
     );
     sent.release.send(()).unwrap();
     let events = fixture.finish(&turn.run_id, &mut events).await;

@@ -903,6 +903,7 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
         unread_at: None,
     };
     let summary_prefix = ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: conversation.id.clone(),
         source_revision: "revision-1".to_string(),
         covered_through: ContextJournalCursor::message("assistant-old"),
@@ -1037,6 +1038,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
         ],
     };
     let seed_prefix = ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: conversation.id.clone(),
         source_revision: "revision-mid-run".to_string(),
         covered_through: ContextJournalCursor::message("user-current"),
@@ -1207,6 +1209,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
     trace.validate().unwrap();
 
     let prefix = ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: conversation.id.clone(),
         source_revision: "revision-command-audit-tail".to_string(),
         covered_through: ContextJournalCursor::trace_item("assistant-command-audit-tail", 1),

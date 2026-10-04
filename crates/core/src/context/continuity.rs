@@ -583,6 +583,7 @@ mod tests {
         }
         let covered_through = ContextJournalCursor::trace_item("assistant-1", 999);
         let snapshot = ContextContinuitySnapshot::from_prefix(&ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-1".to_string(),
             covered_through,
@@ -644,6 +645,7 @@ mod tests {
             ));
         }
         let first_prefix = ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-1".to_string(),
             covered_through: first_cursor.clone(),
@@ -669,6 +671,7 @@ mod tests {
         };
         let final_cursor = ContextJournalCursor::message("user-2");
         let next = ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-2".to_string(),
             covered_through: final_cursor.clone(),
@@ -745,6 +748,7 @@ mod tests {
         for tool in ["conversation_history", "todo_update"] {
             let cursor = ContextJournalCursor::trace_item("assistant-1", 1);
             let snapshot = ContextContinuitySnapshot::from_prefix(&ContextCompactionPrefix {
+                model_source_items: None,
                 conversation_id: "conversation-1".to_string(),
                 source_revision: format!("source-{tool}"),
                 covered_through: cursor.clone(),

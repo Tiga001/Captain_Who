@@ -359,7 +359,9 @@ impl AgentRuntime {
                 &crate::WorldStateRequestBoundary {
                     run_id: run_id.clone(),
                     assistant_message_id: trace_assistant_message_id.clone().ok_or_else(|| {
-                        AgentError::new("Organization mail delivery requires an assistant message identity.")
+                        AgentError::new(
+                            "Organization mail delivery requires an assistant message identity.",
+                        )
                     })?,
                     request_index: 1,
                     after_trace_sequence: None,
@@ -521,6 +523,9 @@ impl AgentRuntime {
         let context_compaction_executor = context_compaction_services
             .map(ContextCompactionExecutor::new)
             .filter(|_| context_window_configured);
+        let mut compaction_pressure = context_compaction_pressure::CompactionPressure::default();
+        let mut context_rejection_recovery_used = false;
+        let mut pending_context_rejection: Option<AgentError> = None;
         if let Some(detector) = &context_capacity_detector {
             detector.prepare_frame(&mut active_context);
         }
@@ -600,6 +605,7 @@ impl AgentRuntime {
                 if tool_batch.is_empty()
                     && next_model_request_index > self.max_tool_iterations
                     && !empty_model_action_repair_pending
+                    && pending_context_rejection.is_none()
                 {
                     let message = "工具调用次数超过限制，已停止继续执行。".to_string();
                     let trace_sequence = conversation_trace
@@ -839,19 +845,54 @@ impl AgentRuntime {
                                 effective_tool_set.dynamic_definitions(),
                             );
                             let compaction_query = report.compaction_query();
-                            let compaction_plan = context_compaction_planner.plan(
+                            let growth_headroom = compaction_pressure.request_headroom(
+                                compaction_query.request_input_tokens,
+                                compaction_query.available_input_tokens,
+                            );
+                            let planning_items = request_context.planning_items()?;
+                            let mut compaction_plan = context_compaction_planner.plan_with_headroom(
                                     &compaction_query,
-                                    &request_context.planning_items()?,
+                                    &planning_items,
                                     true,
+                                    growth_headroom,
+                                    pending_context_rejection.is_some(),
                                 );
+                            // The summary is a separate request. Check its actual encoding even
+                            // before the ordinary request reaches its soft percentage threshold.
+                            let mut summary_budget = None;
+                            let mut summary_over_budget = false;
+                            if let Some(executor) = &context_compaction_executor {
+                                let candidate = context_compaction_planner.plan_with_headroom(
+                                    &compaction_query, &planning_items, true, growth_headroom, true,
+                                );
+                                if let Some(budget) = executor.inspect_budget(
+                                    &candidate, &run_id, trace_conversation_id.as_deref(),
+                                    trace_assistant_message_id.as_deref(),
+                                )? {
+                                    let summary_pressure = compaction_pressure.summary_pressure(&budget);
+                                    summary_over_budget = budget.input_capacity_tokens.is_some_and(|capacity| budget.input_tokens > capacity);
+                                    summary_budget = Some(budget);
+                                    if summary_pressure { compaction_plan = candidate; }
+                                }
+                            }
+                            let request_over_budget = report.available_input_tokens.is_some_and(|capacity| {
+                                compaction_query.request_input_tokens > capacity
+                            });
                             emit_context_budget_if_enabled(
                                 &run_id,
                                 model_request_index + 1,
                                 &report,
                                 &compaction_query,
                                 &compaction_plan,
+                                json!({
+                                    "growthHeadroomTokens": growth_headroom,
+                                    "summaryRequest": summary_budget,
+                                    "providerCapacityRecovery": pending_context_rejection.is_some(),
+                                    "deferred": !compaction_pressure.should_attempt(false),
+                                }),
                             );
-                            if compaction_attempts < MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST {
+                            if compaction_attempts < MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST
+                                && compaction_pressure.should_attempt(request_over_budget || summary_over_budget || pending_context_rejection.is_some()) {
                                 if let Some(executor) = &context_compaction_executor {
                                     let operation_id = format!(
                                         "{run_id}-context-compaction-{}-{}",
@@ -893,6 +934,7 @@ impl AgentRuntime {
                                         );
                                         let execution =
                                             executor.execute(attempt, &cancellation_token).await;
+                                        let applied = matches!(&execution, Ok(ContextCompactionExecution::Applied { .. }));
                                         let outcome = match &execution {
                                             Ok(ContextCompactionExecution::Applied { .. }) => {
                                                 AgentContextCompactionEventOutcome::Applied
@@ -958,6 +1000,8 @@ impl AgentRuntime {
                                                 )?;
                                                 compaction_attempts =
                                                     compaction_attempts.saturating_add(1);
+                                                compaction_pressure.reset();
+                                                if applied { pending_context_rejection = None; }
                                                 continue;
                                             }
                                             Err(error) if error.is_cancelled() => {
@@ -981,11 +1025,27 @@ impl AgentRuntime {
                                                     error.usage().cloned(),
                                                     provider_runtime_capabilities.usage(),
                                                 );
-                                                return Err(error.with_usage(usage));
+                                                if !request_over_budget
+                                                    && pending_context_rejection.is_none()
+                                                    && context_compaction_pressure::can_defer_compaction_error(&error)
+                                                {
+                                                    // The original request still has working
+                                                    // headroom. Keep the failed receipt/marker,
+                                                    // but do not turn a summary outage into a
+                                                    // terminal task error or retry every step.
+                                                    compaction_pressure.defer();
+                                                } else {
+                                                    return Err(error.with_usage(usage));
+                                                }
                                             }
                                         }
                                     }
                                 }
+                            }
+                            // A rejected provider request may only be sent again after a real
+                            // summary was committed. A stale/empty plan is not a recovery.
+                            if let Some(error) = pending_context_rejection.take() {
+                                return Err(error.with_usage(usage).with_model_request_interruption());
                             }
                             emit_compaction_skip_if_required(
                                 &run_id,
@@ -993,6 +1053,7 @@ impl AgentRuntime {
                                 compaction_attempts,
                                 context_compaction_executor.is_some(),
                                 &compaction_plan,
+                                !compaction_pressure.should_attempt(false),
                             );
                             request_estimate =
                                 Some(ModelRequestEstimate::from_budget_report(&report));
@@ -1051,6 +1112,7 @@ impl AgentRuntime {
                         effective_tool_set.dynamic_definitions(),
                     );
                     let mut committed_message_stream_id = None;
+                    let mut received_model_output = false;
                     let llm_response_result = if request.stream {
                         let delta_run_id = run_id.clone();
                         let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
@@ -1063,6 +1125,9 @@ impl AgentRuntime {
                                 if delta_cancellation_token.is_cancelled() {
                                     return;
                                 }
+                                received_model_output |= matches!(&stream_event,
+                                    LlmStreamEvent::Delta(delta) if !delta.is_empty())
+                                    || matches!(&stream_event, LlmStreamEvent::ToolInputProgress { .. });
                                 match stream_event {
                                     LlmStreamEvent::AttemptStarted {
                                         attempt,
@@ -1226,6 +1291,20 @@ impl AgentRuntime {
                                 error.usage().cloned(),
                                 provider_runtime_capabilities.usage(),
                             );
+                            if !context_rejection_recovery_used
+                                && context_compaction_executor.is_some()
+                                && !received_model_output
+                                && committed_message_stream_id.is_none()
+                                && context_compaction_pressure::is_context_capacity_rejection(&error)
+                            {
+                                // The provider rejected sampling before delivering output. Rebuild
+                                // from committed history once; never replay executed tools or a
+                                // partially streamed response as part of this recovery.
+                                context_rejection_recovery_used = true;
+                                pending_context_rejection = Some(error);
+                                compaction_pressure.reset();
+                                continue 'agent_loop;
+                            }
                             if is_repairable_empty_model_action(&error)
                                 && !empty_model_action_repair_pending
                             {

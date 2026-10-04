@@ -1156,9 +1156,9 @@ export const enUSTranslations = {
   'chat.modelTransition.confirmThenRetryEdit':
     'Compact the history and switch models first, then submit the edit again.',
   'chat.contextWindow': 'Context window',
-  'chat.contextWindowAria': 'Context window {used}% used',
-  'chat.contextUsedSummary': '{used}% used ({remaining}% remaining)',
-  'chat.contextTokenSummary': '{used} used of {total}',
+  'chat.contextWindowAria': 'Context window estimated {used}% used',
+  'chat.contextUsedSummary': 'Estimated {used}% used ({remaining}% remaining)',
+  'chat.contextTokenSummary': 'Estimated use: {used} of {total}',
   'chat.resume': 'Resume task',
   'chat.resuming': 'Resuming task',
   'chat.resumeFailed': 'Could not resume the task. Please try again.',

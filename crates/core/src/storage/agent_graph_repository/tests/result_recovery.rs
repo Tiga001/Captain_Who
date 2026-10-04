@@ -318,6 +318,7 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
             message_id: message_id.to_string(),
         };
         let prefix = crate::ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: conversation_id.to_string(),
             source_revision: "canonical-raw-prefix-revision".to_string(),
             covered_through: cursor.clone(),
@@ -338,9 +339,10 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
             .unwrap();
         assert_eq!(model_prefix.source_revision, prefix.source_revision);
         assert_eq!(model_prefix.covered_through, prefix.covered_through);
-        assert!(!serde_json::to_string(&model_prefix)
+        assert!(!serde_json::to_string(&model_prefix.model_source_items)
             .unwrap()
             .contains("agent-grand"));
+        assert_eq!(model_prefix.source_items, prefix.source_items);
         assert_eq!(serde_json::to_string(&prefix).unwrap(), canonical);
 
         let reference = crate::storage::conversation_history_repository::ConversationHistoryRecordRef::Message {

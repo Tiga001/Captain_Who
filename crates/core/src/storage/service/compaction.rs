@@ -9,27 +9,10 @@ impl StorageService {
     ) -> Result<ContextCompactionPrefix, String> {
         let connection = self.state.connection()?;
         let mut projected = prefix.clone();
-        for item in &mut projected.source_items {
-            if let crate::ContextCompactionSourceItem::Message {
-                cursor,
-                role,
-                content,
-                ..
-            } = item
-            {
-                if role == "user" {
-                    if let Some(model_content) =
-                        crate::storage::agent_message_model_projection::project_message(
-                            &connection,
-                            &prefix.conversation_id,
-                            cursor.message_id(),
-                        )?
-                    {
-                        *content = model_content;
-                    }
-                }
-            }
-        }
+        projected.model_source_items = Some(
+            context_compaction_repository::project_model_source_items(&connection, prefix)
+                .map_err(|error| error.to_string())?,
+        );
         Ok(projected)
     }
 

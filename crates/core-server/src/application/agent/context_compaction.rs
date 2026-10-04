@@ -203,6 +203,9 @@ impl AgentService {
             .context_compaction_summary_generator
             .clone()
             .unwrap_or_else(|| self.model_context_compaction_generator(&agent_input));
+        let budget_generator = AgentContextCompactionModelGenerator::from_chat_input(&agent_input);
+        let budget_storage = self.storage.clone();
+        let inspect_model_budget = self.context_compaction_summary_generator.is_none();
         let run_id = run_id.to_string();
         let conversation_id = conversation_id.to_string();
         let assistant_message_id = assistant_message_id.to_string();
@@ -388,6 +391,38 @@ impl AgentService {
                 }
             },
         )
+        .with_budget_inspector(move |request| {
+            // A custom summary generator owns a different request contract; the default model
+            // generator cannot truthfully estimate it.
+            if !inspect_model_budget {
+                return Ok(None);
+            }
+            // Prepare the same canonical prefix as generation, but do not create an attempt,
+            // publish lifecycle events, or contact the provider for this read-only probe.
+            let Some(prefix) = budget_storage
+                .prepare_context_compaction_prefix_if_current(
+                    &request.conversation_id,
+                    &request.covered_through,
+                    request.expected_previous_summary_id.as_deref(),
+                )
+                .map_err(AgentError::new)?
+            else {
+                return Ok(None);
+            };
+            let projected = budget_storage
+                .project_context_compaction_prefix_for_model(&prefix)
+                .map_err(AgentError::new)?;
+            match budget_generator.inspect_budget(&projected, request.source_input_tokens) {
+                Ok(budget) => Ok(Some(budget)),
+                Err(error)
+                    if error.code()
+                        == Some("context_compaction_replacement_overhead_too_large") =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        })
     }
 
     pub(super) fn rebuild_running_context_after_compaction(

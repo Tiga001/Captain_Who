@@ -4,6 +4,7 @@ mod checkpoint;
 mod command_dispatch;
 mod context_compaction;
 mod context_compaction_model;
+mod context_compaction_pressure;
 mod context_materials;
 mod conversation_world_state;
 mod events;

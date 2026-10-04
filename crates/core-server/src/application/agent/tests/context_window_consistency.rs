@@ -386,6 +386,14 @@ fn text_append_grows_the_same_measurement_and_compaction_can_reduce_it() {
         after.cost_breakdown.tool_schema_tokens,
         before.cost_breakdown.tool_schema_tokens
     );
+    let before_projection = fixture
+        .service
+        .context_window_tool_projection(&fixture.preview_input(), None)
+        .unwrap();
+    assert!(before_projection
+        .dynamic_definitions()
+        .iter()
+        .all(|tool| tool.name != "conversation_history"));
 
     let prefix = fixture
         .storage
@@ -418,9 +426,40 @@ fn text_append_grows_the_same_measurement_and_compaction_can_reduce_it() {
         "real compaction may legitimately lower occupancy"
     );
     assert!(compacted.cost_breakdown.summary_tokens > 0);
+    let compacted_projection = fixture
+        .service
+        .context_window_tool_projection(&fixture.preview_input(), None)
+        .unwrap();
     assert_eq!(
-        compacted.cost_breakdown.tool_schema_tokens,
-        after.cost_breakdown.tool_schema_tokens
+        compacted_projection.stable_revision(),
+        before_projection.stable_revision()
+    );
+    assert_eq!(
+        compacted_projection
+            .dynamic_definitions()
+            .iter()
+            .filter(|tool| tool.name == "conversation_history")
+            .count(),
+        1,
+        "the first summary unlocks precisely one history tool"
+    );
+    assert_eq!(
+        compacted_projection
+            .dynamic_definitions()
+            .iter()
+            .filter(|tool| tool.name != "conversation_history")
+            .map(|tool| serde_json::to_value(tool).unwrap())
+            .collect::<Vec<_>>(),
+        before_projection
+            .dynamic_definitions()
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap())
+            .collect::<Vec<_>>(),
+        "compaction must preserve every other dynamic tool schema"
+    );
+    assert!(
+        compacted.cost_breakdown.tool_schema_tokens > after.cost_breakdown.tool_schema_tokens,
+        "the complete request must also count the newly available history schema"
     );
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+mod model_source;
 use crate::storage::{migrations, provider_continuation_repository, world_state_repository};
 use crate::{
     AgentApprovalStatus, AgentCommandSessionStatus, ContextCompactionReceiptStage,

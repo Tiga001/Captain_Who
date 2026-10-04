@@ -5,39 +5,49 @@ fn compaction_prefix_with_published_materials(
     request: &crate::AgentContextCompactionPrepareRequest,
     snapshots: &[crate::ConversationTraceSnapshot],
 ) -> Arc<crate::ContextCompactionPrefix> {
-    let snapshot = snapshots
-        .last()
-        .expect("Run material must be durable before preparation");
-    let through_sequence = request
-        .covered_through
-        .trace_sequence()
-        .expect("initial Run state is now a journal bridge");
     let mut prefix = prefix.clone();
-    let materials = snapshot
-        .items
+    if let Some(index) = prefix
+        .source_items
         .iter()
-        .filter(|item| {
-            item.sequence() <= through_sequence
-                && matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })
-        })
-        .collect::<Vec<_>>();
-    assert!(!materials.is_empty());
-    assert_eq!(materials.last().unwrap().sequence(), through_sequence);
-    for item in materials {
-        let ConversationTurnTraceItem::ContextMaterial { created_at, .. } = item else {
-            unreachable!()
-        };
-        prefix
-            .source_items
-            .push(crate::ContextCompactionSourceItem::TraceItem {
-                cursor: crate::ContextJournalCursor::trace_item(
-                    &request.assistant_message_id,
-                    item.sequence(),
-                ),
-                run_id: request.run_id.clone(),
-                created_at: *created_at,
-                item: Box::new(item.clone()),
-            });
+        .position(|item| item.cursor() == &request.covered_through)
+    {
+        // The planner can retain a recent raw tail rather than consuming through live Run
+        // material. The Host fixture must honor that exact requested journal boundary.
+        prefix.source_items.truncate(index + 1);
+    } else {
+        let snapshot = snapshots
+            .last()
+            .expect("Run material must be durable before preparation");
+        let through_sequence = request
+            .covered_through
+            .trace_sequence()
+            .expect("the requested message boundary must exist in the fixture journal");
+        let materials = snapshot
+            .items
+            .iter()
+            .filter(|item| {
+                item.sequence() <= through_sequence
+                    && matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })
+            })
+            .collect::<Vec<_>>();
+        assert!(!materials.is_empty());
+        assert_eq!(materials.last().unwrap().sequence(), through_sequence);
+        for item in materials {
+            let ConversationTurnTraceItem::ContextMaterial { created_at, .. } = item else {
+                unreachable!()
+            };
+            prefix
+                .source_items
+                .push(crate::ContextCompactionSourceItem::TraceItem {
+                    cursor: crate::ContextJournalCursor::trace_item(
+                        &request.assistant_message_id,
+                        item.sequence(),
+                    ),
+                    run_id: request.run_id.clone(),
+                    created_at: *created_at,
+                    item: Box::new(item.clone()),
+                });
+        }
     }
     prefix.covered_through = request.covered_through.clone();
     prefix.source_revision =
@@ -53,10 +63,36 @@ fn committed_runtime_compaction_baseline(
 ) -> AgentContextBaseline {
     let summary = request.draft.clone().finish(&request.prefix).unwrap();
     assert_eq!(summary.covered_through, request.prefix.covered_through);
+    let mut messages = match &request.prefix.covered_through {
+        crate::ContextJournalCursor::Message { message_id } => {
+            let boundary = template
+                .messages
+                .iter()
+                .position(|message| message.message_id.as_ref() == Some(message_id))
+                .expect("fixture summary boundary must belong to its input history");
+            template.messages[boundary + 1..].to_vec()
+        }
+        crate::ContextJournalCursor::TraceItem {
+            assistant_message_id,
+            ..
+        } => {
+            assert_eq!(
+                Some(assistant_message_id),
+                template.assistant_message_id.as_ref()
+            );
+            Vec::new()
+        }
+    };
+    if !messages
+        .iter()
+        .any(|message| message.message_id == current_user.message_id)
+    {
+        messages.push(current_user.clone());
+    }
     let mut state = create_conversation_context_state(AgentChatInput {
         folder_references: Vec::new(),
         context_compaction_summary: Some(summary),
-        messages: vec![current_user.clone()],
+        messages,
         ..template.clone()
     })
     .unwrap();
@@ -250,6 +286,7 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
     };
     freeze_runtime_test_generic_provider(&mut input, "durable-compaction-capacity");
     let durable_prefix = Arc::new(ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-runtime".to_string(),
         covered_through: ContextJournalCursor::message("user-current"),
@@ -326,6 +363,8 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
     let compacted_baseline_for_commit = compacted_baseline_for_trace.clone();
     let compaction_commit_input = input.clone();
     let compaction_commit_user = current_user.clone();
+    let committed_source_ids = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    let source_ids_for_commit = committed_source_ids.clone();
     let snapshots_for_prepare = trace_snapshots.clone();
     let durable_prefix_for_prepare = durable_prefix.clone();
     let steer_input = AgentSteerInputQueue::new();
@@ -340,7 +379,13 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
                 &request,
                 &snapshots_for_prepare.lock().unwrap(),
             );
-            assert!(request.retained_input_tokens > 0);
+            assert_eq!(
+                request.retained_input_tokens > 0,
+                durable_prefix
+                    .source_items
+                    .iter()
+                    .any(|item| item.cursor().message_id() == "user-current")
+            );
             async move { Ok(AgentContextCompactionPrepareOutcome::Ready(durable_prefix)) }
         },
         move |request, _| {
@@ -419,6 +464,12 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
             }
         },
         move |request, _| {
+            *source_ids_for_commit.lock().unwrap() = request
+                .prefix
+                .source_items
+                .iter()
+                .map(|item| item.cursor().message_id().to_string())
+                .collect();
             let baseline = committed_runtime_compaction_baseline(
                 &compaction_commit_input,
                 &compaction_commit_user,
@@ -566,7 +617,15 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
         );
         assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
         assert!(!request_body.contains("OLD_USER_MARKER"));
-        assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
+        assert_eq!(
+            request_body.contains("OLD_ASSISTANT_MARKER"),
+            !committed_source_ids
+                .lock()
+                .unwrap()
+                .contains("assistant-old"),
+            "uncovered recent evidence stays raw; only covered evidence is replaced"
+        );
+        assert!(request_body.contains("continue"));
     }
     assert!(!request_bodies[0].contains("Preserve this constraint across compaction."));
     assert!(
@@ -725,6 +784,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     }
 
     let previous_summary_prefix = ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-previous".to_string(),
         covered_through: ContextJournalCursor::message("assistant-old"),
@@ -897,6 +957,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     });
 
     let recursive_prefix = Arc::new(ContextCompactionPrefix {
+        model_source_items: None,
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-recursive".to_string(),
         covered_through: ContextJournalCursor::message("user-current"),
@@ -939,6 +1000,8 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     let commit_counter = commit_count.clone();
     let compaction_commit_input = input.clone();
     let compaction_commit_user = current_user.clone();
+    let committed_source_ids = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+    let source_ids_for_commit = committed_source_ids.clone();
     let trace_snapshots = Arc::new(Mutex::new(Vec::new()));
     let snapshots_for_prepare = trace_snapshots.clone();
     let snapshots_for_observer = trace_snapshots.clone();
@@ -962,7 +1025,13 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
                 &request,
                 &snapshots_for_prepare.lock().unwrap(),
             );
-            assert!(request.retained_input_tokens > 0);
+            assert_eq!(
+                request.retained_input_tokens > 0,
+                recursive_prefix
+                    .source_items
+                    .iter()
+                    .any(|item| item.cursor().message_id() == "user-current")
+            );
             async move {
                 Ok(AgentContextCompactionPrepareOutcome::Ready(
                     recursive_prefix,
@@ -1028,6 +1097,12 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
             }
         },
         move |request, _| {
+            *source_ids_for_commit.lock().unwrap() = request
+                .prefix
+                .source_items
+                .iter()
+                .map(|item| item.cursor().message_id().to_string())
+                .collect();
             let baseline = committed_runtime_compaction_baseline(
                 &compaction_commit_input,
                 &compaction_commit_user,
@@ -1073,7 +1148,15 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     assert_eq!(commit_count.load(Ordering::SeqCst), 1);
     assert!(request_body.contains("RECURSIVE_SUMMARY_MARKER"));
     assert!(!request_body.contains("GROWN_USER_MARKER"));
-    assert!(!request_body.contains("GROWN_HISTORY_MARKER"));
+    assert_eq!(
+        request_body.contains("GROWN_HISTORY_MARKER"),
+        !committed_source_ids
+            .lock()
+            .unwrap()
+            .contains("assistant-grown"),
+        "recursive compaction preserves the exact uncovered tail"
+    );
+    assert!(request_body.contains("continue after the first compaction"));
     assert!(!request_body.contains("PREVIOUS_SUMMARY_MARKER"));
     let events = emitted_events.lock().unwrap();
     assert!(events
@@ -1798,4 +1881,385 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
             .status,
         "aborted"
     );
+}
+
+mod proactive_budget_regressions {
+    use super::*;
+    use crate::{
+        AgentContextWindowSnapshot, AgentContextWindowStatus, ContextCompactionGeneration,
+        ContextCompactionPrefix, ContextCompactionSourceItem, ContextCompactionSummaryDraft,
+        ContextJournalCursor,
+    };
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Scenario {
+        Applied,
+        TransientGenerationFailure,
+        PrepareFailure,
+        CommitFailure,
+        ProviderOverflow,
+        RepeatedProviderOverflow,
+    }
+
+    #[tokio::test]
+    async fn summary_pressure_compacts_before_normal_request_reaches_ninety_percent() {
+        exercise(Scenario::Applied).await;
+    }
+
+    #[tokio::test]
+    async fn transient_summary_failure_preserves_history_and_does_not_retry_after_a_tool() {
+        exercise(Scenario::TransientGenerationFailure).await;
+    }
+
+    #[tokio::test]
+    async fn preparation_storage_failure_still_stops_the_run() {
+        exercise(Scenario::PrepareFailure).await;
+    }
+
+    #[tokio::test]
+    async fn commit_failure_still_stops_the_run() {
+        exercise(Scenario::CommitFailure).await;
+    }
+
+    #[tokio::test]
+    async fn provider_overflow_compacts_once_even_with_one_allowed_iteration() {
+        exercise(Scenario::ProviderOverflow).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_provider_overflow_stops_after_one_compaction_recovery() {
+        exercise(Scenario::RepeatedProviderOverflow).await;
+    }
+
+    async fn exercise(scenario: Scenario) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let operations = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let provider_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let server_operations = operations.clone();
+        let server_bodies = provider_bodies.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let body = read_runtime_test_json_request(&mut stream).await;
+                server_operations.lock().unwrap().push("provider");
+                let request_index = {
+                    let mut bodies = server_bodies.lock().unwrap();
+                    bodies.push(body);
+                    bodies.len()
+                };
+                if (scenario == Scenario::ProviderOverflow && request_index == 1)
+                    || scenario == Scenario::RepeatedProviderOverflow
+                {
+                    let body = serde_json::to_vec(&json!({"error":{
+                        "code":"context_length_exceeded", "message":"Context window exceeded"
+                    }}))
+                    .unwrap();
+                    let headers = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
+                    );
+                    stream.write_all(headers.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                    continue;
+                }
+                let response = if scenario == Scenario::TransientGenerationFailure
+                    && request_index == 1
+                {
+                    json!({"choices":[{"message":{"role":"assistant","content":null,
+                        "tool_calls":[{"id":"post-failure-todo","type":"function","function":{
+                            "name":"todo_update","arguments":serde_json::to_string(&json!({
+                                "items":[{"title":"Check preserved context","status":"completed"}]
+                            })).unwrap()
+                        }}]},"finish_reason":"tool_calls"}]})
+                } else {
+                    json!({"choices":[{"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]})
+                };
+                write_runtime_test_json_response(&mut stream, response).await;
+            }
+        });
+
+        let mut old_user = message(
+            "user",
+            &format!("UNCOMPRESSED_HISTORY_MARKER {}", "x".repeat(200_000)),
+        );
+        old_user.message_id = Some("user-old".into());
+        let mut current_user = message("user", "continue with the verified work");
+        current_user.message_id = Some("user-current".into());
+        let mut input = conversation_context_input(vec![old_user.clone(), current_user.clone()]);
+        input.api_url = format!("http://{address}/v1/chat/completions");
+        input.api_token = "test-token".into();
+        input.stream = Some(false);
+        input.max_tokens = Some(1_000);
+        input.context_window_tokens = Some(600_000);
+        input.assistant_message_id = Some("assistant-current".into());
+        input.context = Some(AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some("conversation-1".into()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        });
+        freeze_runtime_test_generic_provider(&mut input, "proactive-compaction-regression");
+        let commit_template = input.clone();
+        let prepare_operations = operations.clone();
+        let generate_operations = operations.clone();
+        let commit_operations = operations.clone();
+        let probe_operations = operations.clone();
+        let services = AgentContextCompactionServices::new(
+            move |request, _| {
+                prepare_operations.lock().unwrap().push("prepare");
+                assert_eq!(
+                    request.covered_through,
+                    ContextJournalCursor::message("user-old")
+                );
+                let old_content = old_user.content.clone();
+                async move {
+                    if scenario == Scenario::PrepareFailure {
+                        return Err(AgentError::structured(
+                            "fixture_storage_failed",
+                            "Storage unavailable",
+                            json!({}),
+                        ));
+                    }
+                    Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
+                        ContextCompactionPrefix {
+                            conversation_id: request.conversation_id,
+                            source_revision: "proactive-source-revision".into(),
+                            covered_through: request.covered_through.clone(),
+                            previous_summary: None,
+                            model_source_items: None,
+                            source_items: vec![ContextCompactionSourceItem::Message {
+                                cursor: request.covered_through,
+                                role: "user".into(),
+                                content: old_content,
+                                created_at: 1,
+                                status: Some("sent".into()),
+                                terminal_status: None,
+                                terminal_error: None,
+                            }],
+                        },
+                    )))
+                }
+            },
+            move |request, _| {
+                generate_operations.lock().unwrap().push("generate");
+                async move {
+                    let builder =
+                        crate::model_request_observation::ModelRequestObservationBuilder::new(
+                            format!("model-request-{}", request.operation_id),
+                            request.run_id.clone(),
+                            Some(request.conversation_id.clone()),
+                            Some(request.assistant_message_id.clone()),
+                            Some(request.operation_id.clone()),
+                            request.request_index,
+                            crate::ModelRequestPurpose::ContextCompaction,
+                            "test-model",
+                            crate::AgentApiStyle::OpenAiCompatible,
+                            None,
+                            1,
+                        );
+                    if scenario == Scenario::TransientGenerationFailure {
+                        let error = AgentError::structured(
+                            "agent.llm_provider_failure",
+                            "Summary provider temporarily unavailable",
+                            json!({"retryable":true}),
+                        );
+                        let observation = builder.failed(None, &error, 2).unwrap();
+                        return Err(error.with_model_request_observation(observation));
+                    }
+                    Ok(AgentContextCompactionGenerationOutput {
+                        draft: ContextCompactionSummaryDraft {
+                            id: "proactive-summary".into(),
+                            source_revision: request.prefix.source_revision.clone(),
+                            content: "PROACTIVE_SUMMARY_MARKER: verified older work was completed."
+                                .into(),
+                            continuity: request.continuity,
+                            generation: ContextCompactionGeneration::test(),
+                            source_input_tokens: request.source_input_tokens,
+                            summary_input_tokens: 32,
+                            continuity_input_tokens: 64,
+                            uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
+                            replacement_input_tokens: 96,
+                            created_at: 2,
+                        },
+                        observation: builder.completed(None, Some("stop".into()), 2).unwrap(),
+                    })
+                }
+            },
+            move |request, _| {
+                commit_operations.lock().unwrap().push("commit");
+                let baseline = committed_runtime_compaction_baseline(
+                    &commit_template,
+                    &current_user,
+                    &request,
+                );
+                async move {
+                    if scenario == Scenario::CommitFailure {
+                        return Err(AgentError::structured(
+                            "fixture_commit_failed",
+                            "Summary commit rejected",
+                            json!({}),
+                        ));
+                    }
+                    Ok(AgentContextCompactionCommitOutcome::Applied {
+                        summary_id: "proactive-summary".into(),
+                        baseline: Box::new(baseline),
+                    })
+                }
+            },
+            |_, _| async { Ok(()) },
+        )
+        .with_budget_inspector(move |request| {
+            probe_operations.lock().unwrap().push("probe");
+            // This is the real loop's pre-compaction ordinary-request measurement. It has
+            // ample headroom; only the independently encoded summary is approaching capacity.
+            let normal_input = request.source_input_tokens + request.uncovered_tail_input_tokens;
+            assert!(normal_input * 100 < 569_000 * 90);
+            if request.expected_previous_summary_id.is_some()
+                || matches!(
+                    scenario,
+                    Scenario::ProviderOverflow | Scenario::RepeatedProviderOverflow
+                )
+            {
+                return Ok(None);
+            }
+            Ok(Some(AgentContextWindowSnapshot {
+                model: "test-model".into(),
+                status: AgentContextWindowStatus::WithinBudget,
+                context_window_tokens: Some(600_000),
+                reserved_output_tokens: 30_000,
+                safety_margin_tokens: 30_000,
+                input_capacity_tokens: Some(540_000),
+                input_tokens: 530_000,
+                cost_breakdown: Default::default(),
+                remaining_input_tokens: Some(10_000),
+            }))
+        });
+        let runtime = if matches!(
+            scenario,
+            Scenario::ProviderOverflow | Scenario::RepeatedProviderOverflow
+        ) {
+            AgentRuntime {
+                max_tool_iterations: 1,
+            }
+        } else {
+            AgentRuntime::default()
+        };
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            runtime.send_chat_with_events_and_cancellation(
+                input,
+                Some("run-proactive-compaction".into()),
+                None,
+                AgentCancellationToken::new(),
+                Some(
+                    AgentRuntimeHostServices::new()
+                        .with_context_compaction(services)
+                        .with_trace_observer(Arc::new(|_| Ok(None))),
+                ),
+            ),
+        )
+        .await
+        .expect("the runtime must make bounded progress");
+        server.abort();
+        let operations = operations.lock().unwrap();
+        let bodies = provider_bodies.lock().unwrap();
+        let count = |name| operations.iter().filter(|value| **value == name).count();
+        assert_eq!(count("prepare"), 1);
+        match scenario {
+            Scenario::Applied => {
+                assert_eq!(output.unwrap().content, "finished");
+                assert_eq!(count("generate"), 1);
+                assert_eq!(count("commit"), 1);
+                assert_eq!(bodies.len(), 1);
+                assert!(
+                    operations
+                        .iter()
+                        .position(|value| *value == "commit")
+                        .unwrap()
+                        < operations
+                            .iter()
+                            .position(|value| *value == "provider")
+                            .unwrap()
+                );
+                let body = bodies[0].to_string();
+                assert!(body.contains("PROACTIVE_SUMMARY_MARKER"));
+                assert!(!body.contains("UNCOMPRESSED_HISTORY_MARKER"));
+            }
+            Scenario::TransientGenerationFailure => {
+                assert_eq!(output.unwrap().content, "finished");
+                assert_eq!(
+                    count("generate"),
+                    1,
+                    "a tool boundary must not retry the failed summary"
+                );
+                assert_eq!(count("commit"), 0);
+                assert!(
+                    count("probe") >= 2,
+                    "summary pressure must remain present after the tool"
+                );
+                assert_eq!(bodies.len(), 2);
+                assert!(bodies
+                    .iter()
+                    .all(|body| body.to_string().contains("UNCOMPRESSED_HISTORY_MARKER")));
+                assert!(
+                    bodies[1]["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message["role"] == "tool"),
+                    "the second provider request must include the completed tool result"
+                );
+            }
+            Scenario::ProviderOverflow | Scenario::RepeatedProviderOverflow => {
+                if scenario == Scenario::ProviderOverflow {
+                    assert_eq!(output.unwrap().content, "finished");
+                } else {
+                    let error = output.unwrap_err();
+                    assert_eq!(error.code(), Some("agent.llm_provider_failure"));
+                    assert_eq!(error.details().unwrap()["category"], "context_too_large");
+                }
+                assert_eq!(count("generate"), 1);
+                assert_eq!(count("commit"), 1);
+                assert_eq!(
+                    bodies.len(),
+                    2,
+                    "there must be only one post-compaction provider retry"
+                );
+                assert_eq!(
+                    operations
+                        .iter()
+                        .filter(|value| **value == "provider" || **value == "commit")
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec!["provider", "commit", "provider"]
+                );
+                assert!(bodies[0]
+                    .to_string()
+                    .contains("UNCOMPRESSED_HISTORY_MARKER"));
+                assert!(bodies[1].to_string().contains("PROACTIVE_SUMMARY_MARKER"));
+                assert!(!bodies[1]
+                    .to_string()
+                    .contains("UNCOMPRESSED_HISTORY_MARKER"));
+            }
+            Scenario::PrepareFailure | Scenario::CommitFailure => {
+                let error = output.unwrap_err();
+                assert_eq!(
+                    error.code(),
+                    Some(if scenario == Scenario::PrepareFailure {
+                        "fixture_storage_failed"
+                    } else {
+                        "fixture_commit_failed"
+                    })
+                );
+                assert!(
+                    bodies.is_empty(),
+                    "storage failures cannot fall through to the normal provider"
+                );
+            }
+        }
+    }
 }

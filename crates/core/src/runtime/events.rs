@@ -103,6 +103,7 @@ pub(super) fn emit_context_budget_if_enabled(
     report: &ContextBudgetReport,
     compaction_query: &ContextCompactionQuery,
     compaction_plan: &ContextCompactionPlan,
+    pressure: serde_json::Value,
 ) {
     if !context_diagnostics_enabled() {
         return;
@@ -112,6 +113,7 @@ pub(super) fn emit_context_budget_if_enabled(
         "capacity": report,
         "compactionQuery": compaction_query,
         "compactionPlan": compaction_plan,
+        "compactionPressure": pressure,
     });
     match serde_json::to_string(&diagnostic) {
         Ok(diagnostic) => {
@@ -129,12 +131,17 @@ pub(super) fn emit_compaction_skip_if_required(
     compaction_attempts: usize,
     executor_available: bool,
     compaction_plan: &ContextCompactionPlan,
+    deferred: bool,
 ) {
     if compaction_plan.status == ContextCompactionPlanStatus::NotRequired {
         return;
     }
 
-    let reason = compaction_skip_reason(compaction_plan, compaction_attempts, executor_available);
+    let reason = if deferred {
+        "summary_failure_cooldown"
+    } else {
+        compaction_skip_reason(compaction_plan, compaction_attempts, executor_available)
+    };
     eprintln!(
         "[context-compaction] skipped run={run_id} request={request_index} attempt={} status={:?} reason={reason} compactable={} planned={} protected={}",
         compaction_attempts.saturating_add(1),

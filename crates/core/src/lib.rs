@@ -111,7 +111,8 @@ pub use builtin_capabilities::{
 pub use cancellation::AgentCancellationToken;
 pub use context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
-    ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
+    ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionModelSourceItem,
+    ContextCompactionModelToolCall, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextContinuitySnapshot, ContextHistoryRef, ContextJournalCursor, ContinuityIndexV2,
     CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONTEXT_CONTINUITY_HARD_MAX_TOKENS,

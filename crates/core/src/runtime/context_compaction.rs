@@ -15,7 +15,7 @@ use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStage, ModelRequestObservation};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type CompactionFuture<T> = Pin<Box<dyn Future<Output = AgentResult<T>> + Send + 'static>>;
 
@@ -109,6 +109,14 @@ type ReceiptCallback = Arc<
         + Sync,
 >;
 
+type BudgetCallback = Arc<
+    dyn Fn(
+            &AgentContextCompactionPrepareRequest,
+        ) -> AgentResult<Option<crate::AgentContextWindowSnapshot>>
+        + Send
+        + Sync,
+>;
+
 /// Dependencies required by the runtime-owned executor.
 ///
 /// `prepare` and `commit` are supplied by the durable-state owner. `generate` is deliberately
@@ -119,6 +127,7 @@ pub struct AgentContextCompactionServices {
     generate: GenerateCallback,
     commit: CommitCallback,
     record_receipt: ReceiptCallback,
+    inspect_budget: Option<BudgetCallback>,
 }
 
 impl AgentContextCompactionServices {
@@ -161,7 +170,23 @@ impl AgentContextCompactionServices {
             record_receipt: Arc::new(move |receipt, observation| {
                 Box::pin(record_receipt(receipt, observation))
             }),
+            inspect_budget: None,
         }
+    }
+
+    /// Read-only inspection of the exact model-visible summary payload. Injected separately
+    /// from generation so a budget check never sends a request or creates a compaction receipt.
+    pub fn with_budget_inspector<F>(mut self, inspect: F) -> Self
+    where
+        F: Fn(
+                &AgentContextCompactionPrepareRequest,
+            ) -> AgentResult<Option<crate::AgentContextWindowSnapshot>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.inspect_budget = Some(Arc::new(inspect));
+        self
     }
 
     pub async fn prepare(
@@ -216,11 +241,53 @@ pub(super) struct ContextCompactionAttempt {
 
 pub(super) struct ContextCompactionExecutor {
     services: AgentContextCompactionServices,
+    budget_cache: Mutex<
+        Option<(
+            AgentContextCompactionPrepareRequest,
+            crate::AgentContextWindowSnapshot,
+        )>,
+    >,
 }
 
 impl ContextCompactionExecutor {
     pub(super) fn new(services: AgentContextCompactionServices) -> Self {
-        Self { services }
+        Self {
+            services,
+            budget_cache: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn inspect_budget(
+        &self,
+        plan: &ContextCompactionPlan,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+    ) -> AgentResult<Option<crate::AgentContextWindowSnapshot>> {
+        let Some(inspect) = &self.services.inspect_budget else {
+            return Ok(None);
+        };
+        let Some(request) =
+            prepare_request_from_plan(plan, run_id, conversation_id, assistant_message_id)
+        else {
+            return Ok(None);
+        };
+        // The selected journal prefix is immutable. Changes to its boundary, previous summary,
+        // or measured costs invalidate the cache. `begin` still verifies the current journal head.
+        let mut cache = self
+            .budget_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((cached_request, budget)) = cache.as_ref() {
+            if cached_request == &request {
+                return Ok(Some(budget.clone()));
+            }
+        }
+        let budget = inspect(&request)?;
+        if let Some(budget) = &budget {
+            *cache = Some((request, budget.clone()));
+        }
+        Ok(budget)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -652,6 +719,7 @@ mod tests {
 
     fn prefix() -> ContextCompactionPrefix {
         ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-revision-1".to_string(),
             covered_through: ContextJournalCursor::message("assistant-old"),

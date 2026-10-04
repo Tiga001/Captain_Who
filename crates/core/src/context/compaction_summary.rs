@@ -331,6 +331,40 @@ pub struct ContextCompactionPrefix {
     /// Only the suffix after `previous_summary` is included. Recursive compaction consumes the
     /// previous summary plus these newly covered raw entries.
     pub source_items: Vec<ContextCompactionSourceItem>,
+    /// Ephemeral summary-model input derived from the durable model-visible journal. It never
+    /// participates in source identity, persistence, continuity or commit validation.
+    #[serde(skip)]
+    pub model_source_items: Option<Vec<ContextCompactionModelSourceItem>>,
+}
+
+/// Semantic source messages for summarization, with no provider continuation or private reasoning.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCompactionModelSourceItem {
+    pub cursor: ContextJournalCursor,
+    pub created_at: i64,
+    pub source_kind: String,
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::ConversationContextImageRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ContextCompactionModelToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub is_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_status: Option<ConversationTurnTraceTerminalStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCompactionModelToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
 }
 
 impl ContextCompactionPrefix {
@@ -478,6 +512,7 @@ mod tests {
     fn summary_can_advance_to_a_closed_tool_result_inside_an_active_turn() {
         let cursor = ContextJournalCursor::trace_item("assistant-current", 2);
         let prefix = ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "revision-1".to_string(),
             covered_through: cursor.clone(),
@@ -551,6 +586,7 @@ mod tests {
     fn prefix_cannot_end_on_an_unresolved_tool_call() {
         let cursor = ContextJournalCursor::trace_item("assistant-current", 1);
         let prefix = ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-1".to_string(),
             source_revision: "revision-1".to_string(),
             covered_through: cursor.clone(),

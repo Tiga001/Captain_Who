@@ -227,6 +227,7 @@ pub(crate) struct ContextBudgetReport {
 impl ContextBudgetReport {
     /// Maximum output reserve that can coexist with this exact measured input while preserving
     /// the configured safety margin. This is independent of the reserve used to build the report.
+    #[cfg(test)]
     pub(crate) fn maximum_output_tokens_for_current_input(&self) -> Option<u64> {
         self.context_window_tokens.map(|context_window_tokens| {
             context_window_tokens

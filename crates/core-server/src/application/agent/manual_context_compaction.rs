@@ -250,7 +250,9 @@ impl AgentService {
             &ContextJournalCursor::message(&boundary),
         )?;
         let source_tokens = mycopilot_core::estimate_provider_transition_compaction_source_tokens(
-            &prefix,
+            &self
+                .storage
+                .project_context_compaction_prefix_for_model(&prefix)?,
             &target.model.provider_model_id,
             target.api_style,
         )

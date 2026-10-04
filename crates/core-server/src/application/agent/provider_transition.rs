@@ -249,7 +249,9 @@ impl AgentService {
             .as_deref()
             .ok_or_else(|| "模型切换缺少可归属摘要的历史回复。".to_string())?;
         let source_input_tokens = estimate_provider_transition_compaction_source_tokens(
-            prefix,
+            &self
+                .storage
+                .project_context_compaction_prefix_for_model(prefix)?,
             &prepared.target.model.provider_model_id,
             prepared.target.api_style,
         )
@@ -1397,6 +1399,7 @@ mod provider_transition_unit_tests {
 
     fn transition_prefix() -> mycopilot_core::ContextCompactionPrefix {
         mycopilot_core::ContextCompactionPrefix {
+            model_source_items: None,
             conversation_id: "conversation-transition-identity".to_string(),
             source_revision: "source-transition-identity".to_string(),
             covered_through: mycopilot_core::ContextJournalCursor::message("assistant-source"),
