@@ -336,7 +336,6 @@ fn pdf_skill_is_a_trusted_package_with_progressive_references() {
         "pdftotext -f FIRST -l LAST",
         "quoted Python heredoc",
         "Do not print an entire large PDF",
-        "`historyOpen`",
         "`conversation_history`",
         "references/reading.md",
         "references/creating-and-editing.md",
@@ -379,7 +378,7 @@ fn pdf_skill_is_a_trusted_package_with_progressive_references() {
     assert!(reading.contains("| rg -n -i -C 4 --max-count 20"));
     assert!(reading.contains("| rg --max-count 80 '^'"));
     assert!(reading.contains("pdftotext -f 42 -l 46 -layout"));
-    assert!(reading.contains("`historyOpen` with `conversation_history`"));
+    assert!(reading.contains("not a command-output continuation"));
     assert!(reading.contains("`head`, `tail`, and byte-offset slicing are not recovery paths"));
     assert!(reading.contains("reports extracted-text line numbers, not PDF page numbers"));
     assert!(reading.contains("python - \"$MYCOPILOT_INPUT_ROOT/manual.pdf\" <<'PY'"));

@@ -47,7 +47,7 @@ the exact source path instead.
    pdftotext -layout "manual.pdf" - | rg --max-count 80 '^'
    ```
 
-3. Extract only the matching page range plus necessary adjacent pages with `pdftotext -f FIRST -l LAST`. Use `rg --max-count N` to bound matches or initial lines. Do not print an entire large PDF, repeatedly slice the same full extraction by output offsets, or rerun a command whose archived result is available through `historyOpen`; open that exact result with `conversation_history` instead.
+3. Extract only the matching page range plus necessary adjacent pages with `pdftotext -f FIRST -l LAST`. Use `rg --max-count N` to bound matches or initial lines. Do not print an entire large PDF or repeatedly slice the same full extraction by output offsets. If a command result is truncated, rerun a narrower page range or search; `conversation_history` only recalls compacted chat history and cannot continue command output.
 4. Use text extraction for meaning, not visual proof. Render relevant pages for scans, tables, figures, columns, forms, or layout questions. Copy each returned image `readPath` unchanged into `read_image.path`, using only the reader actually provided in the current model request; do not reconstruct image paths from filenames or request arguments. If image reading is unavailable, report the missing visual coverage. If text is empty or damaged, switch to page rendering.
 5. After creating or editing, reopen the PDF, validate its structure and requested content, render all changed pages (or every page when small), and inspect those images before delivery.
 6. State which pages were actually extracted or rendered; never claim coverage you did not inspect.

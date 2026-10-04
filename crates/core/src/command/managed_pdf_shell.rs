@@ -256,7 +256,7 @@ pub(crate) fn parse_managed_pdf_shell(
             "pdftotext" => parse_pdftotext(args, segment, &command_variables, &mut operands)?,
             "pdftoppm" => parse_pdftoppm(args, segment, &command_variables, &mut operands)?,
             "python" | "python3" => parse_python(args, segment, &command_variables, &mut operands)?,
-            "rg" => parse_rg(args, segment, &command_variables, &mut operands)?,
+            "rg" => parse_rg(args, segment, &command, &command_variables, &mut operands)?,
             _ => unreachable!("program was checked against MANAGED_PROGRAMS"),
         }
         for redirection in &segment.input_redirections {
@@ -581,6 +581,7 @@ fn parse_python(
 fn parse_rg(
     args: &[(String, Range<usize>)],
     segment: &ShellSegment,
+    command: &str,
     variables: &BTreeMap<String, String>,
     operands: &mut Vec<ManagedPdfInputOperand>,
 ) -> Result<(), String> {
@@ -594,7 +595,7 @@ fn parse_rg(
     let mut uses_explicit_patterns = false;
     while index < args.len() {
         let (argument, range) = &args[index];
-        let resolved = resolve_user_variable(argument, variables)?;
+        let resolved = resolve_shell_word_variable(argument, range, command, variables)?;
         if options_open && resolved == "--" {
             reject_indirect_rg_option(argument)?;
             options_open = false;
@@ -630,7 +631,7 @@ fn parse_rg(
                                 .to_string(),
                         );
                     }
-                    validate_rg_pattern(pattern, variables)?;
+                    validate_rg_pattern(pattern, range, command, variables)?;
                     has_pattern = true;
                     uses_explicit_patterns = true;
                     index += 1;
@@ -642,12 +643,12 @@ fn parse_rg(
                                 .to_string(),
                         );
                     }
-                    let Some((pattern, _)) = args.get(index + 1) else {
+                    let Some((pattern, pattern_range)) = args.get(index + 1) else {
                         return Err(format!(
                             "Managed PDF Shell 的 rg 选项 `{option}` 缺少正则。"
                         ));
                     };
-                    validate_rg_pattern(pattern, variables)?;
+                    validate_rg_pattern(pattern, pattern_range, command, variables)?;
                     has_pattern = true;
                     uses_explicit_patterns = true;
                     index += 2;
@@ -656,7 +657,7 @@ fn parse_rg(
             continue;
         }
         if !has_pattern {
-            validate_rg_pattern(argument, variables)?;
+            validate_rg_pattern(argument, range, command, variables)?;
             has_pattern = true;
         } else {
             push_rg_path(argument, range.clone(), variables, operands)?;
@@ -791,15 +792,85 @@ fn validate_rg_number(option: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_rg_pattern(pattern: &str, variables: &BTreeMap<String, String>) -> Result<(), String> {
+fn validate_rg_pattern(
+    pattern: &str,
+    range: &Range<usize>,
+    command: &str,
+    variables: &BTreeMap<String, String>,
+) -> Result<(), String> {
     if pdf_input_mount(pattern).is_some() {
         return Err("Managed PDF Shell 的 rg 搜索正则不能引用文件输入路径。".to_string());
     }
-    // Shell surface validation already rejected unquoted expansion syntax. Resolve only a static
-    // user variable here; a regex is data, not a filesystem path, so dots, slashes and glob-like
-    // regex metacharacters must never enter path validation.
-    let _ = resolve_user_variable(pattern, variables)?;
+    // Resolve only a genuine static user variable here. The source-aware resolver preserves
+    // literal regex anchors; a regex is data, not a filesystem path, so dots, slashes and
+    // glob-like regex metacharacters must never enter path validation.
+    let _ = resolve_shell_word_variable(pattern, range, command, variables)?;
     Ok(())
+}
+
+fn resolve_shell_word_variable<'a>(
+    value: &'a str,
+    range: &Range<usize>,
+    command: &str,
+    variables: &'a BTreeMap<String, String>,
+) -> Result<&'a str, String> {
+    if pdf_input_mount(value).is_some() {
+        Ok(value)
+    } else if value.contains('$') && shell_word_has_expandable_variable(range, command) {
+        resolve_user_variable(value, variables)
+    } else {
+        Ok(value)
+    }
+}
+
+/// The lexer deliberately returns dequoted words. Preserve the Shell distinction between a
+/// literal regex anchor (for example `'chapter$'` or `chapter\\$`) and a real variable reference
+/// before applying the managed-shell variable policy.
+fn shell_word_has_expandable_variable(range: &Range<usize>, command: &str) -> bool {
+    let raw = command
+        .chars()
+        .skip(range.start)
+        .take(range.end.saturating_sub(range.start));
+    let mut quote = None;
+    let mut escaped = false;
+    let mut characters = raw.peekable();
+    while let Some(character) = characters.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if character == active {
+                quote = None;
+            } else if character == '$'
+                && active != '\''
+                && dollar_starts_shell_expansion(characters.peek().copied())
+            {
+                return true;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            continue;
+        }
+        if character == '$' && dollar_starts_shell_expansion(characters.peek().copied()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn dollar_starts_shell_expansion(next: Option<char>) -> bool {
+    next.is_some_and(|character| {
+        character == '_'
+            || character.is_ascii_alphanumeric()
+            || matches!(character, '{' | '(' | '?' | '#' | '*' | '@' | '!' | '-')
+    })
 }
 
 fn push_rg_path(
@@ -1269,6 +1340,10 @@ mod tests {
             r#"python -c 'print(1)' | rg -ni -C4 --max-count=30 'define.*polymer'"#,
             r#"rg -e 'needle.*value' extracted.txt"#,
             r#"rg needle -- file-without-extension"#,
+            r#"rg 'chapter$' extracted.txt"#,
+            r#"rg -e 'value$' -e '\\$literal' extracted.txt"#,
+            r#"rg chapter$ extracted.txt"#,
+            r#"rg 'chapter$' "$MYCOPILOT_INPUT_ROOT/extracted.txt""#,
         ] {
             assert!(
                 parse_managed_pdf_shell(command).unwrap().is_some(),
@@ -1316,6 +1391,7 @@ mod tests {
             "rg needle /etc/passwd",
             "rg needle ../outside.txt",
             "OPTION=-n; rg \"$OPTION\" needle extracted.txt",
+            "rg \"chapter$UNKNOWN\" extracted.txt",
         ] {
             assert!(parse_managed_pdf_shell(command).is_err(), "{command}");
         }

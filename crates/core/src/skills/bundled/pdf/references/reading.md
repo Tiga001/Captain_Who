@@ -53,7 +53,7 @@ This limits extracted-text lines, not PDF pages. For a known page interval, use 
 pdftotext -f 42 -l 46 -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" -
 ```
 
-Read enough adjacent pages to capture section boundaries, continuations, footnotes, captions, and sources. Do not dump the full text of a large document and then issue repeated Python commands that slice the same stdout by byte or character offset. If a command result exceeded the model budget, use its `historyOpen` with `conversation_history` instead of repeating extraction; `head`, `tail`, and byte-offset slicing are not recovery paths.
+Read enough adjacent pages to capture section boundaries, continuations, footnotes, captions, and sources. Do not dump the full text of a large document and then issue repeated Python commands that slice the same stdout by byte or character offset. If a command result exceeded the model budget, rerun only the relevant page interval or a more distinctive bounded `rg` query; `conversation_history` is only for compacted chat history and is not a command-output continuation. `head`, `tail`, and byte-offset slicing are not recovery paths.
 
 Prefer `pdftotext` for fast layout-aware text, `pypdf` for page-level structure, and `pdfplumber` for positional text and tables. If a tool produces empty or clearly damaged text, switch tools once or render the relevant pages; do not repeat the same failing command.
 
