@@ -1,8 +1,6 @@
 // French UI translation strings.
 export const frFRTranslations = {
   'chat.history.loadSection': 'Charger cet historique',
-  'chat.history.expandAll': 'Afficher tout l’historique',
-  'chat.history.find': 'Rechercher dans la conversation',
   'chat.history.searchPlaceholder': 'Rechercher du texte',
   'chat.history.expanding': 'Chargement de l’historique…',
   'chat.history.cancel': 'Arrêter',

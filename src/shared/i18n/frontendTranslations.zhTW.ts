@@ -1,8 +1,6 @@
 // Traditional Chinese UI translation strings.
 export const zhTWTranslations = {
   'chat.history.loadSection': '載入這段歷史',
-  'chat.history.expandAll': '展開全部歷史',
-  'chat.history.find': '尋找對話',
   'chat.history.searchPlaceholder': '搜尋對話內容',
   'chat.history.expanding': '正在展開歷史…',
   'chat.history.cancel': '停止展開',

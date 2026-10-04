@@ -1,8 +1,6 @@
 // Korean UI translation strings.
 export const koKRTranslations = {
   'chat.history.loadSection': '이 기록 불러오기',
-  'chat.history.expandAll': '전체 기록 펼치기',
-  'chat.history.find': '대화에서 찾기',
   'chat.history.searchPlaceholder': '대화 검색',
   'chat.history.expanding': '기록 펼치는 중…',
   'chat.history.cancel': '펼치기 중지',

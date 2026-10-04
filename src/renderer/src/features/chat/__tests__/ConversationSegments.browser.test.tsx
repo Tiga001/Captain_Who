@@ -213,6 +213,12 @@ function activateSelectionRegion(element: HTMLElement) {
   ;(document.activeElement as HTMLElement)?.blur()
   element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
 }
+
+async function pressHistoryShortcut(key: 'a' | 'f') {
+  activateSelectionRegion(scroller())
+  await userEvent.keyboard(`{Meta>}${key}{/Meta}`)
+}
+
 const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve))
 async function frames(count = 2) {
   for (let i = 0; i < count; i += 1) await frame()
@@ -263,6 +269,11 @@ it('bounds initial Markdown mounts and reaches an unmounted turn by click and ra
   await frames(4)
   expect(document.querySelectorAll('[data-message-id]').length).toBeLessThanOrEqual(48)
   expect(probes.markdown).toBeLessThanOrEqual(48)
+  expect(document.querySelector('.conversation-history-tools')).toBeNull()
+  await expect.element(page.getByRole('button', { name: '展开全部历史' })).not.toBeInTheDocument()
+  await expect
+    .element(page.getByRole('button', { name: '查找对话', exact: true }))
+    .not.toBeInTheDocument()
   expect(message('user-100')).toBeNull()
   await jump(100)
   expect(message('assistant-100')).not.toBeNull()
@@ -383,7 +394,7 @@ it('loads the complete history for find and copies a selection across unloaded s
   expect(probes.copied).toContain('unique-search-0')
   expect(probes.copied).toContain('结束 99')
   expect(await navigator.clipboard.readText()).toBe(probes.copied)
-  await page.getByRole('button', { name: '查找对话', exact: true }).click()
+  await pressHistoryShortcut('f')
   await page.getByRole('textbox', { name: '搜索对话内容' }).fill('unique-search-50')
   await expect.poll(() => Math.abs(top('user-50'))).toBeLessThan(scroller().clientHeight)
   await expect.poll(() => window.getSelection()?.toString()).toBe('unique-search-50')
@@ -397,7 +408,8 @@ it('loads the complete history for find and copies a selection across unloaded s
 
 it('cancels full-history expansion when changing conversations', async () => {
   const view = await render(<Workspace chat={conversation(1000)} />)
-  await page.getByRole('button', { name: '展开全部历史' }).click()
+  await pressHistoryShortcut('a')
+  await expect.element(page.getByRole('button', { name: '停止展开' })).toBeVisible()
   await view.rerender(<Workspace chat={conversation(1000, 'another-chat')} />)
   await frames(8)
   expect(document.querySelectorAll('[data-message-id]').length).toBeLessThanOrEqual(48)
@@ -593,7 +605,7 @@ it('pins an open historical interaction and keeps the projected answer and messa
   host.notify(answered)
   await frames(4)
   expect(message('assistant-7')).toBe(pinned)
-  await page.getByRole('button', { name: '展开全部历史' }).click()
+  await pressHistoryShortcut('a')
   await expect.poll(() => document.querySelectorAll('[data-segment-placeholder]').length).toBe(0)
   expect(document.querySelectorAll('[data-message-id]').length).toBe(200)
   expect(message('assistant-99')).not.toBeNull()
@@ -737,10 +749,10 @@ it.each(['expanding history', 'debouncing results'] as const)(
       </>
     )
     if (phase === 'debouncing results') {
-      await page.getByRole('button', { name: '展开全部历史' }).click()
+      await pressHistoryShortcut('a')
       await expect.poll(() => document.querySelector('[data-segment-placeholder]')).toBeNull()
     }
-    await page.getByRole('button', { name: '查找对话', exact: true }).click()
+    await pressHistoryShortcut('f')
     const field = page.getByRole('textbox', { name: '搜索对话内容' })
     await field.fill('unique-search-40')
     if (phase === 'expanding history')
@@ -850,7 +862,7 @@ it.runIf(Boolean(import.meta.env.VITE_CONVERSATION_RENDER_BENCH))(
         scrollFrameP95Ms: intervals[Math.floor(intervals.length * 0.95)]
       }
       if (turns === 1000 && import.meta.env.VITE_CONVERSATION_RENDER_BENCH === 'release-search') {
-        document.querySelector<HTMLButtonElement>('[aria-label="查找对话"]')!.click()
+        await pressHistoryShortcut('f')
         await frames(2)
         enterHistoryQuery('unique-search-40')
         const deadline = performance.now() + 20000
@@ -869,9 +881,7 @@ it.runIf(Boolean(import.meta.env.VITE_CONVERSATION_RENDER_BENCH))(
         turns === 1000 &&
         import.meta.env.VITE_CONVERSATION_RENDER_BENCH === 'release-pure'
       ) {
-        document
-          .querySelector<HTMLButtonElement>('.conversation-history-tools__actions button')!
-          .click()
+        await pressHistoryShortcut('a')
         await expect
           .poll(() => document.querySelectorAll('[data-segment-placeholder]').length, {
             timeout: 15000
@@ -886,7 +896,7 @@ it.runIf(Boolean(import.meta.env.VITE_CONVERSATION_RENDER_BENCH))(
         await page.screenshot({
           path: '../../../../../../.cache/performance-audit/round3-render/default-1000.png'
         })
-        await page.getByRole('button', { name: '查找对话', exact: true }).click()
+        await pressHistoryShortcut('f')
         await page.getByRole('textbox', { name: '搜索对话内容' }).fill('unique-search-40')
         await expect
           .poll(() => window.getSelection()?.toString(), { timeout: 15000 })

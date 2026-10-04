@@ -7,7 +7,7 @@ import {
   type ClipboardEvent,
   type RefObject
 } from 'react'
-import { Search, X, ChevronUp, ChevronDown, History } from 'lucide-react'
+import { X, ChevronUp, ChevronDown } from 'lucide-react'
 import { copyTextToClipboard } from '../../components/clipboard'
 import {
   getSelectionInteractionRevision,
@@ -371,20 +371,17 @@ export function useConversationHistoryTools(
     intent.current = null
     setNotice(null)
   }
-  const controls = segments.segmented ? (
+  const showControls = segments.segmented && (open || segments.expanding || Boolean(notice))
+  const controls = showControls ? (
     <div className="conversation-history-tools">
-      <div className="conversation-history-tools__actions">
-        {segments.remaining > 0 && (
-          <button type="button" onClick={segments.expanding ? cancel : segments.expandAll}>
-            <History aria-hidden="true" />
-            {t(segments.expanding ? 'chat.history.cancel' : 'chat.history.expandAll')}
+      {segments.expanding && (
+        <div className="conversation-history-tools__actions">
+          <div role="status">{t('chat.history.expanding')}</div>
+          <button type="button" onClick={cancel}>
+            {t('chat.history.cancel')}
           </button>
-        )}
-        <button type="button" aria-label={t('chat.history.find')} onClick={showSearch}>
-          <Search aria-hidden="true" />
-        </button>
-      </div>
-      {segments.expanding && <div role="status">{t('chat.history.expanding')}</div>}
+        </div>
+      )}
       {notice && <div role="status">{notice}</div>}
       {open && (
         <div className="conversation-history-tools__search">

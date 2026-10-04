@@ -1,8 +1,6 @@
 // English UI translation strings.
 export const enUSTranslations = {
   'chat.history.loadSection': 'Load this history section',
-  'chat.history.expandAll': 'Expand all history',
-  'chat.history.find': 'Find in conversation',
   'chat.history.searchPlaceholder': 'Search conversation',
   'chat.history.expanding': 'Expanding history…',
   'chat.history.cancel': 'Stop expanding',

@@ -1,8 +1,6 @@
 // Italian UI translation strings.
 export const itITTranslations = {
   'chat.history.loadSection': 'Carica questa cronologia',
-  'chat.history.expandAll': 'Espandi tutta la cronologia',
-  'chat.history.find': 'Cerca nella conversazione',
   'chat.history.searchPlaceholder': 'Cerca testo',
   'chat.history.expanding': 'Espansione della cronologia…',
   'chat.history.cancel': 'Interrompi',

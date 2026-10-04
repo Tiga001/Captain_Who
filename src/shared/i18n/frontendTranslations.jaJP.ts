@@ -1,8 +1,6 @@
 // Japanese UI translation strings.
 export const jaJPTranslations = {
   'chat.history.loadSection': 'この履歴を読み込む',
-  'chat.history.expandAll': 'すべての履歴を展開',
-  'chat.history.find': '会話内を検索',
   'chat.history.searchPlaceholder': '会話を検索',
   'chat.history.expanding': '履歴を展開中…',
   'chat.history.cancel': '展開を停止',

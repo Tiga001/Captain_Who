@@ -1,8 +1,6 @@
 // Russian UI translation strings.
 export const ruRUTranslations = {
   'chat.history.loadSection': 'Загрузить эту часть истории',
-  'chat.history.expandAll': 'Развернуть всю историю',
-  'chat.history.find': 'Найти в беседе',
   'chat.history.searchPlaceholder': 'Поиск по беседе',
   'chat.history.expanding': 'Загрузка истории…',
   'chat.history.cancel': 'Остановить',

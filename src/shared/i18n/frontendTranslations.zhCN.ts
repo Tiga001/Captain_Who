@@ -1,8 +1,6 @@
 // Simplified Chinese UI translation strings.
 export const zhCNTranslations = {
   'chat.history.loadSection': '加载这段历史',
-  'chat.history.expandAll': '展开全部历史',
-  'chat.history.find': '查找对话',
   'chat.history.searchPlaceholder': '搜索对话内容',
   'chat.history.expanding': '正在展开历史…',
   'chat.history.cancel': '停止展开',
