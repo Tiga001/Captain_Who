@@ -1,10 +1,10 @@
 ---
 title: 用户指南
-description: 从第一次启动到使用 Agent、Skill、MCP、多智能体和定时任务的完整学习入口。
+description: 从第一次启动到使用 Agent、Skill、MCP、多智能体、组织和定时任务的完整学习入口。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-10-04
 ---
 
 # 用户指南
@@ -26,11 +26,13 @@ Captain Who 是一款**本地优先的桌面 AI 工作助手**：项目授权、
 ### 按功能查找
 
 - [日常使用](everyday-use/README.md)：对话、文件、Git、联网、模型、权限和历史。
-- [能力指南](capabilities/README.md)：Tool、Skill、MCP、Multi-Agent、Scheduled Automation、系统通知、浏览器自动化和 Office 产物。
+- [能力指南](capabilities/README.md)：Tool、Skill、MCP、Multi-Agent、组织、Scheduled Automation、系统通知、浏览器自动化和 Office 产物。
 - [任务教程](tutorials/README.md)：围绕真实目标完成一整套操作。
 - [最佳实践](best-practices/README.md)：更清晰地描述任务、管理大型项目并安全使用 Agent。
 - [参考手册](reference/README.md)：快速查询设置、状态、快捷键、能力边界和术语。
 - [常见问题](../support/faq.md)：从现象快速找到解决方法。
+
+当前开发版本新增的[组织](capabilities/organizations.md)将独立对话连接成邮件协作网络，取代旧工作流功能；按[组织教程](tutorials/create-an-organization.md)上手。该部分不代表所有已发布安装包都包含该能力相同能力。
 
 ### 从使用走向理解
 

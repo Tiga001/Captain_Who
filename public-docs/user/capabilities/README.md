@@ -1,27 +1,30 @@
 ---
 title: 能力指南
-description: 了解 Tool、Skill、MCP、Multi-Agent、Scheduled Automation、通知、浏览器与 Office 产物能力。
+description: 了解 Tool、Skill、MCP、Multi-Agent、组织、Scheduled Automation、通知、浏览器与 Office 产物能力。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-10-04
 ---
 
 # 能力指南
 
 Captain Who 的能力由几层组成。先区分它们，能避免把“有说明”“有连接”和“已授权执行”混为一谈。
 
-| 能力                                          | 直观理解                         | 你主要做什么                     |
-| --------------------------------------------- | -------------------------------- | -------------------------------- |
-| [Tool](tools.md)                              | Agent 的手和眼睛                 | 给出目标，核对工具活动和审批     |
-| [人机交互](human-interaction.md)              | Agent 向你请求信息、判断或协作   | 回答、跳过或忽略非阻塞问题       |
-| [Skill](skills.md)                            | 一套任务教材和配套资源           | 选择、安装、启用或更新 Skill     |
-| [MCP](mcp.md)                                 | 连接外部工具的通用插座           | 配置本地 Server，授权启动和调用  |
-| [Multi-Agent](multi-agent.md)                 | 由根 Agent 管理的协作小组        | 定义分工，观察子 Agent，处理审批 |
-| [Scheduled Automation](automations.md)        | 定时启动根 Agent 任务            | 设置计划、目标、权限和通知       |
-| [系统通知](notifications.md)                  | 普通任务与 Automation 状态提醒   | 配置条件、声音和内容预览         |
-| [浏览器自动化](browser-automation.md)         | Agent 控制受管网页               | 开启能力，准备页面，审批敏感动作 |
-| [Office 与 Artifact](artifacts-and-office.md) | 处理文档、表格、演示、PDF 和图片 | 选择 Skill、提供输入并核对输出   |
+| 能力                                          | 直观理解                         | 你主要做什么                         |
+| --------------------------------------------- | -------------------------------- | ------------------------------------ |
+| [Tool](tools.md)                              | Agent 的手和眼睛                 | 给出目标，核对工具活动和审批         |
+| [人机交互](human-interaction.md)              | Agent 向你请求信息、判断或协作   | 回答、跳过或忽略非阻塞问题           |
+| [Skill](skills.md)                            | 一套任务教材和配套资源           | 选择、安装、启用或更新 Skill         |
+| [MCP](mcp.md)                                 | 连接外部工具的通用插座           | 配置本地 Server，授权启动和调用      |
+| [Multi-Agent](multi-agent.md)                 | 由根 Agent 管理的协作小组        | 定义分工，观察子 Agent，处理审批     |
+| [组织](organizations.md)                      | 独立对话组成的邮件协作网络       | 配置成员职责、绑定对话并查看组织看板 |
+| [Scheduled Automation](automations.md)        | 定时启动根 Agent 任务            | 设置计划、目标、权限和通知           |
+| [系统通知](notifications.md)                  | 普通任务与 Automation 状态提醒   | 配置条件、声音和内容预览             |
+| [浏览器自动化](browser-automation.md)         | Agent 控制受管网页               | 开启能力，准备页面，审批敏感动作     |
+| [Office 与 Artifact](artifacts-and-office.md) | 处理文档、表格、演示、PDF 和图片 | 选择 Skill、提供输入并核对输出       |
+
+组织指南描述当前开发版本中取代旧工作流的能力，不代表所有已发布安装包都包含该能力；请以指南的版本范围与实际界面为准。
 
 ## 能力如何组合
 
@@ -42,6 +45,7 @@ Captain Who 的能力由几层组成。先区分它们，能避免把“有说�
 - 需要特定方法、模板或 Office 工作流：用 [Skill](skills.md)。
 - 需要连接第三方本地工具：用 [MCP](mcp.md)。
 - 子任务可以独立并行：用 [Multi-Agent](multi-agent.md)。
+- 独立成员要持续保留职责并按需互相发信：用[组织](organizations.md)。
 - 同一任务需要周期重复：用 [Scheduled Automation](automations.md)。
 
 进一步对比见[选择合适的能力](../best-practices/choosing-capabilities.md)。

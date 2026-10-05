@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # IPC 与协议
@@ -124,7 +124,8 @@ Electron 对 handler 抛出的 Error 通常只可靠保留 message。需要结�
 
 ```ts
 type HostInvocationResult<T> =
-  { ok: true; value: T } | { ok: false; error: { message: string; code?: number; data?: unknown } }
+  | { ok: true; value: T }
+  | { ok: false; error: { message: string; code?: number; data?: unknown } }
 ```
 
 Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data，Renderer client 使用 `unwrapHostInvocation()` 还原 `HostInvocationError`。MCP、Skill、图片生成、部分 Agent 与 Artifact 操作依赖这种结构化错误进行 revision refresh、重试或明确的不重试处理。
@@ -203,9 +204,11 @@ readFileChange / getFileChangeDiff / getFileChangeHistoryDiff
 
 `AgentHostApi.requestWorkflows` 经 `HOST_CHANNELS.agent.workflows` 转发到 `agent.workflows.request`，返回 `HostInvocationResult<WorkflowResponse>`；这是受信 UI 管理 API，不是模型工具或组织执行入口。[TypeScript parser](../../packages/protocol/src/workflows.ts)、[Rust transport](../../crates/core-server/src/transport/workflow_rpc.rs) 与 [fixture](../../packages/protocol/fixtures/workflow-definition-v1.json)共同约束 definition schema v1 和严格判别字段。
 
-模板操作为 `list / validate / save / delete / duplicate / saveDraft / deleteDraft`；实例操作为 `listInstances / saveInstance / setInstanceEnabled / deleteInstance`。模板是否可选由后端实时校验派生，已经没有模板 `setEnabled` 操作；实例 `enabled` 是独立持久状态。更新使用 revision/CAS，实例保存另有 request id 幂等保护，修改在用模板需要绑定实际实例使用关系的确认信息。请求不能携带前端自行声明的 running 状态绕过保护。
+模板操作为 `list / validate / save / delete / duplicate / saveDraft / deleteDraft`；实例操作为 `listInstances / saveInstance / setInstanceEnabled / deleteInstance`。模板是否可选由后端实时校验派生，已经没有模板 `setEnabled` 操作；实例 `enabled` 是独立持久状态。更新使用 revision/CAS；实例保存及启停的响应丢失重试以相同语义请求和预期 revision 识别已提交结果，不接受模型或前端伪造的 request ID、运行状态或成员身份。实例保存完整独立定义，模板只保留来源信息；没有模板使用关系确认或 usage revision。修改已有实例保留启停状态，模板编辑或删除不改变实例。
 
-当前响应投影目录、校验问题、隔离的损坏记录、实例与使用关系；活动监视复用 Agent/协作事件和权威树/实例读取，收发邮件通过独立运行事件更新看板。定义仅含成员与布局，不含固定连线或逻辑门；开启空邮箱不会启动模型。完整状态与事务边界见[组织定义与画布编辑](../subsystems/workflow-authoring.md)。
+当前响应投影模板目录、校验问题、隔离的损坏记录、独立实例、编辑草稿及受影响对话；活动监视复用 Agent/协作事件和权威树/实例读取，收发邮件通过独立运行事件更新看板。定义含公共背景、成员职责/模型/权限、职级/管理身份、部门树与布局，不含固定连线或逻辑门；开启空邮箱不会启动模型。
+
+模型侧使用 `organization_send`、`organization_get_state`、`organization_get_mailbox`、`organization_accept`、`organization_complete`、`organization_recall`，管理员另有 `organization_edit`。这些动态工具通过可信 Run 身份复验当前资格，与受信 UI 管理 RPC 的授权面不同；语义参数使用成员姓名、部门完整路径及邮件 ID，不允许模型填写内部绑定身份。实现真源见[动态工具扩展](../../crates/core/src/runtime/extensions/workflow.rs)，完整状态与事务边界见[组织邮件网络](../subsystems/organizations.md)。
 
 ## 输入引用与工作区来源
 
@@ -318,7 +321,7 @@ Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`�
 - [ ] Browser/FileChange 变更同步核对 exact owner/instance/revision、分页预算、path-free projection 和 history-vs-live query。
 - [ ] Automation event/resync 的 sequence、startup replay、unsubscribe、Renderer ready handshake 和 authoritative reload 均有测试。
 - [ ] 对应架构或子系统文档已更新。
-- [ ] Organization 的严格字段、CAS、实例 request id、使用确认、归档/颜色约束在双端保持一致；未把定义 API 暴露成模型执行能力。
+- [ ] Organization 的严格字段、CAS、相同语义请求的重试、独立实例/成员身份及归档/颜色约束在双端保持一致；未把受信 UI 管理 API 暴露成模型授权。
 
 ## 当前限制
 

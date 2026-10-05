@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # 威胁模型
@@ -18,6 +18,7 @@ last_verified: 2026-09-28
 - 用户工作区文件、FileChange 草稿/审计、附件、下载和生成制品；
 - 模型、搜索、图片生成及 MCP 相关凭据；
 - 对话、Trace、审批、Continuation、Agent 树和本地设置；
+- 组织独立实例定义、成员身份/权限/会话绑定、应用内邮件及投递/人事回执；
 - 普通根任务与 Scheduled Automation 的通知 event/batch，以及 Automation 的 prompt、schedule、目标、冻结权限、Run 与 attention；
 - 用户授权的命令、文件写入、浏览器目标和外部工具副作用；
 - 应用与受管运行时的完整性、签名和冻结 receipt。
@@ -76,14 +77,26 @@ alias 或手工修改 SQLite 也不能作为绕过正式副作用边界的入口
 
 `workspace.instructions` 来自冻结根目录中的 `AGENTS.override.md`/`AGENTS.md`，每次请求与预览共用有界读取器，
 重新验证目录身份并拒绝 leaf symlink。指令内容仍是不可信项目数据，不授予 Tool 权限，也不等同于 Skill 激活。
-组织图、模板可用性、实例启用和编辑草稿由 Rust Core 持久校验；可用模型、CAS 与绑定关系必须在 Host 重验。
-配置保存/启用不能作为已执行节点、外部副作用成功或用户批准的证据。
+组织模板、独立实例定义、实例启用和编辑草稿由 Rust Core 持久校验；可用模型、CAS 与绑定关系必须在 Host 重验。
+当前产品以组织和成员间应用内邮件替代图工作流；保留的 `workflow_*` 路径、表名、RPC 与 `WorkflowDelivery`
+Trace 是兼容标识。保存模板不执行成员任务，启用实例可让符合条件的待处理邮件进入调度；配置状态不能作为外部副作用成功或用户批准的证据。
 
-组织实例保存独立定义；模板修改不改变已有组织权限。人员管理采用独立动态能力 `organization.management`，
+组织实例保存独立定义；模板修改或删除不改变已有组织定义、绑定与权限。人员管理采用独立动态能力 `organization.management`，
 仅当前组织/部门管理员挂载。每次写入在事务中复核成员 incarnation、有效 Run、组织版本、部门子树与调整前后的严格低职级，
 不可操作自己或凭高职级自行取得管理权。移除/重新加入产生不同身份，旧 checkpoint 不恢复资格；其他成员的变化不撤销未变成员身份。
 重放已提交人事回执只返回同 conversation/run/tool call 的原结果，不再执行副作用，也不恢复已撤销的管理权限。
 `organization_edit` 支持原地编辑成员与部门。授予管理身份、移动部门及成员均重新验证权限范围；部门管理员不能授予组织管理员身份。新建或编辑成员的权限逐项受调用者本轮实际有效权限限制，不信任模型输入、可变输入框选择或权限模式名称。权限不可表示或超限时拒绝，不静默改变请求。独立对话保持休眠直到收到任务邮件；成员原地编辑保留对话和邮箱，移除不删除聊天历史。
+
+组织邮件正文同样是不可信输入，不能充当审批；组织不会自动共享成员的完整会话上下文。发送者身份由 Host 绑定 conversation/run/tool call，
+成员姓名按本次请求的目录解析为稳定身份，并在写入事务中复核当前发送资格、收件成员 incarnation、独立会话绑定及回复来源；
+不能凭正文中的姓名、职位或旧目录给已替换的成员发送新邮件。同一调用的持久回执可返回原结果，但不能重复发送或重新获得权限。
+收件会话忙时邮件保持 pending，不因发送完成就向正在运行的 Turn 自动注入；运行中的成员可显式认领邮件，随后在安全采样边界接收投递。
+邮件不传递发送者的权限；自动启动的收件 Turn 使用收件会话的模型与权限配置，并重新经过 Host admission。
+投递与处理分别依据 durable Trace 和邮箱/Run 事实；processed 不证明外部副作用成功，撤回也不能撤销已经发生的外部动作。
+停止会话会暂停邮箱，停用组织只阻止新的合格投递而不取消已有 Run；需核对实际运行和审批状态。
+详见[组织](../subsystems/organizations.md)、
+[`workflow_execution_repository`](../../crates/core/src/storage/workflow_execution_repository) 与
+[`workflow_execution.rs`](../../crates/core-server/src/application/agent/workflow_execution.rs)。
 
 ### 账号与新回合许可
 
@@ -182,10 +195,16 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed。当前 schema v62 只接受明确的 exact v50–v61 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
-v59→v60 只按既有 FTS 顺序元数据回填历史顺序投影，不重排历史或改写正文。启动迁移与显式 reset 是不同边界：reset 当前可从 exact v60 提取 allowlist，旧源恢复仍受固定目标版本 gate
-拒绝。不得用手工改 `user_version`、删表或默默丢弃配置绕过。reset 不保留 notification facts、Browser history/download
-records、Agent templates、组织模板/实例/草稿、本机 Token 统计和 FileChange 运行/审计状态。详见
+fail closed。当前 schema v66 接受明确的 exact v50–v65 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
+v59→v60 只按既有 FTS 顺序元数据回填历史顺序投影，不重排历史或改写正文；v63→v64 新建独立组织邮箱，
+不转换旧图执行记录；v64→v65 复制独立实例定义并建立成员 incarnation，拒绝孤立实例；v65→v66 删除旧
+`workflow_execution_*` 表及记录，保留当前组织邮箱、人员回执和聊天。启动升级并不承诺保留所有旧业务数据，升级前须备份。
+真源见 [`migrations.rs`](../../crates/core/src/storage/migrations.rs)。
+
+启动迁移与显式 reset 是不同边界：reset 当前可从 exact v66 提取 allowlist；旧 v35–v48 与私有 v33 backup
+的配置恢复仍受 target v49 gate 拒绝，v49–v65 不在旧配置来源 allowlist 中。不得用手工改 `user_version`、删表或默默丢弃配置绕过。
+reset 不保留 notification facts、Browser history/download records、Agent templates、组织模板/实例定义/成员身份/草稿、
+组织邮件/投递/暂停/Run/回执与人员变更回执、本机 Token 统计和 FileChange 运行/审计状态。详见
 [恢复 Runbook](../operations/recovery-runbook.md)。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管
@@ -210,6 +229,7 @@ records、Agent templates、组织模板/实例/草稿、本机 Token 统计和 
 
 - 不可信输入在每个跨进程边界是否严格解析并限长；
 - 权限是否绑定精确主体、任务、目标、revision 和有效期；
+- 组织邮件与人事变更是否复核当前成员 incarnation、独立会话/Run 和收件身份，且回执重放不复活权限、不重复投递；
 - 副作用发生前后能否区分安全重试与未知结果；
 - 取消、超时、崩溃和重启是否会导致重复执行或权限升级；
 - Scheduled Automation 是否冻结精确权限、在 admission 重检 revocation，并明确 pause 对 active Run 无效；

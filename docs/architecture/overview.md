@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # 系统架构总览
@@ -97,11 +97,13 @@ transport/application → adapters → core/protocol
   等持久事实来源。
 - 当前 canonical schema 为 **v66**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v66 删除已停用的旧工作流执行表，保留组织邮件与对话；v65 持久保存独立组织配置、成员身份与人员回执；v64 新增独立邮件网络表、不转换旧工作流；v63 增加长粘贴来源元数据；v62 增加组织 pending sequence 部分索引；v61 增加 Trace 增量发布的持久修订围栏和待处理交互摘要索引；v60 增加普通历史顺序投影与分页索引；v59 增加组织新建对话的默认项目；v58 增加组织运行持久事实与 WorkflowDelivery Trace；v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局组织实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加组织定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 空库原子创建 v60；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为组织实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留历史，增加组织持久消息、输入与事件、来源及 Run 身份并支持 WorkflowDelivery Trace；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 保留定义增加默认关闭的模板 enabled 历史字段；exact v53 保留历史增加组织定义表；exact v52 保留历史新增活动明细且不回填旧活动；exact v51 原样保留历史重建 Mailbox 正文约束后依次升 v52、v53、v54、v55、v56、v57、v58、v59、v60。exact v50 仍须协作事件日志为空，依次升级至 v51、v52、v53、v54、v55、v56、v57、v58、v59、v60。不转换旧协作活动；仍有旧事件时返回 `development_storage_schema_reset_required`，由用户先清理历史或显式开发重建。v49 及更早版本、未知 catalog 或外键不匹配也拒绝升级，启动时不自动清空数据库。
+- 空库原子创建当前 v66；exact v51–v65 按连续迁移升级，exact v50 还要求协作事件日志为空。每步校验 catalog fingerprint 与外键；v49 及更早版本、未知 catalog、外键违规或仍有旧协作事件的 v50 均拒绝升级。v64 的组织邮箱不会转换旧图执行数据，v65 将实例配置与模板解耦，v66 仅清除已退役的图执行表；组织邮件和聊天历史保留。逐版边界见[存储与数据生命周期](storage-and-data-lifecycle.md)，启动失败不会自动清空数据库。
 
 上述 reset-required 是拒绝启动的错误类别，不保证当前重置工具能恢复该旧库配置。旧源恢复仍受固定目标版本 gate 限制；处理旧历史须使用受支持的旧版应用并先备份，或保留原库、使用隔离数据根继续开发，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。
 
-组织模板通过校验后自动可选，没有手动模板开关。实例的 `enabled` 独立持久化，以版本校验更新；确认新建或编辑实例会将其开启。仅开启实例占用颜色并阻止绑定对话归档，关闭保留绑定和对话、隐藏颜色标记且不取消当前 Run。正式发布模板更新、绑定对话归档或删除会关闭实例并要求复核；读取时模板校验失效只影响模板可选状态。组织通过自由邮件通信，空闲成员按顺序接收一封邮件唤醒，详见[组织定义与画布编辑](../subsystems/workflow-authoring.md)。
+当前组织已替代旧图工作流：成员是独立根对话，按职责自由发信，布局不决定执行顺序，没有永久连线、逻辑门或用户入口节点。组织模板通过校验后自动可选，没有手动模板开关。激活时复制完整定义并创建尚未绑定的成员对话；实例默认开启，后续编辑保留用户设置的启停状态。模板更新、删除或不可用不会改变已有实例。
+
+实例 `enabled`、当前对话活动与模板可用性是不同事实。仅开启实例占用颜色并阻止绑定对话归档；停用保留绑定与对话，不取消当前 Run，但阻止新发送和新投递。绑定会话移除或改绑只更新相关关系和成员身份，不使整个组织因模板关系而失效。重新开启仍校验实例自己的定义、模型、完整绑定、对话状态和颜色占用。成员与部门可在线编辑，管理员权限受管理范围与严格低职级约束；普通成员资格不扩展文件或工具权限。详见[组织邮件网络](../subsystems/organizations.md)。
 
 ### 当前开发能力边界
 
@@ -111,7 +113,7 @@ transport/application → adapters → core/protocol
 | 多文件夹工作区 | 项目主/辅助根、每 Run 冻结成员和目录身份、根部 AGENTS.md           | 修改项目只影响后续 Run；历史文件操作仍使用原冻结根                   |
 | 输入与续接     | managed 附件、文件夹引用、工作区提及、持久草稿/队列与引导          | 只带附件或文件夹也可提交；队列设置与当前 Run 独立                    |
 | Multi-Agent    | 根 Agent 委派、Mailbox、Wake、直属观察与实时活动投影               | 结果通过 Mailbox 交付；展示流不能倒写成新的用户消息                  |
-| Organization   | 成员画布、独立实例、对话绑定、自由邮件和实时看板                   | 开启空邮箱不会启动模型；新邮件可唤醒空闲节点，运行中通过工具主动领取 |
+| Organization   | 成员/部门、职级与管理身份、独立实例、自由邮件和实时看板            | 开启空邮箱不会启动模型；新邮件可唤醒空闲节点，运行中通过工具主动领取 |
 | 账号与许可     | Main 拥有账号、许可缓存和短期准入租约                              | 新根 Turn 需要准入；退出登录或许可变化不等于取消已运行任务           |
 
 各能力的源码与专项测试入口见对应子系统文档；本表描述当前工作树，不表示发行版本已包含未提交实现。
@@ -152,7 +154,7 @@ transport/application → adapters → core/protocol
 - [MCP 子系统](../subsystems/mcp.md)
 - [FileChange](../subsystems/file-change.md)
 - [对话输入与附件](../subsystems/conversation-inputs.md)
-- [组织定义与实例](../subsystems/workflow-authoring.md)
+- [组织定义与实例](../subsystems/organizations.md)
 - [工作区指令](../subsystems/workspace-instructions.md)
 - [账号与许可](../subsystems/local-token-usage-and-license.md)
 - [浏览器与自动化](../subsystems/browser-automation.md)

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # 故障排查
@@ -97,7 +97,7 @@ Profile/runtime identity 和凭据可用性检查；在设置中修复并保存�
 - 密码登录提示通用服务错误时，核对 CloudBase 密码 provider 是否启用，不把它当作密码错误。验证码发送失败可立即重试；成功接受后才有 60 秒本地冷却。排障仅记录安全 SDK code/request ID，不采集密码、验证码或 token。
 - 附件卡处于导入中时先等待导入终态；草稿/队列保存的是 durable import 引用，重启后仍应复用原身份。若报 missing/integrity 错误，保留草稿并重新选择源文件，不把缺失引用当作空附件提交。目录引用是只读授权，原目录替换或丢失时必须重新选择。
 - 只有附件或目录引用的消息和 Guidance 是有效输入，空文本不能单独成为拒绝原因。历史消息、队列与 Guidance 附件展示应按权威输入恢复，详见[会话输入](../subsystems/conversation-inputs.md)。
-- 组织保存成功不表示节点已执行。实例需复核、模板不可用、绑定会话归档/删除或 revision conflict 时先刷新权威配置；启用实例关联会话无法归档时先暂停实例。不要通过删除绑定表修复；详见[组织编排](../subsystems/workflow-authoring.md)。
+- 组织保存成功不表示成员已开始工作。模板不可用只影响新建选择，不改变已激活实例；已有组织遇到模型不可用、绑定会话归档/删除或 revision conflict 时，刷新并修复实例自己的配置。启用组织中的对话不能归档，应先停用组织；邮件积压还需检查成员停止屏障、审批/交互及执行容量。不要通过删除绑定表或改邮件状态修复，详见[组织邮件与分层协作](../subsystems/organizations.md)。
 
 ## 系统通知未出现、语言不对或重复
 

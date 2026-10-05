@@ -169,16 +169,23 @@ cargo test --locked -p mycopilot-core folder_input
 cargo test --locked -p mycopilot-core-server workspace_instructions --bin core-server
 ```
 
-### 组织配置
+### 组织配置与邮件协作
 
-组织测试分图契约/校验、SQLite CAS 与生命周期、Main transport、Renderer 编辑和实例管理；配置测试不得把保存、
-启用或监控投影当成图执行通过。现有工作区中新增的实例启用/归档保护还需覆盖 root/child Conversation、绑定冲突、
-模板变更导致停用与 `needsReview`，详见[组织编排](../subsystems/workflow-authoring.md)。
+组织测试分定义/部门校验、SQLite CAS 与生命周期、Host transport、动态工具权限、持久邮件和 Renderer 编辑/看板。
+配置保存、激活和启停测试不能替代真实独立根 Turn 的邮件投递验证；旧图工作流的连线、逻辑门和模板变更停用预期不再适用。
+
+重点覆盖模板编辑/删除后的实例独立性、修改保留启停状态、在线编辑与并发冲突、独立对话唯一绑定和跨项目绑定、
+启用实例的归档保护、成员移除/改绑后旧身份永不恢复、管理员低职级和部门子树权限、原子批量编辑及幂等回执。
+邮件需覆盖查询不领取、空闲 FIFO 唤醒、轮内主动接手、领取/撤回竞争、终态原子结算、手动停止屏障及重启恢复；
+看板需覆盖部门布局、动态事件去重、六态邮箱和当前连续运行时长，详见[组织邮件网络](../subsystems/organizations.md)。
 
 ```bash
 pnpm exec vitest run --project unit packages/protocol/src/workflows.test.ts src/main/core/coreServer.workflows.test.ts
 pnpm exec vitest run --project browser src/renderer/src/app/__tests__/WorkflowSettings.browser.test.tsx src/renderer/src/app/__tests__/WorkflowsPage.browser.test.tsx src/renderer/src/app/__tests__/useWorkflowWorkspace.browser.test.tsx
 cargo test --locked -p mycopilot-core workflow
+cargo test --locked -p mycopilot-core organization
+cargo test --locked -p mycopilot-core-server --bin core-server workflow_execution
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/WorkflowMailNetwork.browser.test.tsx src/renderer/src/app/__tests__/WorkflowTemplateDepartments.browser.test.tsx src/renderer/src/app/__tests__/WorkflowTemplatePersonnel.browser.test.tsx
 ```
 
 schema 变更要独立核对启动升级和开发 reset：前者支持的旧版本不自动成为后者支持的配置来源。使用临时数据库检查

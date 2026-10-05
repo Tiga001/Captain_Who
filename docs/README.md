@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # Captain Who 开发文档
@@ -43,7 +43,7 @@ fixture 和测试为准。
 
 | 文档                                                                 | 内容                                                     |
 | -------------------------------------------------------------------- | -------------------------------------------------------- |
-| [组织定义与实例](subsystems/workflow-authoring.md)                   | 成员配置、自由邮件、休眠唤醒、工具与实时看板             |
+| [组织邮件网络](subsystems/organizations.md)                          | 独立实例、部门职级、管理权限、邮件与实时看板             |
 | [对话输入与附件](subsystems/conversation-inputs.md)                  | 分块导入、文件夹引用、工作区提及、草稿、队列与引导       |
 | [账号登录与云端资料](subsystems/account-login.md)                    | 登录门禁、会话存储、退出登录与运行中任务的边界           |
 | [本机 Token 与账号许可](subsystems/local-token-usage-and-license.md) | 本机统计、许可缓存、Host 准入租约与恢复约束              |
@@ -88,15 +88,16 @@ fixture 和测试为准。
 ## 决策与历史
 
 - [ADR 索引与模板](adr/README.md)：记录仍会影响实现的架构决策。
+- [旧组织文档链接入口](subsystems/workflow-authoring.md)：仅兼容已有链接，当前内容已迁移。
 - [历史文档](archive/README.md)：只保留历史背景，不作为当前实现依据。
 - [多智能体分轮落地记录](archive/multi-agent-rollout-history.md)：原六轮实施路线的历史归档。
 - [人机交互分轮交付历史](archive/human-interaction-rollout-history.md)：已完成的五轮实施路线与后续修订背景。
 
 ## 文档状态
 
-组织子系统按当前代码工作树描述成员配置、邮件收发、休眠唤醒和实时看板；
+组织子系统按当前代码描述独立实例、成员/部门、职级与管理权限、邮件收发、休眠唤醒和实时看板；
 这是开发实现快照，不表示这些能力已经随安装包发布。各页面只在核验其内容后更新 `last_verified`。
-组织邮件网络与现有 Multi-Agent、Scheduled Automation 是不同子系统；成员是独立根对话，不依赖固定连线或逻辑门。
+组织已替代旧图工作流；它与现有 Multi-Agent、Scheduled Automation 是不同子系统。成员是独立根对话，不依赖固定连线或逻辑门；文档路径和代码中的 `workflow_*` 继续作为实现标识保留。
 
 - `current`：描述当前代码，可以作为开发和评审依据。
 - `draft`：尚未成为工程约束，不得据此宣称功能已实现。

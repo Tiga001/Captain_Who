@@ -4,7 +4,7 @@ description: 理解根 Agent、子 Agent、任务树、消息与并行协作是�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-10-04
 ---
 
 # Multi-Agent 原理
@@ -20,7 +20,7 @@ Multi-Agent 不是让多个模型随意聊天，而是让一个根 Agent 把可�
 └── 子 Agent：后端调查
 ```
 
-每个子 Agent 有自己的任务名、模型快照和独立对话；它只属于一个父节点。当前结构不是通用 DAG、图形工作流或自动规划器。
+每个子 Agent 有自己的任务名、模型快照和独立对话；它只属于一个父节点。Multi-Agent 子任务结构不是通用 DAG 或自动规划器。当前开发版本另外提供[组织](../capabilities/organizations.md)：成员是独立根对话，按需用邮件通信，与这里的父子任务树不同；不代表所有已发布安装包都包含该能力。
 
 ## 根 Agent 做什么
 

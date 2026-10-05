@@ -4,7 +4,7 @@ description: 用简明语言解释 Captain Who 用户文档中的核心概念。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-10-04
 ---
 
 # 术语表
@@ -96,6 +96,18 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 ## Multi-Agent
 
 根 Agent 通过父子树把独立任务交给子 Agent，并通过持久消息和后续任务协调结果的机制。
+
+## Organization（组织）
+
+当前开发版本中，由共享背景、成员职责和独立根对话组成的邮件协作网络，取代旧工作流功能。成员可直接交互，不属于同一棵子 Agent 树；画布不决定执行顺序。请以对应版本发行说明和实际入口为准。详见[组织](../capabilities/organizations.md)。
+
+## 组织模板与已激活组织
+
+组织模板是可复用配置；激活时为组织保存独立副本并绑定成员对话，未绑定成员自动创建对话。之后模板修改或删除不影响已有组织。
+
+## 组织邮件
+
+成员之间的应用内协作消息，不是发送到外部邮箱的电子邮件。待处理邮件可唤醒空闲成员；已处理表示处理回合结束，不保证结果正确。
 
 ## Outcome Unknown（结果未知）
 

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # Multi-Agent 发布门禁
@@ -130,15 +130,17 @@ v60 的专项存储回归还需证明：exact v59 的 message / trace_item 顺�
 
 稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v66；仅从受支持的 exact catalog 恢复 allowlisted 配置与 credential reference。该显式 reset 清空聊天、运行、本机 Token 统计、Run/Wake 冻结策略和项目；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。启动时不会自动执行 reset，也不转换旧聊天、运行或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
 
-涉及 v57 组织生命周期时，还需保留组织专项回归证据，不能用本门禁的协作运行时测试代替：
+涉及组织生命周期时，还需保留当前独立实例与成员身份的专项回归证据，不能用本门禁的父子 Agent 协作测试代替：
 
 - 模板可用性仅由当前 `issues` 是否为空派生，历史 enabled 字段不控制可用性，界面没有模板开关。
-- 实例 enabled 持久化、默认开启；新建和编辑确认均开启，`setInstanceEnabled` 使用 revision 校验，失败不改变实例。
+- 实例 enabled 持久化、新建默认开启；编辑保留启停状态，`setInstanceEnabled` 使用 revision 校验，失败不改变实例。
 - 仅开启实例独占颜色且比较忽略大小写；关闭释放颜色，重新开启或确认配置时重新检查占用。
-- 开启实例中的对话禁止归档；批量归档先检查全批目标，每次存储写入仍由触发器保护，不宣称跨请求原子性。关闭后归档或删除绑定对话使实例保持关闭并标记 `needsReview`。
-- 正式发布模板变更将关联实例关闭并要求复核；读取时校验失效仅使模板不可选，重新开启实例仍须模板有效。关闭不取消活跃 Run，也不删除绑定或对话。
+- 开启实例中的对话禁止归档；批量归档先检查全批目标，每次存储写入仍由触发器保护，不宣称跨请求原子性。停用后可归档，移除或改绑更新相关关系和组织 revision；重新开启验证完整绑定及对话状态，不依赖旧 `needsReview` 流程。
+- 实例保存完整独立定义；模板更新、删除或不可用不改变实例，重新开启以实例自己的定义、模型和绑定为准。停用不取消活跃 Run，也不删除绑定或对话。
+- 在线编辑可以在其他成员运行时提交；成员身份在不改绑时保持，移除或重加不得复活旧 Run 权限；管理员只可编辑管理范围内严格低职级成员，不能编辑自己或间接扩权。
+- exact v65 → v66 清理仅限 7 张旧图执行表；组织邮箱、人员回执和聊天保持，失败原子回滚。
 
-此处只验证模板、实例、颜色及归档管理；组织邮件收发、主动领取、终态结算与休眠唤醒还需专项回归，见[组织邮件网络](../subsystems/workflow-authoring.md)。
+此处只列模板、实例、身份、管理权限及归档门禁；组织邮件收发、主动领取、终态结算与休眠唤醒还需专项回归，见[组织邮件网络](../subsystems/organizations.md)。
 
 ## 7. 发布所需的组合证据
 

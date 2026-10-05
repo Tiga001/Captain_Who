@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # 仓库结构
@@ -63,8 +63,8 @@ app -> features -> components -> config / host / protocol
 
 - `runtime`、`llm`、`context`：模型运行、Provider 与上下文；
 - `tools`、`file_change`、`command`、`skills`：Agent 能力、FileChange 事务与授权，包括 Automation 专用 `automation_report`；
-- `storage`、`conversation_trace`、`world_state`：持久化与恢复真源，包括 Automation、workflow、模型可用性投影与受管附件导入；
-- `workspace`、`workspace_instructions`：冻结的多目录工作区与根目录指令发现；`workflow`、`workflow_management`：组织图定义、校验与实例配置；
+- `storage`、`conversation_trace`、`world_state`：持久化与恢复真源，包括 Automation、组织邮件与成员身份、模型可用性投影与受管附件导入；
+- `workspace`、`workspace_instructions`：冻结的多目录工作区与根目录指令发现；`workflow`、`workflow_management`：组织定义、校验与独立实例配置；`organization_personnel`：成员/部门编辑与管理权限；
 - `office`、`artifact_runtime`、`image_generation`、`git_review`、`browser_downloads`：专项能力；
 - `protocol`：依赖 Rust Core 概念的运行时模型，不属于跨语言 transport DTO。
 
