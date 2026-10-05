@@ -56,5 +56,6 @@ pub(crate) use model_tool_result_gate::{
 };
 pub use state::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
+    AgentPreparedConversationHistory,
 };
 pub(crate) use trace_renderer::{terminal_record_needed, ConversationTraceRenderer};

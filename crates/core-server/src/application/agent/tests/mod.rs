@@ -54,6 +54,8 @@ mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
 mod office;
 mod pending_actions;
+mod prepared_history;
+mod prepared_history_continuous_send;
 mod provider_profiles;
 mod provider_runtime_capability_boundary;
 mod provider_transition;

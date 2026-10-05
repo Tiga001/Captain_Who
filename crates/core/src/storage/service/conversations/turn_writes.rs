@@ -109,6 +109,7 @@ impl StorageService {
                 None,
                 check_execution_access,
                 None,
+                None,
             )?;
         if !matches!(outcome, super::ConversationTurnRewriteBeginOutcome::Started) {
             return Err(
@@ -140,6 +141,38 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
         check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+    ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
+        self.append_conversation_and_begin_turn_with_history_version(
+            conversation,
+            expected_revision,
+            trusted_wake,
+            permission_source,
+            preloaded_agent_message_ids,
+            new_messages,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            check_execution_access,
+            None,
+        )
+    }
+
+    /// Admits a prepared history only if its trace, summary and attachment evidence still matches
+    /// within the same write transaction that persists the new messages.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_conversation_and_begin_turn_with_history_version(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        new_messages: &[ChatMessageRecord],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+        history_version: Option<&ConversationHistoryVersion>,
     ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
         let valid_messages = match new_messages {
             [assistant] => {
@@ -173,6 +206,7 @@ impl StorageService {
             None,
             check_execution_access,
             Some(new_messages),
+            history_version,
         )?;
         Ok((conversation, permissions))
     }
@@ -218,6 +252,7 @@ impl StorageService {
                 Some((automation_admission, check_execution_access)),
                 None,
                 Some(check_execution_access),
+                None,
                 None,
             )?;
         if !matches!(
@@ -309,6 +344,7 @@ impl StorageService {
                 None,
                 check_execution_access,
                 None,
+                None,
             )?;
         if automation_outcome.is_some() {
             return Err("rewrite admission unexpectedly consumed an automation claim".to_string());
@@ -335,6 +371,7 @@ impl StorageService {
         >,
         check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
         new_messages: Option<&[ChatMessageRecord]>,
+        history_version: Option<&ConversationHistoryVersion>,
     ) -> Result<ConversationTurnAdmissionResult, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
@@ -539,6 +576,19 @@ impl StorageService {
                 "Conversation changed after Turn preparation began; retry from fresh history."
                     .to_string(),
             );
+        }
+        if let Some(expected) = history_version {
+            let current = super::history_snapshot::history_version_in_connection(
+                &transaction,
+                &conversation.id,
+                &self.state.instance_identity,
+            )?;
+            if current.as_ref().map(|(version, _)| version) != Some(expected) {
+                return Err(
+                    "Conversation changed after Turn preparation began; retry from fresh history."
+                        .into(),
+                );
+            }
         }
         let active_run = transaction
             .query_row(
@@ -876,6 +926,7 @@ impl StorageService {
                 None,
                 Some(admission),
                 check_execution_access,
+                None,
                 None,
             )?;
         Ok((

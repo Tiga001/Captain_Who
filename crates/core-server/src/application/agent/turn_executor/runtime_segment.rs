@@ -432,12 +432,11 @@ impl AgentService {
                 agent_input
                     .model_config_id
                     .as_deref()
-                    .map(|model_config_id| {
+                    .map(|_| {
                         self.context_window_observer(
                             &run_id,
                             &conversation_id,
-                            model_config_id,
-                            &agent_input.model,
+                            &agent_input,
                             notifications.clone(),
                         )
                     })

@@ -390,8 +390,22 @@ impl AgentService {
                 .into());
         }
         self.ensure_no_manual_context_compaction(&conversation_id)?;
-        let (previous_conversation, expected_revision) =
-            self.storage.load_conversation_for_turn(&conversation_id)?;
+        let prepared_history = if rewrite.is_none()
+            && continuation.is_none()
+            && response.is_none()
+            && automation.is_none()
+        {
+            self.prepare_cached_history(&conversation_id)?
+        } else {
+            None
+        };
+        let (previous_conversation, expected_revision) = match prepared_history.as_ref() {
+            Some(history) => (
+                Some(history.source.conversation.to_record()),
+                Some(history.source.conversation_revision),
+            ),
+            None => self.storage.load_conversation_for_turn(&conversation_id)?,
+        };
         if let Some(continuation) = &continuation {
             let conversation = previous_conversation
                 .as_ref()
@@ -525,7 +539,7 @@ impl AgentService {
                 self.storage
                     .workflow_execution_bind_input(&workflow.id, &run_id, &user_message_id);
             match claim {
-                Ok(true) => prepare_reserved_workflow_turn(
+                Ok(true) => prepare_reserved_workflow_turn_with_history(
                     &self.storage,
                     &self.skills,
                     input,
@@ -534,6 +548,7 @@ impl AgentService {
                     expected_revision,
                     workflow,
                     &execution_access_check,
+                    prepared_history.clone(),
                 )
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
                 Ok(false) => Err("organization input is no longer pending".to_string().into()),
@@ -563,7 +578,7 @@ impl AgentService {
                     rewrite,
                     &execution_access_check,
                 ),
-                None => prepare_reserved_human_turn(
+                None => prepare_reserved_human_turn_with_history(
                     &self.storage,
                     &self.skills,
                     input,
@@ -578,6 +593,7 @@ impl AgentService {
                     }),
                     automation_execution_context,
                     &execution_access_check,
+                    prepared_history.clone(),
                 )
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
             }

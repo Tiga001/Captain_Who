@@ -12,7 +12,13 @@ impl AgentService {
         let conversation_id = prepared.output.conversation_id.clone();
         let assistant_message_id = prepared.output.assistant_message_id.clone();
         let mcp_tools = self.capture_mcp_tool_runtime(&prepared.agent_input);
-        self.invalidate_conversation_context_state(&conversation_id);
+        if !self.install_prepared_history(&prepared).unwrap_or_else(|_| {
+            #[cfg(debug_assertions)]
+            eprintln!("[历史上下文缓存] 计量基线复用失败：会话={conversation_id}，原因=基线校验或恢复失败，转为正常准备");
+            false
+        }) {
+            self.invalidate_conversation_context_state(&conversation_id);
+        }
         let projected_runtime = self
             .automation_report_sink_for_agent_run_id(&run_id)
             .and_then(|automation_report_sink| {
@@ -484,20 +490,26 @@ impl AgentService {
             {
                 // Admission claims its input before the initial trace transaction. Recovery must
                 // not mistake that short preparation window for an orphaned delivery.
-                let _admission = service.conversation_admission.lock()
+                let _admission = service
+                    .conversation_admission
+                    .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 if let Err(error) = service.storage.workflow_execution_recover_claims() {
                     eprintln!("failed to settle organization input receipts: {error}");
                 }
             }
-            if let Err(error) = service.storage.workflow_execution_mark_run_unread(&worker_run_id) {
+            if let Err(error) = service
+                .storage
+                .workflow_execution_mark_run_unread(&worker_run_id)
+            {
                 eprintln!("failed to mark completed organization input unread: {error}");
             }
             if let Ok(inputs) = service
                 .storage
                 .workflow_execution_inputs_for_conversation(&worker_conversation_id)
             {
-                let instances = inputs.into_iter()
+                let instances = inputs
+                    .into_iter()
                     .filter(|input| input.run_id.as_deref() == Some(worker_run_id.as_str()))
                     .map(|input| input.instance_id)
                     .collect::<std::collections::HashSet<_>>();
@@ -581,6 +593,11 @@ impl AgentService {
             {
                 eprintln!("failed to retire terminal human questions: {error}");
             }
+        }
+        if durable_terminal && !deletion_cleanup {
+            // Persistence and owner release above are authoritative. This optional preparation
+            // also benefits organization recipients whose conversation has no renderer mounted.
+            service.enqueue_history_warmup(&worker_conversation_id);
         }
     }
 }

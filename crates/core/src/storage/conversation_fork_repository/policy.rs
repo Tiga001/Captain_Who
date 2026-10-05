@@ -50,6 +50,8 @@ const REINITIALIZE_TABLES: &[&str] = &[
     "conversation_history_fts",
     "conversation_history_index_entries",
     "conversation_history_timeline",
+    // Inserting the fork and its messages creates branch-local history version evidence.
+    "conversation_message_history_revisions",
     // The copied trace creates a fresh database journal epoch through its insert triggers.
     "conversation_trace_journal_revisions",
     "conversation_world_state_epochs",
@@ -217,6 +219,10 @@ fn high_risk_fork_policies_stay_explicit() {
     let policies = declared_policies();
     assert_eq!(
         policies.get("composer_drafts"),
+        Some(&ForkDataPolicy::Reinitialize)
+    );
+    assert_eq!(
+        policies.get("conversation_message_history_revisions"),
         Some(&ForkDataPolicy::Reinitialize)
     );
     assert_eq!(

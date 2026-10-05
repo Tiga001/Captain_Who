@@ -1,5 +1,16 @@
 #[test]
-fn fork_copies_trace_history_but_reinitializes_the_publication_epoch() {
+fn fork_copies_history_but_reinitializes_publication_and_message_epochs() {
+    fn message_journal(connection: &Connection, conversation_id: &str) -> (String, i64) {
+        connection
+            .query_row(
+                "SELECT epoch, revision FROM conversation_message_history_revisions
+                 WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();
     let source = source_conversation();
@@ -21,6 +32,7 @@ fn fork_copies_trace_history_but_reinitializes_the_publication_epoch() {
         }],
     };
     conversation_trace_repository::replace_trace(&mut connection, &trace, 20, 20).unwrap();
+    let source_message_journal = message_journal(&connection, &source.id);
     let plan = build_assistant_reply_fork_plan(
         &connection,
         "fork-trace-journal",
@@ -51,4 +63,47 @@ fn fork_copies_trace_history_but_reinitializes_the_publication_epoch() {
     assert_eq!(copied.items, trace.items);
     assert_eq!(copied.terminal_status, trace.terminal_status);
     assert_eq!(copied.conversation_id, plan.target.id);
+
+    let target_message_journal = message_journal(&connection, &plan.target.id);
+    assert_ne!(source_message_journal.0, target_message_journal.0);
+    assert!(target_message_journal.1 > 0);
+    // Only the selected prefix is inserted; the source conversation's counter is not copied.
+    assert!(target_message_journal.1 < source_message_journal.1);
+    assert_eq!(
+        message_journal(&connection, &source.id),
+        source_message_journal
+    );
+
+    connection
+        .execute(
+            "UPDATE messages SET content = 'fork-only edit' WHERE id = ?1",
+            [&plan.message_id_map["user-a"]],
+        )
+        .unwrap();
+    assert_eq!(
+        message_journal(&connection, &plan.target.id),
+        (
+            target_message_journal.0.clone(),
+            target_message_journal.1 + 1
+        )
+    );
+    assert_eq!(
+        message_journal(&connection, &source.id),
+        source_message_journal
+    );
+
+    connection
+        .execute(
+            "UPDATE messages SET content = 'source-only edit' WHERE id = 'user-a'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        message_journal(&connection, &source.id),
+        (source_message_journal.0, source_message_journal.1 + 1)
+    );
+    assert_eq!(
+        message_journal(&connection, &plan.target.id),
+        (target_message_journal.0, target_message_journal.1 + 1)
+    );
 }

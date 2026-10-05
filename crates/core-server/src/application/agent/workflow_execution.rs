@@ -911,6 +911,17 @@ impl AgentService {
                     Some(RetryReason::Transient)
                 }
             };
+            // Queued recipients can prepare their stable history while waiting for capacity or
+            // configuration. An immediately startable letter goes straight to admission instead;
+            // preparation never claims pending mail or becomes a scheduler dependency.
+            if matches!(
+                reason,
+                Some(RetryReason::Capacity | RetryReason::Configuration)
+            ) {
+                if let Some(conversation_id) = candidate.conversation_id.as_deref() {
+                    self.enqueue_history_warmup(conversation_id);
+                }
+            }
             let mut state = self
                 .workflow_retry
                 .lock()
@@ -1000,7 +1011,7 @@ impl AgentService {
             .permissions;
         let transition =
             self.preflight_provider_transition(AgentProviderTransitionPreflightInput {
-                for_send: false,
+                for_send: true,
                 conversation_id: conversation_id.into(),
                 target_model_id: model_id.clone(),
             })?;
@@ -1018,6 +1029,16 @@ impl AgentService {
             return Ok(Some(RetryReason::Transition));
         }
         if transition.decision == AgentProviderTransitionDecision::Blocked {
+            return Ok(Some(RetryReason::Transition));
+        }
+        // ReadyForSend is the metadata-only same-protocol fast path. Compatible is returned
+        // only after a necessary full compatibility preflight. Real adaptations above retain
+        // their transition token and compaction admission; warming history cannot bypass them.
+        if !matches!(
+            transition.decision,
+            AgentProviderTransitionDecision::ReadyForSend
+                | AgentProviderTransitionDecision::Compatible
+        ) {
             return Ok(Some(RetryReason::Transition));
         }
         self.start_root_turn_with_workflow(

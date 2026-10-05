@@ -7230,3 +7230,54 @@ DROP TABLE workflow_execution_events;
 DROP TABLE workflow_execution_pauses;
 DROP TABLE workflow_execution_runs;
 DROP TABLE workflow_execution_message_origins;
+
+
+-- Per-conversation model history identity, independent of presentation metadata, schema v67.
+CREATE TABLE conversation_message_history_revisions (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    epoch TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
+INSERT INTO conversation_message_history_revisions(conversation_id)
+SELECT id FROM conversations;
+CREATE TRIGGER message_history_conversation_insert
+AFTER INSERT ON conversations
+BEGIN
+    INSERT INTO conversation_message_history_revisions(conversation_id)
+    VALUES (NEW.id);
+END;
+CREATE TRIGGER message_history_message_insert
+AFTER INSERT ON messages
+BEGIN
+    UPDATE conversation_message_history_revisions SET revision = revision + 1
+    WHERE conversation_id = NEW.conversation_id;
+END;
+CREATE TRIGGER message_history_message_update
+AFTER UPDATE ON messages
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.role IS NOT OLD.role
+  OR NEW.content IS NOT OLD.content
+  OR NEW.status IS NOT OLD.status
+  OR NEW.input_origin_kind IS NOT OLD.input_origin_kind
+  OR NEW.input_origin_agent_id IS NOT OLD.input_origin_agent_id
+  OR NEW.source_agent_message_id IS NOT OLD.source_agent_message_id
+  OR NEW.snapshot_source_conversation_id IS NOT OLD.snapshot_source_conversation_id
+  OR NEW.snapshot_source_message_id IS NOT OLD.snapshot_source_message_id
+  OR NEW.snapshot_original_origin_kind IS NOT OLD.snapshot_original_origin_kind
+  OR NEW.snapshot_original_agent_id IS NOT OLD.snapshot_original_agent_id
+  OR NEW.snapshot_original_mailbox_message_id IS NOT OLD.snapshot_original_mailbox_message_id
+  OR NEW.agent_run_json IS NOT OLD.agent_run_json
+  OR NEW.folder_references_json IS NOT OLD.folder_references_json
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.position IS NOT OLD.position
+BEGIN
+    UPDATE conversation_message_history_revisions SET revision = revision + 1
+    WHERE conversation_id IN (OLD.conversation_id, NEW.conversation_id);
+END;
+CREATE TRIGGER message_history_message_delete
+AFTER DELETE ON messages
+BEGIN
+    UPDATE conversation_message_history_revisions SET revision = revision + 1
+    WHERE conversation_id = OLD.conversation_id;
+END;

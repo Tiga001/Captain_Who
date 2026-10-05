@@ -1,5 +1,338 @@
 use super::*;
 
+#[cfg(debug_assertions)]
+mod initial_publication {
+    use super::*;
+
+    struct InitialPublicationFixture {
+        _directory: tempfile::TempDir,
+        storage: Arc<StorageService>,
+        service: AgentService,
+        input: AgentChatInput,
+        conversation_id: String,
+    }
+
+    impl InitialPublicationFixture {
+        fn new() -> Self {
+            let directory = tempdir().unwrap();
+            let storage = Arc::new(
+                StorageService::open(&directory.path().join("initial-publication.sqlite")).unwrap(),
+            );
+            storage.save_model_settings(test_model_settings()).unwrap();
+            let conversation_id = format!("initial-publication-{}", uuid::Uuid::new_v4());
+            storage
+                .save_conversation(ChatConversationRecord {
+                    id: conversation_id.clone(),
+                    project_id: None,
+                    model_id: Some("model-1".into()),
+                    title: "Initial publication".into(),
+                    messages: [
+                        ("initial-user", "user", "Continue the task."),
+                        ("initial-assistant", "assistant", ""),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (id, role, content))| ChatMessageRecord {
+                        id: id.into(),
+                        role: role.into(),
+                        content: content.into(),
+                        created_at: index as i64 + 1,
+                        status: Some(if role == "user" { "sent" } else { "pending" }.into()),
+                        human_interaction_response: None,
+                        attachments: Vec::new(),
+                        folder_references_json: None,
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    })
+                    .collect(),
+                    created_at: 1,
+                    updated_at: 2,
+                    pinned_at: None,
+                    archived_at: None,
+                    unread_at: None,
+                })
+                .unwrap();
+            let service = AgentService::new_authorized_for_test(storage.clone());
+            let mut input = command_test_input(directory.path());
+            input.context.as_mut().unwrap().conversation_id = Some(conversation_id.clone());
+            input.assistant_message_id = Some("initial-assistant".into());
+            input.context_window_indicator_enabled = true;
+            freeze_test_pending_provider_configuration(&storage, &mut input);
+            admit_test_conversation_run(
+                &storage,
+                &ConversationTraceSnapshot::default().in_progress_trace(
+                    "initial-run",
+                    &conversation_id,
+                    "initial-assistant",
+                ),
+                input.context.as_ref().unwrap().permissions,
+                2,
+            );
+            // This validated empty current-Turn projection has exactly the durable prefix of an
+            // admitted baseline, before Runtime publishes its first seed.
+            service
+                .rebuild_conversation_context_state(
+                    &input,
+                    &conversation_id,
+                    Some("initial-run"),
+                    None,
+                    None,
+                )
+                .unwrap();
+            service
+                .conversation_context_states
+                .lock()
+                .unwrap()
+                .get_mut(&conversation_id)
+                .unwrap()
+                .awaiting_initial_publication = true;
+            Self {
+                _directory: directory,
+                storage,
+                service,
+                input,
+                conversation_id,
+            }
+        }
+
+        fn observer(&self) -> AgentConversationTraceObserver {
+            let projection = self
+                .service
+                .context_window_tool_projection(&self.input, None)
+                .unwrap();
+            self.service.trace_observer(
+                "initial-run",
+                &self.conversation_id,
+                "initial-assistant",
+                2,
+                self.input.clone(),
+                RunContextToolProjection::new(projection),
+                crate::transport::outbound_channel().0,
+            )
+        }
+    }
+
+    fn initial_backend_seed() -> mycopilot_core::ConversationTracePublication {
+        let content = json!({
+            "type": "user_turn_resumed",
+            "message": "The user resumed this task after stopping it."
+        })
+        .to_string();
+        ConversationTraceSnapshot {
+            items: vec![ConversationTurnTraceItem::BackendState {
+                sequence: 0,
+                event_id: "initial-seed".into(),
+                content: content.clone(),
+                created_at: 3,
+                placement: mycopilot_core::ConversationBackendStatePlacement::Timeline,
+            }],
+            model_context_items: vec![ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "user".into(),
+                content,
+                images: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+            }],
+            next_sequence: 1,
+            truncated: false,
+        }
+        .into()
+    }
+
+    #[test]
+    fn admitted_initial_publication_appends_seed_once_without_reloading_history() {
+        let fixture = InitialPublicationFixture::new();
+        let before = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        let publication = initial_backend_seed();
+        let observer = fixture.observer();
+        assert!(observer(publication.clone()).unwrap().is_some());
+        assert!(observer(publication).unwrap().is_some());
+        let after = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        assert_eq!(after.full_loads, before.full_loads);
+        assert_eq!(after.trace_decodes, before.trace_decodes);
+        assert_eq!(after.model_context_decodes, before.model_context_decodes);
+        let warm_snapshot = {
+            let mut states = fixture.service.conversation_context_states.lock().unwrap();
+            let entry = states.get_mut(&fixture.conversation_id).unwrap();
+            assert!(!entry.awaiting_initial_publication);
+            assert_eq!(entry.committed_activity_items, 1);
+            entry.state.snapshot()
+        };
+        let cold_input = fixture
+            .service
+            .persisted_conversation_context_state(&fixture.input, &fixture.conversation_id)
+            .unwrap()
+            .preview_input;
+        let mut cold = create_conversation_context_state(cold_input).unwrap();
+        assert_eq!(warm_snapshot, cold.snapshot());
+    }
+
+    #[test]
+    fn first_publication_rebuilds_instead_of_trusting_an_unbound_or_mismatched_entry() {
+        for mismatch in ["not-admitted", "run", "assistant", "configuration"] {
+            let fixture = InitialPublicationFixture::new();
+            {
+                let mut states = fixture.service.conversation_context_states.lock().unwrap();
+                let entry = states.get_mut(&fixture.conversation_id).unwrap();
+                match mismatch {
+                    "not-admitted" => entry.awaiting_initial_publication = false,
+                    "run" => entry.active_run_id = Some("different-run".into()),
+                    "assistant" => {
+                        entry.active_assistant_message_id = Some("different-assistant".into())
+                    }
+                    "configuration" => {
+                        entry.configuration_revision = "different-configuration".into()
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let before = fixture
+                .storage
+                .history_snapshot_diagnostics(&fixture.conversation_id);
+            assert!(fixture.observer()(initial_backend_seed())
+                .unwrap()
+                .is_some());
+            let after = fixture
+                .storage
+                .history_snapshot_diagnostics(&fixture.conversation_id);
+            assert!(after.full_loads > before.full_loads, "{mismatch}");
+            let states = fixture.service.conversation_context_states.lock().unwrap();
+            let entry = states.get(&fixture.conversation_id).unwrap();
+            assert_eq!(entry.active_run_id.as_deref(), Some("initial-run"));
+            assert_eq!(
+                entry.active_assistant_message_id.as_deref(),
+                Some("initial-assistant")
+            );
+            assert!(!entry.awaiting_initial_publication);
+        }
+    }
+
+    #[test]
+    fn running_snapshot_reuses_only_the_same_host_bound_configuration() {
+        for mismatch in [
+            "model-config",
+            "output-budget",
+            "window",
+            "protocol",
+            "connection",
+        ] {
+            let mut fixture = InitialPublicationFixture::new();
+            let mut settings = test_model_settings();
+            let mut duplicate_wire_model = settings.models[0].clone();
+            duplicate_wire_model.id = "same-wire-model-other-config".into();
+            duplicate_wire_model.display_name = "Same wire model, another configuration".into();
+            settings.models.push(duplicate_wire_model);
+            fixture
+                .storage
+                .save_model_settings(settings.clone())
+                .unwrap();
+            freeze_test_pending_provider_configuration(&fixture.storage, &mut fixture.input);
+            fixture.input.api_style = Some(mycopilot_core::AgentApiStyle::OpenAiCompatible);
+            fixture.input.search_config = Some(AgentSearchConfig {
+                mode: mycopilot_core::AgentSearchMode::Disabled,
+                tavily_api_key: None,
+            });
+            fixture.input.prompt_preferences = Some(agent_prompt_preferences_from_record(
+                fixture.storage.load_agent_prompt_preferences().unwrap(),
+            ));
+            let prepared = fixture
+                .service
+                .persisted_conversation_context_state(&fixture.input, &fixture.conversation_id)
+                .unwrap();
+            let snapshot = create_conversation_context_state(prepared.preview_input)
+                .unwrap()
+                .snapshot();
+            let publish = |input: &AgentChatInput| {
+                fixture.service.context_window_observer(
+                    "initial-run",
+                    &fixture.conversation_id,
+                    input,
+                    crate::transport::outbound_channel().0,
+                )(snapshot.clone());
+            };
+            publish(&fixture.input);
+            let mut query = AgentContextWindowSnapshotInput {
+                conversation_id: Some(fixture.conversation_id.clone()),
+                project_id: None,
+                model_id: "model-1".into(),
+                max_tokens: fixture.input.max_tokens,
+                prompt_preferences: fixture.input.prompt_preferences.clone(),
+                permissions: fixture.input.context.as_ref().unwrap().permissions,
+                skills: Vec::new(),
+            };
+            let before = fixture
+                .storage
+                .history_snapshot_diagnostics(&fixture.conversation_id);
+            let same = fixture
+                .service
+                .get_context_window_snapshot(query.clone())
+                .unwrap();
+            assert_eq!(same.snapshot.as_ref(), Some(&snapshot), "{mismatch}");
+            assert_eq!(
+                fixture
+                    .storage
+                    .history_snapshot_diagnostics(&fixture.conversation_id)
+                    .full_loads,
+                before.full_loads,
+                "matching configuration should avoid history loading"
+            );
+            match mismatch {
+                "model-config" => query.model_id = "same-wire-model-other-config".into(),
+                "output-budget" => query.max_tokens = Some(16_000),
+                "window" => {
+                    settings.models[0].context_window_tokens = Some(256_000);
+                    fixture.storage.save_model_settings(settings).unwrap();
+                }
+                "protocol" => {
+                    // A valid earlier frozen protocol identity must not label today's preview,
+                    // even when the provider model name and context window remain identical.
+                    let mut previous = fixture.input.clone();
+                    previous.provider_configuration_revision = Some("previous-protocol".into());
+                    previous.provider_protocol_key = Some(
+                        ProviderProtocolKey::new(
+                            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+                            previous.provider_profile_config.as_ref().unwrap(),
+                            previous.model.clone(),
+                            previous.provider_configuration_revision.clone(),
+                        )
+                        .unwrap(),
+                    );
+                    publish(&previous);
+                }
+                "connection" => {
+                    settings.api_url = "https://different.example.test/v1/chat/completions".into();
+                    fixture.storage.save_model_settings(settings).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let selected_id = query.model_id.clone();
+            let changed = fixture.service.get_context_window_snapshot(query).unwrap();
+            assert_eq!(changed.model_config_id, selected_id);
+            assert!(
+                fixture
+                    .storage
+                    .history_snapshot_diagnostics(&fixture.conversation_id)
+                    .full_loads
+                    > before.full_loads,
+                "{mismatch} must use the original live-configuration preview path"
+            );
+            let changed = changed.snapshot.unwrap();
+            if mismatch == "output-budget" {
+                assert_eq!(changed.reserved_output_tokens, 16_000);
+            } else if mismatch == "window" {
+                assert_eq!(changed.context_window_tokens, Some(256_000));
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state() {
     let fixture = tempdir().unwrap();
@@ -716,14 +1049,12 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
         "remainingInputTokens": 96655
     }))
     .unwrap();
-    service
-        .running_context_window_snapshots
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
-            "run-derived-refresh-failure".to_string(),
-            exact_request_snapshot.clone(),
-        );
+    service.context_window_observer(
+        "run-derived-refresh-failure",
+        "conversation-derived-refresh-failure",
+        &agent_input,
+        crate::transport::outbound_channel().0,
+    )(exact_request_snapshot.clone());
     let (notifications, mut receiver) = crate::transport::outbound_channel();
     let observer = service.trace_observer(
         "run-derived-refresh-failure",
@@ -808,7 +1139,8 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
             .running_context_window_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .get("run-derived-refresh-failure"),
+            .get("run-derived-refresh-failure")
+            .map(|entry| &entry.snapshot),
         Some(&exact_request_snapshot),
         "a failed approximation must not erase the last exact Provider request accounting"
     );

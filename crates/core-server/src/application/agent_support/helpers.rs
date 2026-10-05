@@ -174,17 +174,17 @@ pub(crate) fn resolve_project(
 /// Project migration needs a dedicated operation that can validate and update every dependent
 /// artifact atomically.
 pub(crate) fn resolve_conversation_project_id(
-    existing: Option<&ChatConversationRecord>,
+    existing_conversation_id: Option<&str>,
+    stored_project_id: Option<&str>,
     requested_project_id: Option<String>,
 ) -> Result<Option<String>, String> {
-    let Some(existing) = existing else {
+    let Some(existing_id) = existing_conversation_id else {
         return Ok(requested_project_id);
     };
-    let stored_project_id = normalized_optional(existing.project_id.as_deref());
+    let stored_project_id = normalized_optional(stored_project_id);
     if requested_project_id.is_some() && requested_project_id != stored_project_id {
         return Err(format!(
-            "会话 `{}` 已绑定到另一个项目；普通消息不能迁移会话项目。",
-            existing.id
+            "会话 `{existing_id}` 已绑定到另一个项目；普通消息不能迁移会话项目。"
         ));
     }
     Ok(stored_project_id)

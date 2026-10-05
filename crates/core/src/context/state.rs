@@ -18,6 +18,10 @@ use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnaps
 
 include!("state_trace_publication.rs");
 
+#[cfg(test)]
+#[path = "state_prepared_history_tests.rs"]
+mod prepared_history_tests;
+
 #[derive(Clone)]
 pub struct AgentContextWindowToolProjection {
     tool_set: AgentRunToolSetCheckpoint,
@@ -441,6 +445,47 @@ impl AgentContextBaseline {
     }
 }
 
+/// Host-private, immutable preparation of one verified durable history snapshot.
+///
+/// This is an in-memory accelerator, not admission authority: the Host must revalidate the
+/// source journals and context configuration before adopting it for a new turn. It contains
+/// neither a future input nor executable Run services. The private measured chunks can retain
+/// provider-owned replay material, so this type deliberately has no serialization boundary.
+#[derive(Clone)]
+pub struct AgentPreparedConversationHistory {
+    baseline: AgentContextBaseline,
+    model: String,
+    context_window_tokens: Option<u32>,
+    reserved_output_tokens: u32,
+    detector: ContextCapacityDetector,
+    timing: ConversationTimingTracker,
+    world_state_head: Option<(String, u64, String)>,
+}
+
+impl AgentPreparedConversationHistory {
+    pub fn configuration_revision(&self) -> &str {
+        &self.baseline.configuration_revision
+    }
+
+    /// Creates an independent mutable state while sharing measured immutable history by Arc.
+    ///
+    /// New input, committed Trace items and current World State still enter through the normal
+    /// append/sampling paths. No active publication cursor is inherited from the source state.
+    pub fn into_context_state(self) -> AgentConversationContextState {
+        AgentConversationContextState {
+            configuration_revision: self.baseline.configuration_revision.clone(),
+            model: self.model,
+            context_window_tokens: self.context_window_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
+            detector: self.detector,
+            frame: self.baseline.into_frame(),
+            timing: self.timing,
+            world_state_head: self.world_state_head,
+            trace_publication_cursor: None,
+        }
+    }
+}
+
 /// Cached durable state for one conversation and one context configuration.
 pub struct AgentConversationContextState {
     configuration_revision: String,
@@ -686,6 +731,22 @@ impl AgentConversationContextState {
         Ok(AgentContextBaseline {
             configuration_revision: self.configuration_revision.clone(),
             frame: self.frame.share_measured_persistent_baseline()?,
+        })
+    }
+
+    /// Freezes the already verified durable prefix for a later, Host-validated admission.
+    ///
+    /// Keep the timing tracker as well as message bytes: the next user message must carry the
+    /// preceding assistant timestamp exactly as it would after a cold history reconstruction.
+    pub fn share_prepared_history(&mut self) -> AgentResult<AgentPreparedConversationHistory> {
+        Ok(AgentPreparedConversationHistory {
+            baseline: self.shared_baseline()?,
+            model: self.model.clone(),
+            context_window_tokens: self.context_window_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
+            detector: self.detector.clone(),
+            timing: self.timing.clone(),
+            world_state_head: self.world_state_head.clone(),
         })
     }
 

@@ -471,6 +471,19 @@ pub fn list_trace_records_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<ConversationTurnTraceRecord>> {
+    load_stored_trace_records_for_conversation(connection, conversation_id)?.decode()
+}
+
+pub(crate) struct StoredConversationTraces {
+    headers: Vec<(TraceHeader, Option<i64>)>,
+    items_by_message: HashMap<String, Vec<StoredTraceItem>>,
+    pending_lifecycle_by_message: HashMap<String, Vec<PendingCommandSessionLifecycle>>,
+}
+
+pub(crate) fn load_stored_trace_records_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<StoredConversationTraces> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -499,35 +512,46 @@ pub fn list_trace_records_for_conversation(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    if headers.is_empty() {
-        return Ok(Vec::new());
-    }
+    Ok(StoredConversationTraces {
+        headers,
+        items_by_message: trace_items_for_conversation(connection, conversation_id)?,
+        pending_lifecycle_by_message: pending_command_session_lifecycle_for_conversation(
+            connection,
+            conversation_id,
+        )?,
+    })
+}
 
-    let mut items_by_message = trace_items_for_conversation(connection, conversation_id)?;
-    let mut pending_lifecycle_by_message =
-        pending_command_session_lifecycle_for_conversation(connection, conversation_id)?;
-    headers
-        .into_iter()
-        .map(|(header, completed_at)| {
-            let assistant_message_id = header.assistant_message_id.clone();
-            let trace = trace_from_stored_items(
-                header,
-                items_by_message
-                    .remove(&assistant_message_id)
-                    .unwrap_or_default(),
-            )?;
-            let trace = overlay_pending_command_session_lifecycle_rows(
-                trace,
-                pending_lifecycle_by_message
-                    .remove(&assistant_message_id)
-                    .unwrap_or_default(),
-            )?;
-            Ok(ConversationTurnTraceRecord {
-                trace,
-                completed_at,
+impl StoredConversationTraces {
+    pub(crate) fn decode(self) -> rusqlite::Result<Vec<ConversationTurnTraceRecord>> {
+        let Self {
+            headers,
+            mut items_by_message,
+            mut pending_lifecycle_by_message,
+        } = self;
+        headers
+            .into_iter()
+            .map(|(header, completed_at)| {
+                let assistant_message_id = header.assistant_message_id.clone();
+                let trace = trace_from_stored_items(
+                    header,
+                    items_by_message
+                        .remove(&assistant_message_id)
+                        .unwrap_or_default(),
+                )?;
+                let trace = overlay_pending_command_session_lifecycle_rows(
+                    trace,
+                    pending_lifecycle_by_message
+                        .remove(&assistant_message_id)
+                        .unwrap_or_default(),
+                )?;
+                Ok(ConversationTurnTraceRecord {
+                    trace,
+                    completed_at,
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
 type StoredTraceItem = (i64, String, String);

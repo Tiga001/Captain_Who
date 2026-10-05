@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::unbounded_channel;
 
 mod awareness;
+mod history_warmup;
 mod personnel;
 
 async fn request_body(stream: &mut tokio::net::TcpStream) -> Value {

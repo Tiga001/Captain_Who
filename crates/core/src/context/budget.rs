@@ -349,7 +349,7 @@ impl ContextCapacityError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FixedRequestEstimate {
     tool_definition_tokens: u64,
     tool_definition_count: usize,
@@ -361,7 +361,7 @@ struct FixedRequestEstimate {
 ///
 /// The selected estimator and tool definitions are fixed for a run. A later tokenizer registry
 /// can replace `select_token_estimator` without changing `ContextFrame` or the agent loop.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ContextCapacityDetector {
     estimator: Arc<dyn ContextTokenEstimator>,
     fixed: FixedRequestEstimate,

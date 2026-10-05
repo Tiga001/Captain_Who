@@ -68,6 +68,7 @@ mod conversations;
 mod file_change_run_grants;
 mod file_changes;
 mod guidance;
+mod history_snapshot;
 mod human_interaction;
 mod image_generation;
 mod lifecycle;
@@ -93,6 +94,12 @@ use attachments::*;
 pub use command_sessions::AgentCommandSessionLifecycleAppendOutcome;
 pub use file_change_run_grants::FileChangeRunGrantServiceError;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};
+#[cfg(any(test, debug_assertions))]
+pub use history_snapshot::ConversationHistorySnapshotDiagnostics;
+pub use history_snapshot::{
+    ConversationHistoryPayload, ConversationHistorySnapshot, ConversationHistoryVersion,
+    SharedHistoryConversation,
+};
 pub use image_generation::{ResolvedGeneratedArtifactInput, ResolvedGeneratedArtifactKind};
 pub use lifecycle::*;
 pub use managed_artifacts::{

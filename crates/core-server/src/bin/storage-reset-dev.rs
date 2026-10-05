@@ -3261,14 +3261,14 @@ mod tests {
 
     fn remove_v53_fixture_objects(connection: &Connection) {
         remove_v60_fixture_objects(connection);
+        remove_workflow_fixture_objects(connection);
         assert_eq!(
             count_rows_if_table_exists(connection, "agent_collaboration_event_activities").unwrap(),
             0
         );
         connection
             .execute_batch(
-                "DROP TABLE workflow_definitions;
-             DROP TRIGGER project_agent_collaboration_event_activities;
+                "DROP TRIGGER project_agent_collaboration_event_activities;
              DROP TRIGGER validate_agent_collaboration_event_activity_insert;
              DROP TRIGGER prevent_agent_collaboration_event_activity_update;
              DROP TRIGGER prevent_agent_collaboration_event_activity_delete;
@@ -3283,14 +3283,83 @@ mod tests {
     // catalogs. Some downgrade paths call this twice, before removing the FTS identity table
     // and again before stripping workflow fixtures.
     fn remove_v60_fixture_objects(connection: &Connection) {
+        let has_timeline: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE name = 'conversation_history_timeline')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if !has_timeline {
+            return;
+        }
         connection
             .execute_batch(
-                "DROP TRIGGER IF EXISTS conversation_history_timeline_message_insert;
+                "DROP TRIGGER message_history_conversation_insert;
+                 DROP TRIGGER message_history_message_insert;
+                 DROP TRIGGER message_history_message_update;
+                 DROP TRIGGER message_history_message_delete;
+                 DROP TABLE conversation_message_history_revisions;
+                 DROP TRIGGER trace_journal_header_insert;
+                 DROP TRIGGER trace_journal_header_update;
+                 DROP TRIGGER trace_journal_header_delete;
+                 DROP TRIGGER trace_journal_item_insert;
+                 DROP TRIGGER trace_journal_item_update;
+                 DROP TRIGGER trace_journal_item_delete;
+                 DROP TRIGGER trace_journal_model_insert;
+                 DROP TRIGGER trace_journal_model_update;
+                 DROP TRIGGER trace_journal_model_delete;
+                 DROP TABLE conversation_trace_journal_revisions;
+                 DROP INDEX idx_human_interaction_requests_attention;
+                 ALTER TABLE attachments DROP COLUMN pasted_text_json;
+                 DROP TRIGGER IF EXISTS conversation_history_timeline_message_insert;
                  DROP TRIGGER IF EXISTS conversation_history_timeline_trace_insert;
                  DROP TABLE IF EXISTS conversation_history_timeline;
                  DROP INDEX IF EXISTS idx_messages_pending_assistant_summary;",
             )
             .unwrap();
+        // The seeded fixture has no organization/workflow rows. Rebuild that empty catalog
+        // exactly as v59, including the graph tables retired by v66 and pre-v65 identities.
+        remove_workflow_fixture_objects(connection);
+        let workflow_schema = include_str!("../../../core/src/storage/canonical_schema.sql")
+            .split_once("-- Workflow authoring definitions, schema v54. Runtime execution is not stored here.\n")
+            .unwrap()
+            .1
+            .split_once("-- Indexed chronological history projection, schema v60.")
+            .unwrap()
+            .0;
+        connection.execute_batch(workflow_schema).unwrap();
+    }
+
+    fn remove_workflow_fixture_objects(connection: &Connection) {
+        let tables = connection
+            .prepare(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'
+                 AND (name GLOB 'workflow_*' OR name = 'organization_personnel_receipts')",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS workflow_bound_conversation_before_delete;
+                 DROP TRIGGER IF EXISTS workflow_bound_conversation_archive_changed;
+                 DROP TRIGGER IF EXISTS workflow_active_conversation_archive_guard;",
+            )
+            .unwrap();
+        for table in tables {
+            assert_eq!(
+                count_rows_if_table_exists(connection, &table).unwrap(),
+                0,
+                "historical reset fixture must not contain workflow data: {table}"
+            );
+            connection
+                .execute_batch(&format!("DROP TABLE \"{}\";", table.replace('"', "\"\"")))
+                .unwrap();
+        }
     }
 
     /// Restore only temporary reset fixtures. They have no request-owned activities or

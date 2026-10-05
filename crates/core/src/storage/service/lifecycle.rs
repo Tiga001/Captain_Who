@@ -2,6 +2,7 @@ use super::*;
 
 pub struct StorageService {
     pub(super) state: StorageState,
+    pub(super) history_snapshot_cache: Mutex<history_snapshot::ConversationHistorySnapshotCache>,
     pub(super) attachment_root: PathBuf,
     pub(super) attachment_preview_cache: attachment_preview_cache::AttachmentPreviewCache,
     pub(super) image_artifact_root: PathBuf,
@@ -91,6 +92,9 @@ impl StorageService {
 
         let service = Self {
             state: StorageState::open(database_path)?,
+            history_snapshot_cache: Mutex::new(
+                history_snapshot::ConversationHistorySnapshotCache::default(),
+            ),
             attachment_root,
             attachment_preview_cache: attachment_preview_cache::AttachmentPreviewCache::default(),
             image_artifact_root,

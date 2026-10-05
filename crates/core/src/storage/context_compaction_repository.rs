@@ -250,6 +250,93 @@ pub(crate) fn finish_message_deletion_compaction_rewind(
     Ok(())
 }
 
+/// Snapshot-only validation material. Its large raw prefix is decoded by the caller after the
+/// shared connection lock is released. Invalid summaries are omitted from this derived view only;
+/// this read-only path preserves get_active_summary's prefix, continuity and Provider guards.
+pub(crate) struct SnapshotSummaryValidation {
+    pub summary: Option<ContextCompactionSummary>,
+    rows: Vec<JournalMessageRow>,
+    continuity_valid: bool,
+    raw_fallback_allowed: bool,
+}
+
+pub(crate) fn load_snapshot_summary_validation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<SnapshotSummaryValidation, ContextCompactionRepositoryError> {
+    let id = connection.query_row(
+        "SELECT summary_id FROM conversation_context_compaction_heads WHERE conversation_id = ?1",
+        [conversation_id], |row| row.get::<_, String>(0),
+    ).optional()?;
+    let summary = id.map(|id| load_summary(connection, &id)).transpose()?;
+    if summary
+        .as_ref()
+        .is_some_and(|summary| summary.conversation_id != conversation_id)
+    {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "active head 指向了其他会话的摘要。".into(),
+        ));
+    }
+    let continuity_valid = summary
+        .as_ref()
+        .map(|summary| continuity_refs_exist(connection, summary))
+        .transpose()?
+        .unwrap_or(true);
+    let rows = if summary.is_some() {
+        load_journal_message_rows(connection, conversation_id)?
+    } else {
+        Vec::new()
+    };
+    let raw_fallback_allowed = summary.is_none()
+        || (!conversation_context_adaptation_repository::get(connection, conversation_id)?
+            .is_some_and(|requirement| requirement.resolved_summary_id.is_some())
+            && !provider_continuation_repository::has_released_for_conversation(
+                connection,
+                conversation_id,
+            )?);
+    Ok(SnapshotSummaryValidation {
+        summary,
+        rows,
+        continuity_valid,
+        raw_fallback_allowed,
+    })
+}
+
+impl SnapshotSummaryValidation {
+    pub(crate) fn validate(
+        self,
+        traces: &[crate::ConversationTurnTrace],
+    ) -> Result<(Option<ContextCompactionSummary>, bool), ContextCompactionRepositoryError> {
+        let Some(summary) = self.summary else {
+            return Ok((None, true));
+        };
+        let traces: HashMap<_, _> = traces
+            .iter()
+            .map(|trace| (trace.assistant_message_id.as_str(), trace))
+            .collect();
+        let entries = journal_entries_from_rows(self.rows, |id| {
+            Ok(traces.get(id).map(|trace| (*trace).clone()))
+        })?;
+        let prefix_valid = match cursor_index(&entries, &summary.covered_through) {
+            Some(index) => {
+                source_revision(
+                    &summary.conversation_id,
+                    &summary.covered_through,
+                    &entries[..=index],
+                )? == summary.source_revision
+            }
+            None => false,
+        };
+        let valid = self.continuity_valid && prefix_valid;
+        if !valid && !self.raw_fallback_allowed {
+            return Err(ContextCompactionRepositoryError::Stale(
+                "provider_context_boundary_required: active summary 已失效，但其 Provider replay 已安全释放，拒绝暴露残缺 Tool Exchange。".into(),
+            ));
+        }
+        Ok((valid.then_some(summary), valid))
+    }
+}
+
 pub fn get_active_summary(
     connection: &Connection,
     conversation_id: &str,
@@ -1205,10 +1292,12 @@ pub(crate) fn project_model_source_items(
     Ok(projected)
 }
 
-fn list_journal_entries(
+type JournalMessageRow = (String, String, String, i64, Option<String>);
+
+fn load_journal_message_rows(
     connection: &Connection,
     conversation_id: &str,
-) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
+) -> rusqlite::Result<Vec<JournalMessageRow>> {
     let rows = {
         let mut statement = connection.prepare(
             "SELECT message.id, message.role, message.content, message.created_at, message.status
@@ -1257,6 +1346,31 @@ fn list_journal_entries(
         rows
     };
 
+    Ok(rows)
+}
+
+fn list_journal_entries(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
+    journal_entries_from_rows(
+        load_journal_message_rows(connection, conversation_id)?,
+        |message_id| {
+            conversation_trace_repository::get_trace_for_message(connection, message_id)
+                .map_err(Into::into)
+        },
+    )
+}
+
+fn journal_entries_from_rows(
+    rows: Vec<JournalMessageRow>,
+    mut get_trace: impl FnMut(
+        &str,
+    ) -> Result<
+        Option<crate::ConversationTurnTrace>,
+        ContextCompactionRepositoryError,
+    >,
+) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
     let mut entries = Vec::new();
     for (message_id, role, content, created_at, status) in rows {
         match role.as_str() {
@@ -1270,8 +1384,7 @@ fn list_journal_entries(
                 terminal_error: None,
             }),
             "assistant" => {
-                let trace =
-                    conversation_trace_repository::get_trace_for_message(connection, &message_id)?;
+                let trace = get_trace(&message_id)?;
                 if let Some(trace) = &trace {
                     for item in trace.items.iter().filter(|item| {
                         item.is_model_visible()

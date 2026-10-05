@@ -492,6 +492,7 @@ mod human_interaction;
 mod mcp_checkpoint;
 mod moonshot_recovery;
 mod output_budget;
+mod prepared_history;
 mod request_layout;
 mod skill_activation;
 mod steering_and_repair;

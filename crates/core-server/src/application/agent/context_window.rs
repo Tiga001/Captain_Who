@@ -1,5 +1,35 @@
 use super::*;
 
+pub(super) struct RunningContextWindowSnapshot {
+    pub(super) snapshot: AgentContextWindowSnapshot,
+    configuration: serde_json::Value,
+}
+
+/// Small, credential-free configuration identity. Historical messages, images and tool payloads
+/// are deliberately absent, so checking a running request never copies its conversation history.
+fn running_context_window_configuration(input: &AgentChatInput) -> serde_json::Value {
+    serde_json::json!({
+        "modelConfigId": input.model_config_id,
+        "model": input.model,
+        "apiStyle": input.api_style,
+        "providerConfigurationRevision": input.provider_configuration_revision,
+        "providerConnectionRevision": input.provider_connection_revision,
+        "searchConnectionRevision": input.search_connection_revision,
+        "providerProfileConfig": input.provider_profile_config,
+        "providerProtocolKey": input.provider_protocol_key,
+        "modelCapabilities": input.model_capabilities,
+        "contextWindowTokens": input.context_window_tokens,
+        "maxTokens": input.max_tokens,
+        "promptPreferences": input.prompt_preferences,
+        "automation": input.prompt_preferences.as_ref()
+            .is_some_and(|preferences| preferences.automation_execution_context.is_some()),
+        "permissions": input.context.as_ref().map(|context| context.permissions),
+        "collaborationIdentity": input.context.as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref()),
+        "searchMode": input.search_config.as_ref().map(|config| config.mode),
+    })
+}
+
 fn should_defer_partial_provider_trace(
     semantics: mycopilot_core::ProviderPartialTraceSemantics,
     trace: &ConversationTurnTrace,
@@ -192,26 +222,105 @@ impl AgentService {
         )
         .map_err(|error| format!("模型 {model_label} 的 Provider Protocol 无效：{error}"))?;
 
-        let conversation = match conversation_id.as_deref() {
-            Some(conversation_id) => self.storage.load_conversation(conversation_id)?,
+        let active_run = conversation_id
+            .as_deref()
+            .map(|id| self.storage.load_active_conversation_turn_identity(id))
+            .transpose()?
+            .flatten();
+        let mut prompt_preferences = match input.prompt_preferences {
+            Some(preferences) => preferences,
+            None => {
+                agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
+            }
+        };
+        // A settings toggle previews the next run only when idle. Active approvals and
+        // running task trees must retain their admitted stable prompt/tool contract.
+        if let Some((run_id, _)) = active_run.as_ref() {
+            prompt_preferences.context_profile = self
+                .storage
+                .load_agent_context_profile_for_run(run_id)?
+                .ok_or_else(|| "运行中的任务缺少冻结的上下文模式。".to_string())?;
+        }
+        let mut agent_input = AgentChatInput {
+            initial_conversation_trace: None,
+            context_image_attachments: Vec::new(),
+            folder_references: Vec::new(),
+            api_url: connection.api_url,
+            api_token: String::new(),
+            provider_configuration_revision: Some(provider_protocol_revision),
+            provider_connection_revision: Some(provider_connection_revision),
+            search_connection_revision: Some(settings_snapshot.search_connection_revision),
+            provider_profile_config: Some(provider_profile_config),
+            provider_protocol_key: Some(provider_protocol_key),
+            model_config_id: Some(model.id.clone()),
+            model: model.provider_model_id.clone(),
+            model_capabilities: ModelCapabilities {
+                image_input: model.supports_image,
+            },
+            api_style: Some(provider_dialect.api_style()),
+            context_window_tokens: Some(context_window_tokens),
+            context_window_indicator_enabled: true,
+            max_tokens: input.max_tokens,
+            temperature: None,
+            stream: Some(false),
+            context: Some(AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: conversation_id.clone(),
+                project_id: None,
+                workspace: None,
+                attachment_library: None,
+                permissions: input.permissions,
+            }),
+            search_config: Some(AgentSearchConfig {
+                mode: search_mode_from_storage(&settings.search_mode),
+                tavily_api_key: None,
+            }),
+            prompt_preferences: Some(prompt_preferences),
+            approval_decision: None,
+            tool_continuation: None,
+            attachments: Vec::new(),
+            resume_checkpoint: None,
+            assistant_message_id: None,
+            context_compaction_summary: None,
+            world_state_records: Vec::new(),
+            skill_activation: None,
+            skill_discovery: None,
+            messages: Vec::new(),
+        };
+        // Match the Host-bound configuration before touching historical payloads. Identical
+        // wire model names/windows can belong to different local configurations and revisions.
+        if input.skills.is_empty() {
+            if let Some((run_id, _)) = active_run.as_ref() {
+                if let Some(snapshot) =
+                    self.cached_running_context_window_snapshot(run_id, &agent_input)
+                {
+                    return Ok(AgentContextWindowSnapshotOutput {
+                        model_config_id: model.id,
+                        snapshot: Some(snapshot),
+                    });
+                }
+            }
+        }
+
+        let prepared_history = match conversation_id.as_deref() {
+            Some(conversation_id) => self.prepare_cached_history(conversation_id)?,
             None => None,
         };
-        let conversation_started = conversation.as_ref().is_some_and(|conversation| {
+        let conversation = prepared_history
+            .as_ref()
+            .map(|history| &history.source.conversation);
+        let conversation_started = conversation.is_some_and(|conversation| {
             conversation.messages.iter().any(|message| {
                 message.role.trim().eq_ignore_ascii_case("user")
                     && (!message.content.trim().is_empty() || !message.attachments.is_empty())
             })
         });
         let project_id = resolve_conversation_project_id(
-            conversation.as_ref(),
+            conversation.map(|conversation| conversation.id.as_str()),
+            conversation.and_then(|conversation| conversation.project_id.as_deref()),
             normalized_optional(input.project_id.as_deref()),
         )?;
         let project = resolve_project(&self.storage, project_id.as_deref())?;
-        let active_run = conversation_id
-            .as_deref()
-            .map(|id| self.storage.load_active_conversation_turn_identity(id))
-            .transpose()?
-            .flatten();
         let workspace_context = match active_run.as_ref() {
             Some((run_id, _)) => self
                 .storage
@@ -243,103 +352,34 @@ impl AgentService {
                     .build_attachment_library_context(conversation_id, project_id.as_deref())
             })
             .transpose()?;
-        let context_compaction_summary = match conversation_id.as_deref() {
-            Some(conversation_id) => self
-                .storage
-                .get_active_context_compaction_summary(conversation_id)?,
-            None => None,
-        };
+        let context_compaction_summary = prepared_history
+            .as_ref()
+            .and_then(|history| history.source.compaction_summary.clone());
         let world_state_records = match conversation_id.as_deref() {
             Some(conversation_id) => load_conversation_world_state(&self.storage, conversation_id)?,
             None => Vec::new(),
         };
-        let mut messages = match conversation.as_ref() {
-            Some(conversation) => {
-                let traces = self
-                    .storage
-                    .list_conversation_turn_traces(&conversation.id)?;
-                let model_context_logs = self
-                    .storage
-                    .list_conversation_model_context_logs(&conversation.id)?;
-                conversation_history_messages_with_model_context(
-                    conversation,
-                    &traces,
-                    &model_context_logs,
-                    context_compaction_summary.as_ref(),
-                    &[],
-                )?
-            }
-            None => Vec::new(),
-        };
+        let mut messages = prepared_history
+            .as_ref()
+            .map(|history| history.messages.as_ref().clone())
+            .unwrap_or_default();
         if let Some(conversation_id) = conversation_id.as_deref() {
             self.storage
                 .project_agent_messages_for_model(conversation_id, &mut messages)?;
         }
-        let mut prompt_preferences = match input.prompt_preferences {
-            Some(preferences) => preferences,
-            None => {
-                agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
-            }
-        };
-        // A settings toggle previews the next run only when idle. Active approvals and
-        // running task trees must retain their admitted stable prompt/tool contract.
-        if let Some(conversation_id) = conversation_id.as_deref() {
-            if let Some((run_id, _)) = self
-                .storage
-                .load_active_conversation_turn_identity(conversation_id)?
-            {
-                prompt_preferences.context_profile = self
-                    .storage
-                    .load_agent_context_profile_for_run(&run_id)?
-                    .ok_or_else(|| "运行中的任务缺少冻结的上下文模式。".to_string())?;
-            }
-        }
-        let mut agent_input = AgentChatInput {
-            initial_conversation_trace: None,
-            context_image_attachments: Vec::new(),
-            folder_references: Vec::new(),
-            api_url: connection.api_url,
-            api_token: String::new(),
-            provider_configuration_revision: Some(provider_protocol_revision),
-            provider_connection_revision: Some(provider_connection_revision),
-            search_connection_revision: Some(settings_snapshot.search_connection_revision),
-            provider_profile_config: Some(provider_profile_config),
-            provider_protocol_key: Some(provider_protocol_key),
-            model_config_id: Some(model.id.clone()),
-            model: model.provider_model_id.clone(),
-            model_capabilities: ModelCapabilities {
-                image_input: model.supports_image,
-            },
-            api_style: Some(provider_dialect.api_style()),
-            context_window_tokens: Some(context_window_tokens),
-            context_window_indicator_enabled: true,
-            max_tokens: input.max_tokens,
-            temperature: None,
-            stream: Some(false),
-            context: Some(AgentRunContext {
-                collaboration_identity: None,
-                conversation_id: conversation_id.clone(),
-                project_id: project_id.clone(),
-                workspace: workspace_context,
-                attachment_library,
-                permissions: input.permissions,
-            }),
-            search_config: Some(AgentSearchConfig {
-                mode: search_mode_from_storage(&settings.search_mode),
-                tavily_api_key: None,
-            }),
-            prompt_preferences: Some(prompt_preferences),
-            approval_decision: None,
-            tool_continuation: None,
-            attachments: Vec::new(),
-            resume_checkpoint: None,
-            assistant_message_id: None,
-            context_compaction_summary,
-            world_state_records,
-            skill_activation: prepared_skills.runtime,
-            skill_discovery,
-            messages,
-        };
+        agent_input.context = Some(AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: conversation_id.clone(),
+            project_id: project_id.clone(),
+            workspace: workspace_context,
+            attachment_library,
+            permissions: input.permissions,
+        });
+        agent_input.context_compaction_summary = context_compaction_summary;
+        agent_input.world_state_records = world_state_records;
+        agent_input.skill_activation = prepared_skills.runtime;
+        agent_input.skill_discovery = skill_discovery;
+        agent_input.messages = messages;
         hydrate_context_image_attachments(&self.storage, &mut agent_input)?;
         let tool_projection = self.context_window_tool_projection(
             &agent_input,
@@ -534,16 +574,19 @@ impl AgentService {
         &self,
         run_id: &str,
         conversation_id: &str,
-        expected_model_config_id: &str,
-        expected_model: &str,
+        agent_input: &AgentChatInput,
         notifications: CoreServerNotificationSender,
     ) -> AgentContextWindowObserver {
         let service = self.clone();
         let run_id = run_id.to_string();
         let conversation_id = conversation_id.to_string();
-        let expected_model_config_id = expected_model_config_id.to_string();
-        let expected_model = expected_model.to_string();
+        let expected_model_config_id = agent_input.model_config_id.clone();
+        let expected_model = agent_input.model.clone();
+        let configuration = running_context_window_configuration(agent_input);
         Arc::new(move |snapshot| {
+            let Some(expected_model_config_id) = expected_model_config_id.as_deref() else {
+                return;
+            };
             if snapshot.model != expected_model {
                 eprintln!(
                     "ignored context-window snapshot for unexpected model `{}` (expected `{expected_model}`)",
@@ -555,12 +598,18 @@ impl AgentService {
                 .running_context_window_snapshots
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(run_id.clone(), snapshot.clone());
+                .insert(
+                    run_id.clone(),
+                    RunningContextWindowSnapshot {
+                        snapshot: snapshot.clone(),
+                        configuration: configuration.clone(),
+                    },
+                );
             service.emit_context_window_snapshot(
                 &notifications,
                 &run_id,
                 &conversation_id,
-                &expected_model_config_id,
+                expected_model_config_id,
                 Some(snapshot),
             );
         })
@@ -580,35 +629,33 @@ impl AgentService {
             .remove(run_id);
     }
 
+    fn cached_running_context_window_snapshot(
+        &self,
+        run_id: &str,
+        agent_input: &AgentChatInput,
+    ) -> Option<AgentContextWindowSnapshot> {
+        let configuration = running_context_window_configuration(agent_input);
+        self.running_context_window_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .filter(|entry| entry.configuration == configuration)
+            .map(|entry| entry.snapshot.clone())
+    }
+
     pub(super) fn persisted_conversation_context_state(
         &self,
         agent_input: &AgentChatInput,
         conversation_id: &str,
     ) -> Result<PersistedConversationContextState, String> {
-        let conversation = self
-            .storage
-            .load_conversation(conversation_id)?
+        let history = self
+            .prepare_cached_history(conversation_id)?
             .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
         let mut preview_input = agent_input.clone();
-        let traces = self
-            .storage
-            .list_conversation_turn_traces(conversation_id)?;
-        let model_context_logs = self
-            .storage
-            .list_conversation_model_context_logs(conversation_id)?;
-        let context_compaction_summary = self
-            .storage
-            .get_active_context_compaction_summary(conversation_id)?;
-        preview_input.messages = conversation_history_messages_with_model_context(
-            &conversation,
-            &traces,
-            &model_context_logs,
-            context_compaction_summary.as_ref(),
-            &[],
-        )?;
+        preview_input.messages = history.messages.as_ref().clone();
         self.storage
             .project_agent_messages_for_model(conversation_id, &mut preview_input.messages)?;
-        preview_input.context_compaction_summary = context_compaction_summary;
+        preview_input.context_compaction_summary = history.source.compaction_summary.clone();
         preview_input.world_state_records =
             load_conversation_world_state(&self.storage, conversation_id)?;
         preview_input.attachments.clear();
@@ -625,8 +672,9 @@ impl AgentService {
         hydrate_context_image_attachments(&self.storage, &mut preview_input)?;
         Ok(PersistedConversationContextState {
             preview_input,
-            full_traces: traces,
-            full_model_context_logs: model_context_logs,
+            full_traces: history.source.traces.clone(),
+            full_model_context_logs: history.source.model_context_logs.clone(),
+            prepared_history: Some(history),
         })
     }
 
@@ -648,7 +696,22 @@ impl AgentService {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             if let Some(entry) = states.get_mut(conversation_id) {
-                if entry.configuration_revision == configuration_revision {
+                let history_current = !entry.terminal
+                    || match entry.history_version.as_ref() {
+                        Some(version) => self
+                            .storage
+                            .is_conversation_history_snapshot_current(version)?,
+                        None => false,
+                    };
+                let world_state_current = entry.state.world_state_revision()
+                    == agent_input
+                        .world_state_records
+                        .last()
+                        .map(|record| record.record.result_revision());
+                if entry.configuration_revision == configuration_revision
+                    && history_current
+                    && world_state_current
+                {
                     entry.last_access = access;
                     return entry
                         .state
@@ -681,10 +744,12 @@ impl AgentService {
         snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
         tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<ConversationContextStateUpdate, String> {
+        self.record_context_rebuild(conversation_id);
         let PersistedConversationContextState {
             preview_input,
             full_traces,
             full_model_context_logs,
+            prepared_history,
         } = self.persisted_conversation_context_state(agent_input, conversation_id)?;
         let latest_trace = full_traces.last();
         let latest_committed_activity_items = latest_trace
@@ -707,6 +772,28 @@ impl AgentService {
             .unwrap_or_default();
         let context_images = preview_input.context_image_attachments.clone();
         let host_services = self.context_window_provider_host_services();
+        // Only a settled history may become a speculative next-turn baseline. An active
+        // preview can already include a partially published provider turn or run input.
+        let history_version = prepared_history
+            .as_ref()
+            .map(|history| history.source.version.clone());
+        let prepared_history = prepared_history
+            .filter(|_| latest_trace.is_none_or(|trace| trace.terminal_status.is_terminal()));
+        let prepared_history = if prepared_history.is_some()
+            && self
+                .storage
+                .load_active_conversation_turn_identity(conversation_id)?
+                .is_none()
+        {
+            prepared_history
+        } else {
+            None
+        };
+        let remembered_input = prepared_history.as_ref().map(|_| preview_input.clone());
+        let terminal_prefix_fingerprint = Some(prepared_history::terminal_prefix_fingerprint(
+            &preview_input,
+            latest_trace.map(|trace| trace.assistant_message_id.as_str()),
+        )?);
         let mut state = create_conversation_context_state_with_host_services(
             preview_input,
             conversation_id,
@@ -716,6 +803,17 @@ impl AgentService {
         state
             .hydrate_context_images(&context_images)
             .map_err(|error| error.to_string())?;
+        if let Some((history, input)) = prepared_history.zip(remembered_input.as_ref()) {
+            // A warmup is an optimization only. Storage changes or cache publication errors
+            // must never turn an otherwise valid context preview into a failed request.
+            if self
+                .remember_prepared_history(history, input, &mut state)
+                .is_err()
+            {
+                #[cfg(debug_assertions)]
+                eprintln!("[历史上下文缓存] 计量预热失败：会话={conversation_id}，原因=基线保存或历史版本校验失败，发送时转为正常准备");
+            }
+        }
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(match tool_projection {
@@ -746,7 +844,10 @@ impl AgentService {
             active_assistant_message_id: latest_trace
                 .map(|trace| trace.assistant_message_id.clone()),
             committed_activity_items: latest_committed_activity_items,
+            awaiting_initial_publication: false,
             terminal: latest_trace.is_none_or(|trace| trace.terminal_status.is_terminal()),
+            history_version,
+            terminal_prefix_fingerprint,
             last_access: self.next_conversation_context_state_access(),
         };
         self.insert_conversation_context_state(conversation_id, entry);
@@ -909,6 +1010,7 @@ impl AgentService {
             });
         let mut needs_rebuild = trace.terminal_status.is_terminal()
             && (exact_provider_replay || summary_covers_current_trace);
+        let mut remember_terminal = false;
         {
             let mut states = self
                 .conversation_context_states
@@ -937,6 +1039,7 @@ impl AgentService {
                                     entry.committed_activity_items = committed_activity_items;
                                     entry.terminal = true;
                                     entry.active_run_id = None;
+                                    entry.awaiting_initial_publication = false;
                                 }
                                 Err(_) => needs_rebuild = true,
                             }
@@ -947,7 +1050,7 @@ impl AgentService {
                                 .state
                                 .shared_baseline()
                                 .map_err(|error| error.to_string())?;
-                            return Ok(true);
+                            remember_terminal = true;
                         }
                     } else {
                         needs_rebuild = true;
@@ -959,6 +1062,27 @@ impl AgentService {
             if needs_rebuild {
                 states.remove(conversation_id);
             }
+        }
+        if remember_terminal {
+            match self.remember_terminal_measured_history(
+                agent_input,
+                conversation_id,
+                &trace,
+                &model_context_items,
+                assistant_content,
+                assistant_created_at,
+            ) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[历史上下文缓存] 终态基线已失效：会话={conversation_id}，原因=历史前缀或终态记录变化，重新校验准备");
+                }
+                Err(_error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[历史上下文缓存] 计量预热失败：会话={conversation_id}，原因=终态基线保存失败，转为正常准备");
+                }
+            }
+            self.invalidate_conversation_context_state(conversation_id);
         }
         let mut baseline_input = agent_input.clone();
         baseline_input.context_window_indicator_enabled = false;

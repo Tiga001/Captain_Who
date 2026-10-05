@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 type AutomationAdmissionWithExecutionAccess<'a> = (
     &'a mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
@@ -53,11 +54,21 @@ pub(crate) struct PreparedConversationTurn {
     pub(crate) output: AgentConversationTurnOutput,
     pub(crate) agent_input: AgentChatInput,
     pub(crate) usage_context: AgentRunUsageContext,
+    pub(crate) prepared_history: Option<Arc<PreparedConversationHistory>>,
     /// Exact, run-scoped access to sibling resources of the activated Skill
     /// revisions. This authority is host-only and is deliberately not
     /// serialized into `AgentChatInput`.
     pub(crate) skill_resources:
         Option<std::sync::Arc<mycopilot_core::skills::SkillResourceSession>>,
+}
+
+/// Validated, provider-neutral history prepared from one durable snapshot. The caller still
+/// supplies the new input, current permissions and provider/world-state configuration.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedConversationHistory {
+    pub(crate) source: Arc<mycopilot_core::storage::service::ConversationHistorySnapshot>,
+    pub(crate) messages: Arc<Vec<AgentChatMessage>>,
+    pub(crate) excluded_message_ids: Vec<String>,
 }
 
 pub(crate) enum PreparedConversationTurnOutcome {
@@ -219,6 +230,7 @@ pub(crate) fn prepare_conversation_turn(
         None,
         None,
         None,
+        None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -253,6 +265,7 @@ pub(crate) fn prepare_reserved_human_response_turn(
         None,
         None,
         Some(check_execution_access),
+        None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -264,6 +277,8 @@ pub(crate) fn prepare_reserved_human_response_turn(
 /// A trusted workflow delivery shares root admission and permissions, but never creates a
 /// HumanText model input. Its content enters the model via the workflow sampling inbox.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)] // Retain the cold-preparation test helper alongside the cached entry point.
 pub(crate) fn prepare_reserved_workflow_turn(
     storage: &StorageService,
     skills_service: &SkillsService,
@@ -273,6 +288,31 @@ pub(crate) fn prepare_reserved_workflow_turn(
     expected_revision: Option<i64>,
     workflow: mycopilot_core::workflow_execution::Input,
     check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    prepare_reserved_workflow_turn_with_history(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        existing,
+        expected_revision,
+        workflow,
+        check_execution_access,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_reserved_workflow_turn_with_history(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    workflow: mycopilot_core::workflow_execution::Input,
+    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
         storage,
@@ -287,6 +327,7 @@ pub(crate) fn prepare_reserved_workflow_turn(
         None,
         None,
         Some(check_execution_access),
+        prepared_history,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -298,6 +339,7 @@ pub(crate) fn prepare_reserved_workflow_turn(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn prepare_reserved_human_turn(
     storage: &StorageService,
     skills_service: &SkillsService,
@@ -308,6 +350,33 @@ pub(crate) fn prepare_reserved_human_turn(
     automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
     check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    prepare_reserved_human_turn_with_history(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        existing,
+        expected_revision,
+        automation_admission,
+        automation_execution_context,
+        check_execution_access,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_reserved_human_turn_with_history(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
+    automation_execution_context: Option<AgentAutomationExecutionContext>,
+    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
         storage,
@@ -322,6 +391,7 @@ pub(crate) fn prepare_reserved_human_turn(
         automation_admission,
         automation_execution_context,
         Some(check_execution_access),
+        prepared_history,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -356,6 +426,7 @@ pub(crate) fn prepare_reserved_human_rewrite_turn(
         None,
         None,
         Some(check_execution_access),
+        None,
     )
 }
 
@@ -383,6 +454,7 @@ pub(crate) fn prepare_reserved_continuation_turn(
         None,
         None,
         Some(check_execution_access),
+        None,
     )
 }
 
@@ -442,6 +514,7 @@ pub(crate) fn prepare_agent_wake_turn(
         None,
         None,
         None,
+        None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -466,6 +539,7 @@ fn prepare_conversation_turn_from_source(
     automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
     check_execution_access: Option<&dyn Fn() -> Result<(), AgentServiceError>>,
+    prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     if rewrite.is_some() && automation_admission.is_some() {
         return Err("an automation Turn cannot be admitted as a rewrite"
@@ -633,7 +707,12 @@ fn prepare_conversation_turn_from_source(
             .into());
     }
     let resolved_project_id = resolve_conversation_project_id(
-        existing.as_ref(),
+        existing
+            .as_ref()
+            .map(|conversation| conversation.id.as_str()),
+        existing
+            .as_ref()
+            .and_then(|conversation| conversation.project_id.as_deref()),
         normalized_optional(input.project_id.as_deref()),
     )?;
     let project = resolve_project(storage, resolved_project_id.as_deref())?;
@@ -716,40 +795,69 @@ fn prepare_conversation_turn_from_source(
     }
     conversation.updated_at = timestamp;
 
-    let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
-    let history_model_context = storage.list_conversation_model_context_logs(&conversation_id)?;
-    let context_compaction_summary =
-        storage.get_active_context_compaction_summary(&conversation_id)?;
-    let mut history_excluded_message_ids = storage
-        .list_trace_bound_agent_projection_message_ids(&conversation_id)
-        .map_err(|error| error.to_string())?;
-    // Workflow bubbles are UI projections. Their authoritative model input is WorkflowDelivery
-    // in the Turn trace; including the raw role=user projection would duplicate/elevate it.
-    history_excluded_message_ids.extend(
-        storage
-            .workflow_execution_inputs_for_conversation(&conversation_id)?
-            .into_iter()
-            .filter_map(|input| input.delivery_id),
-    );
-    if !matches!(&source, ConversationTurnInputSource::HumanContinuation(_)) {
-        history_excluded_message_ids.push(user_message_id.clone());
-    }
-    history_excluded_message_ids.push(assistant_message_id.clone());
-    if let Some(rewrite) = &rewrite {
-        history_excluded_message_ids.push(rewrite.source_user_message_id.clone());
-        history_excluded_message_ids.push(rewrite.source_assistant_message_id.clone());
-    }
-    let history_excluded_refs = history_excluded_message_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let history_messages = conversation_history_messages_with_model_context(
-        &conversation,
-        &history_traces,
-        &history_model_context,
-        context_compaction_summary.as_ref(),
-        &history_excluded_refs,
-    )?;
+    let prepared_history = match prepared_history {
+        Some(history)
+            if rewrite.is_none()
+                && automation_admission.is_none()
+                && matches!(
+                    &source,
+                    ConversationTurnInputSource::Human | ConversationTurnInputSource::Workflow(_)
+                )
+                && history.source.conversation.id == conversation_id
+                && expected_revision == Some(history.source.conversation_revision)
+                && !history.source.conversation.messages.iter().any(|message| {
+                    message.id == user_message_id || message.id == assistant_message_id
+                }) =>
+        {
+            storage
+                .is_conversation_history_snapshot_current(&history.source.version)?
+                .then_some(history)
+        }
+        _ => None,
+    };
+    let (history_messages, context_compaction_summary) = if let Some(history) = &prepared_history {
+        (
+            history.messages.as_ref().clone(),
+            history.source.compaction_summary.clone(),
+        )
+    } else {
+        let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
+        let history_model_context =
+            storage.list_conversation_model_context_logs(&conversation_id)?;
+        let context_compaction_summary =
+            storage.get_active_context_compaction_summary(&conversation_id)?;
+        let mut history_excluded_message_ids = storage
+            .list_trace_bound_agent_projection_message_ids(&conversation_id)
+            .map_err(|error| error.to_string())?;
+        // Workflow bubbles are UI projections. Their authoritative model input is WorkflowDelivery
+        // in the Turn trace; including the raw role=user projection would duplicate/elevate it.
+        history_excluded_message_ids.extend(
+            storage
+                .workflow_execution_inputs_for_conversation(&conversation_id)?
+                .into_iter()
+                .filter_map(|input| input.delivery_id),
+        );
+        if !matches!(&source, ConversationTurnInputSource::HumanContinuation(_)) {
+            history_excluded_message_ids.push(user_message_id.clone());
+        }
+        history_excluded_message_ids.push(assistant_message_id.clone());
+        if let Some(rewrite) = &rewrite {
+            history_excluded_message_ids.push(rewrite.source_user_message_id.clone());
+            history_excluded_message_ids.push(rewrite.source_assistant_message_id.clone());
+        }
+        let history_excluded_refs = history_excluded_message_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let history_messages = conversation_history_messages_with_model_context(
+            &conversation,
+            &history_traces,
+            &history_model_context,
+            context_compaction_summary.as_ref(),
+            &history_excluded_refs,
+        )?;
+        (history_messages, context_compaction_summary)
+    };
 
     let user_message = match &source {
         ConversationTurnInputSource::HumanContinuation(_) => conversation
@@ -1048,7 +1156,7 @@ fn prepare_conversation_turn_from_source(
                     ],
                 };
                 storage
-                    .append_conversation_and_begin_turn_with_execution_access(
+                    .append_conversation_and_begin_turn_with_history_version(
                         conversation,
                         expected_revision,
                         trusted_wake,
@@ -1059,6 +1167,9 @@ fn prepare_conversation_turn_from_source(
                         assistant_created_at,
                         now_ms().max(assistant_created_at),
                         checked_admission,
+                        prepared_history
+                            .as_ref()
+                            .map(|history| &history.source.version),
                     )
                     .map_err(admission_error)?
                     .1
@@ -1211,6 +1322,7 @@ fn prepare_conversation_turn_from_source(
 
     Ok(PreparedConversationTurnOutcome::Prepared(Box::new(
         PreparedConversationTurn {
+            prepared_history,
             skill_resources,
             usage_context: AgentRunUsageContext {
                 conversation_id: conversation_id.clone(),

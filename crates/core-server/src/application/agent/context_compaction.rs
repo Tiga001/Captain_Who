@@ -544,7 +544,10 @@ impl AgentService {
             active_run_id: Some(run_id.to_string()),
             active_assistant_message_id: Some(assistant_message_id.to_string()),
             committed_activity_items,
+            awaiting_initial_publication: false,
             terminal: false,
+            history_version: None,
+            terminal_prefix_fingerprint: None,
             last_access: self.next_conversation_context_state_access(),
         };
         self.insert_conversation_context_state(conversation_id, entry);
@@ -721,7 +724,7 @@ impl AgentService {
         tool_projection: Option<&AgentContextWindowToolProjection>,
         trusted_previous: bool,
     ) -> Result<ConversationContextStateUpdate, String> {
-        if trusted_previous {
+        {
             let mut states = self
                 .conversation_context_states
                 .lock()
@@ -732,16 +735,50 @@ impl AgentService {
                     && entry.active_run_id.as_deref() == Some(run_id)
                     && entry.active_assistant_message_id.as_deref() == Some(assistant_message_id)
                 {
-                    if let Some(count) = entry
-                        .state
-                        .append_trace_publication(
+                    let count = if entry.awaiting_initial_publication
+                        && !trusted_previous
+                        && entry.committed_activity_items == 0
+                        && agent_input.resume_checkpoint.is_none()
+                    {
+                        // Admission validated this historical prefix before binding it to this
+                        // exact new Run. The first committed publication has no predecessor by
+                        // definition: append only its current-Turn seed, then establish the
+                        // ordinary certified publication cursor for subsequent deltas.
+                        let trace = publication.in_progress_trace(
+                            run_id,
+                            conversation_id,
+                            assistant_message_id,
+                        );
+                        let count = entry
+                            .state
+                            .append_trace_items(&trace, &publication.model_context_items, 0)
+                            .map_err(|error| error.to_string())?;
+                        entry
+                            .state
+                            .hydrate_context_images(&agent_input.context_image_attachments)
+                            .map_err(|error| error.to_string())?;
+                        entry.state.seed_trace_publication_cursor(
                             publication,
                             assistant_message_id,
                             run_id,
-                            entry.committed_activity_items,
-                        )
-                        .map_err(|error| error.to_string())?
-                    {
+                            count,
+                        );
+                        entry.awaiting_initial_publication = false;
+                        Some(count)
+                    } else if trusted_previous && !entry.awaiting_initial_publication {
+                        entry
+                            .state
+                            .append_trace_publication(
+                                publication,
+                                assistant_message_id,
+                                run_id,
+                                entry.committed_activity_items,
+                            )
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        None
+                    };
+                    if let Some(count) = count {
                         entry.committed_activity_items = count;
                         entry.last_access = self.next_conversation_context_state_access();
                         let baseline = entry

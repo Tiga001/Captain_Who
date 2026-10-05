@@ -148,6 +148,67 @@ pub(crate) fn list_logs_for_conversation(
         .collect()
 }
 
+/// Opaque compressed rows captured in a read transaction. Decode after releasing the shared
+/// connection mutex; content hashes and identities retain the ordinary reader's strict checks.
+pub(crate) struct StoredConversationModelContextLogs(Vec<(String, Vec<StoredModelContextItem>)>);
+
+pub(crate) fn load_stored_logs_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<StoredConversationModelContextLogs> {
+    let mut statement = connection.prepare(
+        "SELECT model.assistant_message_id, model.sequence, model.ordinal, model.content_hash,
+                model.uncompressed_bytes, model.compression, model.payload
+         FROM conversation_model_context_items model
+         JOIN conversation_turn_traces trace ON trace.assistant_message_id = model.assistant_message_id
+         JOIN messages message ON message.id = trace.assistant_message_id
+         WHERE trace.conversation_id = ?1
+         ORDER BY message.position, message.created_at, model.assistant_message_id, model.sequence, model.ordinal",
+    )?;
+    let rows = statement.query_map([conversation_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            (
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+            ),
+        ))
+    })?;
+    let mut logs: Vec<(String, Vec<StoredModelContextItem>)> = Vec::new();
+    for row in rows {
+        let (id, item) = row?;
+        if let Some((_, items)) = logs
+            .last_mut()
+            .filter(|(previous_id, _)| previous_id == &id)
+        {
+            items.push(item);
+        } else {
+            #[cfg(test)]
+            crate::storage::trace_performance_metrics::context_load();
+            logs.push((id, vec![item]));
+        }
+    }
+    Ok(StoredConversationModelContextLogs(logs))
+}
+
+impl StoredConversationModelContextLogs {
+    pub(crate) fn decode(self) -> rusqlite::Result<Vec<ConversationModelContextLog>> {
+        self.0
+            .into_iter()
+            .map(|(assistant_message_id, rows)| {
+                Ok(ConversationModelContextLog {
+                    assistant_message_id,
+                    items: decode_stored_items(rows)?,
+                })
+            })
+            .collect()
+    }
+}
+
 pub(crate) fn get_log_for_message(
     connection: &Connection,
     assistant_message_id: &str,
@@ -214,6 +275,18 @@ pub(crate) fn load_items_for_message(
     connection: &Connection,
     assistant_message_id: &str,
 ) -> rusqlite::Result<Vec<ConversationModelContextItem>> {
+    decode_stored_items(load_stored_items_for_message(
+        connection,
+        assistant_message_id,
+    )?)
+}
+
+type StoredModelContextItem = (i64, i64, String, i64, String, Vec<u8>);
+
+fn load_stored_items_for_message(
+    connection: &Connection,
+    assistant_message_id: &str,
+) -> rusqlite::Result<Vec<StoredModelContextItem>> {
     #[cfg(test)]
     crate::storage::trace_performance_metrics::context_load();
     let mut statement = connection.prepare(
@@ -236,6 +309,12 @@ pub(crate) fn load_items_for_message(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn decode_stored_items(
+    rows: Vec<StoredModelContextItem>,
+) -> rusqlite::Result<Vec<ConversationModelContextItem>> {
     let mut items = Vec::with_capacity(rows.len());
     for (sequence, ordinal, stored_hash, stored_bytes, compression, payload) in rows {
         if compression != "zstd" {

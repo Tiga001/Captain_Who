@@ -40,7 +40,8 @@ fn publication_committed_model_count(publication: &crate::ConversationTracePubli
 }
 
 impl AgentConversationContextState {
-    /// Called only after a cold, fully validated rebuild from this committed publication.
+    /// Called only after adopting a validated, committed publication: either a cold rebuild or
+    /// an admitted historical baseline with this new Turn's committed seed appended.
     pub fn seed_trace_publication_cursor(
         &mut self,
         publication: &crate::ConversationTracePublication,

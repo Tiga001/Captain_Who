@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 66;
+pub const STORAGE_SCHEMA_VERSION: i32 = 67;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -24,8 +24,11 @@ const V64_SCHEMA_FINGERPRINT: &str =
     "sha256:5ee4d7a0c9c3e7a8ca588dbf76bb14d0353217143a3afe329d394c7c6d05e56f";
 const V65_SCHEMA_FINGERPRINT: &str =
     "sha256:9e91f082fb82ceb7ed3af4ff5178dad656e0026a42b839c9af9cb79114b33568";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V66_SCHEMA_FINGERPRINT: &str =
     "sha256:d9790cf426f36f5b8288025472f4a66dd0766d74e3cae3c8899691525c8eb352";
+
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:d2dab777211771ce0fb8b85ca0d0ddd39a58e5cd4ab0d4bd6e34d1fd0bf8c2ba";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -43,6 +46,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v64 installs independent workflow mailboxes; legacy workflow records are not converted.
 /// v65 snapshots organization instances and assigns durable member identities.
 /// v66 removes the retired graph execution tables; organization mail and chats stay intact.
+/// v67 versions model-bearing message changes independently of conversation presentation metadata.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -116,6 +120,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 65 {
         remove_retired_workflow_execution_v65(connection)?;
+    }
+
+    if read_schema_version(connection)? == 66 {
+        install_message_history_revisions_v66(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -423,13 +431,32 @@ fn workflow_mail_schema() -> &'static str {
         .unwrap();
     &CANONICAL_SCHEMA[start..end]
 }
-fn retired_workflow_cleanup_schema() -> &'static str {
+fn message_history_revisions_schema() -> &'static str {
     &CANONICAL_SCHEMA[CANONICAL_SCHEMA
-        .find("-- Remove retired graph execution storage, schema v66.")
+        .find("-- Per-conversation model history identity, independent of presentation metadata, schema v67.")
         .unwrap()..]
 }
+fn canonical_schema_v66() -> String {
+    CANONICAL_SCHEMA.replace(message_history_revisions_schema(), "")
+}
+fn retired_workflow_cleanup_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Remove retired graph execution storage, schema v66.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Per-conversation model history identity, independent of presentation metadata, schema v67.").unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
 fn canonical_schema_v65() -> String {
-    CANONICAL_SCHEMA.replace(retired_workflow_cleanup_schema(), "")
+    canonical_schema_v66().replace(retired_workflow_cleanup_schema(), "")
+}
+fn install_message_history_revisions_v66(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V66_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(message_history_revisions_schema())?;
+    transaction.pragma_update(None, "user_version", 67)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 fn organization_instances_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
@@ -448,7 +475,7 @@ fn remove_retired_workflow_execution_v65(connection: &Connection) -> rusqlite::R
     validate_schema_fingerprint(&transaction, V65_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(retired_workflow_cleanup_schema())?;
     transaction.pragma_update(None, "user_version", 66)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V66_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 
@@ -726,6 +753,52 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn v67_installs_message_history_versions_without_rewriting_history() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(&super::canonical_schema_v66()).unwrap();
+        c.pragma_update(None, "user_version", 66).unwrap();
+        c.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES('history','Keep',1,1); INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('original','history','user','Keep original content','sent',1,0);").unwrap();
+        let old_revision: i64 = c
+            .query_row(
+                "SELECT revision FROM conversations WHERE id='history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        super::run_migrations(&c).unwrap();
+        super::run_migrations(&c).unwrap();
+        assert_eq!(
+            super::read_schema_version(&c).unwrap(),
+            super::STORAGE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT revision FROM conversations WHERE id='history'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            old_revision
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT content FROM messages WHERE id='original'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "Keep original content"
+        );
+        assert_eq!(c.query_row("SELECT revision FROM conversation_message_history_revisions WHERE conversation_id='history'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        c.execute(
+            "UPDATE messages SET content='New content' WHERE id='original'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(c.query_row("SELECT revision FROM conversation_message_history_revisions WHERE conversation_id='history'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
     #[test]
     fn v65_rejects_orphaned_instances_without_dropping_records() {
         let c = rusqlite::Connection::open_in_memory().unwrap();

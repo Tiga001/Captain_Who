@@ -12,6 +12,7 @@ mod attachment_imports;
 mod attachments;
 mod conversations;
 mod guidance;
+mod history_snapshot;
 mod ignored_history;
 mod incremental_turns;
 mod message_deletion;

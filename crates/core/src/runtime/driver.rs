@@ -375,6 +375,7 @@ impl AgentRuntime {
             .as_ref()
             .map(|preferences| preferences.context_profile)
             .unwrap_or_default();
+        let starts_new_turn = restored_checkpoint.is_none();
         let PreparedLlmRequest {
             template: llm_request,
             context: mut active_context,
@@ -398,6 +399,15 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        // Setup already published this new Turn's exact admitted seed. Keep that recorder's
+        // publication lineage when adding Run context materials; reconstructing an equivalent
+        // recorder here would force the Host to revalidate and rebuild the whole history.
+        // Checkpoint restoration owns its own continuation recorder and remains unchanged.
+        let conversation_trace = if starts_new_turn {
+            setup_conversation_trace
+        } else {
+            conversation_trace
+        };
         active_context.hydrate_context_images(&context_image_attachments)?;
         let provider_runtime_capabilities = resolve_provider_runtime_capabilities(
             &llm_request.provider_protocol_key,

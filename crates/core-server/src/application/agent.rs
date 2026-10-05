@@ -69,8 +69,9 @@ use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcom
 use mycopilot_core::storage::service::{
     AgentPendingActionSettlementInspection, AgentRunGuidanceStoreOutcome,
     AgentRunGuidanceTransitionOutcome, AgentWaitingForApprovalPersistenceOutcome,
-    AgentWaitingSegmentUsagePersistenceOutcome, McpActionTerminalizationRequest,
-    McpAutoActionJournalTerminalOutcome, McpStartupActionTerminalOutcome, StorageService,
+    AgentWaitingSegmentUsagePersistenceOutcome, ConversationHistoryVersion,
+    McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,
+    McpStartupActionTerminalOutcome, StorageService,
 };
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
@@ -132,11 +133,13 @@ mod context_window;
 mod execution_access;
 pub(crate) use execution_access::ExecutionAccessDenied;
 mod conversation_world_state;
+mod history_warmup;
 mod human_root_notifications;
 mod manual_context_compaction;
 mod observer_stream;
 mod pending_action_store;
 mod persisted_resume_input;
+mod prepared_history;
 mod provider_transition;
 pub use manual_context_compaction::{
     AgentManualContextCompactionCancelInput, AgentManualContextCompactionStartInput,
@@ -519,7 +522,10 @@ struct ConversationContextStateEntry {
     active_run_id: Option<String>,
     active_assistant_message_id: Option<String>,
     committed_activity_items: usize,
+    awaiting_initial_publication: bool,
     terminal: bool,
+    history_version: Option<ConversationHistoryVersion>,
+    terminal_prefix_fingerprint: Option<String>,
     last_access: u64,
 }
 
@@ -570,6 +576,7 @@ impl std::ops::Deref for StoredConversationTraceSnapshot {
 }
 
 struct PersistedConversationContextState {
+    prepared_history: Option<Arc<PreparedConversationHistory>>,
     /// Model-facing history uses the active summary and its uncovered suffix.
     preview_input: AgentChatInput,
     /// Incremental journal cursors must be measured against the complete, matching records.
@@ -656,13 +663,18 @@ pub struct AgentService {
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, StoredConversationTraceSnapshot>>>,
     observer_streams: Arc<Mutex<HashMap<String, observer_stream::ObserverStreamState>>>,
-    running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
+    running_context_window_snapshots:
+        Arc<Mutex<HashMap<String, context_window::RunningContextWindowSnapshot>>>,
     /// The selector directory shown to this run, shared by live execution and read-only previews.
     /// Pending checkpoints persist the same directory across process restarts.
     collaboration_run_directories:
         Arc<Mutex<HashMap<String, mycopilot_core::AgentCollaborationSelectorDirectory>>>,
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
+    prepared_histories: Arc<Mutex<prepared_history::PreparedHistoryCache>>,
+    prepared_history_inflight:
+        Arc<Mutex<HashMap<String, std::sync::Weak<prepared_history::PreparedHistoryInflight>>>>,
+    history_warmup: Arc<Mutex<history_warmup::HistoryWarmupQueue>>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     conversation_admission: Arc<Mutex<()>>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
@@ -870,6 +882,11 @@ impl AgentService {
             collaboration_run_directories: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
+            prepared_histories: Arc::new(Mutex::new(
+                prepared_history::PreparedHistoryCache::default(),
+            )),
+            prepared_history_inflight: Arc::new(Mutex::new(HashMap::new())),
+            history_warmup: Arc::new(Mutex::new(history_warmup::HistoryWarmupQueue::default())),
             context_compaction_summary_generator: None,
             conversation_admission: Arc::new(Mutex::new(())),
             execution_access: Arc::new(Mutex::new(
