@@ -4,7 +4,7 @@ description: 让根 Agent 把独立子任务分给多个子 Agent，并在界面
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-10-04
 ---
 
 # Multi-Agent
@@ -95,7 +95,7 @@ Multi-Agent 让一个根 Agent 组织多个子 Agent。每个子 Agent 有自己
 
 ## 当前限制
 
-- 只支持树状协作，不支持任意依赖关系、条件分支或图形工作流。
+- Multi-Agent 子任务支持树状协作，不提供任意依赖关系或条件分支。当前开发版本另有[组织](organizations.md)，把独立根对话连接成邮件网络；组织也没有固定执行连线或逻辑门，不代表所有已发布安装包都包含该能力。
 - 用户不能直接编辑、启动或回复子 Agent 对话。
 - Scheduled Automation 不能直接把目标设为子 Agent；它只能启动根任务，再由根 Agent 分工。
 - Agent Center 只显示当前活动根对话的协作树，不跨多个根任务聚合。
@@ -103,6 +103,7 @@ Multi-Agent 让一个根 Agent 组织多个子 Agent。每个子 Agent 有自己
 
 ## 相关内容
 
+- [组织与独立成员对话](organizations.md)
 - [使用多个 Agent 教程](../tutorials/use-multiple-agents.md)
 - [多 Agent 协作原理](../learn/multi-agent-principles.md)
 - [权限与审批](../everyday-use/permissions-and-approvals.md)

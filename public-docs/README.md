@@ -4,7 +4,7 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-09-23
+last_verified: 2026-10-04
 ---
 
 # Captain Who 文档
@@ -23,7 +23,7 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ### 查找具体功能
 
-前往[能力指南](user/capabilities/README.md)，了解工具、Skill、MCP、Multi-Agent、浏览器自动化、Scheduled Automation 和系统通知；遇到问题时查看[自助排查](support/README.md)。
+前往[能力指南](user/capabilities/README.md)，了解工具、Skill、MCP、Multi-Agent、[组织](user/capabilities/organizations.md)、浏览器自动化、Scheduled Automation 和系统通知；遇到问题时查看[自助排查](support/README.md)。
 
 ### 理解 Agent 技术
 
@@ -40,4 +40,4 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ## 阅读说明
 
-文档只描述当前软件能够验证的行为。不同版本的界面和能力可能存在差异；取得安装包时，请同时查看对应的[发行说明](releases/README.md)。涉及第三方模型、搜索或 MCP 服务时，还需要遵守相应服务商的条款、计费方式和数据政策。
+文档只描述能够验证的产品行为。[组织指南](user/capabilities/organizations.md)与[组织教程](user/tutorials/create-an-organization.md)明确标注当前开发版本范围：旧工作流已移除，由组织邮件协作取代，但这不代表所有已发布安装包都包含该能力。不同版本的界面和能力可能存在差异；取得安装包时，请同时查看对应的[发行说明](releases/README.md)。涉及第三方模型、搜索或 MCP 服务时，还需要遵守相应服务商的条款、计费方式和数据政策。

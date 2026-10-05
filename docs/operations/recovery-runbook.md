@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-04
 ---
 
 # 恢复与故障处理 Runbook
@@ -19,6 +19,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 | 子 Agent 长时间 queued/claimed                                       | Core Server 是否重启、Dispatcher 是否运行、lease deadline、数据库可写                 | 重复 spawn 同一任务或直接把 Wake 改 completed |
 | 子 Agent 显示 running，但进程已崩溃                                  | trace/checkpoint/pending action/lease                                                 | 盲重放可能已有外部副作用的 Turn               |
 | 子 Agent 等待审批                                                    | 根 Agent Approval projection、原 pending action、expiry                               | 从子 Agent 页面直接写 decision                |
+| 组织邮件长期 pending/processing                                      | 成员独立会话、组织启用状态、邮箱暂停、模型配置、原 Run/投递回执                       | 重发同一任务、改邮件终态或恢复旧图执行表      |
 | UI 丢活动或串线                                                      | 根 Agent ID、event sequence、resync、重新 hydrate                                     | 从 notification 时间戳重建状态                |
 | FileChange 卡在 applying/显示 unknown                                | transaction、pending action、audit/receipt、权威文件 digest                           | 重放 `apply_patch` 或删除 journal/草稿行      |
 | 用户 MCP Server 无法启动                                             | Registry status、launch authorization、program/cwd identity                           | 重用旧授权或把 Token 填入 argv                |
@@ -38,14 +39,20 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v62 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v61 可按连续迁移升级到当前版本。v51→v52 保留协作数据与回执，v52→v53 只为未来事件增加请求归属活动；v53→v54 新增组织定义，v54→v55 将既有模板可用性初始化为禁用，v55→v56 新增独立实例与编辑草稿，v56→v57 新增实例启用和关联会话归档保护；v57→v58 增加组织持久执行事实与 WorkflowDelivery Trace；v58→v59 增加组织新建对话的默认项目；v61→v62 只新增组织 pending sequence 部分索引，不改写记录或历史；v60→v61 仅添加 Trace/header/model-context 修订触发器、随机 epoch 与 revision 表和待处理交互摘要索引，保留全部历史正文；v59→v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影与索引，不重排历史或改写正文。旧活动不推测位置或回填；v50 含旧协作事件时保留原库并要求开发者先处理历史。v49 及更早版本不自动升级。真源：
+当前基线为 **schema v66 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v65 可按连续迁移升级到当前版本。v49 及更早版本不自动升级。关键历史边界：
 
-```text
-crates/core/src/storage/migrations.rs
-crates/core/src/storage/canonical_schema.sql
-```
+- v51→v52 保留协作数据与回执；v52→v53 只为未来事件增加请求归属活动，旧活动不推测位置或回填。
+- v53→v59 逐步引入旧工作流的定义、模板可用性、实例/草稿、启用与归档保护、执行记录和默认项目。这些迁移名称保留历史含义，不代表当前仍提供图工作流执行。
+- v59→v60 按既有 FTS position 回填普通历史顺序投影，不重排历史或改写正文；v60→v61 添加 Trace/header/model-context 修订信息与待处理交互摘要索引；v61→v62 添加旧执行队列 pending sequence 索引。
+- v62→v63 只增加长粘贴文本的可选来源元数据，保留既有附件内容。
+- v63→v64 新建独立组织邮箱 `workflow_mail_*`，**不把旧工作流运行、邮件或暂停状态转换为组织邮件**，聊天历史保留。
+- v64→v65 将模板定义复制到每个实例的 `definition_json` 并替换其定义 ID，为既有成员绑定生成 `membership_id`；实例从此独立于模板更新与删除。迁移前校验外键，拒绝孤立实例，不通过 join 静默丢行。
+- v65→v66 **删除旧图执行的 `workflow_execution_*` 七张表及其记录**；当前组织邮箱、人员变更回执和聊天历史保留。旧工作流运行记录不会出现在新的邮箱中，也不能在升级后继续旧图执行。
 
-不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v62 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
+真源与迁移回滚/保留测试见 [`migrations.rs`](../../crates/core/src/storage/migrations.rs) 和
+[`canonical_schema.sql`](../../crates/core/src/storage/canonical_schema.sql)。升级前应保存完整数据根备份，尤其是仍需要旧图执行记录的开发库；不能把“聊天历史保留”解释为“全部旧业务记录保留”。
+
+不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v66 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
 
 手动压缩在重启后显示 interrupted 时，可直接继续聊天；旧 active head 保持有效。不得重放原付费请求来“恢复进度”。如果请求已到达厂商但尚未收到响应就崩溃，实际账单可能只有厂商可确认，本地不能编造 token 数量。
 
@@ -70,8 +77,8 @@ pnpm storage:reset-dev -- --confirm-reset
 确认流程：
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
-2. 从工具明确支持的 exact catalog 提取 allowlisted configuration；支持版本、指纹和受限私有备份恢复以 `crates/core-server/src/bin/storage-reset-dev.rs` 为准。MCP 精确 identity/authorization 必须重新验证；未知配置结构拒绝重置，不能用默认值默默替换模型配置。
-3. 在 staging 文件创建 fresh v60 canonical DB。
+2. 从工具明确支持的 exact catalog 提取 allowlisted configuration；支持版本、指纹和受限私有备份恢复以 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs) 为准。MCP 精确 identity/authorization 必须重新验证；未知配置结构拒绝重置，不能用默认值默默替换模型配置。
+3. 在 staging 文件创建 fresh v66 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
@@ -88,13 +95,13 @@ pnpm storage:reset-dev -- --confirm-reset
 
 不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent
 tree/Mailbox/Wake；Scheduled Automation task/Run/attention；notification event/batch；Browser history/download
-record；人机交互问题、回应、投递、忽略事件收据与挂起；全局 Agent 模板与 Project 分配；组织模板、实例、绑定与编辑草稿；FileChange transaction/chunk/operation/run grant/history；本机 Token 统计与请求去重账本。Conversation 与上述 runtime 记录只计数并丢弃，不执行迁移。附件、附件导入、已安装
+record；人机交互问题、回应、投递、忽略事件收据与挂起；全局 Agent 模板与 Project 分配；组织模板、独立实例定义、成员绑定与身份、编辑草稿、组织邮件/投递/暂停/Run/回执与人员变更回执；FileChange transaction/chunk/operation/run grant/history；本机 Token 统计与请求去重账本。Conversation 与上述 runtime 记录只计数并丢弃，不执行迁移。附件、附件导入、已安装
 Skill、生成图片和 credential 目录不在 reset 事务中移动；失去数据库引用的附件与导入会受后续正常启动的清理规则处理，不能把仍存在的文件当作已恢复数据。
 
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把旧 schema backup 覆盖回运行路径并期待当前版本接受；先核对本节 exact v50–v60 启动升级条件及旧库 fingerprint。
+- 不要直接把旧 schema backup 覆盖回运行路径并期待当前版本接受；先核对本节 exact v50–v65 启动升级条件、旧库 fingerprint 及旧图执行记录删除边界。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
 - 当前 SQLite backup 不含当前模型/搜索 secret，只含 reference 与非秘密元数据；旧 schema backup 仍可能含明文 Token/Key，二者都不得上传到 issue、CI artifact 或公共对象存储。
 - 只恢复 SQLite 不会恢复操作系统凭据。跨设备、跨账户或凭据 backend 丢失后，保留的 reference 会显示为不可用，需要用户替换或清除。
@@ -102,18 +109,33 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；失去�
 
 ### 旧开发库的配置保留边界
 
-当前 `storage-reset-dev.rs` 可保留 exact current v62 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v62 下拒绝恢复；v49–v61 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v61 升级，文档不能把旧版 reset 支持声明延续到当前版本。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
+当前 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs) 可保留 exact current v66 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v66 下拒绝恢复；v49–v65 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v65 升级，文档不能把旧版 reset 支持声明延续到当前版本。未知旧源只要存在任一保留配置表，即使表为空也会拒绝；无这些配置表的旧库可进入不保留配置的显式 reset 分支，这不构成旧配置恢复支持。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
 
-重建后验证 `PRAGMA user_version = 62`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
+重建后验证 `PRAGMA user_version = 66`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
 
 ### 附件、目录引用与组织配置
 
 - Composer 附件以 durable import 身份落在 `attachment-imports/v1`，草稿、队列与挂起输入只保存引用。恢复时先核对原 import/存储附件身份，不重新提交 base64 或手工替换文件；import 清理只在启动接纳请求前处理超过 7 天且无存活引用的 staging 项，无法解析持久 JSON 时停止清理。
 - 用户选择的文件夹是只读目录授权，模型可以看到所选名称与绝对路径；它不是目录副本或项目成员变更。目录丢失、替换或 identity 不匹配时重新选择，不能通过改 JSON 把旧授权指向新目录。
 - 项目目录变更不会改写既有 Run 的冻结 workspace；历史文件打开沿用历史绑定，不能用当前目录替代不可用的旧根。
-- 组织编辑失败先区分模板 revision、usage revision、实例 revision 与独立编辑草稿。CAS 冲突后刷新再编辑；模板变更可能使实例停用并标记 `needsReview`，不能手改状态解除。保存/启用配置没有执行节点的效果，关联会话受启用状态的归档保护。
+- 组织编辑失败先区分模板 revision、实例 revision 与独立编辑草稿 revision。当前请求不再接受旧 usage guard。CAS 冲突后刷新再编辑；实例使用自己的定义，模板修改或删除不改变既有实例、绑定或权限。若实例仍带 `needsReview`，按当前定义、模型与绑定修复并走正式保存/启用校验，不能手改状态解除。
+- 保存模板不启动成员任务；实例创建/编辑可建立或绑定独立会话，启用允许符合条件的待处理邮件进入调度。停用不会取消正在执行的会话；已启用组织的绑定会话受归档保护。成员原地编辑保留身份、会话和邮箱；移除/重新加入产生新的成员身份，不能用旧 checkpoint 恢复权限。
 
-权威契约见[会话输入](../subsystems/conversation-inputs.md)、[工作区与文件](../subsystems/workspace-files.md)和[组织编排](../subsystems/workflow-authoring.md)。
+权威契约见[会话输入](../subsystems/conversation-inputs.md)、[工作区与文件](../subsystems/workspace-files.md)和[组织](../subsystems/organizations.md)。
+
+### 组织邮件与独立会话恢复
+
+组织通过应用内邮件连接独立成员会话，不能套用已删除的图节点/边执行恢复流程。数据库表、RPC 与 Trace 中保留的 `workflow_*` / `WorkflowDelivery` 是兼容标识。排障先记录 instance、成员/收件会话、message/input、run/delivery identity；不要把邮件状态和底层输入状态混为一谈。
+
+- `pending`：检查实例是否启用、收件会话是否仍独立且未归档、邮箱是否暂停、当前模型/凭据/权限与新回合许可是否可用，以及是否被更早邮件或正在运行的会话阻塞。Scheduler 在启动、状态变更与恢复扫描中重检，读取 UI 不承担驱动执行的职责。
+- `processing`：核对原 Run 和 durable `workflow_delivery` Trace。`claimed`/`applied` 是内部输入进度；只有匹配投递证明才可补记 applied，不能仅根据 UI 或模型文字判定已交付。恢复会沿用原 Run 的终态结算，缺失 Run 按失败处理，不创建重复任务来“补交”。
+- `processed`/`stopped`/`failed`/`recalled` 是邮件终态，不手工改回 pending。Run completed 也必须有投递证明才能自动结算 processed；邮件 processed 不证明外部业务目标或 Tool 副作用成功。
+- 停止会话会持久暂停邮箱，pending 邮件保留；新的显式用户回合解除暂停。停用组织与停止会话不同，不能靠停用推断 active Run 已取消。
+- 成员移除或换绑时，只使原收件人已失效的未结邮件失效；改名、职责、模型或部门等原地编辑不改投递所有权。删除实例会使未结邮件失效，但不删除聊天历史。已提交 send/mutation/personnel 回执只能幂等返回原结果，不恢复已撤销的身份或授权。
+
+真源与恢复测试见 [`workflow_execution_repository`](../../crates/core/src/storage/workflow_execution_repository)、
+[`workflow_repository/management_tests.rs`](../../crates/core/src/storage/workflow_repository/management_tests.rs) 和
+[`workflow_scheduler.rs`](../../crates/core-server/src/application/agent/workflow_scheduler.rs)。
 
 ## 4. Multi-Agent 自动恢复
 

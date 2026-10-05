@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-05
+last_verified: 2026-10-04
 ---
 
 # 前端架构
@@ -99,13 +99,13 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 
 Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独立 `primaryView`，覆盖中央会话页和右侧栏，而不是注册成右侧栏页面；左侧栏仍保留，用于切回 Conversation。`AppShell` 只持有视图切换、外部导航请求和本次应用会话的 drawer 宽度偏好，Automation task、Automation Run 和 attention 的业务状态仍来自 Core Server。
 
-Organization 使用右侧栏页面：左侧「组织」打开组织首页并最大化右侧栏，设置中的 `workflows` 页面管理模板；实例绑定画布和实时看板不属于 Agent Center，也不按项目创建副本。实例开启状态、模板版本和绑定由 Rust Core 持久化；前端的活动边框与节点提示只投影现有对话/子 Agent 状态。组织消息投递由 Core Server 的持久状态与调度器控制，不能从前端动画推断执行结果，详见[组织定义与画布编辑](../subsystems/workflow-authoring.md)。
+Organization 使用右侧栏页面：左侧「组织」打开组织首页并最大化右侧栏，设置中的 `workflows` 页面管理模板；实例绑定画布和实时看板不属于 Agent Center，也不按项目创建副本。实例独立定义、部门和成员配置、开启状态、成员身份及绑定由 Rust Core 持久化；前端的活动边框与节点提示只投影现有对话/子 Agent 状态。组织消息投递由 Core Server 的持久状态与调度器控制，不能从前端动画推断执行结果，详见[组织邮件网络](../subsystems/organizations.md)。
 
 Projects 的新建和编辑统一经过项目表单；目录选择使用 Main 的原生 picker，Main 在提交时校验文件夹存在性、重复和嵌套关系。项目含一个主文件夹和若干辅助文件夹，标题栏项目卡按存储顺序展示，并可逐个在 Finder 打开；从卡片进入编辑后的“移除本地项目”请求仍进入既有移除确认流程。首次安装的模型目录为空，`selectedModelId=''`，用户必须在 Configuration 中配置模型；UI 不得以历史内置模型列表作为后端默认值。
 
 多文件夹项目的 Files 树可独立选择来源；切树保留现有预览，缓存与页面分别携带 folder id，配置变化会失效对应根缓存。Terminal 首次输入前可在同一 PTY 中切换源目录。Git Review 支持单源范围，LastTurn 额外支持所有仓库聚合；三个选择器仅在多文件夹项目显示，不修改主文件夹或冻结 Run。项目变化也会刷新空闲会话的上下文窗口预览；活跃 Run 继续只接收 Host 对本轮冻结配置发布的上下文事件。历史 FileChange、Office 产物和读图卡片向 Main 传递 assistantMessageId，由 Rust Core 使用该轮冻结的工作区解析路径及复验目录实体；缺失快照、未知 alias 或根身份变化均不可回退到当前项目目录。
 
-设置页以覆盖主工作区的全屏视图呈现。`AppShellWorkspace` 在设置打开时保持挂载，但设为 `inert` 和 `aria-hidden`，从而保留会话、终端和浏览器状态，同时隔离焦点和辅助技术树。隐藏工作区及其后代的 `-webkit-app-region` 必须重置为 `initial`，同时移除原生 `drag` 和 `no-drag` 区域；仅设置透明度、`pointer-events` 和 `inert` 不能阻止后台标题栏截获设置页点击。设置页保留自己的窗口拖动区域，流程编辑器显式使用 `no-drag`。
+设置页以覆盖主工作区的全屏视图呈现。`AppShellWorkspace` 在设置打开时保持挂载，但设为 `inert` 和 `aria-hidden`，从而保留会话、终端和浏览器状态，同时隔离焦点和辅助技术树。隐藏工作区及其后代的 `-webkit-app-region` 必须重置为 `initial`，同时移除原生 `drag` 和 `no-drag` 区域；仅设置透明度、`pointer-events` 和 `inert` 不能阻止后台标题栏截获设置页点击。设置页保留自己的窗口拖动区域，组织编辑器显式使用 `no-drag`。
 
 会话视图分两种能力面：
 
@@ -124,7 +124,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 | 模型、搜索与图片生成凭据                         | Rust Core 选择的凭据存储                                                 | 只接收状态并暂存用户当前输入；成功/取消后清空；从不回读明文或引用  |
 | 活动 Run、pending action、command session        | Rust Core 事件和存储记录                                                 | 绑定权威 id、缓冲早到事件、reload 时重新 hydrate/reconcile         |
 | Automation task、Automation Run、attention       | Core Server/Rust Core 管理的 SQLite Automation task/Run/event            | 按 `revision`、事件 `sequence` 和请求身份合并；通知只触发刷新      |
-| Organization 模板、暂存草稿、实例和对话绑定      | Core Server/Rust Core 的 Organization repository                         | CAS、保存幂等和实例使用确认；本地画布草稿不改变对话或触发执行      |
+| Organization 模板、暂存草稿、实例和对话绑定      | Core Server/Rust Core 的 Organization repository                         | CAS、保存重试和独立实例同步；本地画布草稿不改变对话或触发执行      |
 | 通知事实、批次、设置和投递 disposition           | Core Server/Rust Core；原生显示由 Electron Main                          | settings 使用 CAS；event/resync 只触发刷新；点击只执行 typed 导航  |
 | Browser 逻辑导航、历史、偏好和下载               | Main surface/session + Rust Core-owned history/preferences/download rows | 只投影 safe DTO；按 `surfaceInstanceId/stateRevision` 拒绝迟到状态 |
 | 右侧栏页面、选中项、滚动/局部预览状态            | Renderer 内存                                                            | 按 module 策略保活或卸载；应用重启后重建                           |
@@ -240,7 +240,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - Scheduled 布局：`src/renderer/src/features/automations/automationLayout.ts`、`useAutomationLayout.ts`
 - 设置导航：`src/renderer/src/features/settings/SettingsPage.tsx`
 - Agent Template library：`src/renderer/src/features/settings/pages/AgentTemplatesSettingsPage.tsx`
-- Organization 模板/实例与只读流程图：[features/workflows/](../../src/renderer/src/features/workflows/)、[useWorkflowWorkspace.ts](../../src/renderer/src/app/useWorkflowWorkspace.ts)
+- Organization 模板/实例、部门画布与实时看板：[features/workflows/](../../src/renderer/src/features/workflows/)、[useWorkflowWorkspace.ts](../../src/renderer/src/app/useWorkflowWorkspace.ts)
 - Organization 活动与待处理提示：[useWorkflowActivity.ts](../../src/renderer/src/features/workflows/project/useWorkflowActivity.ts)、[useWorkflowMonitor.ts](../../src/renderer/src/features/workflows/project/useWorkflowMonitor.ts)、[useConversationAttention.ts](../../src/renderer/src/features/chat/useConversationAttention.ts)
 - Composer 导入和逻辑引用：[useAttachmentImports.ts](../../src/renderer/src/features/chat/useAttachmentImports.ts)、[workspaceMentions.ts](../../src/renderer/src/features/chat/workspaceMentions.ts)
 - 静态依赖规则：`eslint.config.mjs`
@@ -279,7 +279,7 @@ pnpm test:automation-core-e2e
 - [ ] FileChange 活动/历史分页绑定精确 identity，超预算时安全降级；observer 没有获得 mutation 能力。
 - [ ] Browser surface state、下载和历史事件检查 instance/revision；通知设置使用 CAS，点击只消费 typed destination。
 - [ ] Agent Template 定义与 project assignment 的部分失败会刷新 canonical 列表，不把本地勾选当成已提交事实。
-- [ ] Organization 实例启停、颜色占用、归档保护和模板使用确认以 Host 结果为准；列表校准与只读监视不覆盖暂存绑定或清除未读。
+- [ ] Organization 独立实例、在线成员/部门编辑、启停、颜色占用和归档保护以 Host 结果为准；模板变化不影响实例，列表校准与只读监视不覆盖未保存草稿或清除未读。
 - [ ] Composer 导入/搜索/提交按 scope 和草稿版本处理迟到结果；仅附件/目录/工作区引用输入与排队引导有覆盖。
 
 ## 当前限制

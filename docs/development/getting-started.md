@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-04
 ---
 
 # 开发环境与启动
@@ -11,7 +11,7 @@ last_verified: 2026-09-26
 
 - Node.js 22，版本约束见 [`.node-version`](../../.node-version) 和 [`package.json`](../../package.json)。
 - pnpm 11.10.0；应使用仓库声明的 `packageManager` 版本。
-- Rust stable，并安装 `rustfmt`、`clippy`。
+- Rust 1.99.0，由 [`rust-toolchain.toml`](../../rust-toolchain.toml) 锁定，并安装 `rustfmt`、`clippy`。
 - 当前平台的原生编译工具链。`node-pty` 与 Core Server binary 都包含原生构建步骤。
 - Browser tests 会通过 `pnpm test:browser` 准备受管的锁定 Chromium；`pnpm test:web:install` 仅安装普通 Playwright Chromium，不能替代受管组件真源。
 
@@ -44,7 +44,7 @@ Automation 新回合都需要有效的在线验证结果。保存的登录会话
 项目可绑定一个主目录和多个辅助目录，Run 接纳时冻结本轮目录身份。工作区根目录的 `AGENTS.override.md` 或
 `AGENTS.md` 会作为 `workspace.instructions` 加入模型上下文；Composer 文件/目录引用的开发契约见
 [会话输入](../subsystems/conversation-inputs.md)。组织模板与实例的配置入口见
-[组织编排](../subsystems/workflow-authoring.md)，保存或启用组织配置不等于已启动执行。
+[组织邮件网络](../subsystems/organizations.md)。激活会复制独立定义并为未绑定成员创建对话；空邮箱不会启动模型，有待处理邮件且满足准入条件的空闲成员会自动唤醒。
 
 ## 常用命令
 

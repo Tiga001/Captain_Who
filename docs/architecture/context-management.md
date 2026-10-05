@@ -350,7 +350,7 @@ Host 重建上下文缓存时，模型 baseline 使用摘要与未覆盖的 Trac
 previousSummary + 新选中前缀的持久模型可见投影
 ```
 
-Host 从普通上下文使用的 `conversation_model_context_items` 读取 Tool Call、Tool Result、叙述和历史材料。保留模型已经看到的安全正文、调用及结果关联、错误事实、来源类型和图片引用，不从更大的审计 Observation 重新构造结果，也不加入 Provider 私有续接或隐藏推理。Workflow 的用户消息气泡只是 UI 投影，摘要材料排除它，由权威 `WorkflowDelivery` 提供一次邮件内容。绑定到首个 Tool Call 的独立叙述按普通上下文的身份规则去重；内容相同但没有绑定的叙述不因此删除。必须存在的模型日志缺失时明确失败，不回退到审计正文。
+Host 从普通上下文使用的 `conversation_model_context_items` 读取 Tool Call、Tool Result、叙述和历史材料。保留模型已经看到的安全正文、调用及结果关联、错误事实、来源类型和图片引用，不从更大的审计 Observation 重新构造结果，也不加入 Provider 私有续接或隐藏推理。组织来信的消息气泡只是 UI 投影，摘要材料排除它，由权威 `WorkflowDelivery` 提供一次邮件内容。绑定到首个 Tool Call 的独立叙述按普通上下文的身份规则去重；内容相同但没有绑定的叙述不因此删除。必须存在的模型日志缺失时明确失败，不回退到审计正文。
 
 这份模型材料放在 `ContextCompactionPrefix.model_source_items` 临时字段中，不参与序列化、源 revision 或提交。原 `source_items`、journal 游标、连续性引用和 CAS 仍以原始不可变日志为准；投影不删除消息或改写历史，压缩后仍可按原游标精确回查。未接入 Host 的独立 Rust Core/custom host 可以继续提供原始前缀，生产 Host 必须完成上述投影。
 

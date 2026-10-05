@@ -249,7 +249,7 @@ pnpm test:automation-core-e2e
 - 当前没有多进程横向扩展协议；数据库实例锁要求一个 exact DB 只有一个 Core Server 生命周期 owner。
 - Automation 没有可配置并发、Run 总超时或 admission 最大尝试次数；长期等待审批和重复容量退避依赖用户处理或后续状态变化。
 - `notifications.*` 的 delivery 子集的 Host-only 隔离由 Main/Preload invoke allowlist 实现；Core Server stdin 是受信 Main transport，不提供逐请求调用方身份鉴别。
-- 组织管理 RPC 维护模板、草稿、独立实例、在线成员/部门配置、绑定与启停状态；人员工具 Host 在实时职级和部门权限事务后发布 roster 变更。就绪变更只发出调度唤醒，由独立调度器按持久输入、实例版本与对话占用规则执行后续投递，见[组织定义与画布编辑](../subsystems/workflow-authoring.md)。
+- 组织管理 RPC 维护模板、草稿、独立实例、在线成员/部门配置、绑定与启停状态；人员工具 Host 在实时职级和部门权限事务后发布 roster 变更。就绪变更只发出调度唤醒，由独立调度器按持久输入、实例版本与对话占用规则执行后续投递，见[组织定义与画布编辑](../subsystems/organizations.md)。
 - Main 的 6 秒 shutdown watchdog 与 Multi-Agent Dispatcher 最坏约 10 秒的内部收口预算尚未对齐；超时路径必须按强制终止与启动恢复处理，不能宣称所有 Run 都已优雅结束。
 
 ## 13. 变更检查表
