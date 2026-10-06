@@ -6,6 +6,7 @@ import {
   type AgentToolResult
 } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
+import { Tooltip } from '../../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
 import type {
@@ -15,6 +16,7 @@ import type {
 import { loadImageFile } from '../../../storage/storageClient'
 import { normalizeReadImageThumbnailDataUrl } from '../../agentReadActivities'
 import type { ChatReadActivity, ChatReadActivityKind } from '../../chatTypes'
+import type { WorkspaceReferenceTarget } from '../../workspaceMentions'
 import { useImagePreview, useImagePreviewNotice } from '../ImagePreview'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
@@ -27,6 +29,7 @@ interface ReadToolActivityProps {
   conversationId?: string
   observerRootConversationId?: string
   onExpandedChange?: (open: boolean) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   presentation?: 'default' | 'compact'
   projectId?: string | null
   result?: AgentToolResult
@@ -40,6 +43,7 @@ interface ReadToolActivityGroupProps {
   conversationId?: string
   items: ReadToolActivityGroupItem[]
   observerRootConversationId?: string
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   projectId?: string | null
 }
 
@@ -328,29 +332,92 @@ function getReadGroupLabel(
   return t(STATUS_LABELS[kind].completed)
 }
 
-function ReadTextRow({ activity, call, result, settledStatus }: ReadToolActivityProps) {
+function ReadTextRow({
+  assistantMessageId,
+  activity,
+  call,
+  conversationId,
+  onOpenWorkspaceReference,
+  projectId,
+  result,
+  settledStatus
+}: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
+  const kind = getKind(call, activity)
   const fileName = getDisplayName(activity, call, t)
-  const displayPath = getDisplayPath(activity, call, result) || fileName
-  const normalizedPath = displayPath.replace(/\\/g, '/').replace(/\/+$/, '')
-  const separatorIndex = normalizedPath.lastIndexOf('/')
-  const directory = separatorIndex >= 0 ? normalizedPath.slice(0, separatorIndex) || '/' : ''
+  const sourcePath = getDisplayPath(activity, call, result)
+  const displayPath = sourcePath || fileName
   const pathIsDirectory = isPathIsDirectoryFailure(call, result)
   const error = activity?.error ?? result?.error
   const status = getStatus(activity, result, settledStatus)
+  const actionLabel = pathIsDirectory
+    ? t('agent.read.file.pathIsDirectory')
+    : status === 'completed'
+      ? t('agent.activity.read.completed')
+      : status === 'running'
+        ? t('agent.activity.read.running')
+        : t(STATUS_LABELS[kind][status])
+  const previewTarget: WorkspaceReferenceTarget | undefined =
+    kind !== 'image' &&
+    !pathIsDirectory &&
+    sourcePath &&
+    assistantMessageId &&
+    conversationId &&
+    onOpenWorkspaceReference
+      ? {
+          source: 'read-tool',
+          filePath: sourcePath,
+          assistantMessageId,
+          conversationId,
+          callId: call.id,
+          ...(projectId !== undefined ? { projectId } : {})
+        }
+      : undefined
+  const fileNameNode = previewTarget ? (
+    <button
+      aria-label={displayPath}
+      className="read-activity__file-name"
+      onClick={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onOpenWorkspaceReference?.(previewTarget)
+      }}
+      title=""
+      type="button"
+    >
+      {getFileName(displayPath) || fileName}
+    </button>
+  ) : (
+    <span aria-label={displayPath} className="read-activity__file-name" title="">
+      {getFileName(displayPath) || fileName}
+    </span>
+  )
 
   return (
-    <div
+    <span
       className="read-activity__text-item"
       data-status={error ? 'failed' : status}
       title={error ? `${displayPath}\n${error}` : displayPath}
     >
-      {pathIsDirectory ? (
-        <span className="read-activity__path-error">{t('agent.read.file.pathIsDirectory')}</span>
+      {kind !== 'image' ? (
+        <span
+          className={`read-activity__action${status === 'running' ? ' agent-running-text' : ''}${pathIsDirectory ? ' read-activity__path-error' : ''}`}
+        >
+          {actionLabel}
+        </span>
       ) : null}
-      <span className="read-activity__file-name">{getFileName(displayPath) || fileName}</span>
-      {directory ? <span className="read-activity__directory">{directory}</span> : null}
-    </div>
+      {sourcePath ? (
+        <Tooltip
+          anchorClassName="read-activity__file-anchor"
+          appearance="inverse"
+          content={<span className="read-activity__file-tooltip">{sourcePath}</span>}
+        >
+          {fileNameNode}
+        </Tooltip>
+      ) : (
+        fileNameNode
+      )}
+    </span>
   )
 }
 
@@ -361,6 +428,7 @@ function ReadActivityCard({
   call,
   conversationId,
   observerRootConversationId,
+  onOpenWorkspaceReference,
   projectId,
   result,
   settledStatus
@@ -423,7 +491,16 @@ function ReadActivityCard({
   }
 
   return (
-    <ReadTextRow activity={activity} call={call} result={result} settledStatus={settledStatus} />
+    <ReadTextRow
+      assistantMessageId={assistantMessageId}
+      activity={activity}
+      call={call}
+      conversationId={conversationId}
+      onOpenWorkspaceReference={onOpenWorkspaceReference}
+      projectId={projectId}
+      result={result}
+      settledStatus={settledStatus}
+    />
   )
 }
 
@@ -434,6 +511,7 @@ function ReadActivityDetails({
   call,
   conversationId,
   observerRootConversationId,
+  onOpenWorkspaceReference,
   projectId,
   result,
   settledStatus
@@ -454,6 +532,7 @@ function ReadActivityDetails({
           call={call}
           conversationId={conversationId}
           observerRootConversationId={observerRootConversationId}
+          onOpenWorkspaceReference={onOpenWorkspaceReference}
           projectId={projectId}
           result={result}
           settledStatus={settledStatus}
@@ -471,6 +550,7 @@ export function ReadToolActivity({
   conversationId,
   observerRootConversationId,
   onExpandedChange,
+  onOpenWorkspaceReference,
   presentation = 'default',
   projectId,
   result,
@@ -487,46 +567,32 @@ export function ReadToolActivity({
   const isPending = status === 'running'
   const compact = presentation === 'compact' && kind !== 'image'
   const error = activity?.error ?? result?.error
-  const displayPath = getDisplayPath(activity, call, result) || getDisplayName(activity, call, t)
-  const normalizedPath = displayPath.replace(/\\/g, '/').replace(/\/+$/, '')
-  const separatorIndex = normalizedPath.lastIndexOf('/')
-  const directory = separatorIndex >= 0 ? normalizedPath.slice(0, separatorIndex) || '/' : ''
-  const actionLabel =
-    status === 'completed'
-      ? t('agent.activity.read.completed')
-      : status === 'running'
-        ? t('agent.activity.read.running')
-        : label
 
   return (
     <AgentActivityDisclosure
       className={`agent-activity--read${compact ? ' basic-tool-activity__row' : ''}`}
-      hasDetails={compact ? Boolean(error) : hasDetails}
+      hasDetails={kind === 'image' ? hasDetails : Boolean(error)}
       icon={StatusIcon}
       isPending={isPending}
       label={
-        compact ? (
-          <span
-            aria-label={`${actionLabel} ${displayPath}`}
-            className="read-activity__text-item"
-            data-status={status}
-            title={displayPath}
-          >
-            <span
-              className={`read-activity__action${status === 'running' ? ' agent-running-text' : ''}`}
-            >
-              {actionLabel}
-            </span>
-            <span className="read-activity__file-name">{getFileName(displayPath)}</span>
-            {directory && <span className="read-activity__directory">{directory}</span>}
-          </span>
+        kind !== 'image' ? (
+          <ReadTextRow
+            assistantMessageId={assistantMessageId}
+            activity={activity}
+            call={call}
+            conversationId={conversationId}
+            onOpenWorkspaceReference={onOpenWorkspaceReference}
+            projectId={projectId}
+            result={result}
+            settledStatus={settledStatus}
+          />
         ) : (
           label
         )
       }
       onExpandedChange={onExpandedChange}
     >
-      {compact ? (
+      {kind !== 'image' ? (
         error && <p className="agent-activity__details read-activity__error">{error}</p>
       ) : (
         <ReadActivityDetails
@@ -536,6 +602,7 @@ export function ReadToolActivity({
           call={call}
           conversationId={conversationId}
           observerRootConversationId={observerRootConversationId}
+          onOpenWorkspaceReference={onOpenWorkspaceReference}
           projectId={projectId}
           result={result}
           settledStatus={settledStatus}
@@ -550,6 +617,7 @@ export function ReadToolActivityGroup({
   conversationId,
   items,
   observerRootConversationId,
+  onOpenWorkspaceReference,
   projectId
 }: ReadToolActivityGroupProps) {
   const { t } = useFrontendConfig()
@@ -564,6 +632,7 @@ export function ReadToolActivityGroup({
         call={firstItem.call}
         conversationId={conversationId}
         observerRootConversationId={observerRootConversationId}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
         projectId={projectId}
         result={firstItem.result}
         settledStatus={firstItem.settledStatus}
@@ -599,6 +668,7 @@ export function ReadToolActivityGroup({
               call={item.call}
               conversationId={conversationId}
               observerRootConversationId={observerRootConversationId}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
               key={item.call.id}
               projectId={projectId}
               result={item.result}

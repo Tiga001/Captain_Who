@@ -155,6 +155,7 @@ export function AgentTimelineItemView({
         conversationId={conversationId}
         items={items}
         observerRootConversationId={observerRootConversationId}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
         projectId={projectId}
       />
     )
@@ -282,6 +283,7 @@ export function AgentTimelineItemView({
         fileChangeProposal={fileChangeProposal}
         mcpInvocation={mcpInvocation}
         observerRootConversationId={observerRootConversationId}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
         projectId={projectId}
         previousTodoResult={previousTodoResult}
         readActivity={readActivity}

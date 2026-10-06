@@ -46,7 +46,12 @@ export function resolveRightSidebarPageAvailability(
   availability: RightSidebarModuleAvailability,
   page: RightSidebarPage
 ): RightSidebarModuleAvailability {
-  if (module.id === 'files' && page.moduleState?.kind === 'attachment-file') return 'available'
+  if (
+    module.id === 'files' &&
+    (page.moduleState?.kind === 'attachment-file' || page.moduleState?.kind === 'read-tool-file')
+  ) {
+    return 'available'
+  }
   if (
     availability === 'unavailable' &&
     module.contextBinding === 'pinned-to-creation-workspace' &&

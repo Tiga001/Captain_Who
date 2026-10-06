@@ -2,7 +2,7 @@ import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { CSSProperties } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { page } from 'vitest/browser'
+import { page, userEvent } from 'vitest/browser'
 import { frontendConfig, getFrontendCssVariables } from '../../config/frontendConfig'
 import { classicDarkTheme, classicLightTheme } from '../../config/themes/classic'
 import type { ChatReadActivity } from '../../features/chat/chatTypes'
@@ -35,7 +35,9 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
         'agent.read.file.pathIsDirectory': '目录被误用为文件',
         'agent.read.item': '读取 {fileName}',
         'agent.read.pathIsDirectoryItem': '目录被误用为文件：{path}',
-        'agent.read.pathFailedCount': '{count} 个路径失败'
+        'agent.read.pathFailedCount': '{count} 个路径失败',
+        'agent.activity.read.completed': '已读取',
+        'agent.activity.read.running': '正在读取'
       })[key] ?? key
   })
 }))
@@ -109,6 +111,7 @@ describe('ReadToolActivity image presentation', () => {
   })
 
   it('loads the original from its source path instead of using event Base64', async () => {
+    const openWorkspaceReference = vi.fn()
     const screen = await render(
       <ReadToolActivity
         assistantMessageId="assistant-1"
@@ -117,6 +120,8 @@ describe('ReadToolActivity image presentation', () => {
           fullDataUrl: 'data:image/png;base64,bGVnYWN5'
         })}
         call={call}
+        conversationId="conversation-1"
+        onOpenWorkspaceReference={openWorkspaceReference}
         projectId="project-1"
       />
     )
@@ -135,6 +140,7 @@ describe('ReadToolActivity image presentation', () => {
         fileName: 'preview.png',
         src: 'data:image/png;base64,ZnJlc2g='
       })
+      expect(openWorkspaceReference).not.toHaveBeenCalled()
     })
   })
 
@@ -391,10 +397,14 @@ describe('ReadToolActivity structured path failures', () => {
   it('shows the directory misuse and its complete relative path', async () => {
     const path = 'crates/mcp-client/src'
     const readCall = readFileCall('read-directory', path)
+    const openWorkspaceReference = vi.fn()
     const screen = await render(
       <ReadToolActivity
+        assistantMessageId="read-message"
         activity={readFileActivity(readCall, path, 'failed')}
         call={readCall}
+        conversationId="read-conversation"
+        onOpenWorkspaceReference={openWorkspaceReference}
         result={directoryReadResult(readCall, path)}
       />
     )
@@ -403,8 +413,10 @@ describe('ReadToolActivity structured path failures', () => {
     const row = screen.container.querySelector<HTMLElement>('.read-activity__text-item')!
     expect(row.title).toContain(path)
     expect(row.querySelector('.read-activity__file-name')?.textContent).toBe('src')
-    expect(row.querySelector('.read-activity__directory')?.textContent).toBe('crates/mcp-client')
+    expect(row.querySelector('.read-activity__directory')).toBeNull()
     expect(row.dataset.status).toBe('failed')
+    expect(row.querySelector('button')).toBeNull()
+    expect(openWorkspaceReference).not.toHaveBeenCalled()
   })
 
   it('separates successful files from path failures in a group', async () => {
@@ -480,11 +492,141 @@ describe('compact read file rows', () => {
     }
   }))
 
+  it('navigates same-named files with their authoritative path and turn identity by mouse and keyboard', async () => {
+    const openWorkspaceReference = vi.fn()
+    const paths = [
+      'packages/core/index.ts',
+      'packages/ui/index.ts',
+      '/Users/example/.mycopilot/attachments/message-1/report.md',
+      'C:\\work\\outside\\report.md'
+    ]
+    const screen = await render(
+      <div style={getFrontendCssVariables() as CSSProperties}>
+        {paths.map((path, index) => (
+          <ReadToolActivity
+            assistantMessageId="read-message"
+            activity={activity({
+              callId: `link-${index}`,
+              tool: 'read_file',
+              kind: 'file',
+              path: 'stale/event/path.txt',
+              fileName: 'stale.txt'
+            })}
+            call={{ ...items[0].call, id: `link-${index}`, args: { path: 'requested/path.txt' } }}
+            conversationId="read-conversation"
+            key={path}
+            onOpenWorkspaceReference={openWorkspaceReference}
+            presentation="compact"
+            projectId="read-project"
+            result={{ ...items[0].result, callId: `link-${index}`, result: { path } }}
+          />
+        ))}
+      </div>
+    )
+    const buttons = paths.map((path) => screen.getByRole('button', { name: path, exact: true }))
+    expect(buttons[0].element().textContent).toBe('index.ts')
+    expect(buttons[1].element().textContent).toBe('index.ts')
+    expect(screen.container.querySelector('.read-activity__directory')).toBeNull()
+    await userEvent.click(buttons[0])
+    ;(buttons[1].element() as HTMLButtonElement).focus()
+    await userEvent.keyboard('{Enter}')
+    ;(buttons[2].element() as HTMLButtonElement).focus()
+    await userEvent.keyboard(' ')
+    await userEvent.click(buttons[3])
+    expect(openWorkspaceReference.mock.calls).toEqual(
+      paths.map((filePath, index) => [
+        {
+          source: 'read-tool',
+          filePath,
+          assistantMessageId: 'read-message',
+          conversationId: 'read-conversation',
+          callId: `link-${index}`,
+          projectId: 'read-project'
+        }
+      ])
+    )
+
+    await userEvent.hover(buttons[0])
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent(paths[0])
+    expect(page.getByRole('tooltip').element().getAttribute('data-appearance')).toBe('inverse')
+  })
+
+  it('opens a file from an error summary without changing its disclosure state', async () => {
+    const openWorkspaceReference = vi.fn()
+    const expanded = vi.fn()
+    const path = 'reports/missing.md'
+    const screen = await render(
+      <div style={getFrontendCssVariables() as CSSProperties}>
+        <ReadToolActivity
+          assistantMessageId="read-message"
+          call={{ ...items[0].call, args: { path } }}
+          conversationId="read-conversation"
+          onExpandedChange={expanded}
+          onOpenWorkspaceReference={openWorkspaceReference}
+          presentation="compact"
+          projectId="read-project"
+          result={{ ...items[0].result, ok: false, result: { path }, error: '文件暂时不可读取' }}
+        />
+      </div>
+    )
+    const details = screen.container.querySelector('details')!
+    const link = screen.getByRole('button', { name: path, exact: true })
+    expect(details.open).toBe(false)
+    await userEvent.click(link)
+    ;(link.element() as HTMLButtonElement).focus()
+    await userEvent.keyboard('{Enter}')
+    await userEvent.keyboard(' ')
+    expect(details.open).toBe(false)
+    expect(expanded).not.toHaveBeenCalled()
+    expect(openWorkspaceReference).toHaveBeenCalledTimes(3)
+    await userEvent.click(screen.container.querySelector('.read-activity__action')!)
+    await expect.poll(() => details.open).toBe(true)
+    expect(expanded).toHaveBeenCalledWith(true)
+    await userEvent.click(link)
+    expect(details.open).toBe(true)
+    expect(screen.getByText('文件暂时不可读取')).toBeVisible()
+  })
+
+  it('ellipsizes a long basename while preserving the full-path hover and exact external target', async () => {
+    const name = 'bimolecular-termination-kinetics-validation-and-unit-consistency-review.md'
+    const path = `/Users/example/Documents/External reference reports/${name}`
+    const openWorkspaceReference = vi.fn()
+    const screen = await render(
+      <div style={{ ...getFrontendCssVariables(), width: 320, padding: 16 } as CSSProperties}>
+        <ReadToolActivity
+          assistantMessageId="read-message"
+          call={{ ...items[0].call, args: { path } }}
+          conversationId="read-conversation"
+          onOpenWorkspaceReference={openWorkspaceReference}
+          presentation="compact"
+          result={{ ...items[0].result, result: { path } }}
+        />
+      </div>
+    )
+    const row = screen.container.querySelector<HTMLElement>('.read-activity__text-item')!
+    const button = screen.getByRole('button', { name: path, exact: true })
+    expect(button.element().textContent).toBe(name)
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+    expect(button.element().scrollWidth).toBeGreaterThan(button.element().clientWidth)
+    expect(getComputedStyle(button.element()).textOverflow).toBe('ellipsis')
+    await userEvent.hover(button)
+    await expect.element(page.getByRole('tooltip')).toHaveTextContent(path)
+    await userEvent.click(button)
+    expect(openWorkspaceReference).toHaveBeenCalledExactlyOnceWith({
+      source: 'read-tool',
+      filePath: path,
+      assistantMessageId: 'read-message',
+      conversationId: 'read-conversation',
+      callId: items[0].call.id
+    })
+  })
+
   it.each([
     { mode: 'light', theme: classicLightTheme },
     { mode: 'dark', theme: classicDarkTheme }
   ])('keeps long paths on one line in wide and narrow $mode panels', async ({ mode, theme }) => {
     await page.viewport(1100, 700)
+    const openWorkspaceReference = vi.fn()
     const view = (width: number) => (
       <div
         style={
@@ -497,11 +639,19 @@ describe('compact read file rows', () => {
           } as CSSProperties
         }
       >
-        <ReadToolActivityGroup items={items} />
+        <ReadToolActivityGroup
+          assistantMessageId="read-message"
+          conversationId="read-conversation"
+          items={items}
+          onOpenWorkspaceReference={openWorkspaceReference}
+          projectId="read-project"
+        />
       </div>
     )
     const screen = await render(view(960))
     await screen.getByText('已读取 4 个文件').click()
+    const chevron = screen.container.querySelector('.agent-activity__chevron')!
+    await expect.poll(() => getComputedStyle(chevron).transform).toBe('matrix(1, 0, 0, 1, 0, 0)')
     for (const width of [960, 320]) {
       await screen.rerender(view(width))
       const rows = [...screen.container.querySelectorAll<HTMLElement>('.read-activity__text-item')]
@@ -517,16 +667,17 @@ describe('compact read file rows', () => {
         expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
         const name = row.querySelector<HTMLElement>('.read-activity__file-name')!
         expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth)
-        const path = row.querySelector<HTMLElement>('.read-activity__directory')!
-        expect(path.textContent).toBe(directory)
-        expect(getComputedStyle(path).color).not.toBe(getComputedStyle(name).color)
-        if (width === 320) expect(path.scrollWidth).toBeGreaterThan(path.clientWidth)
+        expect(name.tagName).toBe('BUTTON')
+        expect(getComputedStyle(name).textDecorationLine).toBe('underline')
+        expect(getComputedStyle(name).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+        expect(row.querySelector('.read-activity__directory')).toBeNull()
+        expect(row.textContent).not.toContain(directory)
       }
       const details = screen.container.querySelector<HTMLElement>('.read-activity__details')!
       if (width === 960) expect(details.getBoundingClientRect().width).toBeGreaterThan(420)
       await page.screenshot({
         element: screen.container.firstElementChild as HTMLElement,
-        path: `../../../../../.cache/read-activity/${mode}-${width}.png`
+        path: `../../../../../.cache/read-file-links/${mode}-${width}.png`
       })
     }
   })
@@ -544,11 +695,11 @@ describe('compact read file rows', () => {
     const rows = [...screen.container.querySelectorAll<HTMLElement>('.read-activity__text-item')]
     expect(rows[0].title).toBe('actual/result.md')
     expect(rows[0].querySelector('.read-activity__file-name')?.textContent).toBe('result.md')
-    expect(rows[0].querySelector('.read-activity__directory')?.textContent).toBe('actual')
+    expect(rows[0].querySelector('.read-activity__directory')).toBeNull()
     expect(rows[1].querySelector('.read-activity__file-name')?.textContent).toBe('README.md')
     expect(rows[1].querySelector('.read-activity__directory')).toBeNull()
     expect(rows[2].title).toBe('C:\\project\\报告.md')
     expect(rows[2].querySelector('.read-activity__file-name')?.textContent).toBe('报告.md')
-    expect(rows[2].querySelector('.read-activity__directory')?.textContent).toBe('C:/project')
+    expect(rows[2].querySelector('.read-activity__directory')).toBeNull()
   })
 })

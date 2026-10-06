@@ -131,7 +131,8 @@ function RootFilesHarness({
   folderId = 'root-app',
   assistantMessageId,
   markdownView = 'source',
-  attachment
+  attachment,
+  readToolFile
 }: {
   project?: AppProject
   filePath?: string | null
@@ -139,12 +140,14 @@ function RootFilesHarness({
   assistantMessageId?: string
   markdownView?: 'preview' | 'source'
   attachment?: ComponentProps<typeof FilesPanel>['attachment']
+  readToolFile?: ComponentProps<typeof FilesPanel>['readToolFile']
 }) {
   return (
     <WorkspaceFileTreeSessionsProvider projectIds={[project.id]} projects={[project]}>
       <div style={{ height: 620, width: 760 }}>
         <FilesPanel
           attachment={attachment}
+          readToolFile={readToolFile}
           assistantMessageId={assistantMessageId}
           folderId={folderId}
           filePath={filePath}
@@ -499,6 +502,64 @@ describe('FilesPanel', () => {
     await screen.getByRole('button', { name: 'files.options' }).click()
     await screen.getByRole('menuitem', { name: 'files.copyPath' }).click()
     expect(copyPathSpy).toHaveBeenCalledWith({ attachmentId: 'attachment', messageId: 'message' })
+  })
+
+  it('previews a read file outside the workspace while preserving the project tree and its state', async () => {
+    const screen = await render(<RootFilesHarness />)
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    const tree = () =>
+      screen.container.querySelector<HTMLElement>('file-tree-container')?.shadowRoot
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/"]')).not.toBeNull()
+    tree()?.querySelector<HTMLElement>('[data-item-path="src/"]')?.click()
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    await screen.getByRole('textbox', { name: 'files.filter' }).fill('index')
+    const directoryCalls = listDirectorySpy.mock.calls.length
+    const reference = {
+      source: 'read-tool' as const,
+      filePath: '/Users/example/Downloads/external.txt',
+      conversationId: 'conversation',
+      assistantMessageId: 'answer',
+      callId: 'read-call',
+      projectId: 'project-1'
+    }
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        name: 'external.txt',
+        path: reference.filePath,
+        previewKind: 'text',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        sizeBytes: 21
+      },
+      text: {
+        content: 'External file content',
+        path: reference.filePath,
+        modifiedAtMs: 1,
+        sizeBytes: 21
+      }
+    })
+    await screen.rerender(
+      <RootFilesHarness readToolFile={reference} filePath={reference.filePath} />
+    )
+    await expect.element(screen.getByText('External file content')).toBeVisible()
+    expect(readPreviewSpy).toHaveBeenLastCalledWith(reference)
+    expect(listDirectorySpy).toHaveBeenCalledTimes(directoryCalls)
+    await expect
+      .element(screen.getByRole('button', { name: 'files.selectRoot: docs' }))
+      .toBeVisible()
+    await expect.element(screen.getByRole('textbox', { name: 'files.filter' })).toHaveValue('index')
+    expect(tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    expect(tree()?.querySelector('[data-item-selected]')).toBeNull()
+    expect(screen.container.querySelector('.files-panel__breadcrumbs')?.getAttribute('title')).toBe(
+      reference.filePath
+    )
+    await screen.getByRole('button', { name: 'files.reveal' }).click()
+    expect(revealSpy).toHaveBeenCalledWith(reference)
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitem', { name: 'files.copyPath' }).click()
+    expect(copyPathSpy).toHaveBeenCalledWith(reference)
   })
 
   it('previews projectless attachment markdown with no directory reads or workspace relative links', async () => {

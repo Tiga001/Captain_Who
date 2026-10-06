@@ -1,15 +1,19 @@
 import type { ChatWorkspaceMention } from './chatTypes'
+import type { ReadToolFileRequest } from '@mycopilot/protocol'
 
-export interface WorkspaceReferenceTarget {
+interface WorkspaceMentionReferenceTarget {
+  source?: 'workspace'
   projectId: string
   alias: string
   path: string
   kind: 'file' | 'directory'
 }
 
+export type WorkspaceReferenceTarget = WorkspaceMentionReferenceTarget | ReadToolFileRequest
+
 export function workspaceReferenceTargetFromMention(
   mention: Pick<ChatWorkspaceMention, 'projectId' | 'alias' | 'path' | 'kind'>
-): WorkspaceReferenceTarget {
+): WorkspaceMentionReferenceTarget {
   return {
     projectId: mention.projectId,
     alias: mention.alias,
@@ -22,7 +26,7 @@ export function workspaceReferenceTargetFromMention(
 export function parseWorkspaceReferenceTarget(
   href: string | undefined,
   projectId: string | null | undefined
-): WorkspaceReferenceTarget | null {
+): WorkspaceMentionReferenceTarget | null {
   if (!href || !projectId || !href.startsWith('@workspace/')) return null
   const logicalPath = href.slice('@workspace/'.length).replaceAll('\\', '/')
   const separator = logicalPath.indexOf('/')

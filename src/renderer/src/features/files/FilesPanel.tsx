@@ -1,4 +1,4 @@
-import type { WorkspaceFileMetadata } from '@mycopilot/protocol'
+import type { ReadToolFileRequest, WorkspaceFileMetadata } from '@mycopilot/protocol'
 import type { AttachmentFileNavigationTarget } from './AttachmentFileNavigationContext'
 import { FileTree } from '@pierre/trees/react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
@@ -31,6 +31,7 @@ import './FilesPanel.css'
 
 interface FilesPanelProps {
   attachment?: AttachmentFileNavigationTarget
+  readToolFile?: ReadToolFileRequest
   onAttachmentName?: (name: string) => void
   assistantMessageId?: string
   filePath: string | null
@@ -73,6 +74,7 @@ const TREE_STYLE = {
 
 export function FilesPanel({
   attachment,
+  readToolFile,
   onAttachmentName,
   assistantMessageId,
   filePath,
@@ -160,11 +162,12 @@ export function FilesPanel({
     isActive: isActive && Boolean(projectId),
     onFileSelect: handleFileSelect,
     projectId,
-    selectedPath: attachment
-      ? undefined
-      : !assistantMessageId && fileFolderId === treeRoot.folderId
-        ? (filePath ?? selectedDirectoryPath)
-        : null
+    selectedPath:
+      attachment || readToolFile
+        ? undefined
+        : !assistantMessageId && fileFolderId === treeRoot.folderId
+          ? (filePath ?? selectedDirectoryPath)
+          : null
   })
 
   useEffect(() => {
@@ -180,28 +183,31 @@ export function FilesPanel({
   const revealSelectedFile = useCallback(() => {
     if (!filePath) return
     void revealWorkspaceFile(
-      attachment
-        ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
-        : {
-            path: filePath,
-            projectId,
-            ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
-            ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-          }
+      readToolFile ??
+        (attachment
+          ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
+          : {
+              path: filePath,
+              projectId,
+              ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+              ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+            })
     ).catch(() => undefined)
-  }, [attachment, assistantMessageId, fileFolderId, filePath, projectId])
+  }, [attachment, readToolFile, assistantMessageId, fileFolderId, filePath, projectId])
 
   const displayPath = attachment ? (attachmentMetadata?.path ?? attachment.name) : filePath
   const segments = displayPath?.split(/[\\/]/) ?? []
   const fileName = segments.at(-1) ?? null
-  const ancestorPath = attachment
-    ? segments.slice(0, -1).join('/')
-    : [projectName, ...segments.slice(0, -1)].join(' › ')
-  const fullPathLabel = attachment
-    ? (displayPath ?? '')
-    : filePath
-      ? `${projectName}/${filePath}`
-      : projectName
+  const ancestorPath =
+    attachment || readToolFile
+      ? segments.slice(0, -1).join('/')
+      : [projectName, ...segments.slice(0, -1)].join(' › ')
+  const fullPathLabel =
+    attachment || readToolFile
+      ? (displayPath ?? '')
+      : filePath
+        ? `${projectName}/${filePath}`
+        : projectName
 
   const focusOptionItem = (index: number): void => {
     const items = optionItemRefs.current.filter((item): item is HTMLButtonElement => item !== null)
@@ -262,14 +268,15 @@ export function FilesPanel({
     if (!filePath) return
     closeOptionsMenuAndRestoreFocus()
     void copyWorkspaceFilePath(
-      attachment
-        ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
-        : {
-            path: filePath,
-            projectId,
-            ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
-            ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-          }
+      readToolFile ??
+        (attachment
+          ? { attachmentId: attachment.attachmentId, messageId: attachment.messageId }
+          : {
+              path: filePath,
+              projectId,
+              ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+              ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+            })
     ).catch(() => undefined)
   }
 
@@ -436,11 +443,13 @@ export function FilesPanel({
               projectId,
               attachment?.attachmentId,
               attachment?.messageId,
+              readToolFile,
               fileFolderId,
               assistantMessageId,
-              attachment || assistantMessageId ? null : workspaceRevision
+              attachment || readToolFile || assistantMessageId ? null : workspaceRevision
             ])}
             attachment={attachment}
+            readToolFile={readToolFile}
             onMetadata={attachment ? handleMetadata : undefined}
             assistantMessageId={assistantMessageId}
             folderId={fileFolderId}

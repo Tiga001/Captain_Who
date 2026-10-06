@@ -1,4 +1,6 @@
 import type { AttachmentFileNavigationTarget } from '../files/AttachmentFileNavigationContext'
+import type { ReadToolFileRequest } from '@mycopilot/protocol'
+import type { WorkspaceReferenceTarget } from '../chat/workspaceMentions'
 import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
@@ -87,6 +89,15 @@ export type RightSidebarModulePageState =
       tabState?: 'stable' | 'transient'
       preview?: {
         markdownAnchor?: string
+        markdownView?: 'preview' | 'source'
+        pdfPage?: number
+        wrapLines?: boolean
+      }
+    }
+  | {
+      kind: 'read-tool-file'
+      reference: ReadToolFileRequest
+      preview?: {
         markdownView?: 'preview' | 'source'
         pdfPage?: number
         wrapLines?: boolean
@@ -198,11 +209,7 @@ export interface RightSidebarAttachmentNavigationRequest extends AttachmentFileN
   requestId: number
 }
 
-export interface RightSidebarWorkspaceReferenceNavigationRequest {
-  alias: string
-  kind: 'file' | 'directory'
-  path: string
-  projectId: string
+export type RightSidebarWorkspaceReferenceNavigationRequest = WorkspaceReferenceTarget & {
   requestId: number
 }
 

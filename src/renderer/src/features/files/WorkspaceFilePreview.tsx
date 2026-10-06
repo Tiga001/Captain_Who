@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
 import type {
   AttachmentFileRequest,
+  ReadToolFileRequest,
   WorkspaceFileMetadata,
   WorkspaceFilePreviewResult,
   WorkspaceTextFileContent
@@ -38,6 +39,7 @@ type PreviewState =
 
 interface WorkspaceFilePreviewProps {
   attachment?: AttachmentFileRequest
+  readToolFile?: ReadToolFileRequest
   onMetadata?: (metadata: WorkspaceFileMetadata) => void
   assistantMessageId?: string
   folderId?: string
@@ -55,6 +57,7 @@ interface WorkspaceFilePreviewProps {
 
 export function WorkspaceFilePreview({
   attachment,
+  readToolFile,
   onMetadata,
   assistantMessageId,
   folderId,
@@ -124,14 +127,15 @@ export function WorkspaceFilePreview({
     void (async () => {
       try {
         const request =
-          attachmentId && attachmentMessageId
+          readToolFile ??
+          (attachmentId && attachmentMessageId
             ? { attachmentId, messageId: attachmentMessageId }
             : {
                 path,
                 projectId,
                 ...(folderId === undefined ? {} : { folderId }),
                 ...(assistantMessageId === undefined ? {} : { assistantMessageId })
-              }
+              })
         const preview = await readWorkspaceFilePreview(request)
         if (requestSequenceRef.current !== requestId) return
         setState({ preview, status: 'ready' })
@@ -153,6 +157,7 @@ export function WorkspaceFilePreview({
     officeDocumentType,
     path,
     projectId,
+    readToolFile,
     retryToken
   ])
 
@@ -213,7 +218,7 @@ export function WorkspaceFilePreview({
     if (isMarkdown && markdownView === 'preview') {
       return (
         <WorkspaceMarkdownPreview
-          allowWorkspaceLinks={!attachmentId}
+          allowWorkspaceLinks={!attachmentId && !readToolFile}
           assistantMessageId={assistantMessageId}
           folderId={folderId}
           anchor={markdownAnchor}

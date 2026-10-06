@@ -64,6 +64,7 @@ pub(crate) fn rpc_dispatch_class(request: &JsonRpcRequest) -> RpcDispatchClass {
                 | AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD
                 | "storage.loadRunWorkspace"
                 | "storage.resolveRunWorkspacePath"
+                | "storage.resolveRunAttachmentFile"
         )
     {
         RpcDispatchClass::Read
@@ -631,6 +632,19 @@ mod tests {
         ] {
             assert_eq!(class(method, None), RpcDispatchClass::Control, "{method}");
         }
+    }
+
+    #[test]
+    fn run_attachment_file_resolution_is_a_read() {
+        assert_eq!(
+            rpc_dispatch_class(&JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: id(1),
+                method: "storage.resolveRunAttachmentFile".into(),
+                params: None,
+            }),
+            RpcDispatchClass::Read
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

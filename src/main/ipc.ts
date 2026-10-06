@@ -20,6 +20,7 @@ import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { resolveAttachmentFolderForOpen } from './attachments/openAttachmentFolder'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
+import { ReadToolFileSource } from './workspaceFiles/ReadToolFileSource'
 import { registerAgentIpc } from './ipc/agentIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerNotificationIpc } from './ipc/notificationIpc'
@@ -270,11 +271,13 @@ export function registerHostIpc(
   syncExecutionAccess?: () => Promise<void>
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge(coreServer)
+  const readToolFiles = new ReadToolFileSource(coreServer)
   const workspaceFilesService = new WorkspaceFilesService(
     async (projectId) =>
       (await coreServer.loadProjects()).find((project) => project.id === projectId),
     coreServer,
-    coreServer
+    coreServer,
+    readToolFiles
   )
   const ipcMain = createTrustedIpcMain(isTrustedRenderer)
   const rendererQuitFlush = new RendererQuitFlushCoordinator(ipcMain)
@@ -381,6 +384,7 @@ export function registerHostIpc(
     faviconResourceCache.resolveFavicon(input)
   )
   const dispose = (): void => {
+    readToolFiles.dispose()
     rendererQuitFlush.dispose()
     disposeNotificationIpc()
     disposeHumanInteractionIpc()

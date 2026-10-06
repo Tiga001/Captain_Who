@@ -40,6 +40,47 @@ const WORKSPACE_B = createRightSidebarWorkspaceContext('project-b', 'Project B',
 const HOME = createRightSidebarWorkspaceContext(null, null, undefined)
 
 describe('right sidebar platform context lifecycle', () => {
+  it('reuses repeated reads of the same frozen file and preserves its original authority and preview state', () => {
+    const open = (state: RightSidebarPlatformState, callId: string) =>
+      reduceRightSidebarPlatform(state, {
+        type: 'open',
+        module: getModule('files'),
+        pageId: `read-${callId}`,
+        t: translate,
+        workspace: WORKSPACE_A,
+        moduleState: {
+          kind: 'read-tool-file',
+          reference: {
+            source: 'read-tool',
+            conversationId: 'conversation',
+            assistantMessageId: 'assistant',
+            callId,
+            filePath: '/outside/notes.md',
+            projectId: 'project-a'
+          },
+          preview: { markdownView: 'preview' }
+        }
+      })
+    let state = open(INITIAL_RIGHT_SIDEBAR_PLATFORM_STATE, 'first')
+    const originalState = state.pages[0].moduleState
+    if (originalState?.kind !== 'read-tool-file') throw new Error('Missing read preview')
+    state = reduceRightSidebarPlatform(state, {
+      type: 'update',
+      pageId: 'read-first',
+      update: { moduleState: { ...originalState, preview: { markdownView: 'source' } } }
+    })
+    state = open(state, 'second')
+    expect(state.pages).toHaveLength(1)
+    expect(state.pages[0]).toMatchObject({
+      id: 'read-first',
+      workspacePath: '/repo/a',
+      moduleState: {
+        reference: { callId: 'first', filePath: '/outside/notes.md' },
+        preview: { markdownView: 'source' }
+      }
+    })
+  })
+
   it('reuses a sent attachment tab with its preview state and keeps projectless pages available', () => {
     const open = (state: RightSidebarPlatformState, workspace: RightSidebarWorkspaceContext) =>
       reduceRightSidebarPlatform(state, {

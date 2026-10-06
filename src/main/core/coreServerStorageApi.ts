@@ -740,6 +740,14 @@ export class CoreServerStorageApi {
     return this.rpc.request('storage.resolveAttachmentFile', input)
   }
 
+  resolveRunAttachmentFile(input: {
+    conversationId: string
+    assistantMessageId: string
+    filePath: string
+  }): ReturnType<CoreServerStorageApi['resolveAttachmentFile']> {
+    return this.rpc.request('storage.resolveRunAttachmentFile', input)
+  }
+
   loadBrowserDownloadSettings(): Promise<BrowserDownloadSettingsRecord> {
     return this.rpc
       .request<unknown>(STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD)

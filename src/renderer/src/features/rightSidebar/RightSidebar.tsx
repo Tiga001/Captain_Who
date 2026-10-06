@@ -427,7 +427,8 @@ export const RightSidebar = memo(function RightSidebar({
         pages.flatMap((page) =>
           page.moduleId === 'files'
             ? [
-                page.moduleState?.kind === 'attachment-file'
+                page.moduleState?.kind === 'attachment-file' ||
+                page.moduleState?.kind === 'read-tool-file'
                   ? (page.projectId ?? '')
                   : (page.workspaceKey ?? '')
               ]
@@ -583,13 +584,30 @@ export const RightSidebar = memo(function RightSidebar({
 
   useEffect(() => {
     const request = workspaceReferenceNavigationRequest
-    if (!request || !workspaceKey || request.projectId !== workspaceKey) return
+    if (!request) return
     if (
       handledWorkspaceReferenceNavigationRequestIdRef.current !== null &&
       request.requestId <= handledWorkspaceReferenceNavigationRequestIdRef.current
     ) {
       return
     }
+    if (request.source === 'read-tool') {
+      handledWorkspaceReferenceNavigationRequestIdRef.current = request.requestId
+      openModulePage('files', {
+        kind: 'read-tool-file',
+        reference: {
+          source: request.source,
+          conversationId: request.conversationId,
+          assistantMessageId: request.assistantMessageId,
+          callId: request.callId,
+          filePath: request.filePath,
+          projectId: request.projectId
+        },
+        preview: { markdownView: 'preview' }
+      })
+      return
+    }
+    if (!workspaceKey || request.projectId !== workspaceKey) return
     if (moduleAvailability.files === 'checking') return
     if (moduleAvailability.files !== 'available') return
 

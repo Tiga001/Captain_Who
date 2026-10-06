@@ -14,6 +14,7 @@ import type {
   ChatWebSearchActivity
 } from '../../chatTypes'
 import type { ChatAgentRunView } from '../../chatTypes'
+import type { WorkspaceReferenceTarget } from '../../workspaceMentions'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { getApplyPatchRequest } from '../../../agentRun/applyPatchRequest'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
@@ -49,6 +50,7 @@ interface AgentToolActivityProps {
   fileChangeProposal?: AgentFileChangeProposal
   mcpInvocation?: ChatMcpToolInvocationView
   observerRootConversationId?: string
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   projectId?: string | null
   previousTodoResult?: AgentToolResult
   result?: AgentToolResult
@@ -68,6 +70,7 @@ export function AgentToolActivity({
   fileChangeProposal,
   mcpInvocation,
   observerRootConversationId,
+  onOpenWorkspaceReference,
   projectId,
   previousTodoResult,
   result,
@@ -231,6 +234,7 @@ export function AgentToolActivity({
         call={call}
         conversationId={conversationId}
         observerRootConversationId={observerRootConversationId}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
         projectId={projectId}
         result={result}
         settledStatus={settledStatus}

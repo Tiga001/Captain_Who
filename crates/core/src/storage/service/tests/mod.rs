@@ -18,6 +18,7 @@ mod incremental_turns;
 mod message_deletion;
 mod notifications;
 mod reconciliation;
+mod run_attachment_files;
 mod settings;
 mod terminal_message_streams;
 mod trace_reconciliation;

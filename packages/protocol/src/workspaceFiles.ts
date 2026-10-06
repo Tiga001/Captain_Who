@@ -60,7 +60,18 @@ export interface AttachmentFileRequest {
   messageId: string
 }
 
-export type WorkspaceFilePreviewRequest = WorkspaceFileRequest | AttachmentFileRequest
+/** A file actually referenced by a persisted or Host-observed read call in this Turn. */
+export interface ReadToolFileRequest {
+  source: 'read-tool'
+  conversationId: string
+  assistantMessageId: string
+  callId: string
+  filePath: string
+  projectId?: string | null
+}
+
+export type WorkspaceFilePreviewRequest =
+  WorkspaceFileRequest | AttachmentFileRequest | ReadToolFileRequest
 
 export interface WorkspaceFileMetadata {
   /** Original attachment name, which may differ from the stored filename. */

@@ -307,11 +307,14 @@ function renderFilesModule({
   t
 }: RightSidebarModuleRenderProps) {
   const attachmentState = page.moduleState?.kind === 'attachment-file' ? page.moduleState : null
-  if (availability === 'unavailable' || (!page.workspaceKey && !attachmentState)) return null
+  const readToolState = page.moduleState?.kind === 'read-tool-file' ? page.moduleState : null
+  if (availability === 'unavailable' || (!page.workspaceKey && !attachmentState && !readToolState))
+    return null
   const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
   const folderState = page.moduleState?.kind === 'workspace-folder' ? page.moduleState : null
-  const previewState = attachmentState ?? fileState
-  const filePath = attachmentState?.name ?? fileState?.path ?? null
+  const previewState = readToolState ?? attachmentState ?? fileState
+  const filePath =
+    readToolState?.reference.filePath ?? attachmentState?.name ?? fileState?.path ?? null
   const selectedDirectoryPath = folderState?.path ?? null
   const markdownAnchor = fileState?.preview?.markdownAnchor
   const markdownView = previewState?.preview?.markdownView ?? 'preview'
@@ -322,6 +325,7 @@ function renderFilesModule({
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
         attachment={attachmentState ?? undefined}
+        readToolFile={readToolState?.reference}
         onAttachmentName={(name) => {
           if (attachmentState && name !== page.title) onPageUpdate({ title: name })
         }}
@@ -364,7 +368,9 @@ function renderFilesModule({
         }}
         onSurfaceFocus={onSurfaceFocus}
         pdfPage={pdfPage}
-        projectId={page.projectId ?? (attachmentState ? '' : (page.workspaceKey ?? ''))}
+        projectId={
+          page.projectId ?? (attachmentState || readToolState ? '' : (page.workspaceKey ?? ''))
+        }
         projectName={page.workspaceName || t('rightSidebar.files')}
         wrapLines={wrapLines}
       />

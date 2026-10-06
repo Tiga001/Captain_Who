@@ -62,18 +62,30 @@ export function reduceRightSidebarPlatform(
   switch (action.type) {
     case 'open': {
       const attachment = action.moduleState?.kind === 'attachment-file' ? action.moduleState : null
-      const existingPage = attachment
+      const readTool = action.moduleState?.kind === 'read-tool-file' ? action.moduleState : null
+      const existingPage = readTool
         ? state.pages.find(
             (page) =>
               page.moduleId === 'files' &&
-              page.moduleState?.kind === 'attachment-file' &&
-              page.moduleState.attachmentId === attachment.attachmentId &&
-              page.moduleState.messageId === attachment.messageId &&
+              page.moduleState?.kind === 'read-tool-file' &&
+              page.moduleState.reference.conversationId === readTool.reference.conversationId &&
+              page.moduleState.reference.assistantMessageId ===
+                readTool.reference.assistantMessageId &&
+              page.moduleState.reference.filePath === readTool.reference.filePath &&
               page.workspaceSessionKey === action.workspace.sessionKey
           )
-        : findExistingPage(state.pages, action.module, action.workspace)
+        : attachment
+          ? state.pages.find(
+              (page) =>
+                page.moduleId === 'files' &&
+                page.moduleState?.kind === 'attachment-file' &&
+                page.moduleState.attachmentId === attachment.attachmentId &&
+                page.moduleState.messageId === attachment.messageId &&
+                page.workspaceSessionKey === action.workspace.sessionKey
+            )
+          : findExistingPage(state.pages, action.module, action.workspace)
       if (existingPage) {
-        if (attachment) return { ...state, activePageId: existingPage.id }
+        if (attachment || readTool) return { ...state, activePageId: existingPage.id }
         const moduleState = action.moduleState ?? existingPage.moduleState
         if (state.activePageId === existingPage.id && moduleState === existingPage.moduleState) {
           return state
@@ -105,6 +117,14 @@ export function reduceRightSidebarPlatform(
                 ? {
                     title: attachment.name,
                     resourceKey: `attachment-file:${JSON.stringify([attachment.messageId, attachment.attachmentId])}`
+                  }
+                : {}),
+              ...(readTool
+                ? {
+                    title:
+                      readTool.reference.filePath.replaceAll('\\', '/').split('/').at(-1) ||
+                      readTool.reference.filePath,
+                    resourceKey: `read-tool-file:${JSON.stringify([readTool.reference.conversationId, readTool.reference.assistantMessageId, readTool.reference.filePath])}`
                   }
                 : {})
             }
@@ -459,7 +479,11 @@ function synchronizeContext(
       knownWorkspaceKeys &&
       module.orphanedWorkspacePolicy === 'close-page' &&
       currentPage.workspaceKey &&
-      !(currentPage.moduleState?.kind === 'attachment-file' && !currentPage.projectId) &&
+      !(
+        (currentPage.moduleState?.kind === 'attachment-file' ||
+          currentPage.moduleState?.kind === 'read-tool-file') &&
+        !currentPage.projectId
+      ) &&
       !knownWorkspaceKeys.has(currentPage.workspaceKey)
     ) {
       changed = true

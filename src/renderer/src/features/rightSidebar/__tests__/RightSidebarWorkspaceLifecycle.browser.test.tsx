@@ -56,6 +56,51 @@ afterEach(() => {
 })
 
 describe('RightSidebar workspace lifecycle', () => {
+  it.each([true, false])(
+    'opens and reuses an external read file with workspace present=%s',
+    async (hasWorkspace) => {
+      const workspace = hasWorkspace ? workspaceProps('project-a', 'Project A', '/repo/a') : {}
+      const reference = {
+        source: 'read-tool' as const,
+        conversationId: 'chat-a',
+        assistantMessageId: 'answer-a',
+        callId: 'read-a',
+        filePath: '/Users/example/Downloads/external.txt',
+        ...(hasWorkspace ? { projectId: 'project-a' } : {})
+      }
+      const renderSidebar = (requestId: number) => (
+        <RightSidebar
+          {...workspace}
+          activeConversationId="chat-a"
+          isMaximized={false}
+          isOpen
+          modules={MODULES}
+          workspaceKeys={['project-a']}
+          onToggleMaximized={NOOP}
+          workspaceReferenceNavigationRequest={{
+            ...reference,
+            callId: requestId === 1 ? 'read-a' : 'read-b',
+            requestId
+          }}
+        />
+      )
+      const screen = await render(renderSidebar(1))
+      await expect.poll(() => lifecycleCount('mount', 'files')).toBe(1)
+      const surface = getSurface(screen.container, 'files')
+      const pageId = surface.dataset.pageId
+      expect(surface.dataset.workspaceKey).toBe(hasWorkspace ? 'project-a' : 'home')
+      expect(surface.dataset.readToolReference).toBe(JSON.stringify(reference))
+      expect(getTabLabels(screen.container)).toEqual(['external.txt'])
+      await screen.rerender(renderSidebar(2))
+      expect(getTabLabels(screen.container)).toEqual(['external.txt'])
+      expect(getSurface(screen.container, 'files').dataset.pageId).toBe(pageId)
+      expect(getSurface(screen.container, 'files').dataset.readToolReference).toBe(
+        JSON.stringify(reference)
+      )
+      expect(lifecycleCount('mount', 'files')).toBe(1)
+    }
+  )
+
   it('opens projectless attachment previews and reuses the same tab on repeated clicks', async () => {
     const renderSidebar = (requestId: number) => (
       <RightSidebar
@@ -854,6 +899,9 @@ function TrackedSurface({
     <div
       data-activity={activity}
       data-page-id={pageId}
+      data-read-tool-reference={
+        moduleState?.kind === 'read-tool-file' ? JSON.stringify(moduleState.reference) : undefined
+      }
       data-browser-url={moduleState?.kind === 'browser-surface' ? moduleState.url : undefined}
       data-review-request-id={
         moduleState?.kind === 'git-review' ? String(moduleState.requestId) : undefined

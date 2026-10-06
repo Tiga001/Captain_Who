@@ -17,6 +17,7 @@ import type {
   WorkspaceMentionSearchResult,
   WorkspaceMentionSearchEntry
 } from '@mycopilot/protocol'
+import type { ReadToolFileSource } from './ReadToolFileSource'
 
 const DIRECTORY_ENTRY_LIMIT = 20_000
 const IMAGE_PREVIEW_LIMIT_BYTES = 12 * 1024 * 1024
@@ -93,7 +94,8 @@ export class WorkspaceFilesService {
   constructor(
     private readonly resolveProject: WorkspaceProjectResolver,
     private readonly runFiles?: WorkspaceRunFileSource,
-    private readonly attachmentFiles?: AttachmentFileSource
+    private readonly attachmentFiles?: AttachmentFileSource,
+    private readonly readToolFiles?: Pick<ReadToolFileSource, 'resolveReadToolFile'>
   ) {}
 
   /**
@@ -335,6 +337,22 @@ export class WorkspaceFilesService {
   private async resolvePreviewRequest(
     input: WorkspaceFilePreviewRequest
   ): Promise<ResolvedWorkspaceEntry> {
+    if (input && 'source' in input) {
+      if (input.source !== 'read-tool') throw new Error('Read file preview source is not available')
+      if (!this.readToolFiles) throw new Error('Read file preview is not available')
+      const file = await this.readToolFiles.resolveReadToolFile(input)
+      if (!isAbsolute(file.path)) throw new Error('Read file is not available')
+      const info = await lstat(file.path)
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('Read file is not available')
+      return {
+        kind: 'file',
+        name: file.name,
+        path: input.filePath,
+        realPath: await realpath(file.path),
+        modifiedAtMs: info.mtimeMs,
+        sizeBytes: info.size
+      }
+    }
     if (input && 'attachmentId' in input) {
       const attachmentId = normalizeOptionalIdentity(input.attachmentId, 'Attachment id')
       const messageId = normalizeOptionalIdentity(input.messageId, 'Message id')

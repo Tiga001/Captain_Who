@@ -2,6 +2,86 @@ use super::*;
 use base64::Engine;
 
 #[tokio::test]
+async fn run_attachment_file_rpc_binds_the_turn_and_preserves_the_response_shape() {
+    let temporary = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temporary.path().join("storage.sqlite")).unwrap());
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    storage.save_conversation(serde_json::from_value(json!({
+        "id":"read-chat", "projectId":null, "modelId":null, "title":"read", "createdAt":1, "updatedAt":2,
+        "pinnedAt":null, "archivedAt":null, "unreadAt":null,
+        "messages":[
+            {"id":"read-user", "role":"user", "content":"", "createdAt":1, "status":"sent", "agentRunJson":null, "uiStateJson":null},
+            {"id":"read-assistant", "role":"assistant", "content":"", "createdAt":2, "status":"pending", "agentRunJson":null, "uiStateJson":null}
+        ]
+    })).unwrap()).unwrap();
+    let import_id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: "read-file".into(),
+            kind: mycopilot_core::AgentInputAttachmentKind::File,
+            name: "notes.txt".into(),
+            mime_type: Some("text/plain".into()),
+            pasted_text: None,
+            size_bytes: 3,
+        })
+        .unwrap();
+    storage
+        .append_attachment_import(&import_id, 0, "YWJj")
+        .unwrap();
+    let attachment = storage.finish_attachment_import(&import_id).unwrap();
+    storage
+        .save_input_attachments("read-chat", "read-user", None, &[attachment], 1)
+        .unwrap();
+    storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+                "read-run",
+                "read-chat",
+                "read-assistant",
+            ),
+            2,
+            2,
+        )
+        .unwrap();
+    let request = |params: Value| {
+        let (notifications, _receiver) = crate::transport::outbound_channel();
+        handle_request(
+            &storage,
+            &agent,
+            notifications,
+            JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: JsonRpcId::Number(1),
+                method: "storage.resolveRunAttachmentFile".into(),
+                params: Some(params),
+            },
+        )
+    };
+    let params = json!({
+        "conversationId":"read-chat",
+        "assistantMessageId":"read-assistant",
+        "filePath":"@attachments/read-file/notes.txt"
+    });
+    let response = request(params.clone());
+    assert_eq!(response["result"]["name"], "notes.txt");
+    assert_eq!(response["result"]["messageId"], "read-user");
+    assert_eq!(response["result"]["conversationId"], "read-chat");
+    assert_eq!(
+        std::fs::read(response["result"]["path"].as_str().unwrap()).unwrap(),
+        b"abc"
+    );
+    for (key, value) in [
+        ("assistantMessageId", "read-user"),
+        ("conversationId", "foreign-chat"),
+        ("filePath", "@attachments/read-file/forged.txt"),
+        ("attachmentId", "forged-override"),
+    ] {
+        let mut invalid = params.clone();
+        invalid[key] = json!(value);
+        assert!(request(invalid)["error"].is_object());
+    }
+}
+
+#[tokio::test]
 async fn attachment_import_rpc_round_trip_validates_reference_and_preview_shapes() {
     let temporary = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temporary.path().join("storage.sqlite")).unwrap());

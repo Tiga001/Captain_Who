@@ -56,7 +56,10 @@ export function useRightSidebarPlatform({
       if (
         !module ||
         (getRightSidebarModuleAvailability(moduleAvailability, moduleId) !== 'available' &&
-          !(moduleId === 'files' && moduleState?.kind === 'attachment-file'))
+          !(
+            moduleId === 'files' &&
+            (moduleState?.kind === 'attachment-file' || moduleState?.kind === 'read-tool-file')
+          ))
       ) {
         return null
       }
