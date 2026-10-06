@@ -1523,7 +1523,7 @@ pub fn update_message_state(
             },
         )
         .optional()?;
-    let Some((_existing_status, existing_content, existing_run_json, created_at)) = existing else {
+    let Some((existing_status, existing_content, existing_run_json, created_at)) = existing else {
         return Ok(());
     };
     let admitted_run_id = connection
@@ -1616,6 +1616,20 @@ pub fn update_message_state(
     } else {
         agent_run_json
     };
+
+    // Compare the authoritative result, not the incoming checkpoint: terminal content and Usage
+    // may need repair even when a Renderer resends identical values.
+    if content == existing_content && status == existing_status {
+        if agent_run_json != existing_run_json {
+            // Keep presentation-only checkpoints out of content/status UPDATE triggers, including
+            // the full-text history index. The presentation revision still advances normally.
+            connection.execute(
+                "UPDATE messages SET agent_run_json = ?1 WHERE conversation_id = ?2 AND id = ?3",
+                params![&agent_run_json, conversation_id, &message.id],
+            )?;
+        }
+        return Ok(());
+    }
 
     connection.execute(
         "

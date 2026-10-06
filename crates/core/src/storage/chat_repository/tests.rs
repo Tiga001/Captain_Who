@@ -665,6 +665,31 @@ fn authoritative_usage_repairs_loaded_json_and_rejects_stale_renderer_usage() {
     )
     .unwrap();
 
+    // An identical Renderer checkpoint still needs the authoritative Usage overlay. Comparing
+    // incoming bytes before that overlay would incorrectly leave stale persisted Usage behind.
+    let before_repair = get_persisted_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap()
+        .messages
+        .remove(1);
+    update_message_state(
+        &connection,
+        "conversation-1",
+        &ChatMessageStateRecord {
+            id: before_repair.id,
+            content: before_repair.content,
+            status: before_repair.status,
+            agent_run_json: before_repair.agent_run_json,
+        },
+    )
+    .unwrap();
+    let repaired = get_persisted_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    let repaired_run: serde_json::Value =
+        serde_json::from_str(repaired.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(repaired_run["usage"]["inputTokens"], 2_942_988);
+
     let loaded = get_conversation(&connection, "conversation-1")
         .unwrap()
         .unwrap();
@@ -1672,6 +1697,53 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
         run["collaborationTimelineActivities"],
         serde_json::json!([])
     );
+}
+
+#[test]
+fn unchanged_message_checkpoint_has_no_writes_and_presentation_skips_content_triggers() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut stored = conversation();
+    stored.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
+    let mut checkpoint = ChatMessageStateRecord {
+        id: stored.messages[1].id.clone(),
+        content: stored.messages[1].content.clone(),
+        status: stored.messages[1].status.clone(),
+        agent_run_json: stored.messages[1].agent_run_json.clone(),
+    };
+    save_conversation(&mut connection, stored).unwrap();
+    let before = connection.total_changes();
+    update_message_state(&connection, "conversation-1", &checkpoint).unwrap();
+    assert_eq!(connection.total_changes(), before);
+
+    // Exercise the statement's field boundary independently of the FTS value-change guard.
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER forbid_checkpoint_content_rewrite
+         BEFORE UPDATE OF content, status ON main.messages
+         BEGIN SELECT RAISE(ABORT, 'presentation must not touch content or status'); END;",
+        )
+        .unwrap();
+    let mut updated = live_running_agent_run();
+    updated["readActivities"] = serde_json::json!([{ "id": "read-1" }]);
+    checkpoint.agent_run_json = Some(updated.to_string());
+    update_message_state(&connection, "conversation-1", &checkpoint).unwrap();
+    let saved: String = connection
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE id='assistant-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Some(saved), checkpoint.agent_run_json);
+    let presentation_revision: i64 = connection.query_row(
+        "SELECT presentation_revision FROM conversation_message_history_revisions WHERE conversation_id='conversation-1'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(presentation_revision, 1);
+    let after = connection.total_changes();
+    update_message_state(&connection, "conversation-1", &checkpoint).unwrap();
+    assert_eq!(connection.total_changes(), after);
 }
 
 #[test]

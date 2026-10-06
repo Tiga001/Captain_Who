@@ -7390,3 +7390,31 @@ BEGIN
     UPDATE conversation_message_history_revisions SET ui_revision = ui_revision + 1
     WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = OLD.message_id);
 END;
+
+-- Reindex message history only when indexed values change, schema v69.
+DROP TRIGGER conversation_history_fts_message_update;
+CREATE TRIGGER conversation_history_fts_message_update
+AFTER UPDATE OF conversation_id, role, content, status, created_at, position ON messages
+WHEN NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.role IS NOT OLD.role
+  OR NEW.content IS NOT OLD.content
+  OR NEW.status IS NOT OLD.status
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.position IS NOT OLD.position
+BEGIN
+    DELETE FROM conversation_history_index_entries WHERE ref_key = 'message:' || OLD.id;
+    INSERT INTO conversation_history_index_entries (ref_key, owner_message_id)
+    VALUES ('message:' || NEW.id, NEW.id);
+    INSERT INTO conversation_history_fts (
+        rowid,
+        ref_key, conversation_id, record_type, item_kind, message_id,
+        assistant_message_id, sequence, archive_ref, call_id, tool,
+        status, run_id, created_at, position, within_message_order, content
+    ) VALUES (
+        (SELECT rowid FROM conversation_history_index_entries WHERE ref_key = 'message:' || NEW.id),
+        'message:' || NEW.id, NEW.conversation_id, 'message', NULL, NEW.id,
+        NULL, NULL, NULL, NULL, NULL, NEW.status, NULL, NEW.created_at,
+        NEW.position, CASE WHEN NEW.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+        NEW.content
+    );
+END;

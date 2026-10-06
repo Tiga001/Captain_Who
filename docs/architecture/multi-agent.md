@@ -263,15 +263,15 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v68**。唯一真源：
+当前 canonical storage 是 **v69**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 68;
+pub const STORAGE_SCHEMA_VERSION: i32 = 69;
 ```
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加组织定义表，v55 曾增加默认关闭的模板 enabled 字段。当前忽略此历史字段，模板可用性由实时校验结果派生。空库原子创建 v68；exact v67 → v68 分离消息展示水位与模型历史修订，跳过无变化的 Trace/模型日志更新，不改写消息正文或模型历史；exact v66 → v67 增加独立消息历史修订，不改写历史或原会话 revision；exact v65 → v66 删除旧工作流执行表及索引，保留组织邮件与对话；exact v64 → v65 将当前组织配置复制为实例独立定义、解除模板外键并增加成员身份及人员幂等回执；exact v63 → v64 新增独立空邮箱表、不转换旧工作流；exact v62 → v63 增加长粘贴来源元数据；exact v61 → v62 只增加组织 pending sequence 部分索引，不改写记录与正文；exact v60 → v61 保留历史，增加 Trace 增量发布修订围栏与交互摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为组织实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留历史，增加组织持久消息、输入与事件、来源及 Run 身份并支持 WorkflowDelivery Trace；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留组织定义并增加模板 enabled 历史字段；exact v53 原样保留历史增加组织定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v68。
+v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加组织定义表，v55 曾增加默认关闭的模板 enabled 字段。当前忽略此历史字段，模板可用性由实时校验结果派生。空库原子创建 v69；exact v68 → v69 为消息 FTS 更新触发器增加真实值变化条件，不改写历史或既有索引；exact v67 → v68 分离消息展示水位与模型历史修订，跳过无变化的 Trace/模型日志更新，不改写消息正文或模型历史；exact v66 → v67 增加独立消息历史修订，不改写历史或原会话 revision；exact v65 → v66 删除旧工作流执行表及索引，保留组织邮件与对话；exact v64 → v65 将当前组织配置复制为实例独立定义、解除模板外键并增加成员身份及人员幂等回执；exact v63 → v64 新增独立空邮箱表、不转换旧工作流；exact v62 → v63 增加长粘贴来源元数据；exact v61 → v62 只增加组织 pending sequence 部分索引，不改写记录与正文；exact v60 → v61 保留历史，增加 Trace 增量发布修订围栏与交互摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为组织实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留历史，增加组织持久消息、输入与事件、来源及 Run 身份并支持 WorkflowDelivery Trace；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 原样保留组织定义并增加模板 enabled 历史字段；exact v53 原样保留历史增加组织定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68、v69；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68、v69。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v69。
 
 组织邮件网络与本章的 Agent tree 协作运行时独立：组织成员是独立根对话，模板激活后复制为独立组织。实例启停和在线编辑以 revision 校验持久化；编辑保留启停状态。组织/部门管理员的在线人事工具按严格低职级和部门子树权限执行，移除保留对话历史。邮件通过持久邮箱按休眠 FIFO 唤醒和轮内主动接手处理，不使用固定流程连线。详见[组织邮件网络](../subsystems/organizations.md)。
 

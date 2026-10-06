@@ -95,9 +95,9 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v68**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v68 分离消息展示更新与模型历史修订并跳过无变化的日志更新；v67 增加独立消息历史修订；v66 删除已停用的旧工作流执行表，保留组织邮件与对话；v65 持久保存独立组织配置、成员身份与人员回执；v64 新增独立邮件网络表、不转换旧工作流；v63 增加长粘贴来源元数据；v62 增加组织 pending sequence 部分索引；v61 增加 Trace 增量发布的持久修订围栏和待处理交互摘要索引；v60 增加普通历史顺序投影与分页索引；v59 增加组织新建对话的默认项目；v58 增加组织运行持久事实与 WorkflowDelivery Trace；v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局组织实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加组织定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
+- 当前 canonical schema 为 **v69**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v69 仅在索引字段真实变化时更新消息 FTS，不重写历史或既有索引；v68 分离消息展示更新与模型历史修订并跳过无变化的日志更新；v67 增加独立消息历史修订；v66 删除已停用的旧工作流执行表，保留组织邮件与对话；v65 持久保存独立组织配置、成员身份与人员回执；v64 新增独立邮件网络表、不转换旧工作流；v63 增加长粘贴来源元数据；v62 增加组织 pending sequence 部分索引；v61 增加 Trace 增量发布的持久修订围栏和待处理交互摘要索引；v60 增加普通历史顺序投影与分页索引；v59 增加组织新建对话的默认项目；v58 增加组织运行持久事实与 WorkflowDelivery Trace；v57 增加默认开启的实例 enabled 字段与归档保护；v56 增加全局组织实例、对话绑定和独立编辑草稿；v55 曾增加模板 enabled 字段，当前模板可用性由校验结果派生；v54 增加组织定义表；v53 新增按实际任务派发者归属的活动明细；v52 移除协作正文的固定字节上限；v51 为协作活动记录直属父会话及其消息/Trace 位置；v50 保存文件夹引用，v49 允许纯附件引导，v48 为历史搜索增加身份索引。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 空库原子创建当前 v68；exact v51–v67 按连续迁移升级，exact v50 还要求协作事件日志为空。每步校验 catalog fingerprint 与外键；v49 及更早版本、未知 catalog、外键违规或仍有旧协作事件的 v50 均拒绝升级。v64 的组织邮箱不会转换旧图执行数据，v65 将实例配置与模板解耦，v66 仅清除已退役的图执行表；组织邮件和聊天历史保留。逐版边界见[存储与数据生命周期](storage-and-data-lifecycle.md)，启动失败不会自动清空数据库。
+- 空库原子创建当前 v69；exact v51–v68 按连续迁移升级，exact v50 还要求协作事件日志为空。每步校验 catalog fingerprint 与外键；v49 及更早版本、未知 catalog、外键违规或仍有旧协作事件的 v50 均拒绝升级。v64 的组织邮箱不会转换旧图执行数据，v65 将实例配置与模板解耦，v66 仅清除已退役的图执行表；组织邮件和聊天历史保留。逐版边界见[存储与数据生命周期](storage-and-data-lifecycle.md)，启动失败不会自动清空数据库。
 
 上述 reset-required 是拒绝启动的错误类别，不保证当前重置工具能恢复该旧库配置。旧源恢复仍受固定目标版本 gate 限制；处理旧历史须使用受支持的旧版应用并先备份，或保留原库、使用隔离数据根继续开发，见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。
 
