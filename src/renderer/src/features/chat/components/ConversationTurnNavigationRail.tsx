@@ -482,6 +482,7 @@ export function ConversationTurnNavigationRail({
                 aria-label={`${t('chat.turnNavigationJumpToTurn')} ${index + 1}`}
                 className="conversation-turn-navigation__row"
                 data-favorited={item.favorited ? 'true' : undefined}
+                data-previewed={isPreviewed ? 'true' : undefined}
                 data-turn-id={item.id}
                 data-visible={isVisible ? 'true' : undefined}
                 key={item.id}

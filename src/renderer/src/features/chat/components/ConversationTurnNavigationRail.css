@@ -1,5 +1,8 @@
 /* Read-only conversation-turn navigation rail beside the chat viewport. */
 .conversation-turn-navigation {
+  --conversation-turn-idle-opacity: 0.2;
+  --conversation-turn-visible-opacity: 0.66;
+  --conversation-turn-favorite-opacity: 0.62;
   display: flex;
   flex-direction: column;
   position: absolute;
@@ -8,6 +11,14 @@
   left: 4px;
   max-height: min(70%, 640px);
   transform: translateY(-50%);
+}
+
+.conversation-turn-navigation:not([data-pointer-preview-suppressed='true']):hover,
+.conversation-turn-navigation:has(.conversation-turn-navigation__row:focus-visible),
+.conversation-turn-navigation[data-scrubbing='true'] {
+  --conversation-turn-idle-opacity: 0.4;
+  --conversation-turn-visible-opacity: 0.8;
+  --conversation-turn-favorite-opacity: 0.86;
 }
 
 .conversation-turn-navigation__list {
@@ -58,7 +69,7 @@
   height: 2px;
   background: var(--mc-color-text-muted);
   border-radius: 999px;
-  opacity: 0.28;
+  opacity: var(--conversation-turn-idle-opacity);
   transform: scaleX(calc(0.2308 + 0.7692 * var(--conversation-turn-wave-progress, 0)));
   transform-origin: left center;
   transition:
@@ -69,28 +80,30 @@
 
 .conversation-turn-navigation__row[data-visible='true'] > span {
   background: var(--mc-color-text-primary);
-  opacity: 0.66;
+  opacity: var(--conversation-turn-visible-opacity);
+}
+
+.conversation-turn-navigation__row[data-favorited='true'] > span {
+  opacity: var(--conversation-turn-favorite-opacity);
 }
 
 .conversation-turn-navigation:not([data-pointer-preview-suppressed='true'])
   .conversation-turn-navigation__row:hover
   > span,
+.conversation-turn-navigation__row[data-previewed='true'] > span,
 .conversation-turn-navigation__row:focus-visible > span {
   background: var(--mc-color-text-primary);
   opacity: 1;
 }
 
-.conversation-turn-navigation__row[data-favorited='true'] > span,
-.conversation-turn-navigation__row[data-favorited='true']:hover > span,
-.conversation-turn-navigation__row[data-favorited='true']:focus-visible > span {
+.conversation-turn-navigation__row[data-favorited='true'] > span {
   background: var(--mc-color-text-accent);
-  opacity: 1;
 }
 
 .conversation-turn-navigation__row:focus-visible {
   border-radius: 3px;
   outline: 2px solid var(--mc-color-text-accent);
-  outline-offset: 1px;
+  outline-offset: -1px;
 }
 
 .conversation-turn-navigation__tooltip {
