@@ -190,6 +190,7 @@ import {
 } from '@mycopilot/protocol'
 
 import { CoreServerStorageApi } from './coreServerStorageApi'
+import { PendingActionsRefresh } from './pendingActionsRefresh'
 
 const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 
@@ -281,6 +282,12 @@ function shouldLogAgentObserverWarning(count: number): boolean {
 
 /** Agent/collaboration request facade; it does not start or stop the JSON-RPC process. */
 export class CoreServerAgentApi extends CoreServerStorageApi {
+  protected readonly pendingActionsRefresh = new PendingActionsRefresh(() =>
+    this.rpc
+      .request<unknown>(AGENT_LIST_PENDING_ACTIONS_METHOD)
+      .then(parsePendingAgentActionSnapshotsForHost)
+  )
+
   onWorkflowRuntimeChanged(handler: (snapshot: WorkflowRuntimeSnapshot) => void): () => void {
     return this.rpc.onNotification(WORKFLOW_RUNTIME_CHANGED_METHOD, (params) => {
       let snapshot: WorkflowRuntimeSnapshot
@@ -564,9 +571,7 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   }
 
   listPendingActions(): Promise<PendingAgentActionSnapshot[]> {
-    return this.rpc
-      .request<unknown>(AGENT_LIST_PENDING_ACTIONS_METHOD)
-      .then(parsePendingAgentActionSnapshotsForHost)
+    return this.pendingActionsRefresh.request()
   }
 
   approveAction(input: AgentApproveActionRequest): Promise<AgentActionExecutionOutput> {

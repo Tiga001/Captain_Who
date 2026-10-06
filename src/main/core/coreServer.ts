@@ -192,12 +192,14 @@ export class CoreServer extends CoreServerHumanInteractionApi {
   }
 
   stop(): void {
+    this.pendingActionsRefresh.reset()
     this.rpc.stop()
     this.latestAutomationResync = null
     this.latestNotificationResync = null
   }
 
   async shutdown(): Promise<void> {
+    this.pendingActionsRefresh.close()
     // Fence lazy process restart before inspecting the current child. Notification delivery and
     // other late Host producers may still have an in-flight promise, but none can start a fresh
     // scheduler after the shutdown sequence has begun.
