@@ -1,6 +1,6 @@
 /* Chat conversation message bubbles, attachments, actions, usage, and markdown styles. */
 .chat-conversation-page {
-  --chat-column-width: 880px;
+  --chat-column-width: 816px;
   --chat-column-gutter: 40px;
   position: relative;
   display: grid;
