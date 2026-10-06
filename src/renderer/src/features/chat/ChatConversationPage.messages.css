@@ -979,13 +979,17 @@ button.chat-message-attachment:focus-visible {
 }
 
 .chat-markdown code {
-  padding: 0.08em 0.3em;
   color: var(--mc-color-text-secondary);
-  background: var(--mc-color-surface-muted);
-  border: 1px solid var(--mc-color-border-subtle);
-  border-radius: 5px;
   font-family: var(--mc-mono-font-family);
   font-size: var(--mc-font-size-code);
+}
+
+.chat-markdown code:not(pre code) {
+  padding: 0 0.22em;
+  background: color-mix(in srgb, var(--mc-color-surface-muted) 55%, transparent);
+  border: 0;
+  border-radius: 3px;
+  vertical-align: baseline;
 }
 
 .chat-markdown pre {

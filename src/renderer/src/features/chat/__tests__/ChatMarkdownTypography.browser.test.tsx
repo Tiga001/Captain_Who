@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { page } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
-import { getFrontendCssVariables } from '../../../config/frontendConfig'
+import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
+import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import '../../../styles/global.css'
 import '../ChatConversationPage.messages.css'
+
+const { copyText } = vi.hoisted(() => ({ copyText: vi.fn(async () => undefined) }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => key })
@@ -12,7 +16,7 @@ vi.mock('../../syntaxHighlighting', () => ({
   useSyntaxHighlight: () => ({ status: 'idle' })
 }))
 vi.mock('../components/chatMessageItemUtils', () => ({
-  copyTextToClipboard: vi.fn(async () => undefined)
+  copyTextToClipboard: copyText
 }))
 vi.mock('../components/ImagePreview', () => ({
   useImagePreview: () => vi.fn()
@@ -24,6 +28,7 @@ vi.mock('../../../lib/externalLinks', () => ({
 let previousRootStyle: string | null
 
 beforeEach(() => {
+  copyText.mockClear()
   previousRootStyle = document.documentElement.getAttribute('style')
   for (const [key, value] of Object.entries(getFrontendCssVariables())) {
     document.documentElement.style.setProperty(key, value)
@@ -86,6 +91,110 @@ async function renderMarkdown(content: string, width = 320) {
 }
 
 describe('chat Markdown density and readable layout', () => {
+  it.each([
+    { width: 320, dark: false },
+    { width: 680, dark: false },
+    { width: 320, dark: true },
+    { width: 680, dark: true }
+  ])(
+    'keeps inline code in the prose rhythm and preserves fenced code at $width px (dark=$dark)',
+    async ({ width, dark }) => {
+      for (const [name, value] of Object.entries(
+        getFrontendCssVariables(frontendConfig, dark ? classicDarkTheme : classicLightTheme)
+      )) {
+        document.documentElement.style.setProperty(name, value)
+      }
+      await page.viewport(900, 1100)
+      const longPath = `src/renderer/${'features/chat/very_long_component_name/'.repeat(4)}index.tsx`
+      const blockCode = `const description = '${'中英文 mixed content '.repeat(12)}'\nconsole.log(description)\n`
+      const content = [
+        '中文与 English 使用同一行节奏。',
+        '',
+        '中文 A `value` 与 `状态`。  ',
+        '英文 B `count`、`ok`。  ',
+        '混排 C `result` 为 `true`。',
+        '',
+        '读取 `config` 后，按 `mode` 检查 `enabled`，再用 `result` 更新 `state`。Read `input`, check `status`, and return `output`，保持代码与说明连续阅读。',
+        '',
+        `长路径 \`${longPath}\` 应完整换行，后面的正文仍正常衔接。`,
+        '',
+        '```text',
+        blockCode.trimEnd(),
+        '```'
+      ].join('\n')
+      const screen = await render(
+        <div
+          className="inline-code-audit"
+          style={{
+            width: width + 32,
+            padding: 16,
+            background: 'var(--mc-color-surface-main-panel)'
+          }}
+        >
+          <ChatMarkdown className="chat-agent-text" content={content} />
+        </div>
+      )
+      await document.fonts.ready
+      const markdown = element(screen.container, '.chat-markdown')
+      const paragraphs = Array.from(markdown.querySelectorAll<HTMLElement>(':scope > p'))
+      const inlineCode = Array.from(markdown.querySelectorAll<HTMLElement>('code:not(pre code)'))
+      const lineHeight = Number.parseFloat(getComputedStyle(markdown).lineHeight)
+
+      expect(getComputedStyle(markdown).fontSize).toBe('15px')
+      expect(paragraphs).toHaveLength(4)
+      expect(inlineCode.length).toBeGreaterThan(10)
+      expect(paragraphs[0].getBoundingClientRect().height).toBeCloseTo(lineHeight, 1)
+      // Three forced lines each contain Latin and CJK inline code. Their line boxes must
+      // match ordinary prose without assuming identical glyph metrics across fonts.
+      expect(paragraphs[1].querySelectorAll('br')).toHaveLength(2)
+      expect(paragraphs[1].getBoundingClientRect().height).toBeCloseTo(lineHeight * 3, 1)
+      for (const code of inlineCode) {
+        const style = getComputedStyle(code)
+        expect(style.fontSize).toBe('12px')
+        expect(style.display).toBe('inline')
+        expect(style.verticalAlign).toBe('baseline')
+        expect(style.borderTopWidth).toBe('0px')
+        expect(style.borderBottomWidth).toBe('0px')
+      }
+      const pathCode = inlineCode.find((code) => code.textContent === longPath)!
+      expect(textRects(pathCode).length).toBeGreaterThan(1)
+      for (const paragraph of paragraphs) expectTextInside(paragraph)
+      expect(markdown.scrollWidth).toBeLessThanOrEqual(markdown.clientWidth + 1)
+      expectStackedChildren(markdown)
+
+      const pre = element(markdown, 'pre')
+      const block = element(pre, 'code')
+      const scroller = element(markdown, '.chat-code-block__scroller')
+      expect(block.textContent).toBe(blockCode)
+      expect(getComputedStyle(block).fontSize).toBe('12px')
+      expect(getComputedStyle(block).display).toBe('block')
+      expect(getComputedStyle(block).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+      expect(getComputedStyle(block).padding).toBe('0px')
+      expect(Number.parseFloat(getComputedStyle(pre).lineHeight)).toBeCloseTo(17.4, 1)
+      expect(scroller.scrollWidth).toBeGreaterThan(scroller.clientWidth)
+      scroller.scrollLeft = scroller.scrollWidth
+      expect(scroller.scrollLeft).toBeGreaterThan(0)
+      scroller.scrollLeft = 0
+
+      await page.screenshot({
+        element: element(screen.container, '.inline-code-audit'),
+        path: `../../../../../../.cache/conversation-layout-refinement/inline-code-${dark ? 'dark' : 'light'}-${width}.png`
+      })
+
+      await screen.getByRole('button', { name: 'chat.copy' }).click()
+      expect(copyText).toHaveBeenCalledWith(blockCode)
+      const unwrappedHeight = pre.getBoundingClientRect().height
+      await screen.getByRole('button', { name: 'files.wrapLines' }).click()
+      expect(pre.getBoundingClientRect().height).toBeGreaterThan(unwrappedHeight)
+      expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1)
+      expect(block.textContent).toBe(blockCode)
+      // pre-wrap may hang trailing spaces beyond the code content box. The padded
+      // pre is the visible container, so measure clipping against that boundary.
+      expectTextInside(pre)
+      expect(markdown.scrollWidth).toBeLessThanOrEqual(markdown.clientWidth + 1)
+    }
+  )
+
   it.each([320, 680])('wraps long CJK and mixed prose without clipping at %ipx', async (width) => {
     const cjk = '中文长段落应保持清晰的行间距离，缩窄聊天区域后仍然完整换行。'.repeat(8)
     const mixed =
