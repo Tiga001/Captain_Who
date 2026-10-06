@@ -76,6 +76,8 @@ function conversation(turns = 4, longText = false): ChatConversation {
 
 function Workspace({
   middleWidth = 720,
+  rightWidth = 200,
+  shellWidth,
   shellHeight = 760,
   halfHeight = false,
   turns = 4,
@@ -85,6 +87,8 @@ function Workspace({
   collaborationActivities
 }: {
   middleWidth?: number
+  rightWidth?: number
+  shellWidth?: number
   shellHeight?: number
   halfHeight?: boolean
   turns?: number
@@ -111,10 +115,10 @@ function Workspace({
       data-bottom-open={String(bottomOpen)}
       style={
         {
-          width: middleWidth + 360,
+          width: shellWidth ?? middleWidth + 360,
           height: shellHeight,
           '--left-panel-width': '160px',
-          '--right-panel-width': '200px',
+          '--right-panel-width': `${rightWidth}px`,
           '--bottom-panel-height': bottomOpen ? `${shellHeight / 2}px` : '0px'
         } as CSSProperties
       }
@@ -428,6 +432,10 @@ describe('Conversation density and adaptive message layout', () => {
         await page.viewport(viewportWidth, 1000)
         expect(getComputedStyle(scroller).paddingLeft).toBe(`${padding}px`)
         expect(getComputedStyle(scroller).paddingRight).toBe(`${padding}px`)
+        const textBounds = element('.chat-message--assistant').getBoundingClientRect()
+        const composerBounds = element('.chat-composer').getBoundingClientRect()
+        expect(Math.abs(textBounds.left - composerBounds.left)).toBeLessThanOrEqual(1)
+        expect(Math.abs(textBounds.right - composerBounds.right)).toBeLessThanOrEqual(1)
         const navigation = element('.conversation-turn-navigation')
         expect(getComputedStyle(navigation).display === 'none').toBe(!rail)
         if (rail) {
@@ -437,6 +445,81 @@ describe('Conversation density and adaptive message layout', () => {
         }
       }
       await screen.unmount()
+    }
+  )
+
+  it.each([
+    { mode: 'light', theme: classicLightTheme },
+    { mode: 'dark', theme: classicDarkTheme }
+  ])(
+    'keeps a bounded reading column aligned with the composer as the sidebar resizes in $mode mode',
+    async ({ mode, theme }) => {
+      for (const [name, value] of Object.entries(getFrontendCssVariables(frontendConfig, theme))) {
+        document.documentElement.style.setProperty(name, value)
+      }
+      await page.viewport(1920, 1100)
+      const chat = conversation(1, true)
+      const screen = await render(
+        <Workspace
+          shellWidth={1560}
+          rightWidth={200}
+          initialConversation={chat}
+          shellHeight={1040}
+        />
+      )
+      let wideReadingWidth: number | undefined
+      const originalComposer = element('.chat-composer')
+      const originalText = element('.chat-message--assistant')
+      const cases = [
+        { name: 'wide', shellWidth: 1560, rightWidth: 200 },
+        { name: 'wider', shellWidth: 1840, rightWidth: 200 },
+        { name: 'sidebar-expanded', shellWidth: 1560, rightWidth: 600 },
+        { name: 'narrow', shellWidth: 1560, rightWidth: 1080 },
+        { name: 'restored', shellWidth: 1560, rightWidth: 200 }
+      ]
+      for (const fixture of cases) {
+        await screen.rerender(
+          <Workspace
+            shellWidth={fixture.shellWidth}
+            rightWidth={fixture.rightWidth}
+            initialConversation={chat}
+            shellHeight={1040}
+          />
+        )
+        await expect
+          .poll(() => Math.round(element('.main-panel').getBoundingClientRect().width))
+          .toBe(fixture.shellWidth - fixture.rightWidth - 160)
+        const text = element('.chat-message--assistant')
+        const composer = element('.chat-composer')
+        const scroller = element('.chat-conversation-page__messages')
+        expect(composer).toBe(originalComposer)
+        expect(text).toBe(originalText)
+        const textBounds = text.getBoundingClientRect()
+        const composerBounds = composer.getBoundingClientRect()
+        expect(Math.abs(textBounds.left - composerBounds.left)).toBeLessThanOrEqual(1)
+        expect(Math.abs(textBounds.right - composerBounds.right)).toBeLessThanOrEqual(1)
+        const panel = element('.main-panel').getBoundingClientRect()
+        expect(
+          Math.abs((textBounds.left + textBounds.right) / 2 - (panel.left + panel.right) / 2)
+        ).toBeLessThanOrEqual(1)
+        expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1)
+        expect(composer.scrollWidth).toBeLessThanOrEqual(composer.clientWidth + 1)
+        expect(getComputedStyle(element('.chat-message--assistant .chat-markdown')).fontSize).toBe(
+          '15px'
+        )
+        if (fixture.name === 'wide') wideReadingWidth = textBounds.width
+        else if (fixture.name === 'wider' || fixture.name === 'restored')
+          expect(textBounds.width).toBeCloseTo(wideReadingWidth!, 1)
+        else expect(textBounds.width).toBeLessThan(wideReadingWidth!)
+        if (fixture.name !== 'wider' && fixture.name !== 'restored') {
+          scroller.scrollTop = 0
+          await frame()
+          await page.screenshot({
+            element: element('.main-panel'),
+            path: `../../../../../../.cache/conversation-layout-refinement/width-${mode}-${fixture.name}.png`
+          })
+        }
+      }
     }
   )
 

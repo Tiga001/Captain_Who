@@ -2,7 +2,10 @@
 .conversation-scroll-to-bottom {
   position: absolute;
   z-index: 16;
-  right: max(28px, calc(50% - 352px));
+  right: max(
+    var(--chat-column-gutter),
+    calc((100% - var(--chat-column-width)) / 2 + var(--chat-column-gutter))
+  );
   bottom: 12px;
   display: flex;
   width: 36px;
