@@ -4,9 +4,8 @@ pub fn agent_event_notification(event: AgentEvent) -> Value {
     RendererSafeAgentEvent::new(&event).into_notification()
 }
 
-/// The constructor is the single privacy boundary shared by both notification routes. Keeping
-/// the JSON private prevents the observer fast path from accidentally accepting raw Host data.
-#[derive(Clone)]
+/// The constructor is the single privacy boundary shared by root and child notifications. Keeping
+/// the JSON private prevents the child fast path from accidentally accepting raw Host data.
 pub(crate) struct RendererSafeAgentEvent(Value);
 
 impl RendererSafeAgentEvent {
@@ -25,33 +24,37 @@ impl RendererSafeAgentEvent {
     }
 }
 
-/// Wraps one ordinary safe Agent event with the exact child identities required by an observer.
-/// The nested event projection is deliberately identical to `agent.event`; this is routing
-/// authority, not a second runtime event or presentation model.
+/// Wraps one safe event with child routing authority. Main validates it once and fans out to the
+/// ordinary and observer consumers; no second body travels through the Core transport.
 #[cfg(test)]
-pub(crate) fn child_observer_event_notification(
+pub(crate) fn child_event_notification(
     identity: &AgentCollaborationIdentity,
     run_id: &str,
     assistant_message_id: &str,
     event: AgentEvent,
 ) -> Value {
-    child_observer_event_notification_from_safe(
+    child_event_notification_from_safe(
         identity,
         run_id,
         assistant_message_id,
+        &mycopilot_protocol_rs::AgentObserverStreamCursorDto {
+            generation: "test-generation".into(),
+            sequence: 1,
+        },
         RendererSafeAgentEvent::new(&event),
     )
 }
 
-pub(crate) fn child_observer_event_notification_from_safe(
+pub(crate) fn child_event_notification_from_safe(
     identity: &AgentCollaborationIdentity,
     run_id: &str,
     assistant_message_id: &str,
+    cursor: &mycopilot_protocol_rs::AgentObserverStreamCursorDto,
     event: RendererSafeAgentEvent,
 ) -> Value {
     json!({
         "jsonrpc": "2.0",
-        "method": mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+        "method": mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD,
         "params": {
             "schemaVersion": mycopilot_protocol_rs::AGENT_COLLABORATION_SCHEMA_VERSION,
             "rootAgentId": identity.root_agent_id,
@@ -60,12 +63,13 @@ pub(crate) fn child_observer_event_notification_from_safe(
             "conversationId": identity.conversation_id,
             "runId": run_id,
             "assistantMessageId": assistant_message_id,
+            "streamCursor": cursor,
             "event": event.0,
         }
     })
 }
 
-/// Emits the legacy root event plus the identity-rich observer event for a trusted child Turn.
+/// Emits exactly one notification for either a root or a trusted child Turn.
 pub(crate) fn emit_agent_event_notifications(
     service: &crate::application::agent::AgentService,
     notifications: &crate::application::agent::CoreServerNotificationSender,
@@ -76,7 +80,6 @@ pub(crate) fn emit_agent_event_notifications(
 ) {
     let safe = RendererSafeAgentEvent::new(&event);
     if let Some(identity) = collaboration_identity {
-        let _ = notifications.send(safe.clone().into_notification());
         service.emit_child_observer_event(
             notifications,
             identity,

@@ -517,6 +517,8 @@ fn diagnostic_category(value: &Value, data: bool) -> &'static str {
         Some("agent.event") => "agent.event",
         Some("agent.collaboration.observerEvent") if data => "observer.delta",
         Some("agent.collaboration.observerEvent") => "observer.event",
+        Some("agent.collaboration.childEvent") if data => "child.delta",
+        Some("agent.collaboration.childEvent") => "child.event",
         Some("agent.workflows.runtime.changed") => "workflow.runtime",
         None if value.get("id").is_some() => "rpc.response",
         _ => "other",
@@ -543,7 +545,7 @@ impl Drop for OutboundReceiver {
 fn is_body_delta(value: &Value) -> bool {
     let event = match value.get("method").and_then(Value::as_str) {
         Some("agent.event") => value.get("params"),
-        Some("agent.collaboration.observerEvent") => {
+        Some("agent.collaboration.observerEvent" | "agent.collaboration.childEvent") => {
             value.get("params").and_then(|params| params.get("event"))
         }
         _ => None,

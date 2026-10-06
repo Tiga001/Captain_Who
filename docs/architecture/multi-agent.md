@@ -240,10 +240,13 @@ Renderer 在根对话输入框位置聚合主、子 Agent 待审批，每次展�
 当前协作 notification 名必须是：
 
 - `agent.collaboration.event`
+- `agent.collaboration.childEvent`（Core Server → Main 单份子 Agent 流）
 - `agent.collaboration.observerEvent`
 - `agent.collaboration.resync`
 
-notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.collaboration.listEvents` 验证根 Agent 本地连续 sequence；重复、乱序、缺口、Core Server 重启或窗口 reload 都从数据库 rehydrate/replay。
+持久协作 notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.collaboration.listEvents` 验证根 Agent 本地连续 sequence；重复、乱序、缺口、Core Server 重启或窗口 reload 都从数据库 rehydrate/replay。
+
+子 Turn 的实时 Agent event 只发送一份 `childEvent`，携带 Host 绑定的根/子身份、Run、回复消息和必需的 stream cursor；正文仅经过一次脱敏与传输编码。Main 严格校验一次，再依原顺序分发至现有 ordinary 与 observer 消费通道，Renderer 接口与权限边界不变。旧 `agent.event` 和 `observerEvent` 输入仍各自只分发到原通道，避免旧双路输入被再次扇出。根 Turn 及脱离 Turn 后的 Command Session 普通事件仍走原路径；不按会话类型全局屏蔽普通事件。快照 cursor 不在传输层拼接或重排，恢复继续使用原快照与持久事实。
 
 各层聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。任务活动属于实际 Task／Followup 派发者的会话；普通 Message 的 updated 活动属于实际收件人的会话、主体为 sender。结构父级不用于推断展示归属。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
 

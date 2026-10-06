@@ -122,7 +122,7 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。输出准入独立按字节和帧数限制；不在 Runtime 回调或持业务锁时阻塞等待 stdout。
 
-普通输出由 `outbound.rs` 拥有序列化后的行：4 MiB 正文预算，另为响应和非正文事件预留 512 KiB / 64 帧，总帧上限 8192。普通及 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
+普通输出由 `outbound.rs` 拥有序列化后的行：4 MiB 正文预算，另为响应和非正文事件预留 512 KiB / 64 帧，总帧上限 8192。普通、单份 childEvent 及旧 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；childEvent 与旧 observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
 
 既有 JSON-RPC 未限制响应大小，所以允许最多一个超预算完整非 delta 帧（RPC 响应、完整消息或终态等），其 lease 持到 flush；预算按实际已分配缓冲容量记账，为常规队列加一个最大在途完整帧，再加有限 writer batch、序列化临时空间和既有两个图片 Artifact permit。不能把它描述为整个进程严格 4.5 MiB。控制预留保证入队空间，不赋予跨越同 Run 前序正文的权限，慢管道及单个大行仍可延迟控制。
 
@@ -130,7 +130,7 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 出站容量失败会额外输出一次固定分类的诊断，区分总帧、正文帧、总字节、正文预算和超大响应 lease 冲突，并记录触发帧大小及当时队列占用。诊断不包含正文、路径、请求 ID 或凭据；错误码、FIFO 和关停语义不变。
 
-受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、两条 Agent 通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
+受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、Agent 各通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
 
 上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
 

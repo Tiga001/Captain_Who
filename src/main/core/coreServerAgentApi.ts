@@ -110,7 +110,6 @@ import {
   AGENT_COLLABORATION_LIST_EVENTS_METHOD,
   AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
   AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
-  AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
   AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
   AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
   AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
@@ -120,7 +119,6 @@ import {
   AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
   AGENT_COMMAND_SESSIONS_GET_METHOD,
   AGENT_COMMAND_SESSIONS_LIST_METHOD,
-  AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
   AGENT_GET_FILE_CHANGE_DIFF_METHOD,
   AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
@@ -154,13 +152,11 @@ import {
   parseAgentConversationLocatorRequest,
   parseAgentDetail,
   parseAgentDetailRequest,
-  parseAgentEventForHost,
   parseAgentFileChangeContentPageForHost,
   parseAgentFileChangeDiffPageForHost,
   parseAgentFileChangeHistoryDiffPageForHost,
   parseAgentObserverConversation,
   parseAgentObserverConversationRequest,
-  parseAgentObserverEventEnvelope,
   parseAgentProviderTransitionNotification,
   parseAgentProviderTransitionOperation,
   parseAgentProviderTransitionPreflightInput,
@@ -191,6 +187,7 @@ import {
 
 import { CoreServerStorageApi } from './coreServerStorageApi'
 import { PendingActionsRefresh } from './pendingActionsRefresh'
+import { CoreAgentEventStream } from './coreAgentEventStream'
 
 const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 
@@ -216,72 +213,9 @@ function assertAgentActionExecutionIdentity(
   return response
 }
 
-const AGENT_OBSERVER_EVENT_TYPES = {
-  started: true,
-  tool_set_changed: true,
-  state: true,
-  message_delta: true,
-  message_stream_started: true,
-  message_stream_reset: true,
-  message_stream_committed: true,
-  model_activity_changed: true,
-  final_answer_ready: true,
-  llm_retry: true,
-  tool_input_progress: true,
-  file_change_preview_updated: true,
-  file_change_preview_cleared: true,
-  message: true,
-  guidance_queued: true,
-  guidance_applied: true,
-  workflow_delivery_applied: true,
-  guidance_rejected: true,
-  tool_call: true,
-  tool_result: true,
-  mcp_tool_invocation_state_changed: true,
-  todo_updated: true,
-  skill_activated: true,
-  file_change_updated: true,
-  context_window_updated: true,
-  context_compaction_started: true,
-  context_compaction_finished: true,
-  approval_required: true,
-  file_change_proposed: true,
-  command_started: true,
-  command_output: true,
-  command_exited: true,
-  command_interrupted: true,
-  error: true,
-  done: true
-} as const satisfies Readonly<Record<AgentEvent['type'], true>>
-
-type AgentObserverEventLogType = AgentEvent['type'] | 'unknown'
-
-interface AgentObserverWarning {
-  category: 'validation_failed' | 'handler_failed'
-  eventType: AgentObserverEventLogType
-  count: number
-}
-
-function readAgentObserverEventLogType(value: unknown): AgentObserverEventLogType {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'unknown'
-  const event = 'event' in value ? value.event : undefined
-  if (typeof event !== 'object' || event === null || Array.isArray(event)) return 'unknown'
-  const eventType = 'type' in event ? event.type : undefined
-  if (
-    typeof eventType !== 'string' ||
-    !Object.prototype.hasOwnProperty.call(AGENT_OBSERVER_EVENT_TYPES, eventType)
-  ) {
-    return 'unknown'
-  }
-  return eventType as AgentEvent['type']
-}
-
-function shouldLogAgentObserverWarning(count: number): boolean {
-  return count === 1 || count % 100 === 0
-}
-
 /** Agent/collaboration request facade; it does not start or stop the JSON-RPC process. */
 export class CoreServerAgentApi extends CoreServerStorageApi {
+  private readonly agentEventStream = new CoreAgentEventStream(this.rpc)
   protected readonly pendingActionsRefresh = new PendingActionsRefresh(() =>
     this.rpc
       .request<unknown>(AGENT_LIST_PENDING_ACTIONS_METHOD)
@@ -306,25 +240,6 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
     return this.rpc
       .request<unknown, WorkflowRequest>(WORKFLOW_REQUEST_METHOD, request)
       .then(parseWorkflowResponse)
-  }
-
-  private readonly agentObserverWarningCounts = new Map<string, number>()
-
-  private warnAgentObserverEvent(
-    category: AgentObserverWarning['category'],
-    eventType: AgentObserverEventLogType
-  ): void {
-    const key = `${category}:${eventType}`
-    const count = (this.agentObserverWarningCounts.get(key) ?? 0) + 1
-    this.agentObserverWarningCounts.set(key, count)
-    if (!shouldLogAgentObserverWarning(count)) return
-    const warning: AgentObserverWarning = { category, eventType, count }
-    console.warn(
-      category === 'validation_failed'
-        ? 'Ignored invalid Agent observer event'
-        : 'Agent observer handler failed',
-      warning
-    )
   }
 
   async startManualContextCompaction(
@@ -662,14 +577,7 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   }
 
   onAgentEvent(handler: (event: AgentEvent) => void): () => void {
-    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) => {
-      try {
-        handler(parseAgentEventForHost(params))
-      } catch {
-        // MCP event rejection must not echo the rejected payload or a parser diagnostic.
-        console.warn('Ignored invalid Agent event')
-      }
-    })
+    return this.agentEventStream.onAgentEvent(handler)
   }
 
   getCollaborationSettings(
@@ -970,25 +878,7 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   }
 
   onCollaborationObserverEvent(handler: (event: AgentObserverEventEnvelope) => void): () => void {
-    return this.rpc.onNotification(
-      AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
-      (params) => {
-        let event: AgentObserverEventEnvelope
-        try {
-          event = parseAgentObserverEventEnvelope(params)
-        } catch {
-          this.warnAgentObserverEvent('validation_failed', readAgentObserverEventLogType(params))
-          return
-        }
-        try {
-          handler(event)
-        } catch {
-          // Preserve the notification boundary's fail-closed behavior without misclassifying a
-          // renderer/subscriber failure as an invalid Core event or echoing the event payload.
-          this.warnAgentObserverEvent('handler_failed', event.event.type)
-        }
-      }
-    )
+    return this.agentEventStream.onObserverEvent(handler)
   }
 
   onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void {

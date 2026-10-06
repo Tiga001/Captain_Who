@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from './agent'
 import {
   parseAgentObserverEventEnvelope,
+  parseAgentChildEventEnvelope,
+  AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD,
   type AgentObserverEventEnvelope
 } from './agentCollaboration'
 import { parseAgentEventForHost } from './agentParsers/events'
@@ -408,6 +410,16 @@ function envelope(event: AgentEvent): AgentObserverEventEnvelope {
 }
 
 describe('Agent observer event contract', () => {
+  it('shares the single child transport fixture with the Rust sender', () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        resolve(process.cwd(), 'packages/protocol/fixtures/agent-child-event-v1.json'),
+        'utf8'
+      )
+    )
+    expect(fixture.method).toBe(AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD)
+    expect(parseAgentChildEventEnvelope(fixture.params)).toEqual(fixture.params)
+  })
   it('validates exact workflow delivery ownership, ordering, and source bodies', () => {
     expect(parseAgentEventForHost(workflowDeliveryEvent)).toEqual(workflowDeliveryEvent)
     for (const field of [
@@ -443,8 +455,35 @@ describe('Agent observer event contract', () => {
     (_type, event) => {
       const canonical = parseAgentEventForHost(event)
       expect(parseAgentObserverEventEnvelope(envelope(event)).event).toEqual(canonical)
+      expect(
+        parseAgentChildEventEnvelope({
+          ...envelope(event),
+          streamCursor: { generation: 'generation', sequence: 1 }
+        }).event
+      ).toEqual(canonical)
     }
   )
+
+  it('requires a valid cursor for the single transport while keeping legacy envelopes readable', () => {
+    expect(AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD).toBe(
+      'agent.collaboration.childEvent'
+    )
+    const original = envelope(allEventFixtures[0])
+    expect(parseAgentObserverEventEnvelope(original).streamCursor).toBeUndefined()
+    for (const streamCursor of [
+      undefined,
+      null,
+      {},
+      { generation: 'g', sequence: 0 },
+      { generation: '', sequence: 1 }
+    ]) {
+      expect(() => parseAgentChildEventEnvelope({ ...original, streamCursor })).toThrow()
+    }
+    const current = { ...original, streamCursor: { generation: 'g', sequence: 1 } }
+    expect(parseAgentChildEventEnvelope(current).streamCursor).toEqual(current.streamCursor)
+    expect(() => parseAgentChildEventEnvelope({ ...current, runId: 'another-run' })).toThrow()
+    expect(() => parseAgentChildEventEnvelope({ ...current, trusted: true })).toThrow()
+  })
 
   it('requires complete owner-safe FileChange preview fields', () => {
     const current = formerlyDroppedEvents.find(

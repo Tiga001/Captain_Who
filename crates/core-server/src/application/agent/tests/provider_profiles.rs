@@ -60,6 +60,16 @@ pub(super) async fn write_provider_stream(
         .unwrap();
 }
 
+fn notification_agent_event(notification: &Value) -> &Value {
+    match notification["method"].as_str() {
+        Some(
+            mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+            | mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+        ) => &notification["params"]["event"],
+        _ => &notification["params"],
+    }
+}
+
 pub(super) async fn collect_until_done(
     receiver: &mut crate::transport::OutboundReceiver,
 ) -> Vec<Value> {
@@ -67,7 +77,7 @@ pub(super) async fn collect_until_done(
         let mut events = Vec::new();
         loop {
             let event = receiver.recv().await.expect("Agent event channel closed");
-            let done = event["params"]["type"] == "done";
+            let done = notification_agent_event(&event)["type"] == "done";
             events.push(event);
             if done {
                 return events;
@@ -1782,7 +1792,14 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     );
 
     let events = collect_until_done(&mut receiver).await;
-    assert_eq!(events.last().unwrap()["params"]["status"], "completed");
+    assert_eq!(
+        events.last().unwrap()["method"],
+        mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+    );
+    assert_eq!(
+        notification_agent_event(events.last().unwrap())["status"],
+        "completed"
+    );
     let conversation = storage
         .load_conversation(&spawn.agent.conversation_id)
         .unwrap()
@@ -1945,7 +1962,14 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
             .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
             .unwrap();
         let events = collect_until_done(&mut receiver).await;
-        assert_eq!(events.last().unwrap()["params"]["status"], "completed");
+        assert_eq!(
+            events.last().unwrap()["method"],
+            mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+        );
+        assert_eq!(
+            notification_agent_event(events.last().unwrap())["status"],
+            "completed"
+        );
         storage
             .finish_agent_turn_with_result(&mycopilot_core::FinishAgentTurnResultInput {
                 wake_id: wake.wake_id,

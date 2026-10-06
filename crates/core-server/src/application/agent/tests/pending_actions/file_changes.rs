@@ -55,7 +55,7 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
         run_id: run_id.to_string(),
         file_change: file_change.clone(),
     });
-    let observer_event = child_observer_event_notification(
+    let observer_event = child_event_notification(
         &valid_resume_collaboration_identity(),
         run_id,
         "assistant-direct-file-change",

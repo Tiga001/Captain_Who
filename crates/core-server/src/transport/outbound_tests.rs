@@ -73,12 +73,17 @@ async fn adjacent_delta_merge_preserves_unicode_escaping_empty_parts_and_all_bou
 async fn observer_cursor_and_unknown_stage_fields_are_never_merged() {
     let (sender, mut receiver) = outbound_channel();
     let mut messages = Vec::new();
-    for cursor in 1..=3 {
-        let observer = json!({"jsonrpc":"2.0","method":"agent.collaboration.observerEvent","params":{
+    for method in [
+        "agent.collaboration.observerEvent",
+        "agent.collaboration.childEvent",
+    ] {
+        for cursor in 1..=3 {
+            let observer = json!({"jsonrpc":"2.0","method":method,"params":{
             "agentId":"child", "rootAgentId":"root", "conversationId":"child-conversation",
             "streamCursor":cursor, "event":delta("run","a","x")["params"]}});
-        sender.send(observer.clone()).unwrap();
-        messages.push(observer);
+            sender.send(observer.clone()).unwrap();
+            messages.push(observer);
+        }
     }
     for _ in 0..2 {
         let mut unknown_stage = delta("run", "a", "x");
@@ -207,6 +212,9 @@ async fn command_output_and_observer_progress_use_data_budget_without_merging() 
         ("agent.event", "command_output"),
         ("agent.collaboration.observerEvent", "command_output"),
         ("agent.collaboration.observerEvent", "tool_input_progress"),
+        ("agent.collaboration.childEvent", "message_delta"),
+        ("agent.collaboration.childEvent", "command_output"),
+        ("agent.collaboration.childEvent", "tool_input_progress"),
     ] {
         let event = json!({"type":kind,"runId":"run","delta":"stdout\n"});
         let params = if method == "agent.event" {

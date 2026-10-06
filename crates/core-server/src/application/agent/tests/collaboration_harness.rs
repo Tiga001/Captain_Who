@@ -1434,10 +1434,13 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
     let child_run_id = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let notification = receiver.recv().await.expect("Agent event channel closed");
-            if notification["params"]["type"] == "tool_call"
-                && notification["params"]["call"]["tool"] == "command_session"
+            let event = &notification["params"]["event"];
+            if notification["method"]
+                == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+                && event["type"] == "tool_call"
+                && event["call"]["tool"] == "command_session"
             {
-                break notification["params"]["runId"]
+                break event["runId"]
                     .as_str()
                     .expect("child ToolCall carries its Run identity")
                     .to_string();
@@ -1816,8 +1819,10 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
         );
         assert!(
             events_before_cancellation.iter().any(|event| {
-                event["params"]["runId"] == child_run_id
-                    && event["params"]["type"] == "approval_required"
+                event["method"]
+                    == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+                    && event["params"]["event"]["runId"] == child_run_id
+                    && event["params"]["event"]["type"] == "approval_required"
             }),
             "the approval must be published before advancing it: {events_before_cancellation:#?}"
         );
@@ -1924,10 +1929,13 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
         let events_after_approval =
             std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
         assert!(events_after_approval.iter().all(|event| {
-            let params = &event["params"];
+            let params = if event["method"] == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD {
+                &event["params"]["event"]
+            } else { &event["params"] };
             params["runId"] != child_run_id
                 || !matches!(params["type"].as_str(), Some("state" | "done"))
-                || params["status"] != "waiting_for_approval"
+                || (params["status"] != "waiting_for_approval"
+                    && params["state"]["status"] != "waiting_for_approval")
         }), "advanced approval published a stale WaitingForApproval event: {events_after_approval:#?}");
         assert_eq!(
             requests
@@ -2061,17 +2069,35 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
     let events_after_cancellation =
         std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
     assert!(events_before_cancellation.iter().all(|event| {
-        event["params"]["runId"] != child_run_id
-            || event["params"]["status"] != "waiting_for_approval"
+        let params = if event["method"]
+            == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+        {
+            &event["params"]["event"]
+        } else {
+            &event["params"]
+        };
+        params["runId"] != child_run_id
+            || (params["status"] != "waiting_for_approval"
+                && params["state"]["status"] != "waiting_for_approval")
     }));
     assert!(events_after_cancellation.iter().all(|event| {
-        let params = &event["params"];
+        let params = if event["method"] == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD {
+            &event["params"]["event"]
+        } else { &event["params"] };
         params["runId"] != child_run_id
             || !matches!(params["type"].as_str(), Some("state" | "done"))
-            || params["status"] != "waiting_for_approval"
+            || (params["status"] != "waiting_for_approval"
+                && params["state"]["status"] != "waiting_for_approval")
     }), "cancelled child published a stale WaitingForApproval event: {events_after_cancellation:#?}");
     assert!(events_after_cancellation.iter().all(|event| {
-        event["params"]["runId"] != child_run_id || event["params"]["type"] != "approval_required"
+        let params = if event["method"]
+            == mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+        {
+            &event["params"]["event"]
+        } else {
+            &event["params"]
+        };
+        params["runId"] != child_run_id || params["type"] != "approval_required"
     }));
     assert_eq!(
         requests

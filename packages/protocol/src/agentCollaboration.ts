@@ -20,6 +20,7 @@ export {
   AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
   AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
   AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+  AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD,
   AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD
 } from './agentCollaboration/constants'
 
@@ -80,6 +81,7 @@ export {
 export {
   parseCollaborationEventEnvelope,
   parseAgentObserverEventEnvelope,
+  parseAgentChildEventEnvelope,
   parseCollaborationEventsRequest,
   parseCollaborationEventsPage,
   parseCollaborationResyncEnvelope

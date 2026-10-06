@@ -3,7 +3,12 @@ use mycopilot_protocol_rs::{
     AgentObserverLiveStreamDto, AgentObserverLiveStreamSnapshotDto, AgentObserverModelActivityDto,
     AgentObserverModelActivityKindDto, AgentObserverStreamCursorDto,
 };
+#[cfg(test)]
 use serde_json::json;
+
+#[cfg(test)]
+#[path = "child_event_transport_tests.rs"]
+mod child_event_transport_tests;
 
 /// Retains provisional text and content-free activity. Committed narration lives in the trace;
 /// this process-local state is released after terminal persistence. No per-token database writes.
@@ -312,13 +317,13 @@ impl AgentService {
                 ..
             }
         );
-        let mut notification = child_observer_event_notification_from_safe(
+        let notification = child_event_notification_from_safe(
             identity,
             run_id,
             assistant_message_id,
+            &state.snapshot.cursor,
             safe_event,
         );
-        notification["params"]["streamCursor"] = json!(state.snapshot.cursor);
         let _ = notifications.send(notification);
         if terminal {
             streams.remove(&identity.conversation_id);
@@ -700,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_projection_preserves_both_routes_privacy_identity_and_snapshot_cursor() {
+    fn single_child_notification_preserves_privacy_identity_and_snapshot_cursor() {
         let directory = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
@@ -736,6 +741,7 @@ mod tests {
         ];
         let mut generation = None;
         for (index, event) in events.into_iter().enumerate() {
+            let expected_event = agent_event_notification(event.clone())["params"].clone();
             emit_agent_event_notifications(
                 &service,
                 &sender,
@@ -744,10 +750,16 @@ mod tests {
                 "assistant",
                 event,
             );
-            let ordinary = receiver.try_recv().unwrap();
             let observer = receiver.try_recv().unwrap();
-            assert_eq!(ordinary["method"], AGENT_EVENT_NAME);
-            assert_eq!(observer["params"]["event"], ordinary["params"]);
+            assert_eq!(
+                observer["method"],
+                mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
+            );
+            assert_eq!(observer["params"]["event"], expected_event);
+            assert!(
+                receiver.try_recv().is_err(),
+                "a child event must cross the transport only once"
+            );
             assert_eq!(observer["params"]["agentId"], identity.agent_id);
             assert_eq!(
                 observer["params"]["conversationId"],
@@ -766,11 +778,9 @@ mod tests {
                 assert_eq!(cursor, previous);
             }
             generation = Some(cursor.clone());
-            for notification in [ordinary, observer] {
-                let serialized = notification.to_string();
-                assert!(!serialized.contains("argumentsDigest"));
-                assert!(!serialized.contains("host-only-arguments-digest"));
-            }
+            let serialized = observer.to_string();
+            assert!(!serialized.contains("argumentsDigest"));
+            assert!(!serialized.contains("host-only-arguments-digest"));
         }
         let snapshots = service.observer_streams.lock().unwrap();
         let snapshot = &snapshots[&identity.conversation_id].snapshot;

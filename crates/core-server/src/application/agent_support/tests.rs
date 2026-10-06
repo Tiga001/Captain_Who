@@ -136,10 +136,15 @@ fn child_observer_notification_adds_exact_identity_without_changing_safe_event_p
         delta: "hello".to_string(),
     };
     let notification =
-        child_observer_event_notification(&identity, "run-child", "assistant-child", event.clone());
+        child_event_notification(&identity, "run-child", "assistant-child", event.clone());
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../../../../packages/protocol/fixtures/agent-child-event-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(notification, golden);
     assert_eq!(
         notification["method"],
-        mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD
+        mycopilot_protocol_rs::AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD
     );
     assert_eq!(notification["params"]["rootAgentId"], "agent-root");
     assert_eq!(notification["params"]["agentId"], "agent-child");
@@ -205,7 +210,7 @@ fn child_observer_notification_preserves_previously_dropped_runtime_event_projec
     for event in events {
         let safe_event = agent_event_notification(event.clone())["params"].clone();
         let notification =
-            child_observer_event_notification(&identity, "run-child", "assistant-child", event);
+            child_event_notification(&identity, "run-child", "assistant-child", event);
         assert_eq!(notification["params"]["runId"], "run-child");
         assert_eq!(notification["params"]["event"], safe_event);
     }

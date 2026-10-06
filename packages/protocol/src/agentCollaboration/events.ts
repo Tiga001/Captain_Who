@@ -328,6 +328,15 @@ export function parseAgentObserverEventEnvelope(value: unknown): AgentObserverEv
   return parsed
 }
 
+/** The single-transport route requires an exact snapshot cut; the legacy route remains readable. */
+export function parseAgentChildEventEnvelope(value: unknown): AgentObserverEventEnvelope {
+  const envelope = parseAgentObserverEventEnvelope(value)
+  if (envelope.streamCursor === undefined) {
+    throw new Error('Invalid Agent child event stream cursor')
+  }
+  return envelope
+}
+
 export function parseCollaborationEventsRequest(value: unknown): CollaborationEventsRequest {
   const item = record(value, 'CollaborationEventsRequest')
   exact(item, ['rootConversationId', 'afterSequence', 'limit'], 'CollaborationEventsRequest')

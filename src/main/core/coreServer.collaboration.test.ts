@@ -321,6 +321,34 @@ describe('CoreServer collaboration client', () => {
     warning.mockRestore()
   })
 
+  it('routes one child wire notification through the existing ordinary and observer facade APIs', () => {
+    const receivers = new Map<string, (value: unknown) => void>()
+    onNotification.mockImplementation((method, handler) => {
+      receivers.set(method, handler)
+      return () => receivers.delete(method)
+    })
+    const server = new CoreServer()
+    const ordinary = vi.fn()
+    const observer = vi.fn()
+    server.onAgentEvent(ordinary)
+    server.onCollaborationObserverEvent(observer)
+    const event = { type: 'message_delta', runId: 'child-run', delta: 'hello' }
+    const input = {
+      schemaVersion: 1,
+      rootAgentId: 'root-agent',
+      rootConversationId: 'root-conversation',
+      agentId: 'child-agent',
+      conversationId: 'child-conversation',
+      runId: 'child-run',
+      assistantMessageId: 'child-message',
+      streamCursor: { generation: 'generation', sequence: 1 },
+      event
+    }
+    receivers.get('agent.collaboration.childEvent')?.(input)
+    expect(ordinary).toHaveBeenCalledExactlyOnceWith(event)
+    expect(observer).toHaveBeenCalledExactlyOnceWith(input)
+  })
+
   it('forwards sustained valid observer tool input progress without invalid-event warnings', () => {
     let receiver: ((value: unknown) => void) | undefined
     onNotification.mockImplementation((_method, handler) => {

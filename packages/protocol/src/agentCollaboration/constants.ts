@@ -44,5 +44,7 @@ export const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD = 'agent.collaboratio
 
 export const AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD =
   'agent.collaboration.observerEvent'
+/** One Core → Main child event, fanned out locally to the existing consumer channels. */
+export const AGENT_COLLABORATION_CHILD_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.childEvent'
 
 export const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD = 'agent.collaboration.resync'

@@ -13,6 +13,7 @@ const METHODS = new Set([
   'agent.workflows.request',
   'agent.event',
   'agent.collaboration.observerEvent',
+  'agent.collaboration.childEvent',
   'agent.workflows.runtime.changed'
 ])
 
