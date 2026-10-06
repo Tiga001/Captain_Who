@@ -9,6 +9,8 @@ import type { SettledToolStatus } from './toolActivityUtils'
 interface AttachmentListToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
+  onExpandedChange?: (open: boolean) => void
+  presentation?: 'default' | 'compact'
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -126,6 +128,8 @@ function scrollToConversationAttachment(attachment: ListedAttachment) {
 export function AttachmentListToolActivity({
   cancelled = false,
   call,
+  onExpandedChange,
+  presentation = 'default',
   result,
   settledStatus
 }: AttachmentListToolActivityProps) {
@@ -140,11 +144,12 @@ export function AttachmentListToolActivity({
 
   return (
     <AgentActivityDisclosure
-      className="agent-activity--attachment-list"
+      className={`agent-activity--attachment-list${presentation === 'compact' ? ' basic-tool-activity__row' : ''}`}
       hasDetails={hasDetails}
       icon={Files}
       isPending={status === 'running'}
       label={label}
+      onExpandedChange={onExpandedChange}
     >
       {hasDetails && (
         <div className="agent-activity__details attachment-list-activity__details">

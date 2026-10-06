@@ -9,6 +9,8 @@ import type { SettledToolStatus } from './toolActivityUtils'
 interface SearchToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
+  onExpandedChange?: (open: boolean) => void
+  presentation?: 'default' | 'compact'
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -41,11 +43,6 @@ const STATUS_LABELS: Record<SearchKind, Record<SearchStatus, TranslationKey>> = 
     failed: 'agent.search.code.failed',
     cancelled: 'agent.search.code.cancelled'
   }
-}
-
-const COMPLETED_LABELS: Record<SearchKind, TranslationKey> = {
-  files: 'agent.search.files.groupCompleted',
-  code: 'agent.search.code.groupCompleted'
 }
 
 const GROUP_COMPLETED_LABELS: Record<SearchKind, TranslationKey> = {
@@ -113,7 +110,9 @@ function getQuery(call: AgentToolCall, result: AgentToolResult | undefined) {
 }
 
 function getStatusLabel(t: Translate, kind: SearchKind, status: SearchStatus) {
-  return status === 'completed' ? t(COMPLETED_LABELS[kind]) : t(STATUS_LABELS[kind][status])
+  if (status === 'completed') return t('agent.activity.search.completed')
+  if (status === 'running') return t('agent.activity.search.running')
+  return t(STATUS_LABELS[kind][status])
 }
 
 function SearchResultRow({ kind, match }: { kind: SearchKind; match: SearchMatch }) {
@@ -208,6 +207,8 @@ function SearchCallDisclosure({
 export function SearchToolActivity({
   cancelled = false,
   call,
+  onExpandedChange,
+  presentation = 'default',
   result,
   settledStatus
 }: SearchToolActivityProps) {
@@ -218,15 +219,18 @@ export function SearchToolActivity({
 
   return (
     <AgentActivityDisclosure
-      className="agent-activity--search"
+      className={`agent-activity--search${presentation === 'compact' ? ' basic-tool-activity__row' : ''}`}
       hasDetails={hasDetails}
       icon={Search}
       isPending={status === 'running'}
-      label={getStatusLabel(t, kind, status)}
+      label={`${getStatusLabel(t, kind, status)} ${getQuery(call, result) || t('agent.search.unknownQuery')}`}
+      onExpandedChange={onExpandedChange}
     >
       {hasDetails && (
         <div className="agent-activity__details search-activity__details search-activity__details--single">
-          <div className="search-activity__query-heading">{getQueryLabel(t, call, result)}</div>
+          {presentation !== 'compact' && (
+            <div className="search-activity__query-heading">{getQueryLabel(t, call, result)}</div>
+          )}
           <SearchCallResults call={call} kind={kind} result={result} />
         </div>
       )}

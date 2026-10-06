@@ -841,6 +841,7 @@
 }
 
 .read-activity__image {
+  flex: 0 0 auto;
   width: 92px;
   height: 92px;
   padding: 0;
@@ -876,7 +877,14 @@ button.read-activity__image:focus-visible {
 .read-activity__items[data-kind='image'] {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 10px;
+}
+
+/* Missing/failed thumbnails fall back to text; they must not share a row with image cards. */
+.read-activity__items[data-kind='image'] > .read-activity__text-item {
+  flex: 0 0 100%;
+  max-width: 100%;
 }
 
 .read-activity__text-item {
@@ -898,6 +906,21 @@ button.read-activity__image:focus-visible {
   color: inherit;
   font: inherit;
   text-overflow: ellipsis;
+}
+
+.read-activity__text-item > .read-activity__action {
+  flex: 0 0 auto;
+  color: var(--mc-color-text-muted);
+}
+
+.read-activity__text-item > .read-activity__action.agent-running-text {
+  color: var(--agent-running-base-color, var(--mc-color-text-muted));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .read-activity__text-item > .read-activity__action.agent-running-text {
+    color: transparent;
+  }
 }
 
 .read-activity__file-name {
@@ -1033,12 +1056,28 @@ button.attachment-list-activity__item:focus-visible {
   height: var(--mc-icon-size-sm);
   margin-left: 5px;
   color: currentColor;
+  opacity: 0;
   transform: rotate(-90deg);
-  transition: transform 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    opacity 120ms ease;
 }
 
-.search-activity__query-group[open] .search-activity__query-chevron {
+.search-activity__query-group
+  > summary:is(:hover, :focus-visible)
+  > .search-activity__query-chevron {
+  opacity: 1;
+}
+
+.search-activity__query-group[open] > summary > .search-activity__query-chevron {
   transform: rotate(0deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-activity__query-group > summary,
+  .search-activity__query-chevron {
+    transition: none;
+  }
 }
 
 .search-activity__query-heading {

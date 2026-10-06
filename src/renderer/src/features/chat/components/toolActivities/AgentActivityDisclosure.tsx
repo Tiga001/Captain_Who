@@ -10,7 +10,8 @@ interface AgentActivityDisclosureProps {
   iconBadge?: ReactNode
   iconBadgeTone?: 'danger' | 'blocked'
   isPending?: boolean
-  label: string
+  label: ReactNode
+  onExpandedChange?: (open: boolean) => void
   revealDetailsOnOpen?: boolean
 }
 
@@ -54,6 +55,7 @@ export function AgentActivityDisclosure({
   iconBadgeTone,
   isPending = false,
   label,
+  onExpandedChange,
   revealDetailsOnOpen = false
 }: AgentActivityDisclosureProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
@@ -62,6 +64,7 @@ export function AgentActivityDisclosure({
     .filter(Boolean)
     .join(' ')
   const labelNode = <span className={labelClassName}>{label}</span>
+  const labelTitle = typeof label === 'string' ? label : undefined
   const iconNode = (
     <span className="agent-activity__icon">
       <Icon aria-hidden="true" />
@@ -76,7 +79,7 @@ export function AgentActivityDisclosure({
   if (!hasDetails) {
     return (
       <div className={activityClassName}>
-        <div className="agent-activity__static-summary">
+        <div className="agent-activity__static-summary" title={labelTitle}>
           {iconNode}
           {labelNode}
         </div>
@@ -90,11 +93,12 @@ export function AgentActivityDisclosure({
       onToggle={(event) => {
         const details = event.currentTarget
         setIsOpen(details.open)
+        onExpandedChange?.(details.open)
         if (details.open && revealDetailsOnOpen) revealExpandedDetails(details)
       }}
       open={isOpen}
     >
-      <summary>
+      <summary title={labelTitle}>
         {iconNode}
         {labelNode}
         <ChevronDown className="agent-activity__chevron" aria-hidden="true" />

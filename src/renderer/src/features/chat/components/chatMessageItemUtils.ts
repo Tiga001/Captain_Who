@@ -48,7 +48,7 @@ const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>([
   'interrupt_agent'
 ])
 
-function isHiddenTimelineTool(tool: AgentToolCall['tool']) {
+export function isHiddenTimelineTool(tool: AgentToolCall['tool']) {
   // Command Session and Agent collaboration Harness calls are model-facing coordination. Keep
   // their call/result records for durable history and diagnostics, but do not expose raw JSON or
   // repeated list/wait bookkeeping as user-visible timeline rows. Child lifecycle activities

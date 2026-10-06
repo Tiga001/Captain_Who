@@ -28,6 +28,10 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
         'agent.read.completedWithPathFailures': '读取了 {label}，{count} 个路径失败',
         'agent.read.completedCount': '已读取 {label}',
         'agent.read.count.file': '{count} 个文件',
+        'agent.read.count.image': '{count} 张图片',
+        'agent.read.failedCount': '{count} 个失败',
+        'agent.read.failedReadCount': '读取 {label} 失败',
+        'agent.separator': '，',
         'agent.read.file.pathIsDirectory': '目录被误用为文件',
         'agent.read.item': '读取 {fileName}',
         'agent.read.pathIsDirectoryItem': '目录被误用为文件：{path}',
@@ -222,6 +226,111 @@ describe('ReadToolActivity image presentation', () => {
       })
     })
   })
+})
+
+describe('image read failures layout', () => {
+  function imageItem(id: string, failed = false, withError = true) {
+    const path =
+      id === 'two'
+        ? `Playground/很长的截图文件名-${id}-2026-10-06.png`
+        : `Playground/截图-${id}.png`
+    return {
+      call: { ...call, id, args: { path } },
+      activity: activity({
+        callId: id,
+        path,
+        fileName: path.split('/').at(-1),
+        thumbnailDataUrl: THUMBNAIL_DATA_URL
+      }),
+      result: {
+        callId: id,
+        tool: 'read_image',
+        ok: !failed,
+        ...(failed && withError ? { error: '读取失败：无法解码图片。' } : {})
+      }
+    }
+  }
+
+  it.each([
+    { mode: 'light', theme: classicLightTheme },
+    { mode: 'dark', theme: classicDarkTheme }
+  ])(
+    'keeps failed rows separate from thumbnails through updates in $mode panels',
+    async ({ mode, theme }) => {
+      await page.viewport(1100, 800)
+      const successful = ['one', 'two', 'three'].map((id) => imageItem(id))
+      const failed = ['one', 'two', 'three'].map((id) => imageItem(id, true))
+      const view = (items: typeof successful, width: number) => (
+        <div
+          style={
+            {
+              ...getFrontendCssVariables(frontendConfig, theme),
+              width,
+              padding: 16,
+              boxSizing: 'border-box',
+              background: 'var(--mc-color-surface-main-panel)',
+              fontFamily: 'var(--mc-font-family)'
+            } as CSSProperties
+          }
+        >
+          <ReadToolActivityGroup items={items} />
+        </div>
+      )
+      const screen = await render(view(successful, 960))
+      screen.container.querySelector('summary')!.click()
+      await vi.waitFor(() => expect(screen.container.querySelector('details')!.open).toBe(true))
+      expect(screen.container.querySelectorAll('.read-activity__image')).toHaveLength(3)
+      const mixed = [
+        ...failed,
+        ...['retry-one', 'retry-two', 'retry-three'].map((id) => imageItem(id))
+      ]
+      for (const width of [960, 320]) {
+        await screen.rerender(view(mixed, width))
+        const list = screen.container.querySelector<HTMLElement>('.read-activity__items')!
+        const rows = [...list.querySelectorAll<HTMLElement>('.read-activity__text-item')]
+        const images = [...list.querySelectorAll<HTMLElement>('.read-activity__image')]
+        expect(rows).toHaveLength(3)
+        expect(images).toHaveLength(3)
+        expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth)
+        for (const [index, row] of rows.entries()) {
+          expect(row.dataset.status).toBe('failed')
+          expect(row.title).toContain(mixed[index].result.error)
+          expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(
+            parseFloat(getComputedStyle(row).lineHeight) + 1
+          )
+          // A text row owns a whole flex line: no thumbnail may sit beside it.
+          expect(row.getBoundingClientRect().width).toBeGreaterThanOrEqual(list.clientWidth - 4)
+        }
+        expect(images[0].getBoundingClientRect().top).toBeGreaterThanOrEqual(
+          rows[2].getBoundingClientRect().bottom
+        )
+        for (const image of images) {
+          expect(image.getBoundingClientRect().width).toBe(92)
+          expect(image.getBoundingClientRect().height).toBe(92)
+        }
+        expect(images[0].getBoundingClientRect().top).toBe(images[1].getBoundingClientRect().top)
+        await page.screenshot({
+          element: screen.container.firstElementChild as HTMLElement,
+          path: `../../../../../.cache/read-activity/mixed-images-${mode}-${width}.png`
+        })
+      }
+      // A failed tool result is authoritative even if an earlier thumbnail remains and no error text arrived.
+      await screen.rerender(view([imageItem('one', true, false), ...failed.slice(1)], 320))
+      expect(screen.container.querySelectorAll('.read-activity__image')).toHaveLength(0)
+      expect(
+        screen.container.querySelectorAll('.read-activity__text-item[data-status="failed"]')
+      ).toHaveLength(3)
+      // Interleaving preserves timeline order and still gives each failure its own line.
+      await screen.rerender(view([successful[0], failed[1], successful[2]], 320))
+      const children = [...screen.container.querySelector('.read-activity__items')!.children]
+      expect(children[1].getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        children[0].getBoundingClientRect().bottom
+      )
+      expect(children[2].getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        children[1].getBoundingClientRect().bottom
+      )
+    }
+  )
 })
 
 describe('ReadToolActivity structured path failures', () => {

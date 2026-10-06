@@ -1,7 +1,171 @@
 /* Agent run status, activity disclosure, command, and patch activity styles. */
 .agent-run {
   display: grid;
+  min-width: 0;
   gap: 14px;
+}
+
+/* Mixed tool spans keep their leaves as stable siblings while sharing one live header. */
+.basic-tool-activity__header {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px 5px 2px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--mc-color-text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--mc-font-size-chat-activity);
+  font-weight: var(--mc-font-weight-regular);
+  line-height: var(--mc-line-height-relaxed);
+  text-align: left;
+  transition: color 140ms ease;
+}
+
+.basic-tool-activity__header:hover,
+.basic-tool-activity__header:focus-visible {
+  color: var(--mc-color-text-primary);
+}
+
+.basic-tool-activity__header:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 3px;
+}
+
+.basic-tool-activity__icon,
+.basic-tool-activity__chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.basic-tool-activity__icon,
+.basic-tool-activity__icon > svg {
+  width: var(--mc-icon-size-base);
+  height: var(--mc-icon-size-base);
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.basic-tool-activity__label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.basic-tool-activity__counts {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.basic-tool-activity__chevron {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  opacity: 0;
+  transform: rotate(-90deg);
+  transition:
+    transform 160ms ease,
+    opacity 140ms ease;
+}
+
+.basic-tool-activity__header[aria-expanded='true'] .basic-tool-activity__chevron {
+  transform: rotate(0);
+}
+
+.basic-tool-activity__header:hover .basic-tool-activity__chevron,
+.basic-tool-activity__header:focus-visible .basic-tool-activity__chevron {
+  opacity: 1;
+}
+
+.basic-tool-activity__leaf {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.basic-tool-activity__leaf[hidden] {
+  display: none;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] {
+  margin-top: -14px;
+  margin-left: calc(var(--mc-icon-size-base) / 2);
+  padding: 3px 0 3px 17px;
+  border-left: 1px solid var(--mc-color-border-subtle);
+}
+
+.basic-tool-activity__leaf[data-grouped='true'][data-first='true'] {
+  margin-top: -8px;
+  padding-top: 2px;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'][data-last='true'] {
+  padding-bottom: 5px;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity > summary,
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity__static-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  min-height: 28px;
+  padding-left: 0;
+  text-indent: 0;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity__icon {
+  margin-right: 0;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity__chevron {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.basic-tool-activity__leaf[data-grouped='true'] .agent-activity__details {
+  margin-top: 6px;
+  margin-bottom: 5px;
+}
+
+.agent-activity--basic-file-change .file-change-activity__item-line {
+  align-items: center;
+  min-height: 28px;
+}
+
+.agent-activity--basic-file-change .agent-activity__icon {
+  margin-right: 0;
+}
+
+.agent-activity--basic-file-change
+  .file-change-activity__item-line
+  > span:not(.file-change-activity__path) {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .basic-tool-activity__header,
+  .basic-tool-activity__chevron {
+    transition: none;
+  }
 }
 
 .agent-run__elapsed {
@@ -110,11 +274,11 @@
   color: transparent;
   background: linear-gradient(
     110deg,
-    var(--mc-color-text-muted) 0%,
-    var(--mc-color-text-muted) 42%,
+    var(--agent-running-base-color, var(--mc-color-text-muted)) 0%,
+    var(--agent-running-base-color, var(--mc-color-text-muted)) 42%,
     var(--mc-color-shimmer-highlight) 50%,
-    var(--mc-color-text-muted) 58%,
-    var(--mc-color-text-muted) 100%
+    var(--agent-running-base-color, var(--mc-color-text-muted)) 58%,
+    var(--agent-running-base-color, var(--mc-color-text-muted)) 100%
   );
   background-size: 360% 100%;
   background-position: 140% 0;
@@ -144,7 +308,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .agent-running-text {
-    color: var(--mc-color-text-muted);
+    color: var(--agent-running-base-color, var(--mc-color-text-muted));
     background: none;
     animation: none;
   }
@@ -381,6 +545,21 @@
   color: var(--mc-color-text-primary);
 }
 
+/* The interactive row owns hover feedback; nested detail typography must inherit it too. */
+.agent-activity
+  > summary:is(:hover, :focus-visible)
+  > .agent-activity__label:not(.agent-running-text),
+.agent-activity > summary:is(:hover, :focus-visible) > .agent-activity__icon,
+.agent-activity > summary:is(:hover, :focus-visible) > .agent-activity__chevron {
+  color: inherit;
+}
+
+.basic-tool-activity__header:is(:hover, :focus-visible) .agent-running-text,
+.agent-activity > summary:is(:hover, :focus-visible) .agent-running-text,
+.file-change-activity__item-line:is(:hover, :has(:focus-visible)) > .agent-running-text {
+  --agent-running-base-color: var(--mc-color-text-primary);
+}
+
 .agent-activity summary::-webkit-details-marker {
   display: none;
 }
@@ -494,10 +673,8 @@
   vertical-align: -0.2em;
 }
 
-.agent-activity summary:hover .agent-activity__chevron,
-.agent-activity summary:focus-visible .agent-activity__chevron,
-.agent-activity--send-message-group > summary .agent-activity__chevron,
-.agent-activity[open] > summary .agent-activity__chevron {
+.agent-activity > summary:hover > .agent-activity__chevron,
+.agent-activity > summary:focus-visible > .agent-activity__chevron {
   opacity: 1;
 }
 
@@ -913,6 +1090,21 @@
   gap: 6px;
   color: var(--mc-color-text-muted);
   line-height: var(--mc-line-height-relaxed);
+  transition: color 120ms ease;
+}
+
+.file-change-activity__item-line:has(.file-change-activity__toggle):is(
+    :hover,
+    :has(:focus-visible)
+  ) {
+  color: var(--mc-color-text-primary);
+}
+
+.file-change-activity__item-line
+  > span:not(.file-change-activity__path):not(.file-change-activity__stats):not(
+    .agent-running-text
+  ) {
+  color: inherit;
 }
 
 .file-change-activity__item-line {
@@ -1004,17 +1196,31 @@ button.file-change-activity__path:focus-visible {
   height: 18px;
   padding: 2px;
   place-items: center;
-  color: var(--mc-color-icon-muted);
+  color: inherit;
   background: transparent;
   border: 0;
-  border-radius: var(--mc-radius-sm);
+  opacity: 0;
   cursor: pointer;
+  transition: opacity 120ms ease;
 }
 
-.file-change-activity__toggle:hover,
+.file-change-activity__item-line:hover .file-change-activity__toggle,
+.file-change-activity__item-line:has(:focus-visible) .file-change-activity__toggle {
+  opacity: 1;
+}
+
 .file-change-activity__toggle:focus-visible {
-  color: var(--mc-color-icon-default);
-  background: var(--mc-color-surface-muted);
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity summary,
+  .agent-activity__chevron,
+  .file-change-activity__item-line,
+  .file-change-activity__toggle {
+    transition: none;
+  }
 }
 
 .file-change-diff-card {

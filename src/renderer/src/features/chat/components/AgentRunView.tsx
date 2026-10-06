@@ -37,6 +37,10 @@ import {
 } from '../../agentCollaboration/CollaborationTimelineActivity'
 import type { WorkspaceReferenceTarget } from '../workspaceMentions'
 import { AgentTimelineItemView, GuidanceTimelineItemView } from './AgentTimelineItemView'
+import { projectBasicToolTimeline, type BasicToolTimelineBlock } from './basicToolTimeline'
+import { BasicToolActivityHeader } from './toolActivities/BasicToolActivityHeader'
+import { BasicToolActivityItem } from './toolActivities/BasicToolActivityItem'
+import { useBasicToolExpansion } from './useBasicToolExpansion'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
 
@@ -302,6 +306,7 @@ export function AgentRunView({
   const displayTimelineBlocks = useMemo(() => {
     type TimelineBlock =
       | { kind: 'timeline'; items: RenderableTimelineItem[] }
+      | Extract<BasicToolTimelineBlock, { kind: 'basic_tools' }>
       | { kind: 'final-answer' }
       | {
           id: string
@@ -393,14 +398,8 @@ export function AgentRunView({
     }
     const appendTimelineSegment = (end: number) => {
       if (end <= segmentStart) return
-      const grouped = groupTimelineItems(run, timeline.slice(segmentStart, end), {
-        includeSkillLoadGroup: false
-      })
-      if (grouped.length > 0) {
-        blocks.push({
-          kind: 'timeline',
-          items: grouped
-        })
+      for (const block of projectBasicToolTimeline(run, timeline.slice(segmentStart, end))) {
+        blocks.push(block.kind === 'legacy' ? { kind: 'timeline', items: block.items } : block)
       }
       segmentStart = end
     }
@@ -440,8 +439,13 @@ export function AgentRunView({
     () => displayTimelineBlocks.flatMap((block) => (block.kind === 'timeline' ? block.items : [])),
     [displayTimelineBlocks]
   )
+  const basicToolGroups = useMemo(
+    () => displayTimelineBlocks.filter((block) => block.kind === 'basic_tools'),
+    [displayTimelineBlocks]
+  )
+  const basicToolExpansion = useBasicToolExpansion(run?.runId ?? null, basicToolGroups)
   const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
-  const hasTimeline = displayTimeline.length > 0
+  const hasTimeline = displayTimeline.length > 0 || basicToolGroups.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
   // Root and observer conversations use the same trusted message/trace ownership.
   const hasCollapsibleCollaborationActivity =
@@ -580,6 +584,51 @@ export function AgentRunView({
               onOpenAgent={onOpenCollaborationAgent}
             />
           )
+        }
+        if (block.kind === 'basic_tools') {
+          const grouped = block.items.length > 1
+          const expanded = basicToolExpansion.isExpanded(block.items)
+          const hidden = !showTimeline || (canToggleTimeline && timelineCollapsed)
+          const leafId = (id: string) => `basic-tool-${message.id}-${id}`
+          return [
+            grouped && !hidden ? (
+              <BasicToolActivityHeader
+                controls={block.items.map((item) => leafId(item.id)).join(' ')}
+                expanded={expanded}
+                items={block.items}
+                key={`basic-header:${block.id}`}
+                onToggle={() => basicToolExpansion.setExpanded(block.items, !expanded)}
+                run={run}
+              />
+            ) : null,
+            ...block.items.map((item, index) => (
+              <div
+                className="basic-tool-activity__leaf"
+                data-grouped={grouped ? 'true' : 'false'}
+                data-first={index === 0 ? 'true' : undefined}
+                data-last={index === block.items.length - 1 ? 'true' : undefined}
+                data-tool-anchor={item.id}
+                hidden={hidden || (grouped && !expanded)}
+                id={leafId(item.id)}
+                key={`basic-leaf:${item.id}`}
+              >
+                <BasicToolActivityItem
+                  assistantMessageId={message.id}
+                  conversationId={conversationId}
+                  item={item}
+                  mode={mode}
+                  observerRootConversationId={observerRootConversationId}
+                  onExpandedChange={(open) => {
+                    basicToolExpansion.setDetailExpanded(item, open)
+                  }}
+                  onOpenWorkspaceReference={onOpenWorkspaceReference}
+                  presentation={grouped ? 'compact' : 'default'}
+                  projectId={projectId}
+                  run={run}
+                />
+              </div>
+            ))
+          ]
         }
         if (!showTimeline) return []
         // Timeline segments are presentation-only placement boundaries. Their start/end changes

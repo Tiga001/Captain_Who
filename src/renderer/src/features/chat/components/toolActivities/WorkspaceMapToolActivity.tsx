@@ -60,6 +60,10 @@ export function WorkspaceMapToolActivity({
   const { t } = useFrontendConfig()
   const status = getWorkspaceMapStatus(cancelled, result, settledStatus)
   const folder = getFolderName(call, result) || t('agent.workspaceMap.workspace')
+  const displayFolder =
+    (status === 'completed' || status === 'running') && !folder.endsWith('/')
+      ? `${folder}/`
+      : folder
 
   return (
     <AgentActivityDisclosure
@@ -67,7 +71,7 @@ export function WorkspaceMapToolActivity({
       hasDetails={false}
       icon={FolderOpen}
       isPending={status === 'running'}
-      label={formatTranslation(t, STATUS_LABELS[status], { folder })}
+      label={formatTranslation(t, STATUS_LABELS[status], { folder: displayFolder })}
     />
   )
 }

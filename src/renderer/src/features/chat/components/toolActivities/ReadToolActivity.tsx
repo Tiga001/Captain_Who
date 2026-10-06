@@ -26,6 +26,8 @@ interface ReadToolActivityProps {
   call: AgentToolCall
   conversationId?: string
   observerRootConversationId?: string
+  onExpandedChange?: (open: boolean) => void
+  presentation?: 'default' | 'compact'
   projectId?: string | null
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
@@ -326,7 +328,7 @@ function getReadGroupLabel(
   return t(STATUS_LABELS[kind].completed)
 }
 
-function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
+function ReadTextRow({ activity, call, result, settledStatus }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const fileName = getDisplayName(activity, call, t)
   const displayPath = getDisplayPath(activity, call, result) || fileName
@@ -335,11 +337,12 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
   const directory = separatorIndex >= 0 ? normalizedPath.slice(0, separatorIndex) || '/' : ''
   const pathIsDirectory = isPathIsDirectoryFailure(call, result)
   const error = activity?.error ?? result?.error
+  const status = getStatus(activity, result, settledStatus)
 
   return (
     <div
       className="read-activity__text-item"
-      data-status={error ? 'failed' : undefined}
+      data-status={error ? 'failed' : status}
       title={error ? `${displayPath}\n${error}` : displayPath}
     >
       {pathIsDirectory ? (
@@ -359,7 +362,8 @@ function ReadActivityCard({
   conversationId,
   observerRootConversationId,
   projectId,
-  result
+  result,
+  settledStatus
 }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const openImagePreview = useImagePreview()
@@ -368,6 +372,7 @@ function ReadActivityCard({
   const thumbnailDataUrl =
     kind === 'image' ? normalizeReadImageThumbnailDataUrl(activity?.thumbnailDataUrl) : undefined
   const error = activity?.error ?? result?.error
+  const status = getStatus(activity, result, settledStatus)
   const displayName = getDisplayName(activity, call, t)
   const sourcePath = activity?.path || getPathFromCall(call)
 
@@ -404,7 +409,7 @@ function ReadActivityCard({
     }
   }
 
-  if (thumbnailDataUrl && !error) {
+  if (thumbnailDataUrl && !error && status !== 'failed' && status !== 'cancelled') {
     return (
       <button
         className="read-activity__image"
@@ -417,7 +422,9 @@ function ReadActivityCard({
     )
   }
 
-  return <ReadTextRow activity={activity} call={call} result={result} />
+  return (
+    <ReadTextRow activity={activity} call={call} result={result} settledStatus={settledStatus} />
+  )
 }
 
 function ReadActivityDetails({
@@ -463,6 +470,8 @@ export function ReadToolActivity({
   call,
   conversationId,
   observerRootConversationId,
+  onExpandedChange,
+  presentation = 'default',
   projectId,
   result,
   settledStatus
@@ -476,26 +485,62 @@ export function ReadToolActivity({
   const StatusIcon = getStatusIcon(kind)
   const hasDetails = Boolean(activity || getPathFromCall(call) || result?.error)
   const isPending = status === 'running'
+  const compact = presentation === 'compact' && kind !== 'image'
+  const error = activity?.error ?? result?.error
+  const displayPath = getDisplayPath(activity, call, result) || getDisplayName(activity, call, t)
+  const normalizedPath = displayPath.replace(/\\/g, '/').replace(/\/+$/, '')
+  const separatorIndex = normalizedPath.lastIndexOf('/')
+  const directory = separatorIndex >= 0 ? normalizedPath.slice(0, separatorIndex) || '/' : ''
+  const actionLabel =
+    status === 'completed'
+      ? t('agent.activity.read.completed')
+      : status === 'running'
+        ? t('agent.activity.read.running')
+        : label
 
   return (
     <AgentActivityDisclosure
-      className="agent-activity--read"
-      hasDetails={hasDetails}
+      className={`agent-activity--read${compact ? ' basic-tool-activity__row' : ''}`}
+      hasDetails={compact ? Boolean(error) : hasDetails}
       icon={StatusIcon}
       isPending={isPending}
-      label={label}
+      label={
+        compact ? (
+          <span
+            aria-label={`${actionLabel} ${displayPath}`}
+            className="read-activity__text-item"
+            data-status={status}
+            title={displayPath}
+          >
+            <span
+              className={`read-activity__action${status === 'running' ? ' agent-running-text' : ''}`}
+            >
+              {actionLabel}
+            </span>
+            <span className="read-activity__file-name">{getFileName(displayPath)}</span>
+            {directory && <span className="read-activity__directory">{directory}</span>}
+          </span>
+        ) : (
+          label
+        )
+      }
+      onExpandedChange={onExpandedChange}
     >
-      <ReadActivityDetails
-        assistantMessageId={assistantMessageId}
-        activity={activity}
-        artifactResolver={artifactResolver}
-        call={call}
-        conversationId={conversationId}
-        observerRootConversationId={observerRootConversationId}
-        projectId={projectId}
-        result={result}
-        settledStatus={settledStatus}
-      />
+      {compact ? (
+        error && <p className="agent-activity__details read-activity__error">{error}</p>
+      ) : (
+        <ReadActivityDetails
+          assistantMessageId={assistantMessageId}
+          activity={activity}
+          artifactResolver={artifactResolver}
+          call={call}
+          conversationId={conversationId}
+          observerRootConversationId={observerRootConversationId}
+          projectId={projectId}
+          result={result}
+          settledStatus={settledStatus}
+        />
+      )}
     </AgentActivityDisclosure>
   )
 }

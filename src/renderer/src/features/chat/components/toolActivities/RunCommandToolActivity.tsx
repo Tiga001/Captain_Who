@@ -12,6 +12,8 @@ interface RunCommandToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
   liveOutput?: ChatCommandOutputPreview
+  onExpandedChange?: (open: boolean) => void
+  presentation?: 'default' | 'compact'
   result?: AgentToolResult
   session?: ChatCommandSessionView
   settledStatus?: SettledToolStatus
@@ -23,7 +25,7 @@ interface RunCommandToolActivityGroupProps {
   items: RunCommandToolActivityGroupItem[]
 }
 
-type RunCommandStatus =
+export type RunCommandStatus =
   | 'waiting_for_approval'
   | 'starting'
   | 'running'
@@ -193,7 +195,7 @@ function getCommandStatus(
   return ok === false ? t('agent.command.failedStatus') : t('agent.command.successStatus')
 }
 
-function getRunCommandStatus(item: RunCommandToolActivityGroupItem): RunCommandStatus {
+export function getRunCommandStatus(item: RunCommandToolActivityGroupItem): RunCommandStatus {
   if (isRejectedResult(item.result)) return 'rejected'
   if (item.session?.status === 'exited') {
     return item.session.exitCode === 0 ? 'completed' : 'failed'
@@ -227,6 +229,8 @@ export function RunCommandToolActivity({
   cancelled = false,
   call,
   liveOutput,
+  onExpandedChange,
+  presentation = 'default',
   result,
   session,
   settledStatus
@@ -311,13 +315,14 @@ export function RunCommandToolActivity({
 
   return (
     <AgentActivityDisclosure
-      className="agent-activity--run-command"
+      className={`agent-activity--run-command${presentation === 'compact' ? ' basic-tool-activity__row' : ''}`}
       hasDetails={hasDetails}
       icon={SquareTerminal}
       iconBadge={iconBadge}
       iconBadgeTone={rejected ? 'blocked' : status === 'timed_out' ? 'danger' : undefined}
       isPending={isPending}
       label={label}
+      onExpandedChange={onExpandedChange}
       revealDetailsOnOpen
     >
       {hasDetails && (

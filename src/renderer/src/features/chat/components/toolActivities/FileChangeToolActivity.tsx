@@ -357,20 +357,26 @@ function isAbsoluteLocalPath(filePath: string): boolean {
   return filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('\\\\')
 }
 
-function FileChangeRow({
+export function FileChangeRow({
   assistantMessageId,
+  compact = false,
   conversationId,
   item,
+  onExpandedChange,
   observerRootConversationId,
   projectId,
-  runId
+  runId,
+  showIcon = false
 }: {
   assistantMessageId?: string
+  compact?: boolean
   conversationId?: string
   item: FileChangeToolActivityGroupItem
+  onExpandedChange?: (open: boolean) => void
   observerRootConversationId?: string
   projectId?: string | null
   runId?: string
+  showIcon?: boolean
 }) {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
@@ -405,6 +411,9 @@ function FileChangeRow({
     ? t('agent.fileChange.historyPreviewUnavailable')
     : t('files.preview.error')
   const canReveal = Boolean(view.filePath && (projectId || isAbsoluteLocalPath(view.filePath)))
+  const displayPath = compact
+    ? view.filePath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) || view.filePath
+    : view.filePath
 
   useEffect(() => {
     if (
@@ -574,6 +583,11 @@ function FileChangeRow({
         </p>
       ) : null}
       <div className="file-change-activity__item-line" title={view.filePath}>
+        {showIcon && (
+          <span className="agent-activity__icon">
+            <Pencil aria-hidden="true" />
+          </span>
+        )}
         <span className={isPending(view.status) ? 'agent-running-text' : undefined}>
           {t(ROW_LABELS[view.operation][view.status])}
         </span>
@@ -594,11 +608,11 @@ function FileChangeRow({
             })}
             type="button"
           >
-            {view.filePath}
+            {displayPath}
           </button>
         ) : (
           <span className="file-change-activity__path">
-            {view.filePath || t('agent.fileChange.unknownFile')}
+            {displayPath || t('agent.fileChange.unknownFile')}
           </span>
         )}
         <span
@@ -621,7 +635,11 @@ function FileChangeRow({
             aria-expanded={expanded}
             aria-label={t('agent.fileChange.togglePreview')}
             className="file-change-activity__toggle"
-            onClick={() => setExpanded((current) => !current)}
+            onClick={() => {
+              const nextExpanded = !expanded
+              setExpanded(nextExpanded)
+              onExpandedChange?.(nextExpanded)
+            }}
             title={t('agent.fileChange.togglePreview')}
             type="button"
           >
