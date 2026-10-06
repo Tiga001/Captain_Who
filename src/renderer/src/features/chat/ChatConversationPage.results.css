@@ -830,6 +830,29 @@
   font-size: var(--mc-font-size-chat-activity-detail);
 }
 
+/* File summaries contain a flex text row; keep its icon beside it even outside a tool group. */
+.agent-activity--read-text > :is(summary, .agent-activity__static-summary) {
+  display: flex;
+  align-items: center;
+  gap: var(--mc-activity-gap);
+  padding-left: 0;
+  text-indent: 0;
+}
+
+.agent-activity--read-text
+  > :is(summary, .agent-activity__static-summary)
+  > :is(.agent-activity__icon, .agent-activity__chevron) {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.agent-activity--read-text
+  > :is(summary, .agent-activity__static-summary)
+  > .agent-activity__label {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
 .read-activity__details {
   display: block;
   max-width: 100%;

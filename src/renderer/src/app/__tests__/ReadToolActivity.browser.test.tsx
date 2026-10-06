@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { page, userEvent } from 'vitest/browser'
 import { frontendConfig, getFrontendCssVariables } from '../../config/frontendConfig'
+import { getTranslation } from '../../config/frontendTranslations'
 import { classicDarkTheme, classicLightTheme } from '../../config/themes/classic'
 import type { ChatReadActivity } from '../../features/chat/chatTypes'
 import {
@@ -37,7 +38,11 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
         'agent.read.pathIsDirectoryItem': '目录被误用为文件：{path}',
         'agent.read.pathFailedCount': '{count} 个路径失败',
         'agent.activity.read.completed': '已读取',
-        'agent.activity.read.running': '正在读取'
+        'agent.activity.read.running': '正在读取',
+        'agent.read.file.failed': getTranslation('zh-CN', 'agent.read.file.failed'),
+        'agent.read.word.failed': getTranslation('zh-CN', 'agent.read.word.failed'),
+        'agent.read.presentation.failed': getTranslation('zh-CN', 'agent.read.presentation.failed'),
+        'agent.read.spreadsheet.failed': getTranslation('zh-CN', 'agent.read.spreadsheet.failed')
       })[key] ?? key
   })
 }))
@@ -468,9 +473,133 @@ describe('ReadToolActivity structured path failures', () => {
       />
     )
 
-    expect(screen.container.textContent).toContain('agent.read.file.failed')
+    expect(screen.container.textContent).toContain(
+      getTranslation('zh-CN', 'agent.read.file.failed')
+    )
     expect(screen.container.textContent).not.toContain('目录被误用为文件')
   })
+})
+
+describe('standalone read summary layout', () => {
+  const fixtures = [
+    { tool: 'read_file', name: 'TEAM.md' },
+    { tool: 'read_word', name: '研究报告.docx' },
+    { tool: 'read_presentation', name: 'project-review.pptx' },
+    {
+      tool: 'read_spreadsheet',
+      name: 'bimolecular-termination-kinetics-validation-and-unit-consistency-review.xlsx'
+    }
+  ].map(({ tool, name }) => ({
+    id: `standalone-${tool}`,
+    tool,
+    args: { path: `/Users/example/Documents/External reference reports/${name}` },
+    approvalStatus: 'not_required' as const,
+    reason: null
+  }))
+
+  it.each([
+    { mode: 'light', theme: classicLightTheme },
+    { mode: 'dark', theme: classicDarkTheme }
+  ])(
+    'keeps icons and filenames together through state and width changes in $mode',
+    async ({ mode, theme }) => {
+      await page.viewport(1000, 700)
+      const onOpenWorkspaceReference = vi.fn()
+      const view = (width: number, status: 'running' | 'completed' | 'failed') => (
+        <div
+          style={
+            {
+              ...getFrontendCssVariables(frontendConfig, theme),
+              width,
+              padding: 16,
+              display: 'grid',
+              gap: 8,
+              background: 'var(--mc-color-surface-main-panel)',
+              fontFamily: 'var(--mc-font-family)'
+            } as CSSProperties
+          }
+        >
+          {fixtures.map((readCall) => (
+            <ReadToolActivity
+              assistantMessageId="read-message"
+              call={readCall}
+              conversationId="read-conversation"
+              key={readCall.id}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
+              result={
+                status === 'running'
+                  ? undefined
+                  : {
+                      callId: readCall.id,
+                      tool: readCall.tool,
+                      ok: status === 'completed',
+                      result: { path: readCall.args.path },
+                      ...(status === 'failed' ? { error: '文件暂时不可读取' } : {})
+                    }
+              }
+            />
+          ))}
+        </div>
+      )
+      const screen = await render(view(736, 'running'))
+      for (const width of [736, 320]) {
+        for (const status of ['running', 'completed', 'failed'] as const) {
+          await screen.rerender(view(width, status))
+          const panel = screen.container.firstElementChild as HTMLElement
+          const summaries = [
+            ...panel.querySelectorAll<HTMLElement>(
+              '.agent-activity--read > .agent-activity__static-summary, .agent-activity--read > summary'
+            )
+          ]
+          expect(summaries).toHaveLength(fixtures.length)
+          for (const [index, summary] of summaries.entries()) {
+            const icon = summary.querySelector<HTMLElement>('.agent-activity__icon')!
+            const action = summary.querySelector<HTMLElement>('.read-activity__action')!
+            const filename = summary.querySelector<HTMLElement>('.read-activity__file-name')!
+            const iconRect = icon.getBoundingClientRect()
+            const actionRect = action.getBoundingClientRect()
+            const filenameRect = filename.getBoundingClientRect()
+            // Check the entire summary: a one-line filename alone misses the icon stranded above it.
+            expect(
+              Math.abs(iconRect.top + iconRect.height / 2 - actionRect.top - actionRect.height / 2)
+            ).toBeLessThanOrEqual(3)
+            expect(
+              Math.abs(
+                filenameRect.top + filenameRect.height / 2 - actionRect.top - actionRect.height / 2
+              )
+            ).toBeLessThanOrEqual(3)
+            expect(iconRect.right).toBeLessThanOrEqual(actionRect.left)
+            expect(actionRect.right).toBeLessThanOrEqual(filenameRect.left)
+            expect(filenameRect.width).toBeGreaterThan(0)
+            expect(summary.getBoundingClientRect().height).toBeLessThanOrEqual(
+              Math.max(
+                parseFloat(getComputedStyle(summary).minHeight) || 0,
+                iconRect.height,
+                actionRect.height,
+                filenameRect.height
+              ) + 1
+            )
+            expect(summary.scrollWidth).toBeLessThanOrEqual(summary.clientWidth + 1)
+            expect(filename.getAttribute('aria-label')).toBe(fixtures[index].args.path)
+            expect(getComputedStyle(filename).textOverflow).toBe('ellipsis')
+            expect(summary.querySelector('.read-activity__directory')).toBeNull()
+            expect(action.textContent).toContain(status === 'failed' ? '失败' : '读取')
+            if (width === 320 && index === fixtures.length - 1) {
+              expect(filename.scrollWidth).toBeGreaterThan(filename.clientWidth)
+            }
+          }
+          expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth + 1)
+          expect(panel.querySelectorAll('details')).toHaveLength(
+            status === 'failed' ? fixtures.length : 0
+          )
+          await page.screenshot({
+            element: panel,
+            path: `../../../../../.cache/read-summary-fix/${mode}-${width}-${status}.png`
+          })
+        }
+      }
+    }
+  )
 })
 
 describe('compact read file rows', () => {

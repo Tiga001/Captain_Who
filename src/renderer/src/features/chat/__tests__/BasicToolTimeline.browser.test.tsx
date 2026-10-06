@@ -146,6 +146,19 @@ describe('mixed tool timeline', () => {
       const options = { mode, onOpenWorkspaceReference }
       const screen = await render(view(run([read]), options))
       const filename = screen.getByRole('button', { name: filePath, exact: true })
+      const filenameNode = filename.element()
+      const readLeaf = leaf(screen.container, read.id)
+      const assertReadAlignment = () => {
+        const icon = readLeaf.querySelector<HTMLElement>('.agent-activity__icon')!
+        const action = readLeaf.querySelector<HTMLElement>('.read-activity__action')!
+        const iconRect = icon.getBoundingClientRect()
+        const actionRect = action.getBoundingClientRect()
+        expect(
+          Math.abs(iconRect.top + iconRect.height / 2 - actionRect.top - actionRect.height / 2)
+        ).toBeLessThanOrEqual(3)
+        expect(iconRect.right).toBeLessThanOrEqual(actionRect.left)
+      }
+      assertReadAlignment()
       await userEvent.click(filename)
       const expectedTarget = {
         source: 'read-tool',
@@ -159,6 +172,9 @@ describe('mixed tool timeline', () => {
       const command = call('after-read')
       await screen.rerender(view(run([read, command]), options))
       await userEvent.click(header(screen.container))
+      expect(leaf(screen.container, read.id)).toBe(readLeaf)
+      expect(filename.element()).toBe(filenameNode)
+      assertReadAlignment()
       await userEvent.click(filename)
       expect(onOpenWorkspaceReference).toHaveBeenLastCalledWith(expectedTarget)
       expect(header(screen.container).getAttribute('aria-expanded')).toBe('true')

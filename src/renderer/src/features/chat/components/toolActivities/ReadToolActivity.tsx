@@ -570,7 +570,13 @@ export function ReadToolActivity({
 
   return (
     <AgentActivityDisclosure
-      className={`agent-activity--read${compact ? ' basic-tool-activity__row' : ''}`}
+      className={[
+        'agent-activity--read',
+        kind !== 'image' ? 'agent-activity--read-text' : '',
+        compact ? 'basic-tool-activity__row' : ''
+      ]
+        .filter(Boolean)
+        .join(' ')}
       hasDetails={kind === 'image' ? hasDetails : Boolean(error)}
       icon={StatusIcon}
       isPending={isPending}
