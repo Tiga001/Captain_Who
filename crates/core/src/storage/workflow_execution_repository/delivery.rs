@@ -418,19 +418,62 @@ pub fn runtime_snapshot(
         .iter()
         .filter_map(|event| event.input_id.as_deref())
         .collect();
-    let mut statement=c.prepare("SELECT input_json FROM workflow_mail_inputs WHERE instance_id=?1 AND (input_id IN(SELECT input_id FROM workflow_mail_messages WHERE mail_status IN('pending','processing')) OR sequence IN(SELECT sequence FROM workflow_mail_inputs WHERE instance_id=?1 ORDER BY sequence DESC LIMIT 128) OR input_id IN(SELECT value FROM json_each(?2))) ORDER BY sequence").map_err(db)?;
-    let mut inputs: Vec<Input> = statement
+    // Strip bodies inside SQLite: the monitor needs envelope metadata, not an allocation and
+    // Rust JSON decode of every retained letter. Keep the stored envelope's remaining fields
+    // intact, including nullable identities and errors, rather than rebuilding a second DTO.
+    // Invalid body/array shapes must reach the original strict decoder unchanged: replacing a
+    // missing or non-string body with "" would otherwise silently repair corrupt stored mail.
+    let mut statement = c
+        .prepare(
+            "SELECT
+             CASE WHEN json_type(i.input_json, '$.content') = 'text'
+                       AND json_type(i.input_json, '$.messages') = 'array'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM json_each(i.input_json, '$.messages') AS message
+                           WHERE CASE WHEN message.type = 'object'
+                               THEN json_type(message.value, '$.content') IS NOT 'text'
+                               ELSE 1 END
+                       )
+                  THEN json_set(i.input_json, '$.content', '', '$.messages', json(
+                      (SELECT json_group_array(json_set(message.value, '$.content', ''))
+                       FROM json_each(i.input_json, '$.messages') AS message)
+                  ))
+                  ELSE i.input_json END,
+             trace.terminal_status
+         FROM workflow_mail_inputs AS i
+         LEFT JOIN conversation_turn_traces AS trace
+           ON trace.run_id = i.run_id AND trace.conversation_id = i.conversation_id
+         WHERE i.instance_id = ?1 AND (
+             i.input_id IN (
+                 SELECT input_id FROM workflow_mail_messages
+                 WHERE instance_id = ?1 AND mail_status IN ('pending', 'processing')
+             )
+             OR i.sequence IN (
+                 SELECT sequence FROM workflow_mail_inputs
+                 WHERE instance_id = ?1 ORDER BY sequence DESC LIMIT 128
+             )
+             OR i.input_id IN (SELECT value FROM json_each(?2))
+         )
+         ORDER BY i.sequence",
+        )
+        .map_err(db)?;
+    let rows = statement
         .query_map(params![instance_id, json(&referenced_inputs)?], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
-        .map_err(db)?
-        .map(|row| parse(&row.map_err(db)?))
-        .collect::<Result<_, _>>()?;
-    for input in &mut inputs {
-        input.content.clear();
-        for message in &mut input.messages {
-            message.content.clear();
+        .map_err(db)?;
+    let mut inputs = Vec::new();
+    let mut input_runs = Vec::new();
+    for row in rows {
+        let (raw, terminal_status) = row.map_err(db)?;
+        let input: Input = parse(&raw)?;
+        if let Some(status) = terminal_status {
+            input_runs.push(InputRunState {
+                input_id: input.id.clone(),
+                status,
+            });
         }
+        inputs.push(input);
     }
     let mut s=c.prepare("SELECT p.conversation_id FROM workflow_mail_pauses p JOIN workflow_instance_bindings b ON b.conversation_id=p.conversation_id WHERE b.instance_id=?1 ORDER BY p.conversation_id").map_err(db)?;
     let paused_conversation_ids = s
@@ -438,10 +481,6 @@ pub fn runtime_snapshot(
         .map_err(db)?
         .collect::<rusqlite::Result<_>>()
         .map_err(db)?;
-    let mut input_runs = vec![];
-    for input in &inputs {
-        if let Some(status)=c.query_row("SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1 AND conversation_id=?2",params![input.run_id,input.conversation_id],|r|r.get(0)).optional().map_err(db)?{input_runs.push(InputRunState{input_id:input.id.clone(),status});}
-    }
     Ok(RuntimeSnapshot {
         instance_id: instance_id.into(),
         sequence,

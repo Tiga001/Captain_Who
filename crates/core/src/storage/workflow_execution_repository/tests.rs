@@ -118,6 +118,186 @@ fn workflow_execution_any_member_sends_atomically_and_retry_is_idempotent() {
         2
     );
 }
+
+#[test]
+fn runtime_snapshot_projects_envelopes_and_run_states_in_one_query() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
+
+    let mut c = fixture();
+    let body = "private body with 中文, quotes \" and newline\n".repeat(1_000);
+    let receipt = send_mail(
+        &mut c,
+        "runtime-metadata",
+        &[
+            ("b", &body),
+            ("b", "pending"),
+            ("c", &body),
+            ("c", "failed"),
+        ],
+    );
+    start_run(&mut c, "b", "run-b");
+    start_run(&mut c, "c", "run-c");
+    assert!(bind_input(&mut c, &receipt.input_ids[0], "run-b", "delivery-b").unwrap());
+    assert!(bind_input(&mut c, &receipt.input_ids[2], "run-c", "delivery-c").unwrap());
+    fail_input(&mut c, &receipt.input_ids[3], "preserved error 中文").unwrap();
+    let b = conversation(&c, "b");
+    pause_conversation(&mut c, &b).unwrap();
+
+    let expected_inputs: Vec<_> = receipt
+        .input_ids
+        .iter()
+        .map(|id| {
+            let mut input = load_input(&c, id).unwrap().unwrap();
+            input.content.clear();
+            for message in &mut input.messages {
+                message.content.clear();
+            }
+            serde_json::to_value(input).unwrap()
+        })
+        .collect();
+    let trace_reads = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::clone(&trace_reads);
+    c.authorizer(Some(move |context: AuthContext<'_>| {
+        if matches!(
+            context.action,
+            AuthAction::Read {
+                table_name: "conversation_turn_traces",
+                column_name: "terminal_status",
+                ..
+            }
+        ) {
+            reads.fetch_add(1, Ordering::Relaxed);
+        }
+        Authorization::Allow
+    }));
+    let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    assert_eq!(trace_reads.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        serde_json::to_value(&snapshot.inputs).unwrap(),
+        json!(expected_inputs)
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot.input_runs).unwrap(),
+        json!([
+            { "inputId": receipt.input_ids[0], "status": "in_progress" },
+            { "inputId": receipt.input_ids[2], "status": "in_progress" }
+        ])
+    );
+    assert_eq!(
+        snapshot.paused_conversation_ids,
+        vec![conversation(&c, "b")]
+    );
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("private body"));
+    // Projection must not mutate the durable model-delivery bodies.
+    assert_eq!(
+        load_input(&c, &receipt.input_ids[0])
+            .unwrap()
+            .unwrap()
+            .messages[0]
+            .content,
+        body
+    );
+}
+
+#[test]
+fn runtime_snapshot_keeps_all_pending_inputs_without_other_instances() {
+    let mut c = fixture();
+    let first = send_mail(&mut c, "pending-page-1", &vec![("b", "pending"); 80]);
+    let second = send_mail(&mut c, "pending-page-2", &vec![("c", "pending"); 80]);
+    let mut other = load_input(&c, &first.input_ids[0]).unwrap().unwrap();
+    other.id = "other-input".into();
+    other.instance_id = "other-instance".into();
+    other.messages[0].id = "other-message".into();
+    other.messages[0].instance_id = other.instance_id.clone();
+    // A separate organization uses the same mail tables but must never enter this projection.
+    c.execute(
+        "INSERT INTO workflow_mail_inputs(input_id,instance_id,execution_version,node_id,conversation_id,input_json,status,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,'pending',1,1)",
+        params![other.id, other.instance_id, other.execution_version, other.node_id, other.conversation_id, json(&other).unwrap()],
+    ).unwrap();
+    c.execute(
+        "INSERT INTO workflow_mail_messages(message_id,instance_id,execution_version,node_id,recipient_conversation_id,mail_status,message_json,input_id,created_at)
+         VALUES('other-message','other-instance',?1,?2,?3,'pending',?4,'other-input',1)",
+        params![other.execution_version, other.node_id, other.conversation_id, json(&other.messages[0]).unwrap()],
+    ).unwrap();
+    let sequence = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    let snapshot = runtime_snapshot(&c, "instance", Some(sequence)).unwrap();
+    assert!(snapshot.events.is_empty());
+    let expected: Vec<_> = first
+        .input_ids
+        .into_iter()
+        .chain(second.input_ids)
+        .collect();
+    assert_eq!(
+        snapshot
+            .inputs
+            .iter()
+            .map(|input| &input.id)
+            .collect::<Vec<_>>(),
+        expected.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn runtime_snapshot_does_not_repair_invalid_envelope_shapes() {
+    let mut c = fixture();
+    let receipt = send_mail(&mut c, "invalid-runtime-shapes", &[("b", "body")]);
+    let original =
+        serde_json::to_value(load_input(&c, &receipt.input_ids[0]).unwrap().unwrap()).unwrap();
+    let mut invalid = Vec::new();
+    for field in ["content", "messages"] {
+        let mut missing = original.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        invalid.push((format!("missing {field}"), missing));
+        for value in [json!(null), json!(42), json!({})] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            invalid.push((format!("wrong type for {field}"), changed));
+        }
+    }
+    let mut array_body = original.clone();
+    array_body["content"] = json!([]);
+    invalid.push(("array content".into(), array_body));
+    let mut text_messages = original.clone();
+    text_messages["messages"] = json!("not an array");
+    invalid.push(("text messages".into(), text_messages));
+    let mut missing_source_body = original.clone();
+    missing_source_body["messages"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("content");
+    invalid.push(("missing source content".into(), missing_source_body));
+    for value in [json!(null), json!(42), json!({}), json!([])] {
+        let mut changed = original.clone();
+        changed["messages"][0]["content"] = value;
+        invalid.push(("wrong source content type".into(), changed));
+    }
+    for value in [json!(null), json!(42), json!("not an object"), json!([])] {
+        let mut changed = original.clone();
+        changed["messages"][0] = value;
+        invalid.push(("non-object source".into(), changed));
+    }
+    let mut invalid_metadata = original.clone();
+    invalid_metadata["messages"][0]["id"] = json!(42);
+    invalid.push(("wrong source metadata type".into(), invalid_metadata));
+    for (name, envelope) in invalid {
+        assert!(
+            serde_json::from_value::<Input>(envelope.clone()).is_err(),
+            "{name}"
+        );
+        c.execute(
+            "UPDATE workflow_mail_inputs SET input_json=?1 WHERE input_id=?2",
+            params![envelope.to_string(), receipt.input_ids[0]],
+        )
+        .unwrap();
+        assert!(runtime_snapshot(&c, "instance", None).is_err(), "{name}");
+    }
+}
+
 #[test]
 fn workflow_execution_idle_fifo_and_explicit_accept_are_separate() {
     let mut c = fixture();
