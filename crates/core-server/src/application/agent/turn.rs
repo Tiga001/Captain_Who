@@ -395,7 +395,10 @@ impl AgentService {
             && response.is_none()
             && automation.is_none()
         {
-            self.prepare_cached_history(&conversation_id)?
+            self.prepare_cached_history_for(
+                &conversation_id,
+                super::prepared_history::HistoryPreparationSource::Send,
+            )?
         } else {
             None
         };

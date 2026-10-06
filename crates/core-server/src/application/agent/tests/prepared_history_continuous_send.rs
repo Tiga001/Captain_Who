@@ -2,7 +2,7 @@
 //! A correct helper-only cache hit is insufficient if any later observer rebuilds the history.
 #![cfg(debug_assertions)] // Work counters are intentionally absent from production builds.
 use super::*;
-use mycopilot_core::storage::models::ChatConversationMetaRecord;
+use mycopilot_core::storage::models::{ChatConversationMetaRecord, ChatMessageStateRecord};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -182,6 +182,53 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
     assert!(before_metadata_storage.model_context_decodes > 0);
     assert!(before_metadata_server.history_assemblies > 0);
     assert!(before_metadata_server.context_rebuilds > 0);
+    let terminal_history = storage
+        .load_conversation_history_snapshot(ID)
+        .unwrap()
+        .unwrap();
+    let assistant = settled
+        .messages
+        .iter()
+        .find(|message| message.id == first.assistant_message_id)
+        .unwrap();
+    // Simulate the Renderer receiving final usage/display events after the Host has already
+    // committed the authoritative terminal trace and prepared the next-send prefix. Start with
+    // the actual canonical run projection; a fabricated partial run can be rejected/repaired
+    // before storage and would never exercise the late presentation-write regression.
+    let mut renderer_run: Value =
+        serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(renderer_run["runId"], first.run_id);
+    assert_eq!(renderer_run["status"], "completed");
+    renderer_run["finishReason"] = json!("stop");
+    renderer_run["firstResponseAt"] = json!(assistant.created_at + 1);
+    renderer_run["usage"] = serde_json::to_value(mycopilot_core::AgentUsage {
+        input_tokens: Some(17),
+        output_tokens: Some(5),
+        output_thinking_tokens: None,
+        total_tokens: Some(22),
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: Some(1),
+    })
+    .unwrap();
+    storage
+        .save_chat_message_state(
+            ID,
+            ChatMessageStateRecord {
+                id: assistant.id.clone(),
+                content: assistant.content.clone(),
+                status: assistant.status.clone(),
+                agent_run_json: Some(renderer_run.to_string()),
+            },
+        )
+        .unwrap();
+    storage
+        .save_chat_message_ui_state(
+            ID,
+            &assistant.id,
+            Some(r#"{"favorited":true,"timelineCollapsed":false}"#),
+        )
+        .unwrap();
     storage
         .save_conversation_meta(ChatConversationMetaRecord {
             id: settled.id,
@@ -196,6 +243,35 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
         })
         .unwrap();
     assert!(storage.load_conversation_for_turn(ID).unwrap().1.unwrap() > previous_revision);
+
+    let latest_raw = storage
+        .load_conversation_history_snapshot(ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        latest_raw.version, terminal_history.version,
+        "late Renderer projection writes do not change model-visible history"
+    );
+    let latest_display = storage.load_conversation(ID).unwrap().unwrap();
+    for messages in [
+        latest_raw.conversation.messages.as_slice(),
+        &latest_display.messages,
+    ] {
+        let latest_assistant = messages
+            .iter()
+            .find(|message| message.id == first.assistant_message_id)
+            .unwrap();
+        let latest_run: Value =
+            serde_json::from_str(latest_assistant.agent_run_json.as_deref().unwrap()).unwrap();
+        assert_eq!(latest_run["finishReason"], "stop");
+        assert_eq!(latest_run["firstResponseAt"], assistant.created_at + 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(latest_assistant.ui_state_json.as_deref().unwrap())
+                .unwrap(),
+            json!({"favorited": true, "timelineCollapsed": false}),
+            "presentation reads remain fresh while the model history prefix is shared"
+        );
+    }
 
     // The current renderer can ask for a preview while terminal or idle preparation is finishing.
     // Concurrent readers must neither decode the same stable history again nor erase measurement.
@@ -316,4 +392,20 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
     drop(second_stream);
     wait_for_terminal(&service, &mut events, &second.assistant_message_id).await;
     assert_eq!(storage.list_conversation_turn_traces(ID).unwrap().len(), 2);
+    let after_second_turn = storage.load_conversation(ID).unwrap().unwrap();
+    let previous_assistant = after_second_turn
+        .messages
+        .iter()
+        .find(|message| message.id == first.assistant_message_id)
+        .unwrap();
+    let previous_run: Value =
+        serde_json::from_str(previous_assistant.agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(previous_run["finishReason"], "stop");
+    assert_eq!(previous_run["firstResponseAt"], assistant.created_at + 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(previous_assistant.ui_state_json.as_deref().unwrap())
+            .unwrap(),
+        json!({"favorited": true, "timelineCollapsed": false}),
+        "next-send admission must not overwrite the late Renderer projection with cached state"
+    );
 }

@@ -7281,3 +7281,112 @@ BEGIN
     UPDATE conversation_message_history_revisions SET revision = revision + 1
     WHERE conversation_id = OLD.conversation_id;
 END;
+
+-- Incremental message presentation refresh and semantic trace revisions, schema v68.
+ALTER TABLE conversation_message_history_revisions
+    ADD COLUMN presentation_revision INTEGER NOT NULL DEFAULT 0 CHECK (presentation_revision >= 0);
+ALTER TABLE conversation_message_history_revisions
+    ADD COLUMN ui_revision INTEGER NOT NULL DEFAULT 0 CHECK (ui_revision >= 0);
+ALTER TABLE messages
+    ADD COLUMN presentation_revision INTEGER NOT NULL DEFAULT 0 CHECK (presentation_revision >= 0);
+CREATE INDEX idx_messages_presentation_revision
+    ON messages(conversation_id, presentation_revision);
+DROP TRIGGER message_history_message_update;
+CREATE TRIGGER message_history_message_update
+AFTER UPDATE ON messages
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.role IS NOT OLD.role
+  OR NEW.content IS NOT OLD.content
+  OR NEW.status IS NOT OLD.status
+  OR NEW.input_origin_kind IS NOT OLD.input_origin_kind
+  OR NEW.input_origin_agent_id IS NOT OLD.input_origin_agent_id
+  OR NEW.source_agent_message_id IS NOT OLD.source_agent_message_id
+  OR NEW.snapshot_source_conversation_id IS NOT OLD.snapshot_source_conversation_id
+  OR NEW.snapshot_source_message_id IS NOT OLD.snapshot_source_message_id
+  OR NEW.snapshot_original_origin_kind IS NOT OLD.snapshot_original_origin_kind
+  OR NEW.snapshot_original_agent_id IS NOT OLD.snapshot_original_agent_id
+  OR NEW.snapshot_original_mailbox_message_id IS NOT OLD.snapshot_original_mailbox_message_id
+  OR NEW.folder_references_json IS NOT OLD.folder_references_json
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.position IS NOT OLD.position
+BEGIN
+    UPDATE conversation_message_history_revisions SET revision = revision + 1
+    WHERE conversation_id IN (OLD.conversation_id, NEW.conversation_id);
+END;
+CREATE TRIGGER message_presentation_message_update
+AFTER UPDATE OF agent_run_json ON messages
+WHEN NEW.agent_run_json IS NOT OLD.agent_run_json
+BEGIN
+    UPDATE conversation_message_history_revisions
+    SET presentation_revision = presentation_revision + 1
+    WHERE conversation_id = NEW.conversation_id;
+    UPDATE messages
+    SET presentation_revision = (
+        SELECT presentation_revision FROM conversation_message_history_revisions
+        WHERE conversation_id = NEW.conversation_id
+    )
+    WHERE id = NEW.id;
+END;
+DROP TRIGGER trace_journal_header_update;
+CREATE TRIGGER trace_journal_header_update
+AFTER UPDATE ON conversation_turn_traces
+WHEN NEW.assistant_message_id IS NOT OLD.assistant_message_id
+  OR NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.schema_version IS NOT OLD.schema_version
+  OR NEW.terminal_status IS NOT OLD.terminal_status
+  OR NEW.terminal_error IS NOT OLD.terminal_error
+  OR NEW.truncated IS NOT OLD.truncated
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.completed_at IS NOT OLD.completed_at
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+DROP TRIGGER trace_journal_item_update;
+CREATE TRIGGER trace_journal_item_update
+AFTER UPDATE ON conversation_turn_trace_items
+WHEN NEW.assistant_message_id IS NOT OLD.assistant_message_id
+  OR NEW.sequence IS NOT OLD.sequence
+  OR NEW.item_kind IS NOT OLD.item_kind
+  OR NEW.item_json IS NOT OLD.item_json
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+DROP TRIGGER trace_journal_model_update;
+CREATE TRIGGER trace_journal_model_update
+AFTER UPDATE ON conversation_model_context_items
+WHEN NEW.assistant_message_id IS NOT OLD.assistant_message_id
+  OR NEW.sequence IS NOT OLD.sequence
+  OR NEW.ordinal IS NOT OLD.ordinal
+  OR NEW.content_hash IS NOT OLD.content_hash
+  OR NEW.uncompressed_bytes IS NOT OLD.uncompressed_bytes
+  OR NEW.compression IS NOT OLD.compression
+  OR NEW.payload IS NOT OLD.payload
+BEGIN
+    UPDATE conversation_trace_journal_revisions SET revision = revision + 1
+    WHERE assistant_message_id IN (OLD.assistant_message_id, NEW.assistant_message_id);
+END;
+CREATE TRIGGER message_presentation_ui_insert
+AFTER INSERT ON chat_message_ui_states
+BEGIN
+    UPDATE conversation_message_history_revisions SET ui_revision = ui_revision + 1
+    WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = NEW.message_id);
+END;
+CREATE TRIGGER message_presentation_ui_update
+AFTER UPDATE ON chat_message_ui_states
+WHEN NEW.message_id IS NOT OLD.message_id OR NEW.ui_state_json IS NOT OLD.ui_state_json
+BEGIN
+    UPDATE conversation_message_history_revisions SET ui_revision = ui_revision + 1
+    WHERE conversation_id IN (
+        SELECT conversation_id FROM messages WHERE id IN (OLD.message_id, NEW.message_id)
+    );
+END;
+CREATE TRIGGER message_presentation_ui_delete
+AFTER DELETE ON chat_message_ui_states
+BEGIN
+    UPDATE conversation_message_history_revisions SET ui_revision = ui_revision + 1
+    WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = OLD.message_id);
+END;

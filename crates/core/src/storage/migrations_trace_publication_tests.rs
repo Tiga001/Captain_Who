@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
+fn upgrades_v60_without_rewriting_history_and_tracks_semantic_journal_mutations() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
@@ -41,7 +41,11 @@ fn upgrades_v60_without_rewriting_history_and_tracks_every_journal_mutation() {
     };
     assert_eq!(revision(), 0);
     connection.execute("UPDATE conversation_turn_traces SET updated_at=2 WHERE assistant_message_id='assistant'", []).unwrap();
+    assert_eq!(revision(), 0, "publication time is not model history");
+    connection.execute("UPDATE conversation_turn_traces SET truncated=1 WHERE assistant_message_id='assistant'", []).unwrap();
     assert_eq!(revision(), 1);
+    connection.execute("UPDATE conversation_turn_traces SET truncated=truncated WHERE assistant_message_id='assistant'", []).unwrap();
+    assert_eq!(revision(), 1, "identical publication is a no-op");
     connection.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES('assistant',0,'assistant_narration','{\"type\":\"assistant_narration\",\"sequence\":0,\"content\":\"text\",\"truncated\":false}')", []).unwrap();
     assert_eq!(revision(), 2);
     connection.execute("UPDATE conversation_turn_trace_items SET item_json=json_set(item_json,'$.content','new') WHERE assistant_message_id='assistant'", []).unwrap();

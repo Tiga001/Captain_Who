@@ -47,7 +47,7 @@ fn append(
 fn external_header_change_revokes_cursor_and_rebuilds_the_durable_prefix() {
     let (_directory, service, external, mut recorder, mut cursor) = fixture();
     external.execute(
-        "UPDATE conversation_turn_traces SET updated_at=3 WHERE assistant_message_id='assistant'",
+        "UPDATE conversation_turn_traces SET created_at=0, updated_at=3 WHERE assistant_message_id='assistant'",
         [],
     ).unwrap();
     recorder.record_narration("second").unwrap();
@@ -60,6 +60,22 @@ fn external_header_change_revokes_cursor_and_rebuilds_the_durable_prefix() {
     recorder.record_narration("third").unwrap();
     let outcome = append(&service, &mut cursor, &recorder).unwrap();
     assert!(outcome.previous_publication.is_some());
+}
+
+#[test]
+fn external_publication_timestamp_and_identical_items_preserve_trusted_cursor() {
+    let (_directory, service, external, mut recorder, mut cursor) = fixture();
+    external.execute_batch(
+        "UPDATE conversation_turn_traces SET updated_at=3 WHERE assistant_message_id='assistant';
+         UPDATE conversation_turn_trace_items SET item_json=item_json WHERE assistant_message_id='assistant';
+         UPDATE conversation_model_context_items SET payload=payload WHERE assistant_message_id='assistant';",
+    ).unwrap();
+    recorder.record_narration("second").unwrap();
+    crate::storage::trace_performance_metrics::start();
+    let outcome = append(&service, &mut cursor, &recorder).unwrap();
+    let metrics = crate::storage::trace_performance_metrics::finish();
+    assert!(outcome.previous_publication.is_some());
+    assert_eq!((metrics.trace_loads, metrics.context_loads), (0, 0));
 }
 
 #[test]

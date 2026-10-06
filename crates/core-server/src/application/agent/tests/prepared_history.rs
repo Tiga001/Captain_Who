@@ -311,6 +311,200 @@ fn history_warm_authoritative_change_cannot_reuse_old_measured_prefix() {
         .any(|message| { message.content == "New authoritative request after prewarming" }));
 }
 
+#[test]
+fn history_warm_ui_only_updates_refresh_raw_source_without_rebuilding_model_history() {
+    let (_directory, storage, service) = fixture();
+    let preview = warm_preview(&service);
+    let before = service.prepare_cached_history(ID).unwrap().unwrap();
+    let before_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    let before_storage = storage.history_snapshot_diagnostics(ID);
+    for state in [
+        Some(r#"{"favorited":true,"timelineCollapsed":false}"#),
+        None,
+    ] {
+        storage
+            .save_chat_message_ui_state(ID, "old-assistant", state)
+            .unwrap();
+        let after = service.prepare_cached_history(ID).unwrap().unwrap();
+        assert_eq!(after.source.version, before.source.version);
+        assert_eq!(
+            after.source.conversation_revision, before.source.conversation_revision,
+            "UI state does not change the admission CAS"
+        );
+        assert_eq!(
+            after.source.conversation.messages[1]
+                .ui_state_json
+                .as_deref(),
+            state,
+            "a same-model-version cache hit must refresh its raw UI source"
+        );
+        assert!(Arc::ptr_eq(&before.messages, &after.messages));
+        assert!(service.has_measured_prepared_history_for_test(ID));
+        assert_eq!(warm_preview(&service), preview);
+    }
+    assert!(before.source.conversation.messages[1]
+        .ui_state_json
+        .is_none());
+    let after_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    let after_storage = storage.history_snapshot_diagnostics(ID);
+    assert_eq!(after_storage.full_loads, before_storage.full_loads);
+    assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
+    assert_eq!(
+        after_storage.model_context_decodes,
+        before_storage.model_context_decodes
+    );
+    assert_eq!(
+        after_diagnostics.history_assemblies,
+        before_diagnostics.history_assemblies
+    );
+    assert_eq!(
+        after_diagnostics.context_rebuilds,
+        before_diagnostics.context_rebuilds
+    );
+}
+
+#[test]
+fn history_warm_identical_trace_replay_preserves_materials_and_measured_prefix() {
+    let (_directory, storage, service) = fixture();
+    warm_preview(&service);
+    let before = service.prepare_cached_history(ID).unwrap().unwrap();
+    let before_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    let before_storage = storage.history_snapshot_diagnostics(ID);
+    storage
+        .replace_conversation_turn_trace(&before.source.traces[0], 2000, 2001)
+        .unwrap();
+    let after = service.prepare_cached_history(ID).unwrap().unwrap();
+    assert_eq!(before.source.version, after.source.version);
+    assert!(Arc::ptr_eq(&before.messages, &after.messages));
+    assert!(service.has_measured_prepared_history_for_test(ID));
+    warm_preview(&service);
+    let after_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    let after_storage = storage.history_snapshot_diagnostics(ID);
+    assert_eq!(after_storage.full_loads, before_storage.full_loads);
+    assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
+    assert_eq!(
+        after_storage.model_context_decodes,
+        before_storage.model_context_decodes
+    );
+    assert_eq!(
+        after_diagnostics.history_assemblies,
+        before_diagnostics.history_assemblies
+    );
+    assert_eq!(
+        after_diagnostics.context_rebuilds,
+        before_diagnostics.context_rebuilds
+    );
+}
+
+#[test]
+fn history_warm_trace_change_invalidates_materials_and_measured_prefix() {
+    let (_directory, storage, service) = fixture();
+    warm_preview(&service);
+    let stale = service.prepare_cached_history(ID).unwrap().unwrap();
+    let mut trace = stale.source.traces[0].clone();
+    trace
+        .items
+        .push(ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "New durable trace observation".into(),
+            provider_turn_id: None,
+            first_tool_call_id: None,
+            truncated: false,
+        });
+    let items = [ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".into(),
+        content: "New durable trace observation".into(),
+        images: vec![],
+        tool_call_id: None,
+        tool_calls: vec![],
+        is_error: false,
+    }];
+    storage
+        .finalize_chat_message_with_conversation_trace_model_context_and_usage(
+            ID,
+            "old-assistant",
+            "The requirements are recorded.",
+            Some("sent"),
+            "completed",
+            &trace,
+            Some(&items),
+            2000,
+            2001,
+            None,
+            None,
+        )
+        .unwrap();
+
+    let current = service.prepare_cached_history(ID).unwrap().unwrap();
+    assert_ne!(current.source.version, stale.source.version);
+    assert!(!Arc::ptr_eq(&current.messages, &stale.messages));
+    assert!(!service.has_measured_prepared_history_for_test(ID));
+    let assistant = current
+        .messages
+        .iter()
+        .find(|message| message.message_id.as_deref() == Some("old-assistant"))
+        .unwrap();
+    assert_eq!(assistant.conversation_model_context_items, items);
+    assert_eq!(assistant.conversation_turn_trace.as_ref(), Some(&trace));
+    let cold = AgentService::new_authorized_for_test(storage);
+    assert_eq!(
+        serde_json::to_value(warm_preview(&service)).unwrap(),
+        serde_json::to_value(warm_preview(&cold)).unwrap(),
+        "new durable trace material must be measured before the next send"
+    );
+}
+
+#[test]
+fn history_warm_attachment_change_invalidates_materials_and_measured_prefix() {
+    use base64::Engine;
+
+    let (_directory, storage, service) = fixture();
+    warm_preview(&service);
+    let stale = service.prepare_cached_history(ID).unwrap().unwrap();
+    let bytes = b"New source evidence";
+    let import_id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: "late-attachment".into(),
+            kind: mycopilot_core::AgentInputAttachmentKind::File,
+            name: "new-requirements.txt".into(),
+            mime_type: Some("text/plain".into()),
+            size_bytes: bytes.len() as u64,
+            pasted_text: None,
+        })
+        .unwrap();
+    storage
+        .append_attachment_import(
+            &import_id,
+            0,
+            &base64::engine::general_purpose::STANDARD.encode(bytes),
+        )
+        .unwrap();
+    let attachment = storage.finish_attachment_import(&import_id).unwrap();
+    storage
+        .save_input_attachments(ID, "old-user", None, &[attachment], 3000)
+        .unwrap();
+    let current = service.prepare_cached_history(ID).unwrap().unwrap();
+    assert_ne!(current.source.version, stale.source.version);
+    assert!(!Arc::ptr_eq(&current.messages, &stale.messages));
+    assert!(!service.has_measured_prepared_history_for_test(ID));
+    let user = current
+        .source
+        .conversation
+        .messages
+        .iter()
+        .find(|message| message.id == "old-user")
+        .unwrap();
+    assert_eq!(user.attachments.len(), 1);
+    assert_eq!(user.attachments[0].name, "new-requirements.txt");
+    let cold = AgentService::new_authorized_for_test(storage);
+    assert_eq!(
+        serde_json::to_value(warm_preview(&service)).unwrap(),
+        serde_json::to_value(warm_preview(&cold)).unwrap()
+    );
+}
+
 fn assert_terminal_update_rejects_stale_measurement(change_user_prefix: bool) {
     let (_directory, storage, service) = fixture();
     warm_preview(&service);

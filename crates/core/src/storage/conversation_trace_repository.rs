@@ -502,7 +502,6 @@ pub(crate) fn load_stored_trace_records_for_conversation(
         ORDER BY
             message.position ASC,
             message.created_at ASC,
-            trace.updated_at ASC,
             trace.assistant_message_id ASC
         ",
     )?;

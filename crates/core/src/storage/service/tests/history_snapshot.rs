@@ -514,7 +514,7 @@ fn history_snapshot_admission_rejects_trace_only_mutation_transactionally() {
         .load_conversation_history_snapshot("history")
         .unwrap()
         .unwrap();
-    service.state.connection().unwrap().execute("UPDATE conversation_turn_traces SET updated_at = updated_at + 1 WHERE assistant_message_id = 'history-assistant'", []).unwrap();
+    service.state.connection().unwrap().execute("UPDATE conversation_turn_traces SET completed_at = completed_at + 1 WHERE assistant_message_id = 'history-assistant'", []).unwrap();
     let mut candidate = old.conversation.to_record();
     let mut assistant = candidate.messages.last().unwrap().clone();
     assistant.id = "new-assistant".into();
@@ -758,4 +758,177 @@ fn history_snapshot_tracks_only_workflow_delivery_ids_already_in_history() {
     assert!(!service
         .is_conversation_history_snapshot_current(&with_delivery.version)
         .unwrap());
+}
+
+#[test]
+fn history_snapshot_refreshes_raw_presentation_without_redecoding_semantic_history() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seeded_history(&service, "history");
+    let original = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    let before = service.history_snapshot_diagnostics("history");
+    let external = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    let mut previous = original.clone();
+    for agent_json in [
+        Some(r#"{"usage":{"inputTokens":123},"finishReason":"stop"}"#),
+        Some(r#"{"usage":{"inputTokens":456},"finishReason":"length","note":"quoted \" text"}"#),
+        None,
+    ] {
+        external
+            .execute(
+                "UPDATE messages SET agent_run_json=?1 WHERE id='history-assistant'",
+                [agent_json],
+            )
+            .unwrap();
+        assert!(service
+            .is_conversation_history_snapshot_current(&original.version)
+            .unwrap());
+        let refreshed = service
+            .load_conversation_history_snapshot("history")
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.version, original.version);
+        assert!(Arc::ptr_eq(&original.payload, &refreshed.payload));
+        assert!(!Arc::ptr_eq(
+            &previous.conversation.messages,
+            &refreshed.conversation.messages
+        ));
+        assert!(refreshed.conversation_revision > previous.conversation_revision);
+        assert_eq!(
+            refreshed.conversation.messages[1].agent_run_json.as_deref(),
+            agent_json
+        );
+        assert_eq!(
+            serde_json::to_value(refreshed.conversation.to_record()).unwrap(),
+            serde_json::to_value(
+                service
+                    .load_conversation_for_turn("history")
+                    .unwrap()
+                    .0
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let bytes = serde_json::to_vec(&(
+            refreshed.conversation.to_record(),
+            &refreshed.traces,
+            &refreshed.model_context_logs,
+            &refreshed.compaction_summary,
+        ))
+        .unwrap()
+        .len()
+            * 2;
+        assert_eq!(refreshed.estimated_bytes, bytes);
+        external
+            .execute(
+                "UPDATE messages SET agent_run_json=agent_run_json WHERE id='history-assistant'",
+                [],
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &refreshed,
+            &service
+                .load_conversation_history_snapshot("history")
+                .unwrap()
+                .unwrap()
+        ));
+        previous = refreshed;
+    }
+    assert_eq!(original.conversation.messages[1].agent_run_json, None);
+    for ui_json in [
+        Some(r#"{"favorited":true}"#),
+        Some(r#"{"collapsed":true}"#),
+        None,
+    ] {
+        chat_repository::update_message_ui_state(
+            &external,
+            "history",
+            "history-assistant",
+            ui_json,
+        )
+        .unwrap();
+        let refreshed = service
+            .load_conversation_history_snapshot("history")
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.version, original.version);
+        assert_eq!(
+            refreshed.conversation_revision,
+            previous.conversation_revision
+        );
+        assert!(Arc::ptr_eq(&original.payload, &refreshed.payload));
+        assert_eq!(
+            refreshed.conversation.messages[1].ui_state_json.as_deref(),
+            ui_json
+        );
+        assert_eq!(
+            serde_json::to_value(refreshed.conversation.to_record()).unwrap(),
+            serde_json::to_value(
+                service
+                    .load_conversation_for_turn("history")
+                    .unwrap()
+                    .0
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let bytes = serde_json::to_vec(&(
+            refreshed.conversation.to_record(),
+            &refreshed.traces,
+            &refreshed.model_context_logs,
+            &refreshed.compaction_summary,
+        ))
+        .unwrap()
+        .len()
+            * 2;
+        assert_eq!(refreshed.estimated_bytes, bytes);
+        chat_repository::update_message_ui_state(
+            &external,
+            "history",
+            "history-assistant",
+            ui_json,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &refreshed,
+            &service
+                .load_conversation_history_snapshot("history")
+                .unwrap()
+                .unwrap()
+        ));
+        previous = refreshed;
+    }
+    let after = service.history_snapshot_diagnostics("history");
+    assert_eq!(before.full_loads, after.full_loads);
+    assert_eq!(before.trace_decodes, after.trace_decodes);
+    assert_eq!(before.model_context_decodes, after.model_context_decodes);
+}
+
+#[test]
+fn history_snapshot_noop_trace_updates_reuse_payload_but_actual_payload_tamper_invalidates() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seeded_history(&service, "history");
+    let original = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    let connection = service.state.connection().unwrap();
+    connection.execute_batch("UPDATE conversation_turn_traces SET terminal_status=terminal_status, completed_at=completed_at, updated_at=updated_at+1 WHERE assistant_message_id='history-assistant'; UPDATE conversation_turn_trace_items SET item_json=item_json, item_kind=item_kind WHERE assistant_message_id='history-assistant'; UPDATE conversation_model_context_items SET payload=payload, content_hash=content_hash WHERE assistant_message_id='history-assistant';").unwrap();
+    drop(connection);
+    let unchanged = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, &unchanged));
+    service.state.connection().unwrap().execute("UPDATE conversation_model_context_items SET payload=zeroblob(length(payload)) WHERE assistant_message_id='history-assistant'", []).unwrap();
+    assert!(!service
+        .is_conversation_history_snapshot_current(&original.version)
+        .unwrap());
+    assert!(service
+        .load_conversation_history_snapshot("history")
+        .is_err());
 }

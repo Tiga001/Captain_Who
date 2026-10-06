@@ -195,14 +195,14 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed。当前 schema v66 接受明确的 exact v50–v65 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
+fail closed。当前 schema v68 接受明确的 exact v50–v67 连续升级，v50 还要求协作事件日志为空；不推测旧活动归属。
 v59→v60 只按既有 FTS 顺序元数据回填历史顺序投影，不重排历史或改写正文；v63→v64 新建独立组织邮箱，
 不转换旧图执行记录；v64→v65 复制独立实例定义并建立成员 incarnation，拒绝孤立实例；v65→v66 删除旧
 `workflow_execution_*` 表及记录，保留当前组织邮箱、人员回执和聊天。启动升级并不承诺保留所有旧业务数据，升级前须备份。
 真源见 [`migrations.rs`](../../crates/core/src/storage/migrations.rs)。
 
-启动迁移与显式 reset 是不同边界：reset 当前可从 exact v66 提取 allowlist；旧 v35–v48 与私有 v33 backup
-的配置恢复仍受 target v49 gate 拒绝，v49–v65 不在旧配置来源 allowlist 中。不得用手工改 `user_version`、删表或默默丢弃配置绕过。
+启动迁移与显式 reset 是不同边界：reset 当前可从 exact v68 提取 allowlist；旧 v35–v48 与私有 v33 backup
+的配置恢复仍受 target v49 gate 拒绝，v49–v67 不在旧配置来源 allowlist 中。不得用手工改 `user_version`、删表或默默丢弃配置绕过。
 reset 不保留 notification facts、Browser history/download records、Agent templates、组织模板/实例定义/成员身份/草稿、
 组织邮件/投递/暂停/Run/回执与人员变更回执、本机 Token 统计和 FileChange 运行/审计状态。详见
 [恢复 Runbook](../operations/recovery-runbook.md)。

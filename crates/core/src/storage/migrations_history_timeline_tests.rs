@@ -61,29 +61,33 @@ fn v59_timeline_migration_preserves_journal_and_backfills_recorded_order() {
         "conversation_history_fts",
         "conversation_history_index_entries",
     ];
-    let before: Vec<_> = tables
+    // Later additive migrations may append columns. Compare every original column exactly.
+    let queries: Vec<_> = tables
         .iter()
         .map(|table| {
-            rows(
-                &connection,
-                &format!("SELECT * FROM {table} ORDER BY rowid"),
-            )
+            let mut statement = connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(",");
+            format!("SELECT {columns} FROM {table} ORDER BY rowid")
         })
+        .collect();
+    let before: Vec<_> = queries
+        .iter()
+        .map(|query| rows(&connection, query))
         .collect();
     run_migrations(&connection).unwrap();
     assert_eq!(
         read_schema_version(&connection).unwrap(),
         STORAGE_SCHEMA_VERSION
     );
-    for (table, expected) in tables.iter().zip(before) {
-        assert_eq!(
-            rows(
-                &connection,
-                &format!("SELECT * FROM {table} ORDER BY rowid")
-            ),
-            expected,
-            "{table}"
-        );
+    for ((table, query), expected) in tables.iter().zip(&queries).zip(before) {
+        assert_eq!(rows(&connection, query), expected, "{table}");
     }
     assert_projection_agrees(&connection);
     let position: i64 = connection.query_row(

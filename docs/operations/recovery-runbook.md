@@ -39,7 +39,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v66 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v65 可按连续迁移升级到当前版本。v49 及更早版本不自动升级。关键历史边界：
+当前基线为 **schema v68 + exact catalog fingerprint + valid foreign keys**。exact v50 仅在协作事件日志为空时可升级；exact v51–v67 可按连续迁移升级到当前版本。v49 及更早版本不自动升级。关键历史边界：
 
 - v51→v52 保留协作数据与回执；v52→v53 只为未来事件增加请求归属活动，旧活动不推测位置或回填。
 - v53→v59 逐步引入旧工作流的定义、模板可用性、实例/草稿、启用与归档保护、执行记录和默认项目。这些迁移名称保留历史含义，不代表当前仍提供图工作流执行。
@@ -49,10 +49,12 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 - v64→v65 将模板定义复制到每个实例的 `definition_json` 并替换其定义 ID，为既有成员绑定生成 `membership_id`；实例从此独立于模板更新与删除。迁移前校验外键，拒绝孤立实例，不通过 join 静默丢行。
 - v65→v66 **删除旧图执行的 `workflow_execution_*` 七张表及其记录**；当前组织邮箱、人员变更回执和聊天历史保留。旧工作流运行记录不会出现在新的邮箱中，也不能在升级后继续旧图执行。
 
+- v66→v67 添加独立消息历史修订；v67→v68 增加展示水位与消息更新索引，跳过无变化的 Trace/模型日志更新，保留聊天正文和模型历史。
+
 真源与迁移回滚/保留测试见 [`migrations.rs`](../../crates/core/src/storage/migrations.rs) 和
 [`canonical_schema.sql`](../../crates/core/src/storage/canonical_schema.sql)。升级前应保存完整数据根备份，尤其是仍需要旧图执行记录的开发库；不能把“聊天历史保留”解释为“全部旧业务记录保留”。
 
-不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v66 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
+不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v68 不支持直接交给旧应用打开。回退应用版本时，应先停止应用并恢复升级前的完整数据根备份；只回退代码不会回退 schema，不能将新库直接交给旧二进制。启动升级与显式 reset 的来源支持集不同，不能互相推断。
 
 手动压缩在重启后显示 interrupted 时，可直接继续聊天；旧 active head 保持有效。不得重放原付费请求来“恢复进度”。如果请求已到达厂商但尚未收到响应就崩溃，实际账单可能只有厂商可确认，本地不能编造 token 数量。
 
@@ -78,7 +80,7 @@ pnpm storage:reset-dev -- --confirm-reset
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
 2. 从工具明确支持的 exact catalog 提取 allowlisted configuration；支持版本、指纹和受限私有备份恢复以 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs) 为准。MCP 精确 identity/authorization 必须重新验证；未知配置结构拒绝重置，不能用默认值默默替换模型配置。
-3. 在 staging 文件创建 fresh v66 canonical DB。
+3. 在 staging 文件创建 fresh v68 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
@@ -101,7 +103,7 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；失去�
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把旧 schema backup 覆盖回运行路径并期待当前版本接受；先核对本节 exact v50–v65 启动升级条件、旧库 fingerprint 及旧图执行记录删除边界。
+- 不要直接把旧 schema backup 覆盖回运行路径并期待当前版本接受；先核对本节 exact v50–v67 启动升级条件、旧库 fingerprint 及旧图执行记录删除边界。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
 - 当前 SQLite backup 不含当前模型/搜索 secret，只含 reference 与非秘密元数据；旧 schema backup 仍可能含明文 Token/Key，二者都不得上传到 issue、CI artifact 或公共对象存储。
 - 只恢复 SQLite 不会恢复操作系统凭据。跨设备、跨账户或凭据 backend 丢失后，保留的 reference 会显示为不可用，需要用户替换或清除。
@@ -109,9 +111,9 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；失去�
 
 ### 旧开发库的配置保留边界
 
-当前 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs) 可保留 exact current v66 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v66 下拒绝恢复；v49–v65 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v65 升级，文档不能把旧版 reset 支持声明延续到当前版本。未知旧源只要存在任一保留配置表，即使表为空也会拒绝；无这些配置表的旧库可进入不保留配置的显式 reset 分支，这不构成旧配置恢复支持。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
+当前 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs) 可保留 exact current v68 的 allowlisted 配置。历史 v35–v48 和私有 v33 backup 分支仍绑定 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49`，在 current v68 下拒绝恢复；v49–v67 也不在 reset 的旧配置来源 allowlist 中。该限制独立于正常启动支持的 v50–v67 升级，文档不能把旧版 reset 支持声明延续到当前版本。未知旧源只要存在任一保留配置表，即使表为空也会拒绝；无这些配置表的旧库可进入不保留配置的显式 reset 分支，这不构成旧配置恢复支持。遇到旧库拒绝时保留原库和备份，使用隔离数据根继续开发，并另行修复/验证恢复工具；不得修改版本号或删除配置来绕过拒绝。
 
-重建后验证 `PRAGMA user_version = 66`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
+重建后验证 `PRAGMA user_version = 68`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
 
 ### 附件、目录引用与组织配置
 

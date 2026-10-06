@@ -14,6 +14,10 @@ mod initial_publication {
 
     impl InitialPublicationFixture {
         fn new() -> Self {
+            Self::with_admission(true)
+        }
+
+        fn with_admission(admitted: bool) -> Self {
             let directory = tempdir().unwrap();
             let storage = Arc::new(
                 StorageService::open(&directory.path().join("initial-publication.sqlite")).unwrap(),
@@ -58,41 +62,56 @@ mod initial_publication {
             input.assistant_message_id = Some("initial-assistant".into());
             input.context_window_indicator_enabled = true;
             freeze_test_pending_provider_configuration(&storage, &mut input);
-            admit_test_conversation_run(
-                &storage,
-                &ConversationTraceSnapshot::default().in_progress_trace(
-                    "initial-run",
-                    &conversation_id,
-                    "initial-assistant",
-                ),
-                input.context.as_ref().unwrap().permissions,
-                2,
-            );
-            // This validated empty current-Turn projection has exactly the durable prefix of an
-            // admitted baseline, before Runtime publishes its first seed.
-            service
-                .rebuild_conversation_context_state(
-                    &input,
-                    &conversation_id,
-                    Some("initial-run"),
-                    None,
-                    None,
-                )
-                .unwrap();
-            service
-                .conversation_context_states
-                .lock()
-                .unwrap()
-                .get_mut(&conversation_id)
-                .unwrap()
-                .awaiting_initial_publication = true;
-            Self {
+            let fixture = Self {
                 _directory: directory,
                 storage,
                 service,
                 input,
                 conversation_id,
+            };
+            if admitted {
+                fixture.admit_and_install();
             }
+            fixture
+        }
+
+        fn admit_and_install(&self) {
+            self.admit();
+            self.install_admitted_baseline();
+        }
+
+        fn admit(&self) {
+            admit_test_conversation_run(
+                &self.storage,
+                &ConversationTraceSnapshot::default().in_progress_trace(
+                    "initial-run",
+                    &self.conversation_id,
+                    "initial-assistant",
+                ),
+                self.input.context.as_ref().unwrap().permissions,
+                2,
+            );
+        }
+
+        fn install_admitted_baseline(&self) {
+            // This validated empty current-Turn projection has exactly the durable prefix of an
+            // admitted baseline, before Runtime publishes its first seed.
+            self.service
+                .rebuild_conversation_context_state(
+                    &self.input,
+                    &self.conversation_id,
+                    Some("initial-run"),
+                    None,
+                    None,
+                )
+                .unwrap();
+            self.service
+                .conversation_context_states
+                .lock()
+                .unwrap()
+                .get_mut(&self.conversation_id)
+                .unwrap()
+                .awaiting_initial_publication = true;
         }
 
         fn observer(&self) -> AgentConversationTraceObserver {
@@ -110,6 +129,157 @@ mod initial_publication {
                 crate::transport::outbound_channel().0,
             )
         }
+    }
+
+    fn pause_preview_before_publication(
+        fixture: &InitialPublicationFixture,
+    ) -> (
+        Arc<std::sync::Barrier>,
+        std::thread::JoinHandle<Result<ConversationContextStateUpdate, String>>,
+    ) {
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let hook_release = Arc::clone(&release);
+        *fixture
+            .service
+            .context_preview_publication_hook
+            .lock()
+            .unwrap() = Some(Arc::new(move || {
+            ready.send(()).unwrap();
+            hook_release.wait();
+        }));
+        let service = fixture.service.clone();
+        let input = fixture.input.clone();
+        let conversation = fixture.conversation_id.clone();
+        let worker = std::thread::spawn(move || {
+            service.rebuild_conversation_context_state(&input, &conversation, None, None, None)
+        });
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("preview reaches its publication barrier");
+        // Later Runtime work must not inherit this preview-only synchronization hook.
+        *fixture
+            .service
+            .context_preview_publication_hook
+            .lock()
+            .unwrap() = None;
+        (release, worker)
+    }
+
+    #[test]
+    fn idle_preview_after_durable_admission_cannot_fill_an_empty_live_slot() {
+        let fixture = InitialPublicationFixture::with_admission(false);
+        let (release, worker) = pause_preview_before_publication(&fixture);
+        fixture.admit();
+        release.wait();
+        assert!(worker.join().unwrap().unwrap().snapshot.is_some());
+        assert!(!fixture
+            .service
+            .conversation_context_states
+            .lock()
+            .unwrap()
+            .contains_key(&fixture.conversation_id));
+        fixture.install_admitted_baseline();
+        assert!(fixture.observer()(initial_backend_seed())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn idle_preview_finishing_after_admission_preserves_the_installed_run_baseline() {
+        let fixture = InitialPublicationFixture::with_admission(false);
+        let (release, worker) = pause_preview_before_publication(&fixture);
+        fixture.admit_and_install();
+        let before = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        release.wait();
+        assert!(worker.join().unwrap().unwrap().snapshot.is_some());
+        {
+            let states = fixture.service.conversation_context_states.lock().unwrap();
+            let live = states.get(&fixture.conversation_id).unwrap();
+            assert_eq!(live.active_run_id.as_deref(), Some("initial-run"));
+            assert!(live.awaiting_initial_publication);
+        }
+        assert!(fixture.observer()(initial_backend_seed())
+            .unwrap()
+            .is_some());
+        let after = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        assert_eq!(before.full_loads, after.full_loads);
+        assert_eq!(before.trace_decodes, after.trace_decodes);
+    }
+
+    #[test]
+    fn cold_running_preview_finishing_after_observer_preserves_its_publication_cursor() {
+        let fixture = InitialPublicationFixture::new();
+        fixture
+            .service
+            .invalidate_conversation_context_state(&fixture.conversation_id);
+        let (release, worker) = pause_preview_before_publication(&fixture);
+        let observer = fixture.observer();
+        let publication = initial_backend_seed();
+        assert!(observer(publication.clone()).unwrap().is_some());
+        let before = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        release.wait();
+        assert!(worker.join().unwrap().unwrap().snapshot.is_some());
+        {
+            let states = fixture.service.conversation_context_states.lock().unwrap();
+            let live = states.get(&fixture.conversation_id).unwrap();
+            assert_eq!(live.active_run_id.as_deref(), Some("initial-run"));
+            assert_eq!(live.committed_activity_items, 1);
+        }
+        assert!(observer(publication).unwrap().is_some());
+        let after = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        assert_eq!(before.full_loads, after.full_loads);
+        assert_eq!(before.trace_decodes, after.trace_decodes);
+    }
+
+    #[test]
+    fn different_budget_preview_returns_its_result_without_retiring_live_state() {
+        let fixture = InitialPublicationFixture::new();
+        let mut preview_input = fixture.input.clone();
+        preview_input.max_tokens = Some(16_000);
+        let projection = fixture
+            .service
+            .context_window_tool_projection(&preview_input, None)
+            .unwrap();
+        let before_revision = conversation_context_configuration_revision(&fixture.input).unwrap();
+        let preview = fixture
+            .service
+            .context_window_snapshot_with_projection_cache(
+                &preview_input,
+                &fixture.conversation_id,
+                &projection,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(preview.reserved_output_tokens, 16_000);
+        {
+            let states = fixture.service.conversation_context_states.lock().unwrap();
+            let live = states.get(&fixture.conversation_id).unwrap();
+            assert_eq!(live.configuration_revision, before_revision);
+            assert_eq!(live.active_run_id.as_deref(), Some("initial-run"));
+            assert!(live.awaiting_initial_publication);
+        }
+        let before = fixture
+            .storage
+            .history_snapshot_diagnostics(&fixture.conversation_id);
+        assert!(fixture.observer()(initial_backend_seed())
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            fixture
+                .storage
+                .history_snapshot_diagnostics(&fixture.conversation_id)
+                .full_loads,
+            before.full_loads,
+        );
     }
 
     fn initial_backend_seed() -> mycopilot_core::ConversationTracePublication {

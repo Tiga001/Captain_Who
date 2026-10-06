@@ -94,7 +94,9 @@ fn collect_rust_sources(root: &Path, output: &mut Vec<PathBuf>) {
 }
 
 fn is_test_source(relative: &str) -> bool {
-    relative.contains("/tests/") || relative.ends_with("/tests.rs")
+    relative.contains("/tests/")
+        || relative.ends_with("/tests.rs")
+        || relative.ends_with("_tests.rs")
 }
 
 fn production_prefix(source: &str) -> &str {

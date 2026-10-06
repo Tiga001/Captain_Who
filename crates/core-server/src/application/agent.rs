@@ -670,6 +670,9 @@ pub struct AgentService {
     collaboration_run_directories:
         Arc<Mutex<HashMap<String, mycopilot_core::AgentCollaborationSelectorDirectory>>>,
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
+    #[cfg(test)]
+    context_preview_publication_hook:
+        Arc<Mutex<Option<context_window::ContextPreviewPublicationHook>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
     prepared_histories: Arc<Mutex<prepared_history::PreparedHistoryCache>>,
     prepared_history_inflight:
@@ -881,6 +884,8 @@ impl AgentService {
             running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
             collaboration_run_directories: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            context_preview_publication_hook: Arc::new(Mutex::new(None)),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             prepared_histories: Arc::new(Mutex::new(
                 prepared_history::PreparedHistoryCache::default(),

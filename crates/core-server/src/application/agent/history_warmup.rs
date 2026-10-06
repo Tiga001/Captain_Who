@@ -111,7 +111,10 @@ impl AgentService {
         let started = Instant::now();
         // This function is read-only and revalidates its snapshot before publishing. In
         // particular, do not call root admission, bind_input, or a model-request preview here.
-        match self.prepare_cached_history(conversation_id) {
+        match self.prepare_cached_history_for(
+            conversation_id,
+            super::prepared_history::HistoryPreparationSource::IdleWarmup,
+        ) {
             Ok(_) => {}
             Err(error) => {
                 #[cfg(debug_assertions)]

@@ -5,6 +5,16 @@ pub(super) struct RunningContextWindowSnapshot {
     configuration: serde_json::Value,
 }
 
+#[cfg(test)]
+pub(super) type ContextPreviewPublicationHook = Arc<dyn Fn() + Send + Sync>;
+
+/// A preview may replace only the idle cache slot it inspected. The durable history version
+/// additionally fences admission, deletion and rewrites while the expensive preview is built.
+struct ContextPreviewPublicationFence {
+    previous_access: Option<u64>,
+    was_run_bound: bool,
+}
+
 /// Small, credential-free configuration identity. Historical messages, images and tool payloads
 /// are deliberately absent, so checking a running request never copies its conversation history.
 fn running_context_window_configuration(input: &AgentChatInput) -> serde_json::Value {
@@ -303,7 +313,10 @@ impl AgentService {
         }
 
         let prepared_history = match conversation_id.as_deref() {
-            Some(conversation_id) => self.prepare_cached_history(conversation_id)?,
+            Some(conversation_id) => self.prepare_cached_history_for(
+                conversation_id,
+                prepared_history::HistoryPreparationSource::Preview,
+            )?,
             None => None,
         };
         let conversation = prepared_history
@@ -723,7 +736,8 @@ impl AgentService {
                         .map(Some)
                         .map_err(|error| error.to_string());
                 }
-                states.remove(conversation_id);
+                // A preview with different configuration/history computes its own result below.
+                // It must not retire the baseline still owned by a live Runtime observer.
             }
         }
         self.rebuild_conversation_context_state(
@@ -744,6 +758,18 @@ impl AgentService {
         snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
         tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<ConversationContextStateUpdate, String> {
+        let preview_fence = active_run_id.is_none().then(|| {
+            let states = self
+                .conversation_context_states
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let previous = states.get(conversation_id);
+            ContextPreviewPublicationFence {
+                previous_access: previous.map(|entry| entry.last_access),
+                was_run_bound: previous
+                    .is_some_and(|entry| !entry.terminal || entry.awaiting_initial_publication),
+            }
+        });
         self.record_context_rebuild(conversation_id);
         let PersistedConversationContextState {
             preview_input,
@@ -850,8 +876,69 @@ impl AgentService {
             terminal_prefix_fingerprint,
             last_access: self.next_conversation_context_state_access(),
         };
-        self.insert_conversation_context_state(conversation_id, entry);
+        if let Some(fence) = preview_fence {
+            #[cfg(test)]
+            {
+                let hook = self
+                    .context_preview_publication_hook
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // Cache publication is optional; a completed read-only estimate remains useful if
+            // another operation changes storage or prevents the final freshness check.
+            if self
+                .publish_idle_context_preview(conversation_id, entry, fence)
+                .is_err()
+            {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[历史上下文缓存] 预览缓存发布失败：会话={conversation_id}，返回本次估算"
+                );
+            }
+        } else {
+            self.insert_conversation_context_state(conversation_id, entry);
+        }
         Ok(ConversationContextStateUpdate { baseline, snapshot })
+    }
+
+    fn publish_idle_context_preview(
+        &self,
+        conversation_id: &str,
+        entry: ConversationContextStateEntry,
+        fence: ContextPreviewPublicationFence,
+    ) -> Result<(), String> {
+        if fence.was_run_bound || !entry.terminal || entry.awaiting_initial_publication {
+            return Ok(());
+        }
+        let Some(version) = entry.history_version.as_ref() else {
+            return Ok(());
+        };
+        let mut states = self
+            .conversation_context_states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = states.get(conversation_id);
+        if current.map(|entry| entry.last_access) != fence.previous_access
+            || current.is_some_and(|entry| !entry.terminal || entry.awaiting_initial_publication)
+            || self
+                .storage
+                .load_active_conversation_turn_identity(conversation_id)?
+                .is_some()
+            || !self
+                .storage
+                .is_conversation_history_snapshot_current(version)?
+        {
+            return Ok(());
+        }
+        // The Runtime installer and observers use this same lock. An admission that commits
+        // after the durable checks above will install/invalidate its state after this publication;
+        // an already installed Run can never be overwritten by a late read-only preview.
+        Self::insert_context_state_into_cache(&mut states, conversation_id, entry);
+        Ok(())
     }
 
     pub(super) fn finalize_conversation_context_state(
@@ -1194,6 +1281,14 @@ impl AgentService {
             .conversation_context_states
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        Self::insert_context_state_into_cache(&mut states, conversation_id, entry);
+    }
+
+    fn insert_context_state_into_cache(
+        states: &mut HashMap<String, ConversationContextStateEntry>,
+        conversation_id: &str,
+        entry: ConversationContextStateEntry,
+    ) {
         if !states.contains_key(conversation_id)
             && states.len() >= MAX_CONVERSATION_CONTEXT_STATE_CACHE_ENTRIES
         {

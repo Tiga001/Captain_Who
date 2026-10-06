@@ -14,6 +14,29 @@ struct WindowFixture {
     turn: usize,
 }
 
+#[test]
+fn completed_turn_changed_budget_preview_is_reused_on_the_second_read() {
+    let mut fixture = WindowFixture::new();
+    fixture.start_turn("Complete this turn before previewing another output budget.");
+    fixture.finish_turn("The turn is complete.");
+    let mut preview_input = fixture.preview_input();
+    preview_input.max_tokens = Some(16_000);
+    let before = fixture
+        .service
+        .prepared_history_diagnostics_for_test(CONVERSATION);
+    let first = fixture.preview(&preview_input);
+    assert_eq!(first.reserved_output_tokens, 16_000);
+    let after_first = fixture
+        .service
+        .prepared_history_diagnostics_for_test(CONVERSATION);
+    assert_eq!(after_first.context_rebuilds, before.context_rebuilds + 1);
+    assert_eq!(fixture.preview(&preview_input), first);
+    let after_second = fixture
+        .service
+        .prepared_history_diagnostics_for_test(CONVERSATION);
+    assert_eq!(after_second.context_rebuilds, after_first.context_rebuilds);
+}
+
 fn message(id: &str, role: &str, content: &str, created_at: i64) -> ChatMessageRecord {
     ChatMessageRecord {
         id: id.into(),

@@ -3296,7 +3296,13 @@ mod tests {
         }
         connection
             .execute_batch(
-                "DROP TRIGGER message_history_conversation_insert;
+                "DROP TRIGGER message_presentation_message_update;
+                 DROP TRIGGER message_presentation_ui_insert;
+                 DROP TRIGGER message_presentation_ui_update;
+                 DROP TRIGGER message_presentation_ui_delete;
+                 DROP INDEX idx_messages_presentation_revision;
+                 ALTER TABLE messages DROP COLUMN presentation_revision;
+                 DROP TRIGGER message_history_conversation_insert;
                  DROP TRIGGER message_history_message_insert;
                  DROP TRIGGER message_history_message_update;
                  DROP TRIGGER message_history_message_delete;

@@ -91,6 +91,8 @@ pub struct ConversationHistoryPayload {
 pub struct ConversationHistorySnapshot {
     pub conversation: SharedHistoryConversation,
     pub conversation_revision: i64,
+    presentation_revision: i64,
+    ui_revision: i64,
     pub payload: Arc<ConversationHistoryPayload>,
     pub version: ConversationHistoryVersion,
     pub estimated_bytes: usize,
@@ -102,26 +104,93 @@ impl std::ops::Deref for ConversationHistorySnapshot {
     }
 }
 impl ConversationHistorySnapshot {
-    fn with_current_metadata(
+    fn with_current_presentation(
         self: &Arc<Self>,
         connection: &Connection,
         conversation_revision: i64,
     ) -> Result<Arc<Self>, String> {
-        if self.conversation_revision == conversation_revision {
+        let (presentation_revision, ui_revision) =
+            message_presentation_revisions(connection, &self.conversation.id)?;
+        if self.conversation_revision == conversation_revision
+            && self.presentation_revision == presentation_revision
+            && self.ui_revision == ui_revision
+        {
             return Ok(self.clone());
         }
-        let metadata = chat_repository::get_conversation_meta(connection, &self.conversation.id)
-            .map_err(storage_error)?
-            .ok_or_else(|| "历史上下文的会话已不存在。".to_string())?;
         let mut refreshed = self.as_ref().clone();
-        // Only the small metadata wrapper changes. Account for its size without rescanning
-        // the shared messages, decoded traces or model context payloads.
-        refreshed.estimated_bytes = refreshed
-            .estimated_bytes
-            .saturating_sub(serialized_size(&self.conversation.metadata)?.saturating_mul(2))
-            .saturating_add(serialized_size(&metadata)?.saturating_mul(2));
-        refreshed.conversation.metadata = metadata;
-        refreshed.conversation_revision = conversation_revision;
+        if self.conversation_revision != conversation_revision {
+            let metadata =
+                chat_repository::get_conversation_meta(connection, &self.conversation.id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| "历史上下文的会话已不存在。".to_string())?;
+            // Refresh the small metadata wrapper without rescanning decoded history payloads.
+            refreshed.estimated_bytes = refreshed
+                .estimated_bytes
+                .saturating_sub(serialized_size(&self.conversation.metadata)?.saturating_mul(2))
+                .saturating_add(serialized_size(&metadata)?.saturating_mul(2));
+            refreshed.conversation.metadata = metadata;
+            refreshed.conversation_revision = conversation_revision;
+        }
+        if self.presentation_revision != presentation_revision {
+            // The indexed query reads only changed agent JSON, without loading trace/model
+            // payloads. Copy-on-write messages keep previously returned snapshots immutable.
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, agent_run_json FROM messages
+                 WHERE conversation_id = ?1 AND presentation_revision > ?2",
+                )
+                .map_err(storage_error)?;
+            let changes = statement
+                .query_map(
+                    rusqlite::params![self.conversation.id, self.presentation_revision],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(storage_error)?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+                .map_err(storage_error)?;
+            if !changes.is_empty() {
+                let messages = Arc::make_mut(&mut refreshed.conversation.messages);
+                for message in messages {
+                    if let Some(agent_run_json) = changes.get(&message.id) {
+                        refreshed.estimated_bytes = refreshed
+                            .estimated_bytes
+                            .saturating_sub(
+                                serialized_size(&message.agent_run_json)?.saturating_mul(2),
+                            )
+                            .saturating_add(serialized_size(agent_run_json)?.saturating_mul(2));
+                        message.agent_run_json = agent_run_json.clone();
+                    }
+                }
+            }
+            refreshed.presentation_revision = presentation_revision;
+        }
+        if self.ui_revision != ui_revision {
+            // UI state is a separate overlay, including for immutable fork/snapshot messages.
+            // Read its small rows only when its watermark changes; missing rows mean deletion.
+            let mut statement = connection
+                .prepare(
+                    "SELECT ui.message_id, ui.ui_state_json FROM chat_message_ui_states ui
+                 JOIN messages message ON message.id = ui.message_id
+                 WHERE message.conversation_id = ?1",
+                )
+                .map_err(storage_error)?;
+            let states = statement
+                .query_map([&self.conversation.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_error)?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+                .map_err(storage_error)?;
+            for message in Arc::make_mut(&mut refreshed.conversation.messages) {
+                let ui_state_json = states.get(&message.id).cloned();
+                refreshed.estimated_bytes = refreshed
+                    .estimated_bytes
+                    .saturating_sub(serialized_size(&message.ui_state_json)?.saturating_mul(2))
+                    .saturating_add(serialized_size(&ui_state_json)?.saturating_mul(2));
+                message.ui_state_json = ui_state_json;
+            }
+            refreshed.ui_revision = ui_revision;
+        }
         Ok(Arc::new(refreshed))
     }
 }
@@ -323,6 +392,8 @@ impl StorageService {
         else {
             return Ok(None);
         };
+        let (presentation_revision, ui_revision) =
+            message_presentation_revisions(&transaction, conversation_id)?;
         let active = conversation_trace_repository::get_in_progress_turn_identity(
             &transaction,
             conversation_id,
@@ -336,7 +407,7 @@ impl StorageService {
                 .map_err(|_| "历史上下文缓存状态不可用。".to_string())?;
             if let Some(snapshot) = cache.get(&version) {
                 let snapshot =
-                    snapshot.with_current_metadata(&transaction, conversation_revision)?;
+                    snapshot.with_current_presentation(&transaction, conversation_revision)?;
                 cache.insert(snapshot.clone());
                 transaction.commit().map_err(storage_error)?;
                 return Ok(Some(snapshot));
@@ -411,6 +482,8 @@ impl StorageService {
         let mut snapshot = Arc::new(ConversationHistorySnapshot {
             conversation: conversation.into(),
             conversation_revision,
+            presentation_revision,
+            ui_revision,
             payload: Arc::new(ConversationHistoryPayload {
                 traces,
                 model_context_logs,
@@ -431,10 +504,9 @@ impl StorageService {
             )?
             .filter(|(version, _)| version == &snapshot.version)
             {
-                // Metadata may change while the large bodies are decoded. Refresh it under
-                // this final read transaction so unchanged history does not return an already
-                // stale admission revision merely because a read/unread event arrived.
-                snapshot = snapshot.with_current_metadata(&transaction, revision)?;
+                // Presentation may change while the large bodies are decoded. Refresh raw
+                // agent JSON and admission metadata together under the final read transaction.
+                snapshot = snapshot.with_current_presentation(&transaction, revision)?;
                 let _ = self
                     .history_snapshot_cache
                     .lock()
@@ -445,6 +517,16 @@ impl StorageService {
         }
         Ok(Some(snapshot))
     }
+}
+
+fn message_presentation_revisions(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<(i64, i64), String> {
+    connection.query_row(
+        "SELECT presentation_revision, ui_revision FROM conversation_message_history_revisions WHERE conversation_id = ?1",
+        [conversation_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(storage_error)
 }
 
 fn serialized_size(value: &impl serde::Serialize) -> Result<usize, String> {
@@ -483,6 +565,8 @@ mod cache_tests {
             }
             .into(),
             conversation_revision: 0,
+            presentation_revision: 0,
+            ui_revision: 0,
             payload: Arc::new(ConversationHistoryPayload {
                 traces: Vec::new(),
                 model_context_logs: Vec::new(),

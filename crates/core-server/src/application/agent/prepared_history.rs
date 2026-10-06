@@ -7,6 +7,25 @@ pub(super) type PreparedHistory = PreparedConversationHistory;
 const MAX_ENTRIES: usize = 32;
 const MAX_BYTES: usize = 128 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+pub(super) enum HistoryPreparationSource {
+    Restore,
+    Preview,
+    Send,
+    IdleWarmup,
+}
+
+impl HistoryPreparationSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Restore => "上下文恢复",
+            Self::Preview => "上下文预览",
+            Self::Send => "发送准备",
+            Self::IdleWarmup => "后台空闲预热",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct MeasuredHistory {
     history: AgentPreparedConversationHistory,
@@ -101,6 +120,14 @@ impl AgentService {
         &self,
         id: &str,
     ) -> Result<Option<Arc<PreparedHistory>>, String> {
+        self.prepare_cached_history_for(id, HistoryPreparationSource::Restore)
+    }
+
+    pub(super) fn prepare_cached_history_for(
+        &self,
+        id: &str,
+        source: HistoryPreparationSource,
+    ) -> Result<Option<Arc<PreparedHistory>>, String> {
         // Install or join the same per-conversation gate under one short map lock.
         // Release the registry lock before waiting so unrelated conversations can progress.
         let gate = {
@@ -120,12 +147,13 @@ impl AgentService {
         let _preparation = gate.lock().unwrap_or_else(|error| error.into_inner());
         // Followers recheck the now-cached source rather than inheriting a result captured
         // before their arrival. Metadata CAS and history versions must both remain current.
-        self.prepare_cached_history_inner(id)
+        self.prepare_cached_history_inner(id, source)
     }
 
     fn prepare_cached_history_inner(
         &self,
         id: &str,
+        preparation_source: HistoryPreparationSource,
     ) -> Result<Option<Arc<PreparedHistory>>, String> {
         #[cfg(debug_assertions)]
         let started = Instant::now();
@@ -170,9 +198,7 @@ impl AgentService {
                 if entry.history.source.version == source.version
                     && entry.history.excluded_message_ids == excluded
                 {
-                    let history = if entry.history.source.conversation_revision
-                        == source.conversation_revision
-                    {
+                    let history = if Arc::ptr_eq(&entry.history.source, &source) {
                         entry.history.clone()
                     } else {
                         Arc::new(PreparedHistory {
@@ -181,12 +207,17 @@ impl AgentService {
                             excluded_message_ids: entry.history.excluded_message_ids.clone(),
                         })
                     };
-                    // Refresh the metadata wrapper and its accounting while preserving the
-                    // same-version measured history and shared message allocation.
+                    // Metadata, run display JSON or independent message UI state may refresh
+                    // the raw source without changing the model version. Keep those reads fresh
+                    // while preserving the measured history and assembled message allocation.
                     cache.insert(history.clone());
                     return Ok(Some(history));
                 }
-                miss_reason = "历史或消息来源已变化";
+                miss_reason = if entry.history.excluded_message_ids != excluded {
+                    "消息来源归属已变化"
+                } else {
+                    "模型历史已变化"
+                };
                 // Keep the stale entry until this preparation publishes a current replacement.
                 // A failed or superseded prepare must not erase a still-usable measured baseline.
             } else {
@@ -215,32 +246,38 @@ impl AgentService {
             messages: Arc::new(messages),
             excluded_message_ids: excluded,
         });
-        let mut publication = "已写入缓存";
-        if stable {
-            if self
+        if stable
+            && self
                 .storage
                 .is_conversation_history_snapshot_current(&history.source.version)?
-            {
-                let mut cache = self
-                    .prepared_histories
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if !cache.insert(history.clone()) {
-                    publication = "超过内存预算未写入缓存，发送时正常准备";
-                }
-            } else {
-                publication = "准备期间历史发生变化，旧结果未写入缓存";
+        {
+            let cached = self
+                .prepared_histories
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(history.clone());
+            #[cfg(debug_assertions)]
+            if !cached {
+                eprintln!(
+                    "[历史上下文缓存] 无法缓存历史：会话={id}，来源={}，原因=超过内存预算，发送时转为正常准备",
+                    preparation_source.label()
+                );
             }
-        } else {
-            publication = "轮次尚未结算，不缓存运行中历史";
+            #[cfg(not(debug_assertions))]
+            let _ = cached;
         }
+        // Preview, terminal refresh and idle warmup normally prepare a new history version.
+        // Report misses only when a sender actually has to wait for that preparation.
         #[cfg(debug_assertions)]
-        eprintln!(
-            "[历史上下文缓存] 未命中后准备完成：会话={id}，原因={miss_reason}，结果={publication}，耗时={}ms",
-            started.elapsed().as_millis()
-        );
+        if matches!(preparation_source, HistoryPreparationSource::Send) {
+            eprintln!(
+                "[历史上下文缓存] 缓存未命中：会话={id}，来源={}，原因={miss_reason}，同步准备耗时={}ms",
+                preparation_source.label(),
+                started.elapsed().as_millis()
+            );
+        }
         #[cfg(not(debug_assertions))]
-        let _ = (miss_reason, publication);
+        let _ = (miss_reason, preparation_source.label());
         Ok(Some(history))
     }
 
@@ -372,26 +409,34 @@ impl AgentService {
         };
         let id = &prepared.output.conversation_id;
         if !can_reuse_measured_history(&prepared.agent_input)? {
-            #[cfg(debug_assertions)]
-            eprintln!("[历史上下文缓存] 计量基线未复用：会话={id}，原因=当前模型需要实时校验私有回放记录，继续复用通用历史并正常恢复回放");
+            // Private replay validation is an expected provider policy, not a cache failure.
             return Ok(false);
         }
-        let measured = {
+        let (measured, miss_reason) = {
             let cache = self
                 .prepared_histories
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            cache
+            match cache
                 .entries
                 .iter()
-                .find(|entry| entry.history.source.version == source.source.version)
-                .and_then(|entry| entry.measured.clone())
+                .find(|entry| entry.history.source.conversation.id == *id)
+            {
+                Some(entry) if entry.history.source.version == source.source.version => (
+                    entry.measured.clone(),
+                    "通用历史已缓存，尚无可复用的计量基线",
+                ),
+                Some(_) => (None, "准备期间模型历史版本已变化"),
+                None => (None, "历史未缓存或已因内存预算淘汰"),
+            }
         };
         let Some(measured) = measured else {
             #[cfg(debug_assertions)]
             eprintln!(
-                "[历史上下文缓存] 计量基线未命中：会话={id}，原因=尚未预热或已淘汰，转为正常准备"
+                "[历史上下文缓存] 计量基线未命中：会话={id}，来源=发送准备，原因={miss_reason}，转为正常准备"
             );
+            #[cfg(not(debug_assertions))]
+            let _ = miss_reason;
             return Ok(false);
         };
         let configuration = conversation_context_configuration_revision(&prepared.agent_input)
