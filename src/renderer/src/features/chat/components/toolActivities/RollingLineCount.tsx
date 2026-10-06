@@ -65,7 +65,11 @@ export function RollingLineCount({ className, sign, value }: RollingLineCountPro
   const columns = Math.max(from.length, to.length)
 
   return (
-    <span className={`${className} rolling-line-count`} ref={rootRef}>
+    <span
+      className={`${className} rolling-line-count`}
+      data-zero={value === 0 ? 'true' : 'false'}
+      ref={rootRef}
+    >
       <span className="rolling-line-count__text">
         {sign}
         {value}

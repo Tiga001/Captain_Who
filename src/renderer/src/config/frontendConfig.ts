@@ -180,6 +180,10 @@ export function getFrontendCssVariables(
     '--mc-font-size-chat-activity-detail': config.typography.chat.activityDetailSize,
     '--mc-font-size-chat-metadata': config.typography.chat.metadataSize,
     '--mc-font-size-chat-approval': config.typography.chat.approvalSize,
+    '--mc-activity-row-height': '26px',
+    '--mc-activity-icon-size': '16px',
+    '--mc-activity-gap': '6px',
+    '--mc-activity-block-gap': '8px',
     '--mc-font-size-xs': config.typography.scale.xs,
     '--mc-font-size-sm': config.typography.scale.sm,
     '--mc-font-size-md': config.typography.scale.md,
@@ -222,6 +226,10 @@ export function getFrontendCssVariables(
     '--mc-color-text-secondary': contrastText(theme.colors.text.secondary),
     '--mc-color-text-muted': contrastText(theme.colors.text.muted),
     '--mc-color-text-subtle': contrastText(theme.colors.text.subtle),
+    '--mc-color-text-activity': contrastText(theme.colors.text.activity ?? theme.colors.text.muted),
+    '--mc-color-text-activity-subtle': contrastText(
+      theme.colors.text.activitySubtle ?? theme.colors.text.subtle
+    ),
     '--mc-color-text-inverse': theme.colors.text.inverse,
     '--mc-color-text-danger': theme.colors.text.danger,
     '--mc-color-text-accent': theme.colors.text.accent,

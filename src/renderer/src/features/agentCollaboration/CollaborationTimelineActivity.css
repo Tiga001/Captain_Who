@@ -1,8 +1,8 @@
 .collaboration-timeline {
   box-sizing: border-box;
   display: grid;
-  gap: 6px;
-  margin: 10px 0 14px;
+  gap: var(--mc-activity-gap);
+  margin: var(--mc-activity-block-gap) 0;
   min-width: 0;
   padding: 0 4px;
   width: 100%;
@@ -25,11 +25,12 @@
 }
 
 .collaboration-timeline__activity {
-  color: var(--mc-color-text-secondary);
+  color: var(--mc-color-text-activity);
   display: block;
   font-size: var(--mc-font-size-chat-activity);
   line-height: var(--mc-line-height-relaxed);
   max-width: 100%;
+  min-height: var(--mc-activity-row-height);
   min-width: 0;
 }
 
@@ -41,41 +42,39 @@
 
 .collaboration-timeline__chip {
   align-items: center;
-  background: var(--mc-color-surface-card);
-  border: 1px solid var(--mc-color-border-subtle);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--mc-color-border-subtle) 70%, transparent);
   border-radius: 999px;
-  color: var(--mc-color-text-secondary);
+  color: var(--mc-color-text-activity);
   cursor: pointer;
   display: inline-flex;
   font: inherit;
+  line-height: var(--mc-line-height-normal);
   gap: 4px;
-  margin: 2px 5px 2px 0;
+  margin: 1px 6px 1px 0;
   max-width: min(220px, 100%);
   min-height: 24px;
   min-width: 0;
-  padding: 2px 7px;
+  padding: 1px 6px;
   transition:
-    background-color 120ms ease,
     border-color 120ms ease,
     color 120ms ease;
   vertical-align: middle;
 }
 
 .collaboration-timeline__overflow {
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-text-activity-subtle);
   display: inline;
   margin-right: 5px;
   white-space: nowrap;
 }
 
 .collaboration-timeline__chip:hover {
-  background: var(--mc-color-state-hover);
   border-color: var(--mc-color-border-default);
   color: var(--mc-color-text-primary);
 }
 
 .collaboration-timeline__chip:focus-visible {
-  background: var(--mc-color-state-hover);
   border-color: var(--mc-color-border-default);
   color: var(--mc-color-text-primary);
   outline: 2px solid var(--mc-color-focus-ring);
@@ -84,8 +83,8 @@
 
 .collaboration-timeline__chip .agent-avatar {
   flex: 0 0 auto;
-  height: 15px;
-  width: 15px;
+  height: var(--mc-activity-icon-size);
+  width: var(--mc-activity-icon-size);
 }
 
 .collaboration-timeline__chip-label {
@@ -95,7 +94,7 @@
 }
 
 .collaboration-timeline__status {
-  color: var(--mc-color-text-secondary);
+  color: var(--mc-color-text-activity);
   display: inline;
   white-space: nowrap;
 }

@@ -359,7 +359,6 @@ function isAbsoluteLocalPath(filePath: string): boolean {
 
 export function FileChangeRow({
   assistantMessageId,
-  compact = false,
   conversationId,
   item,
   onExpandedChange,
@@ -369,7 +368,6 @@ export function FileChangeRow({
   showIcon = false
 }: {
   assistantMessageId?: string
-  compact?: boolean
   conversationId?: string
   item: FileChangeToolActivityGroupItem
   onExpandedChange?: (open: boolean) => void
@@ -411,9 +409,8 @@ export function FileChangeRow({
     ? t('agent.fileChange.historyPreviewUnavailable')
     : t('files.preview.error')
   const canReveal = Boolean(view.filePath && (projectId || isAbsoluteLocalPath(view.filePath)))
-  const displayPath = compact
-    ? view.filePath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) || view.filePath
-    : view.filePath
+  const normalizedPath = view.filePath.replace(/\\/g, '/').replace(/\/+$/, '')
+  const displayPath = normalizedPath.split('/').filter(Boolean).at(-1) || view.filePath
 
   useEffect(() => {
     if (
@@ -611,9 +608,18 @@ export function FileChangeRow({
             {displayPath}
           </button>
         ) : (
-          <span className="file-change-activity__path">
-            {displayPath || t('agent.fileChange.unknownFile')}
-          </span>
+          <>
+            <span
+              aria-hidden={view.filePath ? true : undefined}
+              className="file-change-activity__path"
+              title={view.filePath || undefined}
+            >
+              {displayPath || t('agent.fileChange.unknownFile')}
+            </span>
+            {view.filePath && (
+              <span className="file-change-activity__accessible-path">{view.filePath}</span>
+            )}
+          </>
         )}
         <span
           className="file-change-activity__stats"

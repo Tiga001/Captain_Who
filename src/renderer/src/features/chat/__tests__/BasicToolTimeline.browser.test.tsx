@@ -7,6 +7,7 @@ import { frontendConfig, getFrontendCssVariables } from '../../../config/fronten
 import { getTranslation, type TranslationKey } from '../../../config/frontendTranslations'
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
+import type { WorkspaceReferenceTarget } from '../workspaceMentions'
 import type { CollaborationTimelineActivity } from '../../agentCollaboration/CollaborationTimelineActivity'
 import { AgentRunView } from '../components/AgentRunView'
 import '../ChatConversationPage.agent.css'
@@ -82,13 +83,15 @@ function view(
     dark = false,
     mode = 'interactive',
     width = 780,
-    collapsed = false
+    collapsed = false,
+    onOpenWorkspaceReference
   }: {
     activities?: CollaborationTimelineActivity[]
     dark?: boolean
     mode?: 'interactive' | 'observer'
     width?: number
     collapsed?: boolean
+    onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   } = {}
 ) {
   const message: ChatMessage = {
@@ -122,6 +125,7 @@ function view(
         mode={mode}
         observerRootConversationId={mode === 'observer' ? 'root-conversation' : undefined}
         onOpenCollaborationAgent={() => {}}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
       />
     </div>
   )
@@ -133,6 +137,34 @@ const leaf = (root: ParentNode, id: string) =>
   root.querySelector<HTMLElement>(`[data-tool-anchor="marker-${id}"]`)!
 
 describe('mixed tool timeline', () => {
+  it.each(['interactive', 'observer'] as const)(
+    'opens the original read file from singleton and aggregated %s timelines',
+    async (mode) => {
+      const filePath = '/workspace/reports/summary.md'
+      const read = call('read-file-preview', 'read_file', { path: filePath })
+      const onOpenWorkspaceReference = vi.fn()
+      const options = { mode, onOpenWorkspaceReference }
+      const screen = await render(view(run([read]), options))
+      const filename = screen.getByRole('button', { name: filePath, exact: true })
+      await userEvent.click(filename)
+      const expectedTarget = {
+        source: 'read-tool',
+        filePath,
+        conversationId: 'basic-conversation',
+        assistantMessageId: 'basic-message',
+        callId: read.id
+      }
+      expect(onOpenWorkspaceReference).toHaveBeenLastCalledWith(expectedTarget)
+
+      const command = call('after-read')
+      await screen.rerender(view(run([read, command]), options))
+      await userEvent.click(header(screen.container))
+      await userEvent.click(filename)
+      expect(onOpenWorkspaceReference).toHaveBeenLastCalledWith(expectedTarget)
+      expect(header(screen.container).getAttribute('aria-expanded')).toBe('true')
+    }
+  )
+
   it('updates a single collapsed header through parallel activity and completion without moving history', async () => {
     const read = call('read', 'read_file', { path: 'src/deeply/nested/Timeline.tsx' })
     const command = call('test')

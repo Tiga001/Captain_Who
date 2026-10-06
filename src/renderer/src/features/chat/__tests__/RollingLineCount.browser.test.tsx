@@ -120,6 +120,16 @@ describe('rolling file-change counts', () => {
       element: screen.container.firstElementChild as HTMLElement,
       path: '../../../../../../.cache/rolling-line-count/themes.png'
     })
+    await screen.rerender(view(0))
+    rows.forEach((row, index) => {
+      const neutral = index === 0 ? 'rgb(116, 116, 124)' : 'rgb(136, 136, 143)'
+      for (const counter of row.querySelectorAll('.rolling-line-count')) {
+        expect(counter.getAttribute('data-zero')).toBe('true')
+        expect(getComputedStyle(counter).color).toBe(neutral)
+      }
+    })
+    await screen.rerender(view(1))
+    expectDiffColors()
   })
 
   it('starts static, then rolls changed digits upward without moving the sign', async () => {

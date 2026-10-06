@@ -1,9 +1,9 @@
 .chat-composer {
   position: relative;
   display: grid;
-  grid-template-rows: minmax(38px, 1fr) auto;
+  grid-template-rows: minmax(36px, 1fr) auto;
   min-height: 96px;
-  padding: 14px 12px 4px 16px;
+  padding: 14px 12px 6px 16px;
   color: var(--mc-color-text-primary);
   background: var(--mc-color-surface-card);
   border: 0.5px solid var(--mc-color-border-subtle);
@@ -136,7 +136,7 @@
   align-items: center;
   min-width: 0;
   min-height: 38px;
-  gap: 8px;
+  gap: 6px;
 }
 
 .chat-composer__toolbar button,
@@ -163,7 +163,12 @@
     calc(var(--mc-radius-composer) - 1px);
 }
 
-.chat-composer__toolbar svg,
+.chat-composer__toolbar svg {
+  width: var(--mc-icon-size-base);
+  height: var(--mc-icon-size-base);
+  stroke-width: var(--mc-icon-stroke-thin);
+}
+
 .chat-composer-menu-popover svg {
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
@@ -602,6 +607,13 @@
   width: var(--mc-icon-size-sm);
   height: var(--mc-icon-size-sm);
   stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.composer-model-button > svg:last-child,
+.composer-permission-button > svg:last-child {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
 }
 
 .composer-model-menu,

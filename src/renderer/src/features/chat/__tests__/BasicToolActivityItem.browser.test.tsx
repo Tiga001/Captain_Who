@@ -177,7 +177,7 @@ it('shows compact file rows without a redundant category disclosure or raw histo
   expect(screen.container.textContent).not.toContain('private')
 })
 
-it('promotes an edit to its basename while preserving its path authority and count nodes', async () => {
+it('keeps edit filenames prominent while preserving full path authority and count nodes', async () => {
   const filePath = '/workspace/reports/deeply/nested/final/report.md'
   const edit = call('edit', 'apply_patch', {
     request: { action: 'apply', operation: 'create', filePath, content: 'report\n' }
@@ -189,7 +189,10 @@ it('promotes an edit to its basename while preserving its path authority and cou
   )
   const path = screen.container.querySelector<HTMLButtonElement>('.file-change-activity__path')!
   const counts = screen.container.querySelector('.file-change-activity__stats')
-  expect(path.textContent).toBe(filePath)
+  expect(path.textContent).toBe('report.md')
+  expect(path.getAttribute('aria-label')).toContain(filePath)
+  expect(path.title).toContain(filePath)
+  expect(screen.container.querySelector('.file-change-activity__directory')).toBeNull()
 
   await screen.rerender(
     <BasicToolActivityItem
@@ -201,6 +204,7 @@ it('promotes an edit to its basename while preserving its path authority and cou
   )
   expect(screen.container.querySelector('.file-change-activity__path')).toBe(path)
   expect(path.textContent).toBe('report.md')
+  expect(screen.container.querySelector('.file-change-activity__directory')).toBeNull()
   expect(
     screen.container.querySelector('.file-change-activity__item-line')?.getAttribute('title')
   ).toBe(filePath)
@@ -209,22 +213,55 @@ it('promotes an edit to its basename while preserving its path authority and cou
   expect(revealFile).toHaveBeenLastCalledWith(undefined, filePath, 'answer')
 })
 
+it('retains the full accessible path when an edit has no reveal action', async () => {
+  const filePath = 'docs/reports/summary.md'
+  const edit = call('edit', 'apply_patch', {
+    request: { action: 'apply', operation: 'update', filePath }
+  })
+  const screen = await render(
+    <BasicToolActivityItem run={run([edit])} item={item(edit.id, 'edit')} />
+  )
+  const path = screen.container.querySelector<HTMLElement>('.file-change-activity__path')!
+  expect(path.tagName).toBe('SPAN')
+  expect(path.textContent).toBe('summary.md')
+  expect(path.getAttribute('aria-hidden')).toBe('true')
+  expect(
+    screen.container.querySelector('.file-change-activity__accessible-path')?.textContent
+  ).toBe(filePath)
+  expect(path.title).toBe(filePath)
+  expect(screen.container.querySelector('.file-change-activity__directory')).toBeNull()
+})
+
 it('puts the read action before the filename while retaining failures and the source path', async () => {
-  const read = call('read-word', 'read_word', { path: '/workspace/reports/summary.docx' })
+  const filePath = '/workspace/client/reports/annual/summary.docx'
+  const read = call('read-word', 'read_word', { path: filePath })
   const state = run([read])
   const leaf = item(read.id, 'read')
+  const onOpenWorkspaceReference = vi.fn()
+  const navigation = {
+    assistantMessageId: 'answer',
+    conversationId: 'chat',
+    onOpenWorkspaceReference
+  }
   const screen = await render(
-    <BasicToolActivityItem run={state} item={leaf} presentation="compact" />
+    <BasicToolActivityItem {...navigation} run={state} item={leaf} presentation="compact" />
   )
   const action = () => screen.container.querySelector('.read-activity__action')
   expect(action()?.textContent).toBe('正在读取')
   expect(action()?.nextElementSibling?.textContent).toBe('summary.docx')
-  expect(screen.container.querySelector('.read-activity__directory')?.textContent).toBe(
-    '/workspace/reports'
-  )
+  expect(screen.container.querySelector('.read-activity__directory')).toBeNull()
+  await userEvent.click(screen.getByRole('button', { name: filePath, exact: true }))
+  expect(onOpenWorkspaceReference).toHaveBeenLastCalledWith({
+    source: 'read-tool',
+    filePath,
+    assistantMessageId: 'answer',
+    conversationId: 'chat',
+    callId: read.id
+  })
 
   await screen.rerender(
     <BasicToolActivityItem
+      {...navigation}
       run={{ ...state, toolResults: [{ callId: read.id, tool: read.tool, ok: true }] }}
       item={leaf}
       presentation="compact"
@@ -239,15 +276,16 @@ it('puts the read action before the filename while retaining failures and the so
           { callId: read.id, tool: read.tool, ok: false, error: 'Cannot read this file' }
         ]
       }}
+      {...navigation}
       item={leaf}
       presentation="compact"
     />
   )
   expect(action()?.textContent).toBe(getTranslation('zh-CN', 'agent.read.word.failed'))
-  expect(screen.container.querySelector('.read-activity__text-item')?.getAttribute('title')).toBe(
-    '/workspace/reports/summary.docx'
-  )
-  await userEvent.click(screen.container.querySelector('summary')!)
+  expect(
+    screen.container.querySelector('.read-activity__text-item')?.getAttribute('title')
+  ).toContain(filePath)
+  await userEvent.click(screen.container.querySelector('summary .read-activity__action')!)
   await expect.element(screen.getByText('Cannot read this file')).toBeVisible()
 })
 

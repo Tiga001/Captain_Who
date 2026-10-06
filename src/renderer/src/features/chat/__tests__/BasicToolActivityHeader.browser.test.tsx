@@ -121,8 +121,8 @@ it('keeps the active action and settled categories in the header without issue l
   )
   expect(button.element().textContent).toBe('File reads: 1 · Commands: 1')
   expect(button.element().getAttribute('title')).toBe('File reads: 1 · Commands: 1')
+  expect(button.element().getAttribute('aria-label')).toBe('File reads: 1 · Commands: 1')
   expect(screen.container.querySelector('.basic-tool-activity__attention')).toBeNull()
-  expect(screen.container.querySelector('[aria-label]')).toBeNull()
   expect(screen.container.querySelector('.agent-running-text')).toBeNull()
 })
 
@@ -212,8 +212,132 @@ it('summarizes completed operations separately and counts a staged create only o
     />
   )
   const button = screen.getByRole('button').element()
-  expect(button.textContent).toBe('Edited 1 files · Created 1 files · Deleted 1 files')
+  expect(
+    Array.from(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).map(
+      (part) => part.textContent
+    )
+  ).toEqual(['Edited 1 files', ' · Created 1 files', ' · Deleted 1 files'])
+  expect(button.getAttribute('aria-label')).toBe(
+    'Edited 1 files · Created 1 files · Deleted 1 files'
+  )
+  expect(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).toHaveLength(3)
+  expect(screen.container.querySelector('.basic-tool-activity__summary-overflow--wide')).toBeNull()
+  expect(
+    screen.container.querySelector('.basic-tool-activity__summary-overflow--compact')?.textContent
+  ).toBe('…')
+  expect(
+    screen.container.querySelector('.basic-tool-activity__icon')?.getAttribute('data-category')
+  ).toBe('edit')
   expect(button.getAttribute('data-status')).toBe('completed')
   expect(screen.container.querySelector('.agent-running-text')).toBeNull()
   expect(screen.container.querySelector('.basic-tool-activity__counts')).toBeNull()
+})
+
+it('collapses a mixed summary to three categories while retaining every count in expanded and accessible labels', async () => {
+  const run = ensureAgentRun(undefined, 'run', 'completed')
+  const created = editFixture('create', 4)
+  const deleted = editFixture('delete', 5)
+  const call = (id: string, tool: string): AgentToolCall => ({
+    id,
+    tool,
+    args: { path: `${id}.txt` },
+    approvalStatus: 'not_required',
+    reason: null
+  })
+  run.toolCalls = [
+    call('read', 'read_file'),
+    call('read-second', 'read_file'),
+    call('search', 'search_files'),
+    call('workspace', 'workspace_map'),
+    created.call,
+    deleted.call,
+    call('command', 'run_command')
+  ]
+  run.toolResults = run.toolCalls.map((toolCall) => ({
+    callId: toolCall.id,
+    tool: toolCall.tool,
+    ok: true
+  }))
+  run.fileChanges = [created.transaction, deleted.transaction].map((transaction) => ({
+    ...transaction,
+    status: 'applied'
+  }))
+  let items: BasicToolItem[] = run.toolCalls.map((toolCall, ordinal) => ({
+    id: toolCall.id,
+    callIds: [toolCall.id],
+    firstOrdinal: ordinal,
+    latestOrdinal: ordinal,
+    category:
+      toolCall.tool === 'read_file'
+        ? 'read'
+        : toolCall.tool === 'search_files'
+          ? 'search'
+          : toolCall.tool === 'workspace_map'
+            ? 'workspace'
+            : toolCall.tool === 'apply_patch'
+              ? 'edit'
+              : 'command'
+  }))
+  const header = (expanded: boolean) => (
+    <BasicToolActivityHeader
+      run={run}
+      items={items}
+      expanded={expanded}
+      controls="basic-details"
+      onToggle={vi.fn()}
+    />
+  )
+  const screen = await render(header(false))
+  const button = screen.getByRole('button').element()
+  const fullSummary =
+    'Read 2 files · Searched 1 times · Read directories 1 times · Created 1 files · Deleted 1 files · Ran 1 commands'
+  expect(
+    Array.from(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).map(
+      (part) => [part.getAttribute('data-summary-index'), part.textContent]
+    )
+  ).toEqual([
+    ['0', 'Read 2 files'],
+    ['1', ' · Searched 1 times'],
+    ['2', ' · Read directories 1 times']
+  ])
+  expect(
+    screen.container.querySelector('.basic-tool-activity__summary-overflow--wide')?.textContent
+  ).toBe('…')
+  expect(
+    screen.container.querySelector('.basic-tool-activity__summary-overflow--compact')?.textContent
+  ).toBe('…')
+  expect(button.getAttribute('title')).toBe(fullSummary)
+  expect(button.getAttribute('aria-label')).toBe(fullSummary)
+  expect(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).toHaveLength(3)
+  expect(
+    screen.container.querySelector('.basic-tool-activity__icon')?.getAttribute('data-category')
+  ).toBe('create')
+
+  items = [...items].reverse()
+  await screen.rerender(header(true))
+  expect(button.textContent).toBe(fullSummary)
+  expect(button.getAttribute('aria-label')).toBe(fullSummary)
+  expect(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).toHaveLength(6)
+  expect(screen.container.querySelector('.basic-tool-activity__summary-overflow')).toBeNull()
+  expect(
+    screen.container.querySelector('.basic-tool-activity__icon')?.getAttribute('data-category')
+  ).toBe('create')
+
+  run.toolResults.find((result) => result.callId === 'command')!.ok = false
+  await screen.rerender(header(false))
+  const neutralSummary =
+    'File reads: 2 · Searches: 1 · Directory reads: 1 · File creations: 1 · File deletions: 1 · Commands: 1'
+  expect(
+    Array.from(screen.container.querySelectorAll('.basic-tool-activity__summary-part')).map(
+      (part) => part.textContent
+    )
+  ).toEqual(['File reads: 2', ' · Searches: 1', ' · Directory reads: 1'])
+  expect(
+    screen.container.querySelector('.basic-tool-activity__summary-overflow--wide')?.textContent
+  ).toBe('…')
+  expect(
+    screen.container.querySelector('.basic-tool-activity__summary-overflow--compact')?.textContent
+  ).toBe('…')
+  expect(button.getAttribute('title')).toBe(neutralSummary)
+  expect(button.getAttribute('aria-label')).toBe(neutralSummary)
 })

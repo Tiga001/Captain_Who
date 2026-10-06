@@ -4,6 +4,7 @@ import { render } from 'vitest-browser-react'
 import type { CSSProperties } from 'react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
+import '../../../styles/global.css'
 import {
   CollaborationTimelineActivityList,
   copyCollaborationTimelineSelection,
@@ -143,6 +144,7 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
   const narrowStyle = {
     ...getFrontendCssVariables(frontendConfig, classicLightTheme),
     background: 'var(--mc-color-surface-main-panel)',
+    fontFamily: 'var(--mc-font-family)',
     padding: 12,
     width: 280
   } as CSSProperties
@@ -209,8 +211,8 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
     firstOverflow.compareDocumentPosition(firstStatus) & Node.DOCUMENT_POSITION_FOLLOWING
   ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   expect(getComputedStyle(firstChips).display).toBe('contents')
-  expect(getComputedStyle(firstStatus).color).toBe('rgb(79, 86, 96)')
-  expect(getComputedStyle(screen.getByText('Completed').element()).color).toBe('rgb(79, 86, 96)')
+  expect(getComputedStyle(firstStatus).color).toBe('rgb(104, 104, 111)')
+  expect(getComputedStyle(screen.getByText('Completed').element()).color).toBe('rgb(104, 104, 111)')
   expect(getComputedStyle(screen.getByText('Waiting for approval').element()).color).toBe(
     'rgb(63, 63, 70)'
   )
@@ -219,18 +221,16 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
   expect(surface.scrollWidth).toBeLessThanOrEqual(surface.clientWidth)
   const qa = screen.getByRole('button', { name: 'View sub-agent QA: Started working' })
   expect(getComputedStyle(qa.element()).borderRadius).toBe('999px')
-  expect(getComputedStyle(qa.element()).color).toBe('rgb(79, 86, 96)')
+  expect(getComputedStyle(qa.element()).color).toBe('rgb(104, 104, 111)')
   expect(qa.element().getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
   const restingBackground = getComputedStyle(qa.element()).backgroundColor
   await page.screenshot({
     element: screen.container,
-    path: '__screenshots__/CollaborationTimelineActivity.browser.test.tsx/narrow-inline.png'
+    path: '../../../../../../.cache/timeline-visual-polish/collaboration-narrow-inline.png'
   })
 
   await userEvent.hover(qa)
-  await expect
-    .poll(() => getComputedStyle(qa.element()).backgroundColor)
-    .not.toBe(restingBackground)
+  await expect.poll(() => getComputedStyle(qa.element()).backgroundColor).toBe(restingBackground)
   await expect.poll(() => getComputedStyle(qa.element()).color).toBe('rgb(63, 63, 70)')
   await userEvent.unhover(qa)
   await userEvent.keyboard('{Tab}')
@@ -302,6 +302,7 @@ it('uses readable product-theme status colors in classic dark mode', async () =>
   const darkStyle = {
     ...getFrontendCssVariables(frontendConfig, classicDarkTheme),
     background: 'var(--mc-color-surface-main-panel)',
+    fontFamily: 'var(--mc-font-family)',
     padding: 12,
     width: 280
   } as CSSProperties
@@ -318,9 +319,13 @@ it('uses readable product-theme status colors in classic dark mode', async () =>
   )
 
   expect(getComputedStyle(screen.getByText('Started working').element()).color).toBe(
-    'rgb(224, 224, 224)'
+    'rgb(166, 166, 172)'
   )
   expect(getComputedStyle(screen.getByText('Waiting for approval').element()).color).toBe(
     'rgb(252, 252, 252)'
   )
+  await page.screenshot({
+    element: screen.container,
+    path: '../../../../../../.cache/timeline-visual-polish/collaboration-dark.png'
+  })
 })

@@ -1,7 +1,9 @@
 import {
   Brain,
   ChevronDown,
+  FilePlus2,
   FileText,
+  FileX2,
   Files,
   FolderOpen,
   Pencil,
@@ -27,8 +29,21 @@ const CATEGORY_ICONS = {
   attachments: Files,
   history: Brain,
   edit: Pencil,
+  create: FilePlus2,
+  delete: FileX2,
   command: SquareTerminal
 }
+const SUMMARY_ICON_ORDER: BasicToolSummaryCategory[] = [
+  'edit',
+  'create',
+  'delete',
+  'command',
+  'search',
+  'read',
+  'workspace',
+  'attachments',
+  'history'
+]
 const CATEGORY_ORDER: BasicToolSummaryCategory[] = [
   'read',
   'search',
@@ -119,14 +134,25 @@ export function BasicToolActivityHeader({
     subject = selected.subject.split(/[\\/]/).filter(Boolean).at(-1) || selected.subject
     if (subject && selected.item.category === 'workspace' && !subject.endsWith('/')) subject += '/'
   }
+  const summaryParts = CATEGORY_ORDER.flatMap((category) => {
+    const count = presentation.categoryCounts[category]
+    const key = presentation.outcomes.length ? SUMMARY_KEYS[category] : COMPLETED_KEYS[category]
+    return count ? [{ category, label: formatTranslation(t, key, { count }) }] : []
+  })
+  const visibleSummaryParts = expanded ? summaryParts : summaryParts.slice(0, 3)
+  const overflowVariants = expanded
+    ? []
+    : [
+        { size: 'wide', count: summaryParts.length - 3 },
+        { size: 'compact', count: summaryParts.length - 2 }
+      ].filter((variant) => variant.count > 0)
   const label = selected
     ? [selectedAction, subject].filter(Boolean).join(' ')
-    : CATEGORY_ORDER.flatMap((category) => {
-        const count = presentation.categoryCounts[category]
-        const key = presentation.outcomes.length ? SUMMARY_KEYS[category] : COMPLETED_KEYS[category]
-        return count ? [formatTranslation(t, key, { count })] : []
-      }).join(' · ')
-  const category = selected?.item.category ?? presentation.items[0]?.item.category ?? 'read'
+    : summaryParts.map((part) => part.label).join(' · ')
+  const category =
+    selected?.item.category ??
+    SUMMARY_ICON_ORDER.find((candidate) => presentation.categoryCounts[candidate]) ??
+    'read'
   const Icon = CATEGORY_ICONS[category]
   const fullLabel = selected ? [selectedAction, selected.subject].filter(Boolean).join(' ') : label
   const counts = selected?.item.category === 'edit' ? selected.editCounts : undefined
@@ -137,15 +163,46 @@ export function BasicToolActivityHeader({
       onClick={onToggle}
       aria-expanded={expanded}
       aria-controls={controls}
+      aria-label={selected ? undefined : fullLabel}
       data-status={selected?.phase ?? presentation.outcomes[0] ?? 'completed'}
       data-active={selected?.isActive ? 'true' : 'false'}
       title={fullLabel}
     >
-      <Icon aria-hidden="true" className="basic-tool-activity__icon" />
+      <Icon aria-hidden="true" className="basic-tool-activity__icon" data-category={category} />
       <span
         className={`basic-tool-activity__label${selected?.isActive ? ' agent-running-text' : ''}`}
+        data-summary={selected ? undefined : 'true'}
       >
-        {label}
+        {selected ? (
+          label
+        ) : (
+          <>
+            {visibleSummaryParts.map((part, index) => (
+              <span
+                key={part.category}
+                className="basic-tool-activity__summary-part"
+                data-category={part.category}
+                data-summary-index={index}
+              >
+                {index > 0 ? (
+                  <span className="basic-tool-activity__summary-separator" aria-hidden="true">
+                    {' · '}
+                  </span>
+                ) : null}
+                {part.label}
+              </span>
+            ))}
+            {overflowVariants.map((variant) => (
+              <span
+                key={variant.size}
+                className={`basic-tool-activity__summary-overflow basic-tool-activity__summary-overflow--${variant.size}`}
+                aria-hidden="true"
+              >
+                …
+              </span>
+            ))}
+          </>
+        )}
       </span>
       {counts ? (
         <span

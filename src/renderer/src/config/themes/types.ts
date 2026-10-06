@@ -64,6 +64,8 @@ export interface FrontendTheme {
       readonly secondary: string
       readonly muted: string
       readonly subtle: string
+      readonly activity?: string
+      readonly activitySubtle?: string
       readonly inverse: string
       readonly danger: string
       readonly accent: string

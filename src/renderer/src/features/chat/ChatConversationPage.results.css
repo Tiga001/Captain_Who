@@ -891,7 +891,7 @@ button.read-activity__image:focus-visible {
   display: flex;
   align-items: baseline;
   min-width: 0;
-  gap: 10px;
+  gap: var(--mc-activity-gap);
   overflow: hidden;
   color: var(--mc-color-text-secondary);
   font-size: var(--mc-font-size-chat-activity);
@@ -910,11 +910,11 @@ button.read-activity__image:focus-visible {
 
 .read-activity__text-item > .read-activity__action {
   flex: 0 0 auto;
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-text-activity);
 }
 
 .read-activity__text-item > .read-activity__action.agent-running-text {
-  color: var(--agent-running-base-color, var(--mc-color-text-muted));
+  color: var(--agent-running-base-color, var(--mc-color-text-activity));
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -925,11 +925,59 @@ button.read-activity__image:focus-visible {
 
 .read-activity__file-name {
   flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.read-activity__text-item > .read-activity__directory {
-  flex: 1 1 0;
-  color: var(--mc-color-text-subtle);
+.read-activity__file-anchor {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+button.read-activity__file-name {
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  appearance: none;
+  background: transparent;
+  color: var(--mc-color-text-activity);
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 3px;
+  transition:
+    color 120ms ease,
+    text-decoration-color 120ms ease;
+}
+
+button.read-activity__file-name:hover,
+button.read-activity__file-name:focus-visible {
+  background: transparent;
+  color: var(--mc-color-text-primary);
+  text-decoration-color: currentColor;
+}
+
+button.read-activity__file-name:focus-visible {
+  outline: 1px solid var(--mc-color-focus-ring);
+  outline-offset: -1px;
+}
+
+.read-activity__file-tooltip {
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.read-activity__file-name {
+    transition: none;
+  }
 }
 
 .read-activity__path-error {

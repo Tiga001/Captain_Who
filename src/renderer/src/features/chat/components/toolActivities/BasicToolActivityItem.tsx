@@ -30,6 +30,7 @@ export function BasicToolActivityItem({
   item,
   observerRootConversationId,
   onExpandedChange,
+  onOpenWorkspaceReference,
   presentation = 'default',
   projectId,
   run
@@ -56,6 +57,7 @@ export function BasicToolActivityItem({
           assistantMessageId={assistantMessageId}
           conversationId={conversationId}
           observerRootConversationId={observerRootConversationId}
+          onOpenWorkspaceReference={onOpenWorkspaceReference}
           projectId={projectId}
         />
       )
@@ -74,7 +76,6 @@ export function BasicToolActivityItem({
         <div className="agent-activity agent-activity--basic-file-change">
           <FileChangeRow
             assistantMessageId={assistantMessageId}
-            compact={presentation === 'compact'}
             conversationId={conversationId}
             item={edit}
             key={item.id}

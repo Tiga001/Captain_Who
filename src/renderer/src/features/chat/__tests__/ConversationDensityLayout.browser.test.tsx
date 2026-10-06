@@ -2,9 +2,12 @@ import { useState, type CSSProperties } from 'react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
-import { getFrontendCssVariables } from '../../../config/frontendConfig'
+import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import type { TranslationKey } from '../../../config/languageRegistry'
+import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import type { ChatConversation, ChatMessage } from '../chatTypes'
+import type { CollaborationTimelineActivity } from '../../agentCollaboration/CollaborationTimelineActivity'
 import '../../../styles/global.css'
 import '../../agentCollaboration/AgentCenterPanel.css'
 
@@ -78,7 +81,8 @@ function Workspace({
   turns = 4,
   longText = false,
   observer = false,
-  initialConversation
+  initialConversation,
+  collaborationActivities
 }: {
   middleWidth?: number
   shellHeight?: number
@@ -87,11 +91,18 @@ function Workspace({
   longText?: boolean
   observer?: boolean
   initialConversation?: ChatConversation
+  collaborationActivities?: CollaborationTimelineActivity[]
 }) {
   const [bottomOpen, setBottomOpen] = useState(halfHeight)
   const [draft, setDraft] = useState(() => createComposerDraft({ modelId: 'model-1' }))
   const [chat] = useState(() => initialConversation ?? conversation(turns, longText))
-  const common = { conversation: chat, initialScrollTop: 0, showTokenUsageDetails: false }
+  const common = {
+    conversation: chat,
+    initialScrollTop: 0,
+    showTokenUsageDetails: false,
+    collaborationTimelineActivities: collaborationActivities,
+    onOpenCollaborationAgent: vi.fn()
+  }
   return (
     <div
       className="app-shell"
@@ -168,6 +179,126 @@ function stoppedMessage(id: string, durationSeconds: number): ChatMessage {
       timeline: []
     }
   }
+}
+
+function visualPolishConversation() {
+  const chat = conversation(1)
+  const path = '03_Cases/C001_FRP_Bimolecular_Termination_CSTR/derivation.md'
+  const definitions: [string, string, unknown, unknown][] = [
+    ['read', 'read_file', { path }, { path }],
+    ['search', 'search_code', { query: 'terminationRate', path: 'src' }, { matches: [] }],
+    ['map', 'workspace_map', { focusPath: 'src' }, { workspace: { focusPath: 'src' } }],
+    ['attachments', 'attachments_list_project', {}, { total: 3, attachments: [] }],
+    [
+      'command',
+      'run_command',
+      { command: 'python3 validation/check.py', reason: '复核报告中的公式与单位格式' },
+      { status: 'exited', exitCode: 0, stdout: 'All checks passed.' }
+    ],
+    [
+      'edit',
+      'apply_patch',
+      {
+        request: {
+          action: 'begin',
+          transactionId: 'visual-edit',
+          filePath: path,
+          operation: 'update'
+        }
+      },
+      { transactionId: 'visual-edit' }
+    ]
+  ]
+  const calls: AgentToolCall[] = definitions.map(([id, tool, args]) => ({
+    id,
+    tool,
+    args,
+    approvalStatus: 'not_required',
+    reason: null
+  }))
+  const results: AgentToolResult[] = definitions.map(([id, tool, , result]) => ({
+    callId: id,
+    tool,
+    ok: true,
+    result
+  }))
+  chat.messages[0].content = '请核对这份报告的公式和验证记录，并整理需要修改的地方。'
+  chat.messages[1] = {
+    id: 'visual-assistant',
+    role: 'assistant',
+    content: '检查已完成，报告中的公式与单位格式已统一，验证结果通过。',
+    createdAt: 2000,
+    status: 'sent',
+    uiState: { timelineCollapsed: false },
+    agentRun: {
+      runId: 'visual-run',
+      status: 'completed',
+      startedAt: 1000,
+      completedAt: 93000,
+      toolDefinitions: [],
+      toolCalls: calls,
+      toolResults: results,
+      approvals: [],
+      fileChangeProposals: [],
+      fileChanges: [
+        {
+          schemaVersion: 1,
+          transactionId: 'visual-edit',
+          conversationId: chat.id,
+          projectId: null,
+          filePath: path,
+          operation: 'update',
+          updateStrategy: 'modify',
+          status: 'applied',
+          baseRevision: null,
+          additions: 33,
+          deletions: 11,
+          lineCount: 120,
+          byteCount: 2048,
+          mutationCount: 1,
+          nextMutationIndex: 1,
+          statsFinal: true,
+          summary: null,
+          createdAt: 1000,
+          updatedAt: 90000
+        }
+      ],
+      timeline: [
+        {
+          id: 'visual-narration',
+          type: 'message',
+          content: '我会先读取报告和相关验证记录，再逐项检查公式，保留原来的推导结构。',
+          traceSequence: 1
+        },
+        ...calls.map((call, index) => ({
+          id: `visual-${call.id}`,
+          type: 'tool_call' as const,
+          callId: call.id,
+          identity: { type: 'builtin' as const, toolName: call.tool },
+          traceSequence: index * 2 + 2
+        }))
+      ]
+    }
+  }
+  const activities: CollaborationTimelineActivity[] = [
+    {
+      activityId: 'visual-review-completed',
+      agentId: 'visual-reviewer',
+      ownerAgentId: `root:${chat.id}`,
+      ownerConversationId: chat.id,
+      anchorMessageId: 'visual-assistant',
+      traceBoundarySequence: 20,
+      taskNameSnapshot: '公式复核',
+      semantic: 'completed',
+      sequence: 20,
+      occurredAt: 91000,
+      runId: 'visual-run',
+      turnId: null,
+      taskMessageId: 'visual-task'
+    }
+  ]
+  chat.messages[1].agentRun!.collaborationTimelineActivities = activities
+  return { chat, activities }
 }
 
 function messageGap(before: string, after: string) {
@@ -392,4 +523,62 @@ describe('Conversation density and adaptive message layout', () => {
       scroller.getBoundingClientRect().bottom
     )
   })
+
+  it.each([
+    { width: 780, dark: false },
+    { width: 780, dark: true },
+    { width: 320, dark: false },
+    { width: 320, dark: true }
+  ])(
+    'keeps a complete conversation visually contained at $width px (dark=$dark)',
+    async ({ width, dark }) => {
+      for (const [name, value] of Object.entries(
+        getFrontendCssVariables(frontendConfig, dark ? classicDarkTheme : classicLightTheme)
+      )) {
+        document.documentElement.style.setProperty(name, value)
+      }
+      await page.viewport(1600, 1100)
+      const { chat, activities } = visualPolishConversation()
+      const screen = await render(
+        <Workspace
+          middleWidth={width}
+          shellHeight={1040}
+          initialConversation={chat}
+          collaborationActivities={activities}
+        />
+      )
+      const header = element('.basic-tool-activity__header')
+      const overflow = header.querySelector<HTMLElement>(
+        `.basic-tool-activity__summary-overflow--${width < 480 ? 'compact' : 'wide'}`
+      )!
+      expect(getComputedStyle(overflow).display).not.toBe('none')
+      expect(overflow.getBoundingClientRect().right).toBeLessThanOrEqual(
+        header.getBoundingClientRect().right
+      )
+      expect(getComputedStyle(header).fontSize).toBe('14px')
+      await userEvent.click(header)
+      expect(header).toHaveAttribute('aria-expanded', 'true')
+      expect(header.textContent).toContain('已读取 1 个文件')
+      expect(header.textContent).toContain('已查找 1 次')
+      expect(header.textContent).toContain('已编辑 1 个文件')
+      expect(header.textContent).toContain('已运行 1 个命令')
+      const scroller = element('.chat-conversation-page__messages')
+      scroller.scrollTop = 0
+      await frame()
+      expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1)
+      expect(element('.chat-composer').scrollWidth).toBeLessThanOrEqual(
+        element('.chat-composer').clientWidth + 1
+      )
+      const leaves = screen.container.querySelectorAll<HTMLElement>('[data-tool-anchor]')
+      expect(leaves).toHaveLength(6)
+      expect([...leaves].every((leaf) => !leaf.hidden)).toBe(true)
+      expect(screen.getByRole('button', { name: /公式复核/ })).toBeVisible()
+      expect(element('.file-change-activity__path').textContent).toBe('derivation.md')
+      for (const row of leaves) expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1)
+      await page.screenshot({
+        element: element('.main-panel'),
+        path: `../../../../../../.cache/timeline-visual-polish/conversation-${dark ? 'dark' : 'light'}-${width}.png`
+      })
+    }
+  )
 })
