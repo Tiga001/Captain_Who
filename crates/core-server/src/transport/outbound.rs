@@ -64,6 +64,23 @@ struct State {
     overloaded: bool,
     oversize_in_use: bool,
     stats: OutboundStats,
+    failure_snapshot: Option<FailureSnapshot>,
+}
+
+/// Only closed labels and counters: no method supplied by a caller, IDs, paths or payloads.
+#[derive(Debug, Clone)]
+struct FailureSnapshot {
+    category: &'static str,
+    frame_bytes: usize,
+    queue_bytes: usize,
+    data_bytes: usize,
+    frames: usize,
+    data_frames: usize,
+    frame_limit: bool,
+    data_frame_limit: bool,
+    byte_limit: bool,
+    data_byte_limit: bool,
+    oversize_busy: bool,
 }
 
 struct Shared {
@@ -103,6 +120,8 @@ pub(crate) struct OutboundFrame {
     // One oversized non-delta response/notification is leased through flush. Existing full
     // message/done/tool-result events and RPC responses have no common protocol size cap.
     oversize: Option<Arc<Shared>>,
+    queued_at: Option<std::time::Instant>,
+    category: &'static str,
 }
 
 impl Drop for OutboundFrame {
@@ -137,6 +156,7 @@ pub(crate) fn outbound_channel_with_limits(
             overloaded: false,
             oversize_in_use: false,
             stats: OutboundStats::default(),
+            failure_snapshot: None,
         }),
         ready: Notify::new(),
         failure: Notify::new(),
@@ -185,12 +205,21 @@ impl OutboundSender {
         bytes.push(b'\n');
         let serialization_ns = started.elapsed().as_nanos();
         let data = is_body_delta(&value);
+        let category = diagnostic_category(&value, data);
+        mycopilot_core::performance::record(
+            "outbound.serialize",
+            category,
+            started.elapsed(),
+            bytes.len(),
+        );
         let delta = ordinary_delta_range(&value, &bytes);
         let mut frame = OutboundFrame {
             wire: bytes.into_boxed_slice().into_vec(),
             delta,
             data,
             oversize: None,
+            queued_at: mycopilot_core::performance::enabled().then(std::time::Instant::now),
+            category,
         };
         let size = frame.wire.len();
         let limits = self.shared.limits;
@@ -217,6 +246,12 @@ impl OutboundSender {
                 state.stats.peak_bytes = state.stats.peak_bytes.max(state.bytes);
                 state.stats.peak_wire_bytes = state.stats.peak_wire_bytes.max(state.wire_bytes);
                 drop(state);
+                mycopilot_core::performance::record(
+                    "outbound.merged",
+                    category,
+                    std::time::Duration::ZERO,
+                    size,
+                );
                 self.shared.ready.notify_one();
                 return Ok(());
             }
@@ -234,6 +269,20 @@ impl OutboundSender {
             && (!data || state.data_bytes + charge <= limits.data_bytes)
             && (!oversized_frame || !state.oversize_in_use);
         if !fits {
+            state.failure_snapshot = Some(FailureSnapshot {
+                category,
+                frame_bytes: size,
+                queue_bytes: state.bytes,
+                data_bytes: state.data_bytes,
+                frames: state.queue.len(),
+                data_frames: state.data_frames,
+                frame_limit: state.queue.len() >= limits.frames,
+                data_frame_limit: data
+                    && state.data_frames >= limits.frames.saturating_sub(limits.control_frames),
+                byte_limit: state.bytes + charge > limits.data_bytes + limits.control_bytes,
+                data_byte_limit: data && state.data_bytes + charge > limits.data_bytes,
+                oversize_busy: oversized_frame && state.oversize_in_use,
+            });
             state.failed = true;
             state.overloaded = true;
             state.closed = true;
@@ -292,6 +341,41 @@ impl OutboundSender {
 }
 
 impl OutboundControl {
+    pub(crate) fn report_failure(&self) {
+        let failure = self
+            .shared
+            .state
+            .lock()
+            .expect("outbound state poisoned")
+            .failure_snapshot
+            .take();
+        if let Some(failure) = failure {
+            tracing::warn!(target: "core_performance",
+                category = failure.category, frame_bytes = failure.frame_bytes,
+                queue_bytes = failure.queue_bytes, data_bytes = failure.data_bytes,
+                frames = failure.frames, data_frames = failure.data_frames,
+                frame_limit = failure.frame_limit, data_frame_limit = failure.data_frame_limit,
+                byte_limit = failure.byte_limit, data_byte_limit = failure.data_byte_limit,
+                oversize_busy = failure.oversize_busy, "outbound capacity exhausted");
+        }
+    }
+
+    pub(crate) fn sample_queue(&self) {
+        if !mycopilot_core::performance::enabled() {
+            return;
+        }
+        let state = self.shared.state.lock().expect("outbound state poisoned");
+        let stats = state.stats;
+        let (bytes, frames, oversize_in_use) =
+            (state.bytes, state.queue.len(), state.oversize_in_use);
+        drop(state);
+        tracing::info!(target: "core_performance", bytes, frames, oversize_in_use,
+            peak_bytes = stats.peak_bytes, peak_frames = stats.peak_frames,
+            peak_oversize_bytes = stats.peak_oversize_bytes,
+            accepted = stats.accepted_events, merged = stats.merged_events,
+            "outbound queue snapshot");
+    }
+
     pub(crate) fn close(&self) {
         self.shared
             .state
@@ -381,6 +465,15 @@ impl OutboundReceiver {
                 state.data_bytes -= charge;
                 state.data_frames -= 1;
             }
+            drop(state);
+            if let Some(queued_at) = frame.queued_at {
+                mycopilot_core::performance::record(
+                    "outbound.queue",
+                    frame.category,
+                    queued_at.elapsed(),
+                    frame.wire.len(),
+                );
+            }
             return Ok(frame);
         }
         if state.closed {
@@ -415,6 +508,18 @@ impl OutboundReceiver {
     pub(crate) fn try_recv(&mut self) -> Result<Value, TryRecvError> {
         self.try_recv_frame(usize::MAX)
             .map(|frame| serde_json::from_slice(&frame.wire).expect("encoded JSON"))
+    }
+}
+
+fn diagnostic_category(value: &Value, data: bool) -> &'static str {
+    match value.get("method").and_then(Value::as_str) {
+        Some("agent.event") if data => "agent.delta",
+        Some("agent.event") => "agent.event",
+        Some("agent.collaboration.observerEvent") if data => "observer.delta",
+        Some("agent.collaboration.observerEvent") => "observer.event",
+        Some("agent.workflows.runtime.changed") => "workflow.runtime",
+        None if value.get("id").is_some() => "rpc.response",
+        _ => "other",
     }
 }
 

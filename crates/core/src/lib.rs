@@ -27,6 +27,7 @@ mod model_request_observation;
 pub mod network;
 pub mod notification_subject;
 pub mod office;
+pub mod performance;
 mod prompts;
 pub mod protocol;
 mod provider_continuation_store;

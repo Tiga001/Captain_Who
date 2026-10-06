@@ -143,6 +143,36 @@ pub struct StorageState {
     instance_identity: Arc<()>,
 }
 
+/// Transparently retains the existing single-connection lock and releases it before recording.
+pub struct StorageConnectionGuard<'a> {
+    guard: Option<MutexGuard<'a, Connection>>,
+    timing: Option<(std::time::Instant, Duration)>,
+}
+
+impl std::ops::Deref for StorageConnectionGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.guard.as_deref().expect("connection guard is live")
+    }
+}
+
+impl std::ops::DerefMut for StorageConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.guard.as_deref_mut().expect("connection guard is live")
+    }
+}
+
+impl Drop for StorageConnectionGuard<'_> {
+    fn drop(&mut self) {
+        let held = self.timing.map(|(start, waited)| (start.elapsed(), waited));
+        drop(self.guard.take());
+        if let Some((held, waited)) = held {
+            crate::performance::record("sqlite.wait", "connection", waited, 0);
+            crate::performance::record("sqlite.hold", "connection", held, 0);
+        }
+    }
+}
+
 impl StorageState {
     pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         if let Some(parent) = database_path.parent() {
@@ -170,10 +200,16 @@ impl StorageState {
         })
     }
 
-    pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
-        self.connection
+    pub fn connection(&self) -> Result<StorageConnectionGuard<'_>, String> {
+        let started = crate::performance::enabled().then(std::time::Instant::now);
+        let guard = self
+            .connection
             .lock()
-            .map_err(|_| "数据库连接状态不可用。".to_string())
+            .map_err(|_| "数据库连接状态不可用。".to_string())?;
+        Ok(StorageConnectionGuard {
+            guard: Some(guard),
+            timing: started.map(|start| (std::time::Instant::now(), start.elapsed())),
+        })
     }
 
     pub fn event_notifications(&self) -> StorageEventNotifications {

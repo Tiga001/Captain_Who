@@ -128,6 +128,10 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 同步生产者耗尽容量时让整条连接明确失败：拒绝后续发送、唤醒请求准入停止，尽可能按 FIFO 刷完已接纳行，再发送固定错误 `id:null / -32002 / data.code=outbound_overloaded`。独立错误槽不占正文预算；失败或关闭开始后 writer 排空最多等 5 秒，正常写入没有这个总时限。Main 立即拒绝 pending 请求，屏蔽该连接的迟到通知，等待旧进程实际退出才允许惰性重启。断管或超时无法保证错误行已送达，按断连和持久恢复处理；已开始的阻塞业务仍需完成收尾，writer 的 5 秒不是进程退出承诺。
 
+出站容量失败会额外输出一次固定分类的诊断，区分总帧、正文帧、总字节、正文预算和超大响应 lease 冲突，并记录触发帧大小及当时队列占用。诊断不包含正文、路径、请求 ID 或凭据；错误码、FIFO 和关停语义不变。
+
+受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、两条 Agent 通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
+
 上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
 
 附件导入的 begin/append/finish/cancel 进入修改队列，派生预览进入查询队列。大文件先在 Host 受管存储中形成 durable import，聊天、草稿与引导请求只携带短引用；这与大图片 outbound semaphore 是两个不同边界。契约见[会话输入](../subsystems/conversation-inputs.md)。

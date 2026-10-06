@@ -115,6 +115,19 @@ async fn byte_and_count_budgets_reserve_control_space_and_fail_the_entire_connec
     let control = json!({"jsonrpc":"2.0","id":1,"result":"pong"});
     sender.send(control.clone()).unwrap();
     assert!(sender.send(body.clone()).is_err());
+    let failure = sender
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .failure_snapshot
+        .clone()
+        .unwrap();
+    assert!(failure.frame_limit);
+    assert!(failure.data_frame_limit);
+    assert!(failure.data_byte_limit);
+    assert!(!failure.oversize_busy);
+    assert_eq!(failure.category, "agent.delta");
     tokio::time::timeout(Duration::from_millis(50), sender.failed())
         .await
         .unwrap();
@@ -129,6 +142,63 @@ async fn byte_and_count_budgets_reserve_control_space_and_fail_the_entire_connec
     assert!(sender.stats().peak_bytes <= body_size * 2 + 256);
     assert_eq!(sender.stats().peak_frames, 3);
     assert!(overload_frame().len() < 512);
+}
+
+#[test]
+fn overload_diagnostics_distinguish_bytes_and_oversize_without_payloads() {
+    let (sender, _receiver) = outbound_channel_with_limits(OutboundLimits {
+        data_bytes: 100,
+        control_bytes: 200,
+        frames: 20,
+        control_frames: 2,
+        merge_bytes: 0,
+    });
+    let private = "SECRET_CANARY_PATH_AND_BODY";
+    assert!(sender.send(delta(private, private, private)).is_err());
+    let failure = sender
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .failure_snapshot
+        .clone()
+        .unwrap();
+    assert!(failure.data_byte_limit);
+    assert!(!failure.frame_limit);
+    assert!(!failure.oversize_busy);
+    assert!(!format!("{failure:?}").contains(private));
+
+    let (sender, _receiver) = outbound_channel_with_limits(OutboundLimits {
+        data_bytes: 10,
+        control_bytes: 10,
+        frames: 20,
+        control_frames: 2,
+        merge_bytes: 0,
+    });
+    let value = json!({"jsonrpc":"2.0", "id":private, "result":private.repeat(20)});
+    sender.send(value.clone()).unwrap();
+    assert!(sender.send(value).is_err());
+    let failure = sender
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .failure_snapshot
+        .clone()
+        .unwrap();
+    assert!(failure.oversize_busy);
+    assert!(!failure.byte_limit);
+    assert_eq!(failure.category, "rpc.response");
+    assert!(!format!("{failure:?}").contains(private));
+    sender.control().report_failure();
+    assert!(sender
+        .shared
+        .state
+        .lock()
+        .unwrap()
+        .failure_snapshot
+        .is_none());
+    sender.control().report_failure();
 }
 
 #[tokio::test]

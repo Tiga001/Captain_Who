@@ -19,6 +19,7 @@ fn attach_message_guidance_timelines(
     connection: &rusqlite::Connection,
     conversations: &mut [ChatConversationRecord],
 ) -> Result<ConversationProjectionEvidence, String> {
+    let _timing = crate::performance::Span::new("storage.projection", "conversation_timeline");
     let mut evidence = ConversationProjectionEvidence::default();
     for conversation in conversations {
         let traces = conversation_trace_repository::list_trace_records_for_conversation(

@@ -173,7 +173,7 @@ impl StorageService {
 
     fn template_connection(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, AgentTemplateError> {
+    ) -> Result<crate::storage::StorageConnectionGuard<'_>, AgentTemplateError> {
         self.state
             .connection()
             .map_err(|_| template_storage_unavailable())

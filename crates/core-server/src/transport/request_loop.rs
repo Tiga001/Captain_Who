@@ -750,12 +750,45 @@ where
         let request_service = agent_service.clone();
         let request_notifications = outbound.clone();
         let scheduler_wake = automation_scheduler_wake.clone();
+        let diagnostic_operation = match request.method.as_str() {
+            "storage.loadConversation" => "loadConversation",
+            "storage.loadConversations" => "loadConversations",
+            "storage.loadConversationMetas" => "loadConversationMetas",
+            "storage.saveChatMessageState" => "saveChatMessageState",
+            "agent.listPendingActions" => "listPendingActions",
+            "agent.cancelRun" => "cancelRun",
+            "agent.workflows.request" => match request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("operation"))
+                .and_then(Value::as_str)
+            {
+                Some("runtimeSnapshot") => "workflow.runtimeSnapshot",
+                Some("listInstances") => "workflow.listInstances",
+                _ => "workflow.other",
+            },
+            _ => "other",
+        };
+        let diagnostic_admitted =
+            mycopilot_core::performance::enabled().then(std::time::Instant::now);
         if let Err(response) = rpc.try_submit_with_owner_resolution(
             class,
             request.id.clone(),
             ordering_key,
             owner_resolver,
             move || {
+                if let Some(admitted) = diagnostic_admitted {
+                    mycopilot_core::performance::record(
+                        "rpc.operation_queue",
+                        diagnostic_operation,
+                        admitted.elapsed(),
+                        0,
+                    );
+                }
+                let _timing = mycopilot_core::performance::Span::new(
+                    "rpc.operation_handler",
+                    diagnostic_operation,
+                );
                 if is_automation_request_method(&request.method) {
                     let request_id = request.id.clone();
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -43,15 +43,22 @@ where
     let pump = pump(&mut writer, &mut outbound, &mut images, receiver, &control);
     tokio::pin!(pump);
     let mut deadline = None;
+    let mut diagnostics = tokio::time::interval(Duration::from_secs(30));
+    diagnostics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             result = &mut pump => break result,
+            _ = diagnostics.tick(), if mycopilot_core::performance::enabled() => {
+                control.sample_queue();
+                mycopilot_core::performance::flush();
+            }
             _ = &mut finish, if deadline.is_none() => {
                 control.close();
                 let _ = draining.send(true);
                 deadline = Some(tokio::time::Instant::now() + drain_timeout);
             }
             _ = control.failed(), if deadline.is_none() => {
+                control.report_failure();
                 control.close();
                 let _ = draining.send(true);
                 deadline = Some(tokio::time::Instant::now() + drain_timeout);
@@ -68,6 +75,8 @@ where
     if result.is_err() {
         control.writer_failed();
     }
+    control.report_failure();
+    mycopilot_core::performance::flush();
     result
 }
 
@@ -108,12 +117,16 @@ where
             message = images.recv(), if images_open => {
                 match message {
                     Some(message) => {
+                        let serializing = std::time::Instant::now();
                         // The artifact permit stays live through the flush, as before. A single
                         // large JSON-RPC line cannot be preempted without changing the protocol.
                         let mut bytes = serde_json::to_vec(&message.message)?;
                         bytes.push(b'\n');
+                        mycopilot_core::performance::record("outbound.serialize", "image", serializing.elapsed(), bytes.len());
+                        let writing = std::time::Instant::now();
                         writer.write_all(&bytes).await?;
                         writer.flush().await?;
+                        mycopilot_core::performance::record("outbound.write_flush", "image", writing.elapsed(), bytes.len());
                         drop(message);
                     }
                     None => images_open = false,
@@ -131,6 +144,7 @@ where
                             size += next.wire.len();
                             frames.push(next);
                         }
+                        let writing = std::time::Instant::now();
                         if frames.len() == 1 {
                             writer.write_all(&frames[0].wire).await?;
                         } else {
@@ -139,6 +153,7 @@ where
                             writer.write_all(&batch).await?;
                         }
                         writer.flush().await?;
+                        mycopilot_core::performance::record("outbound.write_flush", "ordinary", writing.elapsed(), size);
                         // In particular, do not release an oversized response lease before flush.
                         drop(frames);
                     }

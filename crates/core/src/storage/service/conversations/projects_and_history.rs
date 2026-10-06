@@ -225,9 +225,11 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
+        let reading = crate::performance::Span::new("storage.read_decode", "conversation_messages");
         let mut conversation =
             chat_repository::get_active_conversation(&connection, conversation_id)
                 .map_err(storage_error)?;
+        drop(reading);
         let (preview_attachments, evidence) = if let Some(conversation) = &mut conversation {
             let preview_attachments =
                 self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;

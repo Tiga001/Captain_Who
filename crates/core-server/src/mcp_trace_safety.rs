@@ -23,6 +23,7 @@ fn host_targets() -> Targets {
     let targets = Targets::new()
         .with_default(LevelFilter::OFF)
         .with_target("rmcp", LevelFilter::OFF)
+        .with_target("core_performance", LevelFilter::INFO)
         .with_target("core_server", LevelFilter::INFO)
         .with_target("mycopilot_core_server", LevelFilter::INFO)
         .with_target("mycopilot_core", LevelFilter::INFO)
@@ -108,6 +109,7 @@ mod tests {
             tracing::error!(target: "rmcp::service", protocol_body = CANARY);
             tracing::error!(target: "rmcp::transport::async_rw", response = CANARY);
             tracing::info!(target: "mycopilot_core_server::lifecycle", "safe host event");
+            tracing::info!(target: "core_performance", count = 2, "performance window");
         });
 
         let rendered = String::from_utf8(
@@ -119,6 +121,7 @@ mod tests {
         .expect("captured tracing output should be UTF-8");
         assert!(!rendered.contains(CANARY));
         assert!(rendered.contains("safe host event"));
+        assert!(rendered.contains("performance window"));
     }
 
     #[test]

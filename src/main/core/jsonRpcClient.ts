@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { app } from 'electron'
 import { isAbsolute, join, normalize } from 'node:path'
+import { diagnosticMethod, RpcDiagnostics } from './rpcDiagnostics'
 import {
   NETWORK_ROUTE_COMPLETE_METHOD,
   NETWORK_ROUTE_RESOLVE_METHOD,
@@ -22,6 +23,7 @@ import type {
 interface PendingRequest {
   resolve(value: unknown): void
   reject(reason: Error): void
+  diagnostic?: { method: string; started: number }
 }
 
 type NotificationHandler = (params: unknown) => void
@@ -70,6 +72,7 @@ export class CoreJsonRpcClient {
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
   private readonly startedHandlers = new Set<() => void>()
   private networkRouteRequests = 0
+  private readonly diagnostics = new RpcDiagnostics()
 
   constructor(options: CoreJsonRpcClientOptions = {}) {
     const appDataRoot = normalize(options.appDataRoot ?? app.getPath('userData'))
@@ -217,12 +220,25 @@ export class CoreJsonRpcClient {
     }
 
     return new Promise<TResult>((resolve, reject) => {
+      const started = this.diagnostics.enabled ? performance.now() : 0
       this.pendingRequests.set(id, {
         resolve: (value) => resolve(value as TResult),
-        reject
+        reject,
+        diagnostic: this.diagnostics.enabled
+          ? { method: diagnosticMethod(method), started }
+          : undefined
       })
 
-      child.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
+      const encoded = `${JSON.stringify(request)}\n`
+      if (this.diagnostics.enabled) {
+        this.diagnostics.record(
+          'request.serialize',
+          method,
+          performance.now() - started,
+          Buffer.byteLength(encoded)
+        )
+      }
+      const accepted = child.stdin.write(encoded, (error) => {
         if (!error) {
           return
         }
@@ -235,6 +251,8 @@ export class CoreJsonRpcClient {
           reject(error)
         }
       })
+      this.diagnostics.queues(this.pendingRequests.size, child.stdin.writableLength)
+      if (!accepted) this.diagnostics.record('stdin.backpressure', method, 0)
     })
   }
 
@@ -252,6 +270,7 @@ export class CoreJsonRpcClient {
   }
 
   private handleLine(line: string): void {
+    const parseStarted = this.diagnostics.enabled ? performance.now() : 0
     let message: JsonRpcResponse | JsonRpcNotification
 
     try {
@@ -260,13 +279,25 @@ export class CoreJsonRpcClient {
       console.error('[core-server] invalid JSON-RPC response', error)
       return
     }
+    const parsedMs = this.diagnostics.enabled ? performance.now() - parseStarted : 0
 
     if (this.isNotification(message)) {
+      if (this.diagnostics.enabled) {
+        this.diagnostics.record('response.parse', message.method, parsedMs, Buffer.byteLength(line))
+      }
       if (message.method === NETWORK_ROUTE_RESOLVE_METHOD) {
         this.resolveNetworkRoute(message.params)
         return
       }
+      const dispatchStarted = this.diagnostics.enabled ? performance.now() : 0
       this.handleNotification(message)
+      if (this.diagnostics.enabled) {
+        this.diagnostics.record(
+          'notification.dispatch',
+          message.method,
+          performance.now() - dispatchStarted
+        )
+      }
       return
     }
 
@@ -295,6 +326,19 @@ export class CoreJsonRpcClient {
     }
 
     this.pendingRequests.delete(response.id)
+    if (pending.diagnostic) {
+      this.diagnostics.record(
+        'response.parse',
+        pending.diagnostic.method,
+        parsedMs,
+        Buffer.byteLength(line)
+      )
+      this.diagnostics.record(
+        'response',
+        pending.diagnostic.method,
+        performance.now() - pending.diagnostic.started
+      )
+    }
 
     if (this.isErrorResponse(response)) {
       pending.reject(new CoreJsonRpcError(response.error))
@@ -348,6 +392,8 @@ export class CoreJsonRpcClient {
   }
 
   private rejectAll(error: Error): void {
+    this.diagnostics.queues(this.pendingRequests.size, this.child?.stdin.writableLength ?? 0)
+    this.diagnostics.flush()
     for (const pending of this.pendingRequests.values()) {
       pending.reject(error)
     }

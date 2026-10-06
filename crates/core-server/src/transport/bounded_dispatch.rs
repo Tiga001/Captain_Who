@@ -281,12 +281,29 @@ async fn execute_job(
         }
     };
     let completed_at = std::time::Instant::now();
-    tracing::debug!(target: "rpc_dispatch", class = ?class,
-        queue_us = started_at.duration_since(job.admitted_at).as_micros() as u64,
-        owner_resolution_us,
-        handler_us = completed_at.duration_since(started_at).as_micros() as u64,
-        total_us = completed_at.duration_since(job.admitted_at).as_micros() as u64,
-        "RPC request completed");
+    let lane = match class {
+        RpcDispatchClass::Read => "read",
+        RpcDispatchClass::Write => "write",
+        RpcDispatchClass::Control => "control",
+    };
+    mycopilot_core::performance::record(
+        "rpc.queue",
+        lane,
+        started_at.duration_since(job.admitted_at),
+        0,
+    );
+    mycopilot_core::performance::record(
+        "rpc.owner_resolution",
+        lane,
+        Duration::from_micros(owner_resolution_us),
+        0,
+    );
+    mycopilot_core::performance::record(
+        "rpc.handler",
+        lane,
+        completed_at.duration_since(started_at),
+        0,
+    );
     let _ = enqueue_outbound(&outbound, response);
     if let Some(completion) = job.completion {
         let _ = completion.send(true);
