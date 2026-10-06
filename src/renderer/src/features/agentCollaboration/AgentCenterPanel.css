@@ -257,7 +257,6 @@
 /* The shared chat Surface keeps its visual language while fitting the 280px sidebar floor. */
 .agent-center__observer .chat-conversation-page__messages {
   padding: 20px 14px 40px;
-  gap: 40px;
 }
 
 .agent-center__observer .chat-conversation-page__messages-region {

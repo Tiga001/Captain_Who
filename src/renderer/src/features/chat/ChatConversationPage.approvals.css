@@ -365,7 +365,7 @@
   display: grid;
   justify-items: stretch;
   width: min(100%, var(--chat-column-width));
-  padding: 14px var(--chat-column-gutter) 16px;
+  padding: 8px var(--chat-column-gutter) 16px;
   margin: 0 auto;
   gap: 8px;
 }

@@ -99,7 +99,7 @@ function Workspace({
 }) {
   const [bottomOpen, setBottomOpen] = useState(halfHeight)
   const [draft, setDraft] = useState(() => createComposerDraft({ modelId: 'model-1' }))
-  const [chat] = useState(() => initialConversation ?? conversation(turns, longText))
+  const [chat, setChat] = useState(() => initialConversation ?? conversation(turns, longText))
   const common = {
     conversation: chat,
     initialScrollTop: 0,
@@ -142,7 +142,14 @@ function Workspace({
               editSelectedModelAvailable
               editSelectedModelSupportsImage
               onSubmitMessage={vi.fn()}
-              onMessageUiStateChange={vi.fn()}
+              onMessageUiStateChange={(messageId, uiState) => {
+                setChat((current) => ({
+                  ...current,
+                  messages: current.messages.map((message) =>
+                    message.id === messageId ? { ...message, uiState } : message
+                  )
+                }))
+              }}
               onContinueInNewTask={vi.fn()}
               permissionModeAvailability={{ custom: true, full: true }}
             />
@@ -380,7 +387,7 @@ describe('Conversation density and adaptive message layout', () => {
             ?.getAttribute('data-message-id')
         ).toBe(after)
       }
-      expect(messageGap('user-0', 'stopped-0')).toBe(40)
+      expect(messageGap('user-0', 'stopped-0')).toBe(36)
     }
   )
 
@@ -410,14 +417,134 @@ describe('Conversation density and adaptive message layout', () => {
     await render(<Workspace observer initialConversation={chat} />)
 
     expect(messageGap('stopped', 'assistant-0')).toBe(12)
-    expect(messageGap('assistant-0', 'stopped-next')).toBe(40)
-    expect(messageGap('stopped-next', 'user-1')).toBe(40)
+    expect(messageGap('assistant-0', 'stopped-next')).toBe(36)
+    expect(messageGap('stopped-next', 'user-1')).toBe(48)
     const header = page.elementLocator(element('[data-message-id="stopped"] .agent-run__elapsed'))
     await header.click()
-    await expect.poll(() => messageGap('stopped', 'assistant-0')).toBe(40)
+    await expect.poll(() => messageGap('stopped', 'assistant-0')).toBe(36)
     await header.click()
     await expect.poll(() => messageGap('stopped', 'assistant-0')).toBe(12)
   })
+
+  it('preserves the larger user-turn boundary across mounted message segments', async () => {
+    await render(<Workspace initialConversation={conversation(10)} />)
+    const previousAssistant = element('[data-message-id="assistant-7"]')
+    const nextUser = element('[data-message-id="user-8"]')
+    expect(previousAssistant.closest('.conversation-message-segment')).not.toBe(
+      nextUser.closest('.conversation-message-segment')
+    )
+    const sameTurnGap = messageGap('user-7', 'assistant-7')
+    const crossTurnGap = messageGap('assistant-7', 'user-8')
+    expect(crossTurnGap).toBeGreaterThan(sameTurnGap)
+    expect(crossTurnGap).toBe(messageGap('assistant-6', 'user-7'))
+    expect(messageGap('user-8', 'assistant-8')).toBe(sameTurnGap)
+  })
+
+  it('keeps a status-only continuation compact across a message-segment boundary', async () => {
+    const chat = conversation(8)
+    chat.messages[15] = stoppedMessage('segment-stopped', 9)
+    chat.messages.push({
+      id: 'segment-continuation',
+      role: 'assistant',
+      content: '已停止，保留当前工作。',
+      status: 'sent',
+      createdAt: 5000
+    })
+    await render(<Workspace initialConversation={chat} />)
+    expect(
+      element('[data-message-id="segment-stopped"]').closest('.conversation-message-segment')
+    ).not.toBe(
+      element('[data-message-id="segment-continuation"]').closest('.conversation-message-segment')
+    )
+    expect(messageGap('segment-stopped', 'segment-continuation')).toBe(12)
+  })
+
+  it.each([
+    { width: 780, mode: 'light', theme: classicLightTheme },
+    { width: 320, mode: 'dark', theme: classicDarkTheme }
+  ])(
+    'separates narration from dense activity and keeps a collapsed result readable at $width px',
+    async ({ width, mode, theme }) => {
+      for (const [name, value] of Object.entries(getFrontendCssVariables(frontendConfig, theme))) {
+        document.documentElement.style.setProperty(name, value)
+      }
+      await page.viewport(1600, 1100)
+      const { chat, activities } = visualPolishConversation()
+      chat.messages[1].agentRun!.timeline!.splice(2, 0, {
+        id: 'second-narration',
+        type: 'message',
+        content: '报告已读取，接下来逐项验证并修订。',
+        traceSequence: 3
+      })
+      chat.messages.push({
+        id: 'rhythm-followup',
+        role: 'assistant',
+        content: '文件和验证记录已经保存。',
+        createdAt: 94000,
+        status: 'sent'
+      })
+      chat.messages.push({
+        id: 'rhythm-user',
+        role: 'user',
+        content: '很好，请继续检查附录。',
+        createdAt: 95000,
+        status: 'sent'
+      })
+      const screen = await render(
+        <Workspace
+          middleWidth={width}
+          shellHeight={1040}
+          initialConversation={chat}
+          collaborationActivities={activities}
+        />
+      )
+      const run = element('[data-message-id="visual-assistant"] .agent-run')
+      const header = element('.basic-tool-activity__header')
+      const collaboration = element('.collaboration-timeline')
+      const narration = [...run.querySelectorAll<HTMLElement>(':scope > .chat-agent-text')]
+      expect(narration).toHaveLength(3)
+      const processGap =
+        collaboration.getBoundingClientRect().top - header.getBoundingClientRect().bottom
+      const narrationGap =
+        header.getBoundingClientRect().top - narration[1].getBoundingClientRect().bottom
+      expect(processGap).toBeGreaterThan(0)
+      expect(narrationGap).toBeGreaterThan(processGap)
+      expect(narrationGap).toBeLessThan(messageGap('visual-assistant', 'rhythm-followup'))
+      expect(messageGap('rhythm-followup', 'rhythm-user')).toBeGreaterThan(
+        messageGap('visual-assistant', 'rhythm-followup')
+      )
+      expect(getComputedStyle(header).fontSize).toBe('14px')
+      expect(getComputedStyle(narration[0]).fontSize).toBe('15px')
+      await userEvent.click(header)
+      const expandedHeight = run.getBoundingClientRect().height
+      const scroller = element('.chat-conversation-page__messages')
+      scroller.scrollTop = 0
+      await frame()
+      expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1)
+      await page.screenshot({
+        element: element('.main-panel'),
+        path: `../../../../../../.cache/conversation-layout-refinement/rhythm-${mode}-${width}-expanded.png`
+      })
+      await userEvent.click(run.querySelector('.agent-run__elapsed')!)
+      await expect.poll(() => run.getBoundingClientRect().height).toBeLessThan(expandedHeight)
+      expect(run.querySelector('.basic-tool-activity__header')).toBeNull()
+      expect(
+        screen.getByText('检查已完成，报告中的公式与单位格式已统一，验证结果通过。')
+      ).toBeVisible()
+      const remainingNarration = run.querySelector<HTMLElement>(':scope > .chat-agent-text')!
+      const elapsed = run.querySelector<HTMLElement>('.agent-run__elapsed')!
+      expect(
+        remainingNarration.getBoundingClientRect().top - elapsed.getBoundingClientRect().bottom
+      ).toBeGreaterThan(0)
+      expect(
+        remainingNarration.getBoundingClientRect().top - elapsed.getBoundingClientRect().bottom
+      ).toBeLessThan(messageGap('visual-assistant', 'rhythm-followup'))
+      await page.screenshot({
+        element: element('.main-panel'),
+        path: `../../../../../../.cache/conversation-layout-refinement/rhythm-${mode}-${width}-collapsed.png`
+      })
+    }
+  )
 
   it.each([
     { width: 480, padding: 24, rail: false },
@@ -533,7 +660,7 @@ describe('Conversation density and adaptive message layout', () => {
     const actionBox = action.getBoundingClientRect()
     expect(actionBox.width).toBe(24)
     expect(actionBox.height).toBe(24)
-    expect(next.getBoundingClientRect().top - box.bottom).toBe(40)
+    expect(next.getBoundingClientRect().top - box.bottom).toBe(48)
     expect(actionBox.bottom + 3).toBeLessThan(next.getBoundingClientRect().top)
     // Move through the actual pseudo-element bridge, then click without a layout-stability wait.
     await page.elementLocator(message).hover({ position: { x: 8, y: box.height + 3 }, force: true })

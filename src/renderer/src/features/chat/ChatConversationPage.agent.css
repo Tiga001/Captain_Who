@@ -6,13 +6,14 @@
   container: agent-activity / inline-size;
 }
 
-/* Narration has paragraph spacing; consecutive process rows share a tighter rhythm. */
+/* Give narration one shared separator; adjacent paragraphs must not stack margins. */
 .agent-run > .chat-agent-text {
-  margin-block: 6px;
+  margin: 0;
 }
 
-.agent-run > .chat-agent-text:last-child {
-  margin-bottom: 0;
+.agent-run > .chat-agent-text:not(:first-child),
+.agent-run > .chat-agent-text + :not([hidden]) {
+  margin-top: 4px;
 }
 
 /* Mixed tool spans keep their leaves as stable siblings while sharing one live header. */

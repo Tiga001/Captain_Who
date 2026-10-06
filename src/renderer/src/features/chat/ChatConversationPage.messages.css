@@ -22,7 +22,8 @@
 }
 
 .chat-conversation-page__messages {
-  --chat-message-gap: 40px;
+  --chat-message-gap: 36px;
+  --chat-turn-gap: 48px;
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -49,6 +50,18 @@
   flex-direction: column;
   min-width: 0;
   gap: var(--chat-message-gap);
+}
+
+/* Separate turns without adding the same large gap between a request and its reply.
+ * Segment boundaries must keep the same rhythm as fully mounted conversation history. */
+:is(
+    .chat-conversation-page__messages,
+    .chat-conversation-page__content,
+    .conversation-message-segment
+  )
+  > .chat-message--user:not(:first-child),
+.conversation-message-segment + .conversation-message-segment > .chat-message--user:first-child {
+  margin-top: calc(var(--chat-turn-gap) - var(--chat-message-gap));
 }
 
 .conversation-message-segment[data-segment-placeholder='true'] {
@@ -296,7 +309,7 @@
   top: 100%;
   right: 0;
   left: 0;
-  /* Bridge the pointer to the actions without entering the next message's 40px gap. */
+  /* Bridge the pointer to the actions while staying inside the smallest message gap. */
   height: 34px;
   content: '';
 }
@@ -537,7 +550,7 @@ button.chat-message-attachment:focus-visible {
   align-self: flex-start;
   width: 100%;
   max-width: 100%;
-  padding: 4px 0;
+  padding: 0;
   color: var(--mc-color-text-primary);
 }
 
@@ -556,12 +569,12 @@ button.chat-message-attachment:focus-visible {
 }
 
 .conversation-message-segment:has(
-    > .chat-message--assistant:last-child:not(:has(> .chat-message__actions)):has(
-        > .chat-message__body > .agent-run > .agent-run__elapsed:only-child
-      )
-  )
-  + .conversation-message-segment
-  > .chat-message--assistant:first-child {
+    > .chat-message--assistant:last-child
+      > .chat-message__body
+      > .agent-run
+      > .agent-run__elapsed:only-child
+  ):not(:has(> .chat-message--assistant:last-child > .chat-message__actions))
+  + .conversation-message-segment:has(> .chat-message--assistant:first-child) {
   margin-top: calc(12px - var(--chat-message-gap));
 }
 
