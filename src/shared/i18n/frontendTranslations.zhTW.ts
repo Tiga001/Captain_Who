@@ -1209,6 +1209,7 @@ export const zhTWTranslations = {
   'chat.usageCachedInputTokens': '緩存命中',
   'chat.usageCacheCreationInputTokens': '快取寫入',
   'agent.thinking': '正在思考',
+  'agent.waitingForNextAction': '等待下一步行動',
   'agent.interruption.serviceConnectionFailed': '模型服務連線失敗',
   'agent.interruption.serviceUnavailable': '模型服務暫時無法使用',
   'agent.interruption.authenticationFailed': '模型服務鑑權失敗',

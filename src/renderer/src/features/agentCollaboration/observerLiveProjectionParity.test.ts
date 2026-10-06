@@ -73,6 +73,14 @@ function envelope(event: AgentEvent): AgentObserverEventEnvelope {
 }
 
 const events = [
+  { type: 'final_answer_ready', runId },
+  {
+    type: 'model_activity_changed',
+    runId,
+    streamId: 'stream-parity',
+    attempt: 1,
+    activity: 'waiting'
+  },
   {
     type: 'tool_set_changed',
     runId,
@@ -138,4 +146,95 @@ describe('observer live projection parity', () => {
       expect(observed.messages[0]).toEqual(direct)
     }
   )
+
+  it('requires the runtime final marker in both routes and clears it only at settlement', () => {
+    const finalEvents: AgentEvent[] = [
+      { type: 'message_stream_started', runId, streamId: 'final-stream', attempt: 1 },
+      { type: 'message_delta', runId, streamId: 'final-stream', delta: 'The final answer.' },
+      { type: 'message_stream_committed', runId, streamId: 'final-stream', traceSequence: null },
+      { type: 'final_answer_ready', runId },
+      {
+        type: 'state',
+        runId,
+        state: { status: 'running', activeRunId: runId, lastError: null, updatedAt: 1 }
+      },
+      { type: 'done', runId, success: true, status: 'completed', proposedActions: [] }
+    ]
+    let direct = assistantMessage()
+    let observed = conversation(assistantMessage())
+    for (const [index, event] of finalEvents.entries()) {
+      direct = applyAgentEventToChatMessage(direct, event)
+      observed = applyObserverLiveEnvelope(observed, observerScope, envelope(event))
+      expect(observed.messages[0]?.agentRun?.finalAnswerReady).toEqual(
+        direct.agentRun?.finalAnswerReady
+      )
+      expect(Boolean(direct.agentRun?.finalAnswerReady)).toBe(index === 3 || index === 4)
+      expect(observed.messages[0]?.agentRun?.status).toBe(index === 5 ? 'completed' : 'running')
+    }
+  })
+
+  it('projects reasoning, visible output, retry, and terminal boundaries identically', () => {
+    const transitionEvents: AgentEvent[] = [
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 1,
+        activity: 'waiting'
+      },
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 1,
+        activity: 'reasoning'
+      },
+      { type: 'message_stream_started', runId, streamId: 'stream-parity', attempt: 1 },
+      { type: 'message_delta', runId, streamId: 'stream-parity', delta: 'visible' },
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 1,
+        activity: 'reasoning'
+      },
+      {
+        type: 'message_stream_reset',
+        runId,
+        streamId: 'stream-parity',
+        reason: 'retrying_model_request'
+      },
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 2,
+        activity: 'waiting'
+      },
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 2,
+        activity: 'reasoning'
+      },
+      { type: 'done', runId, success: false, status: 'cancelled', proposedActions: [] },
+      {
+        type: 'model_activity_changed',
+        runId,
+        streamId: 'stream-parity',
+        attempt: 2,
+        activity: 'reasoning'
+      }
+    ]
+    let direct = assistantMessage()
+    let observed = conversation(assistantMessage())
+    for (const event of transitionEvents) {
+      direct = applyAgentEventToChatMessage(direct, event)
+      observed = applyObserverLiveEnvelope(observed, observerScope, envelope(event))
+      expect(observed.messages[0]?.agentRun?.modelActivity).toEqual(direct.agentRun?.modelActivity)
+      expect(observed.messages[0]?.agentRun?.status).toEqual(direct.agentRun?.status)
+      expect(observed.messages[0]?.content).toEqual(direct.content)
+    }
+  })
 })

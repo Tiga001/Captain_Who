@@ -832,8 +832,12 @@
 
 .read-activity__details {
   display: block;
-  max-width: min(100%, 420px);
+  max-width: 100%;
   padding-top: 8px;
+}
+
+.read-activity__details[data-kind='image'] {
+  max-width: min(100%, 420px);
 }
 
 .read-activity__image {
@@ -861,9 +865,10 @@ button.read-activity__image:focus-visible {
 
 .read-activity__items {
   display: grid;
-  max-width: min(100%, 720px);
+  min-width: 0;
+  max-width: 100%;
   max-height: 260px;
-  gap: 7px;
+  gap: 2px;
   overflow: auto;
   padding-right: 2px;
 }
@@ -875,17 +880,45 @@ button.read-activity__image:focus-visible {
 }
 
 .read-activity__text-item {
+  display: flex;
+  align-items: baseline;
   min-width: 0;
-  color: var(--mc-color-text-muted);
+  gap: 10px;
+  overflow: hidden;
+  color: var(--mc-color-text-secondary);
   font-size: var(--mc-font-size-chat-activity);
   font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-relaxed);
-  overflow-wrap: anywhere;
-  white-space: normal;
+  white-space: nowrap;
+}
+
+.read-activity__text-item > span {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.read-activity__file-name {
+  flex: 0 1 auto;
+}
+
+.read-activity__text-item > .read-activity__directory {
+  flex: 1 1 0;
+  color: var(--mc-color-text-subtle);
+}
+
+.read-activity__path-error {
+  flex: 0 1 auto;
 }
 
 .read-activity__text-item[data-status='failed'] {
   color: var(--mc-color-text-danger);
+}
+
+.read-activity__text-item[data-status='failed'] > span {
+  color: inherit;
 }
 
 .read-activity__error {

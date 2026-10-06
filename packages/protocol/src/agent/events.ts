@@ -45,6 +45,15 @@ export type AgentEvent =
   | { type: 'state'; runId: string; state: AgentStateSnapshot }
   | { type: 'message_delta'; runId: string; streamId?: string; delta: string }
   | { type: 'message_stream_started'; runId: string; streamId: string; attempt: number }
+  /** Presentation-only final reply boundary; authoritative completion still arrives via Done. */
+  | { type: 'final_answer_ready'; runId: string }
+  | {
+      type: 'model_activity_changed'
+      runId: string
+      streamId: string
+      attempt: number
+      activity: 'reasoning' | 'waiting'
+    }
   | { type: 'message_stream_reset'; runId: string; streamId: string; reason: string }
   | {
       type: 'message_stream_committed'

@@ -1272,6 +1272,7 @@ export const koKRTranslations = {
   'chat.usageCachedInputTokens': '캐시된 입력',
   'chat.usageCacheCreationInputTokens': '캐시 쓰기',
   'agent.thinking': '생각',
+  'agent.waitingForNextAction': '다음 작업을 기다리는 중',
   'agent.interruption.serviceConnectionFailed': '모델 서비스 연결 실패',
   'agent.interruption.serviceUnavailable': '모델 서비스를 일시적으로 이용할 수 없습니다',
   'agent.interruption.authenticationFailed': '모델 서비스 인증 실패',

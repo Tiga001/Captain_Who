@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-06
 ---
 
 # 前端架构
@@ -142,6 +142,8 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 - `runId` 返回前到达的事件进入有界缓冲；绑定建立后再按顺序归并。
 - command session 事件按其持久 owner 路由，不简单依赖当前活动 Run。
 - 流式 delta 先短暂批处理，再更新 React 状态和持久化投影，避免每 token 重渲染。
+- 现有运行占位仅在收到明确的模型推理活动信号时显示 `Thinking`，其余空档显示 `Waiting for next action`；正文输出和工具、审批、重试等专用状态保留原有展示优先级。活动信号只携带 Run、stream、attempt 和状态，不携带推理正文，不进入持久历史；子 Agent observer 通过实时快照和 cursor 同步同一状态。
+- Runtime 确认最终回复并通过追加输入、取消和文件事务检查后，以瞬态 `final_answer_ready` 隐藏收尾期间的通用等待占位；它不提前完成 Run、不触发队列发送，也不进入持久历史。不能仅凭当前未收到 Tool Call 或流已提交来推断最终回复，observer 实时快照须保留此展示标记。
 - stop 只是请求；最终 completed/failed/cancelled 状态必须来自后端事件或权威存储对账。
 - reload 后重新加载 pending actions、command sessions 和未完成 Run，而不是根据 UI 文本推断。
 - edit/rewrite、Provider transition 和 Skill 恢复均使用 epoch/revision，迟到结果不得回退更新后的选择。

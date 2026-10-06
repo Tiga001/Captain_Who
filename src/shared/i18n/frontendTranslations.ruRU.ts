@@ -1309,6 +1309,7 @@ export const ruRUTranslations = {
   'chat.usageCachedInputTokens': 'Кэшированный ввод',
   'chat.usageCacheCreationInputTokens': 'Запись в кэш',
   'agent.thinking': 'мышление',
+  'agent.waitingForNextAction': 'Ожидание следующего действия',
   'agent.interruption.serviceConnectionFailed': 'Не удалось подключиться к сервису модели.',
   'agent.interruption.serviceUnavailable': 'Сервис моделей временно недоступен.',
   'agent.interruption.authenticationFailed': 'Аутентификация службы модели не удалась',

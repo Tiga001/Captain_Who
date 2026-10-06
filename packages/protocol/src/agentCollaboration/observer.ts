@@ -93,9 +93,30 @@ function parseObserverLiveStream(value: unknown): AgentObserverLiveStreamSnapsho
   const item = record(value, 'AgentObserverLiveStreamSnapshot')
   exact(
     item,
-    ['runId', 'assistantMessageId', 'cursor', 'stream'],
+    [
+      'runId',
+      'assistantMessageId',
+      'cursor',
+      'stream',
+      ...('modelActivity' in item ? ['modelActivity'] : []),
+      ...('finalAnswerReady' in item ? ['finalAnswerReady'] : [])
+    ],
     'AgentObserverLiveStreamSnapshot'
   )
+  let modelActivity: AgentObserverLiveStreamSnapshot['modelActivity']
+  if ('modelActivity' in item) {
+    const value = record(item.modelActivity, 'AgentObserverModelActivity')
+    exact(value, ['streamId', 'attempt', 'activity'], 'AgentObserverModelActivity')
+    modelActivity = {
+      streamId: text(value.streamId, 'AgentObserverModelActivity.streamId', 1_024),
+      attempt: integer(value.attempt, 'AgentObserverModelActivity.attempt', 1),
+      activity: oneOf(
+        value.activity,
+        ['reasoning', 'waiting'] as const,
+        'AgentObserverModelActivity.activity'
+      )
+    }
+  }
   let stream: AgentObserverLiveStreamSnapshot['stream'] = null
   if (item.stream !== null) {
     const value = record(item.stream, 'AgentObserverLiveStream')
@@ -124,6 +145,15 @@ function parseObserverLiveStream(value: unknown): AgentObserverLiveStreamSnapsho
       'AgentObserverLiveStreamSnapshot.assistantMessageId'
     ),
     cursor: parseObserverStreamCursor(item.cursor),
+    ...(modelActivity ? { modelActivity } : {}),
+    ...('finalAnswerReady' in item
+      ? {
+          finalAnswerReady: bool(
+            item.finalAnswerReady,
+            'AgentObserverLiveStreamSnapshot.finalAnswerReady'
+          )
+        }
+      : {}),
     stream
   }
 }

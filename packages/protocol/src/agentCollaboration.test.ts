@@ -300,6 +300,34 @@ describe('agent collaboration protocol', () => {
     }
     observer.liveStream = liveStream
     expect(parseAgentObserverConversation(observer)?.liveStream).toEqual(liveStream)
+    const modelActivity = { streamId: 'stream-1', attempt: 1, activity: 'reasoning' }
+    observer.liveStream = { ...liveStream, stream: null, modelActivity }
+    expect(parseAgentObserverConversation(observer)?.liveStream).toEqual({
+      ...liveStream,
+      stream: null,
+      modelActivity
+    })
+    for (const invalid of [
+      null,
+      { ...modelActivity, streamId: '' },
+      { ...modelActivity, attempt: 0 },
+      { ...modelActivity, attempt: 1.5 },
+      { ...modelActivity, activity: 'thinking' },
+      { ...modelActivity, content: 'private provider reasoning' }
+    ]) {
+      observer.liveStream = { ...liveStream, modelActivity: invalid }
+      expect(() => parseAgentObserverConversation(observer)).toThrow()
+    }
+    for (const finalAnswerReady of [true, false]) {
+      observer.liveStream = { ...liveStream, stream: null, finalAnswerReady }
+      expect(parseAgentObserverConversation(observer)?.liveStream?.finalAnswerReady).toBe(
+        finalAnswerReady
+      )
+    }
+    for (const finalAnswerReady of [null, undefined, 'true', 1, {}]) {
+      observer.liveStream = { ...liveStream, finalAnswerReady }
+      expect(() => parseAgentObserverConversation(observer)).toThrow(/finalAnswerReady/)
+    }
     for (const sequence of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       observer.liveStream = { ...liveStream, cursor: { ...liveStream.cursor, sequence } }
       expect(() => parseAgentObserverConversation(observer)).toThrow()

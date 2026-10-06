@@ -266,6 +266,8 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_server = captured.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -278,6 +280,14 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
         for request_index in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_runtime_test_json_request(&mut stream).await;
+            assert!(
+                !captured_for_server
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::FinalAnswerReady { .. })),
+                "intermediate no-tool response must not publish final-answer readiness"
+            );
             requests_for_server.lock().unwrap().push(request);
             if request_index == 0 {
                 first_request_seen_tx.take().unwrap().send(()).unwrap();
@@ -326,12 +336,13 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
         permissions: Default::default(),
     });
     let runtime_queue = queue.clone();
+    let sink = captured.clone();
     let runtime = tokio::spawn(async move {
         AgentRuntime::default()
             .send_chat_with_events_and_cancellation(
                 input,
                 Some("run-steer".to_string()),
-                None,
+                Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
                 AgentCancellationToken::new(),
                 Some(AgentRuntimeHostServices::new().with_steer_input(runtime_queue)),
             )
@@ -365,6 +376,19 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
     server.await.unwrap();
 
     assert_eq!(output.content, "Final answer after guidance.");
+    assert_eq!(
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::FinalAnswerReady { .. }))
+            .count(),
+        1
+    );
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::FinalAnswerReady { .. })));
     let requests = requests.lock().unwrap();
     assert!(requests[0]["messages"]
         .as_array()

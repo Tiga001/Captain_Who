@@ -2605,6 +2605,14 @@ fn terminal_event_gate_defers_settled_state_and_done_until_commit() {
         gate.route(message),
         Some(AgentEvent::Message { .. })
     ));
+    // The final reply can stop displaying the generic waiting placeholder while Done
+    // remains behind the durable commit/admission boundary.
+    assert!(matches!(
+        gate.route(AgentEvent::FinalAnswerReady {
+            run_id: "run-terminal-gate".to_string(),
+        }),
+        Some(AgentEvent::FinalAnswerReady { .. })
+    ));
 
     assert!(gate
         .route(AgentEvent::State {

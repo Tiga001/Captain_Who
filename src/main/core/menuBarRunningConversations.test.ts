@@ -81,6 +81,8 @@ describe('Menu-bar running conversations', () => {
       'command_output',
       'tool_input_progress',
       'message_stream_started',
+      'model_activity_changed',
+      'final_answer_ready',
       'tool_result'
     ] as const) {
       expect(agentEventChangesRunningConversations({ type })).toBe(false)

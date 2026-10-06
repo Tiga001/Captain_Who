@@ -594,6 +594,9 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
   delete persistedRun.fileChangePreviews
   delete persistedRun.commandOutputPreviews
   delete persistedRun.llmRetry
+  delete persistedRun.modelActivity
+  delete persistedRun.modelActivityAttempts
+  delete persistedRun.finalAnswerReady
   if (!commandSessions) delete persistedRun.commandSessions
 
   const encoded = JSON.stringify(persistedRun)

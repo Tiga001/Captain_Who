@@ -1318,6 +1318,7 @@ export const itITTranslations = {
   'chat.usageCachedInputTokens': 'Ingresso memorizzato nella cache',
   'chat.usageCacheCreationInputTokens': 'Scrittura nella cache',
   'agent.thinking': 'Pensare',
+  'agent.waitingForNextAction': 'In attesa della prossima azione',
   'agent.interruption.serviceConnectionFailed': 'Connessione al servizio modello non riuscita',
   'agent.interruption.serviceUnavailable': 'Il servizio modello è temporaneamente non disponibile',
   'agent.interruption.authenticationFailed': 'Autenticazione del servizio modello non riuscita',

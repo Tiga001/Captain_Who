@@ -18,6 +18,7 @@ import '../ChatConversationPage.css'
 const translations: Record<string, string> = {
   'agent.processed': '已处理 {duration}',
   'agent.thinking': '正在思考',
+  'agent.waitingForNextAction': '等待下一步行动',
   'agent.command.waitingForCompletion': '正在等待命令完成',
   'agent.sendMessage.sending': '正在向智能体「{name}」发送消息',
   'agent.sendMessage.sent': '向智能体「{name}」发送了消息',
@@ -139,7 +140,7 @@ describe('collaboration Harness timeline projection', () => {
       expect(screen.container.textContent).not.toContain(tool)
       expect(screen.container.textContent).not.toContain(`RAW-HARNESS-${tool}`)
     }
-    expect(screen.container.textContent).toContain('正在思考')
+    expect(screen.container.textContent).toContain('等待下一步行动')
     expect(screen.container.textContent).not.toContain('正在等待命令完成')
   })
 

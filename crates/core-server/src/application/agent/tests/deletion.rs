@@ -16,6 +16,7 @@ pub(super) fn seed_observer_stream(
             agent_id: format!("agent-{conversation_id}"),
             root_agent_id: format!("agent-{root_conversation_id}"),
             root_conversation_id: root_conversation_id.to_string(),
+            model_activity_attempts: std::collections::HashMap::new(),
             snapshot: mycopilot_protocol_rs::AgentObserverLiveStreamSnapshotDto {
                 run_id: run_id.to_string(),
                 assistant_message_id: assistant_message_id.to_string(),
@@ -24,6 +25,8 @@ pub(super) fn seed_observer_stream(
                     sequence: 1,
                 },
                 stream: None,
+                model_activity: None,
+                final_answer_ready: false,
             },
         },
     );

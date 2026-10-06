@@ -362,6 +362,52 @@ describe('CoreServer collaboration client', () => {
     warning.mockRestore()
   })
 
+  it.each([
+    {
+      type: 'model_activity_changed',
+      runId: 'run-child',
+      streamId: 'stream-child',
+      attempt: 1,
+      activity: 'reasoning'
+    },
+    { type: 'final_answer_ready', runId: 'run-child' }
+  ])('forwards content-free $type through both main and observer subscriptions', (event) => {
+    const receivers = new Map<string, (value: unknown) => void>()
+    onNotification.mockImplementation((method, handler) => {
+      receivers.set(method, handler)
+      return () => undefined
+    })
+    const server = new CoreServer()
+    const main = vi.fn()
+    const observer = vi.fn()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    server.onAgentEvent(main)
+    server.onCollaborationObserverEvent(observer)
+    const envelope = {
+      schemaVersion: 1,
+      rootAgentId: 'agent-root',
+      rootConversationId: 'conversation-root',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      runId: event.runId,
+      assistantMessageId: 'assistant-child',
+      event
+    }
+    receivers.get('agent.event')?.(event)
+    receivers.get('agent.collaboration.observerEvent')?.(envelope)
+    expect(main).toHaveBeenCalledExactlyOnceWith(event)
+    expect(observer).toHaveBeenCalledExactlyOnceWith(envelope)
+    expect(warning).not.toHaveBeenCalled()
+
+    const invalid = { ...event, reasoningContent: 'private-reasoning-canary' }
+    receivers.get('agent.event')?.(invalid)
+    receivers.get('agent.collaboration.observerEvent')?.({ ...envelope, event: invalid })
+    expect(main).toHaveBeenCalledTimes(1)
+    expect(observer).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('private-reasoning-canary')
+    warning.mockRestore()
+  })
+
   it('rate-limits invalid observer warnings without logging rejected payloads or identities', () => {
     let receiver: ((value: unknown) => void) | undefined
     onNotification.mockImplementation((_method, handler) => {

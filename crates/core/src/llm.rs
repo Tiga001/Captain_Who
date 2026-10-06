@@ -24,8 +24,9 @@ pub(crate) use transport::{
 
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{
-    AgentApiStyle, AgentAssistantTurnCheckpointIdentity, AgentError, AgentProviderToolCallIdentity,
-    AgentResult, AgentToolDefinition, AgentUsage, ProviderContinuationRef,
+    AgentApiStyle, AgentAssistantTurnCheckpointIdentity, AgentError, AgentModelActivity,
+    AgentProviderToolCallIdentity, AgentResult, AgentToolDefinition, AgentUsage,
+    ProviderContinuationRef,
 };
 use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::tools::schema::validate_portable_tool_input_schema;
@@ -1086,6 +1087,8 @@ pub(crate) enum LlmStreamEvent {
         max_attempts: usize,
     },
     Delta(String),
+    /// Normalized provider activity only; reasoning text remains inside its adapter.
+    ModelActivityChanged(AgentModelActivity),
     ToolInputProgress {
         tool_call_index: usize,
         tool: String,

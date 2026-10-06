@@ -243,6 +243,9 @@ it('keeps live command output transient while persisting the final tool result',
         attempt: 2,
         maxAttempts: 3
       },
+      modelActivity: { streamId: 'stream-1', attempt: 1, activity: 'reasoning' },
+      modelActivityAttempts: { 'stream-1': 1 },
+      finalAnswerReady: true,
       commandSessions: {
         'command-call': {
           callId: 'command-call',
@@ -265,6 +268,9 @@ it('keeps live command output transient while persisting the final tool result',
   expect(storedRun.commandOutputPreviews).toBeUndefined()
   expect(storedRun.commandSessions).toBeUndefined()
   expect(storedRun.llmRetry).toBeUndefined()
+  expect(storedRun.modelActivity).toBeUndefined()
+  expect(storedRun.modelActivityAttempts).toBeUndefined()
+  expect(storedRun.finalAnswerReady).toBeUndefined()
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
 })
 

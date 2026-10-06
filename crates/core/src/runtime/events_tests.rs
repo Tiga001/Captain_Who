@@ -216,6 +216,10 @@ async fn driver_applies_host_retention_only_when_live_delivery_is_available() {
             server.await.unwrap();
             assert_eq!(output.content, "你好 🌍\n```rs\n```");
             assert_eq!(output.status, AgentRunStatus::Completed);
+            assert!(!output
+                .events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswerReady { .. })));
             assert_eq!(
                 output
                     .events
@@ -235,6 +239,32 @@ async fn driver_applies_host_retention_only_when_live_delivery_is_available() {
                     })
                     .collect::<String>();
                 assert_eq!(text, output.content);
+                let captured = captured.lock().unwrap();
+                let ready = captured
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, event)| {
+                        matches!(event, AgentEvent::FinalAnswerReady { run_id } if run_id == "run")
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(ready.len(), 1);
+                let ready = ready[0];
+                let last_delta = captured
+                    .iter()
+                    .rposition(|event| matches!(event, AgentEvent::MessageDelta { .. }))
+                    .unwrap();
+                assert!(last_delta < ready);
+                assert!(
+                    matches!(&captured[ready + 1], AgentEvent::State { state, .. } if state.status == AgentRunStatus::Completed)
+                );
+                assert!(matches!(
+                    &captured[ready + 2],
+                    AgentEvent::Done {
+                        status: Some(AgentRunStatus::Completed),
+                        ..
+                    }
+                ));
             }
         }
     }

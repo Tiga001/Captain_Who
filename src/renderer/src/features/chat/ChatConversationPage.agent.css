@@ -968,6 +968,10 @@ button.file-change-activity__path:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.file-change-activity__stats .rolling-line-count span {
+  color: inherit;
+}
+
 .file-change-activity__additions {
   color: var(--mc-color-diff-addition-text) !important;
 }

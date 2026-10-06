@@ -20,23 +20,28 @@ export interface ObserverStreamPosition {
   cursor: AgentObserverStreamCursor
 }
 
-export function isObserverTextEvent(event: AgentEvent): boolean {
+export function isObserverTransientEvent(event: AgentEvent): boolean {
   return (
     event.type === 'message_delta' ||
     event.type === 'message' ||
     event.type === 'message_stream_started' ||
     event.type === 'message_stream_reset' ||
-    event.type === 'message_stream_committed'
+    event.type === 'message_stream_committed' ||
+    event.type === 'model_activity_changed' ||
+    event.type === 'final_answer_ready' ||
+    event.type === 'llm_retry' ||
+    event.type === 'tool_input_progress'
   )
 }
 
-/** A snapshot's complete prefix replaces provisional text, never durable history before it. */
+/** Restores content-free activity and replaces only the provisional text prefix. */
 export function applyObserverStreamSnapshot(
   conversation: ChatConversation,
   snapshot: AgentObserverLiveStreamSnapshot | undefined
 ): ChatConversation {
-  if (!snapshot?.stream) return conversation
-  const { stream, runId, assistantMessageId } = snapshot
+  if (!snapshot) return conversation
+  const { stream, runId, assistantMessageId, finalAnswerReady } = snapshot
+  const modelActivity = finalAnswerReady ? undefined : snapshot.modelActivity
   return {
     ...conversation,
     messages: conversation.messages.map((message) => {
@@ -49,81 +54,160 @@ export function applyObserverStreamSnapshot(
         run.status === 'cancelled'
       )
         return message
-      // A narration may already have committed in SQLite just before its stream-commit event.
-      // The start boundary identifies that same narration without guessing from matching text.
-      const isCurrentStream = (item: (typeof run.timeline)[number]) =>
-        item.type === 'message' &&
-        (item.streamId === stream.streamId ||
-          (item.traceSequence !== undefined && item.traceSequence >= stream.traceBoundarySequence))
-      const insertionIndex = run.timeline.findIndex(isCurrentStream)
-      const checkpoints = { ...run.messageStreamCheckpoints }
-      delete checkpoints[stream.streamId]
-      let next: ChatMessage = {
-        ...message,
-        agentRun: {
-          ...run,
-          timeline: run.timeline.filter((item) => !isCurrentStream(item)),
-          messageStreamCheckpoints: checkpoints
+      let next: ChatMessage = message
+      if (stream) {
+        // A narration may already have committed in SQLite just before its stream-commit event.
+        // The start boundary identifies that same narration without guessing from matching text.
+        const isCurrentStream = (item: (typeof run.timeline)[number]) =>
+          item.type === 'message' &&
+          (item.streamId === stream.streamId ||
+            (item.traceSequence !== undefined &&
+              item.traceSequence >= stream.traceBoundarySequence))
+        const insertionIndex = run.timeline.findIndex(isCurrentStream)
+        const checkpoints = { ...run.messageStreamCheckpoints }
+        delete checkpoints[stream.streamId]
+        const attempts = { ...run.modelActivityAttempts }
+        delete attempts[stream.streamId]
+        next = {
+          ...message,
+          agentRun: {
+            ...run,
+            timeline: run.timeline.filter((item) => !isCurrentStream(item)),
+            modelActivity: undefined,
+            modelActivityAttempts: attempts,
+            messageStreamCheckpoints: checkpoints
+          }
         }
-      }
-      next = applyAgentEventToChatMessage(next, {
-        type: 'message_stream_started',
-        runId,
-        streamId: stream.streamId,
-        attempt: stream.attempt
-      })
-      next = applyAgentEventToChatMessage(next, {
-        type: 'message_delta',
-        runId,
-        streamId: stream.streamId,
-        delta: stream.content
-      })
-      if (stream.committed) {
         next = applyAgentEventToChatMessage(next, {
-          type: 'message_stream_committed',
+          type: 'message_stream_started',
           runId,
           streamId: stream.streamId,
-          traceSequence: null
+          attempt: stream.attempt
         })
+        next = applyAgentEventToChatMessage(next, {
+          type: 'message_delta',
+          runId,
+          streamId: stream.streamId,
+          delta: stream.content
+        })
+        if (stream.committed) {
+          next = applyAgentEventToChatMessage(next, {
+            type: 'message_stream_committed',
+            runId,
+            streamId: stream.streamId,
+            traceSequence: null
+          })
+        }
+        if (insertionIndex >= 0 && next.agentRun) {
+          const timeline = [...next.agentRun.timeline]
+          const [text] = timeline.splice(timeline.length - 1, 1)
+          if (text) timeline.splice(insertionIndex, 0, text)
+          next = { ...next, agentRun: { ...next.agentRun, timeline } }
+        }
       }
-      if (insertionIndex >= 0 && next.agentRun) {
-        const timeline = [...next.agentRun.timeline]
-        const [text] = timeline.splice(timeline.length - 1, 1)
-        if (text) timeline.splice(insertionIndex, 0, text)
-        next = { ...next, agentRun: { ...next.agentRun, timeline } }
+      next = {
+        ...next,
+        ...(modelActivity || finalAnswerReady ? { status: 'pending' as const } : {}),
+        agentRun: {
+          ...next.agentRun!,
+          ...(modelActivity || finalAnswerReady ? { status: 'running' as const } : {}),
+          finalAnswerReady,
+          llmRetry: finalAnswerReady ? undefined : next.agentRun?.llmRetry,
+          modelActivity,
+          modelActivityAttempts: {
+            ...next.agentRun?.modelActivityAttempts,
+            ...(modelActivity ? { [modelActivity.streamId]: modelActivity.attempt } : {})
+          }
+        }
       }
       return next
     })
   }
 }
 
-/** Only text uses this cursor: other event families keep their own durable identities. */
+/** Transient state uses the snapshot cut; durable events still reduce their own identities. */
 export function applyObserverEnvelopeWithCursor(
   conversation: ChatConversation,
   scope: ObserverScope,
   envelope: AgentObserverEventEnvelope,
   position: ObserverStreamPosition | null
 ): { conversation: ChatConversation; position: ObserverStreamPosition | null } {
+  if (!matchesObserverEnvelope(conversation, scope, envelope)) return { conversation, position }
   const cursor = envelope.streamCursor
-  const textEvent = isObserverTextEvent(envelope.event)
-  if (
-    textEvent &&
+  const alreadyObserved =
     cursor &&
     position?.runId === envelope.runId &&
     position.assistantMessageId === envelope.assistantMessageId &&
     position.cursor.generation === cursor.generation &&
     position.cursor.sequence >= cursor.sequence
-  ) {
+  if (alreadyObserved && isObserverTransientEvent(envelope.event)) {
     return { conversation, position }
   }
-  const next = applyObserverLiveEnvelope(conversation, scope, envelope)
+  let next = applyObserverLiveEnvelope(conversation, scope, envelope)
+  if (alreadyObserved && next !== conversation) {
+    // Earlier durable tool/state events may still add timeline rows. Newer activity or a final
+    // answer marker owns this presentation phase; terminal status still takes precedence.
+    const previous = conversation.messages.find(
+      (message) => message.id === envelope.assistantMessageId
+    )?.agentRun
+    next = {
+      ...next,
+      messages: next.messages.map((message) => {
+        if (message.id !== envelope.assistantMessageId || !message.agentRun) return message
+        const terminal = ['completed', 'failed', 'cancelled'].includes(message.agentRun.status)
+        const newerPhase =
+          previous?.finalAnswerReady ||
+          (previous?.modelActivity &&
+            (previous.status === 'running' || previous.status === 'starting'))
+        if (
+          terminal ||
+          (!newerPhase &&
+            message.agentRun.status !== 'running' &&
+            message.agentRun.status !== 'starting')
+        )
+          return message
+        return {
+          ...message,
+          ...(newerPhase
+            ? { status: conversation.messages.find((item) => item.id === message.id)?.status }
+            : {}),
+          agentRun: {
+            ...message.agentRun,
+            ...(newerPhase ? { status: previous.status } : {}),
+            finalAnswerReady: previous?.finalAnswerReady,
+            modelActivity: previous?.modelActivity,
+            modelActivityAttempts: previous?.modelActivityAttempts
+          }
+        }
+      })
+    }
+  }
   return {
     conversation: next,
     position:
-      textEvent && cursor && next !== conversation
+      cursor && !alreadyObserved
         ? { runId: envelope.runId, assistantMessageId: envelope.assistantMessageId, cursor }
         : position
   }
+}
+
+function matchesObserverEnvelope(
+  conversation: ChatConversation,
+  scope: ObserverScope,
+  envelope: AgentObserverEventEnvelope
+): boolean {
+  return (
+    envelope.agentId === scope.agentId &&
+    envelope.rootAgentId === scope.rootAgentId &&
+    envelope.rootConversationId === scope.rootConversationId &&
+    envelope.conversationId === scope.conversationId &&
+    conversation.id === scope.conversationId &&
+    envelope.event.runId === envelope.runId &&
+    conversation.messages.some(
+      (message) =>
+        message.id === envelope.assistantMessageId && message.agentRun?.runId === envelope.runId
+    )
+  )
 }
 
 export function applyObserverLiveEnvelope(
@@ -131,16 +215,7 @@ export function applyObserverLiveEnvelope(
   scope: ObserverScope,
   envelope: AgentObserverEventEnvelope
 ): ChatConversation {
-  if (
-    envelope.agentId !== scope.agentId ||
-    envelope.rootAgentId !== scope.rootAgentId ||
-    envelope.rootConversationId !== scope.rootConversationId ||
-    envelope.conversationId !== scope.conversationId ||
-    conversation.id !== scope.conversationId ||
-    envelope.event.runId !== envelope.runId
-  ) {
-    return conversation
-  }
+  if (!matchesObserverEnvelope(conversation, scope, envelope)) return conversation
   const message = conversation.messages.find(
     (candidate) =>
       candidate.id === envelope.assistantMessageId && candidate.agentRun?.runId === envelope.runId

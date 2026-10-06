@@ -1326,6 +1326,7 @@ export const frFRTranslations = {
   'chat.usageCachedInputTokens': 'Entrée en cache',
   'chat.usageCacheCreationInputTokens': 'Écriture en cache',
   'agent.thinking': 'Penser',
+  'agent.waitingForNextAction': 'En attente de la prochaine action',
   'agent.interruption.serviceConnectionFailed': 'Échec de la connexion au service de modèle',
   'agent.interruption.serviceUnavailable': 'Le service de modèle est temporairement indisponible',
   'agent.interruption.authenticationFailed': "Échec de l'authentification du service de modèle",

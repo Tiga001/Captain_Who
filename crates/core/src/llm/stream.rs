@@ -7,7 +7,7 @@ use super::{
     INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE,
 };
 use crate::cancellation::AgentCancellationToken;
-use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
+use crate::protocol::{AgentApiStyle, AgentError, AgentModelActivity, AgentResult, AgentUsage};
 #[cfg(test)]
 use crate::provider_profile::ProviderProfileId;
 use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
@@ -15,7 +15,7 @@ use crate::usage::{extract_anthropic_stream_usage, extract_usage, merge_stream_u
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 fn invalid_stream_tool_arguments_error(
@@ -142,6 +142,7 @@ where
             == crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions
         {
             accumulator.saw_terminal_signal = true;
+            accumulator.set_activity(AgentModelActivity::Waiting, on_delta);
         }
         return Ok(false);
     }
@@ -167,6 +168,27 @@ where
     let is_model_activity = is_meaningful_model_activity(frame.event.as_deref(), &value);
     accumulator.process(frame.event.as_deref(), &value, on_delta)?;
     Ok(is_model_activity)
+}
+
+fn has_openai_tool_activity(delta: &Value) -> bool {
+    delta
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| {
+            calls.iter().any(|call| {
+                call.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+                    || call.get("function").is_some_and(|function| {
+                        ["name", "arguments"].iter().any(|field| {
+                            function
+                                .get(field)
+                                .and_then(Value::as_str)
+                                .is_some_and(|value| !value.is_empty())
+                        })
+                    })
+            })
+        })
 }
 
 fn is_meaningful_model_activity(event: Option<&str>, value: &Value) -> bool {
@@ -195,24 +217,7 @@ fn is_meaningful_model_activity(event: Option<&str>, value: &Value) -> bool {
                         .get("reasoning_content")
                         .and_then(Value::as_str)
                         .is_some_and(|reasoning| !reasoning.is_empty())
-                    || delta
-                        .get("tool_calls")
-                        .and_then(Value::as_array)
-                        .is_some_and(|calls| {
-                            calls.iter().any(|call| {
-                                call.get("id")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|id| !id.is_empty())
-                                    || call.get("function").is_some_and(|function| {
-                                        ["name", "arguments"].iter().any(|field| {
-                                            function
-                                                .get(field)
-                                                .and_then(Value::as_str)
-                                                .is_some_and(|value| !value.is_empty())
-                                        })
-                                    })
-                            })
-                        })
+                    || has_openai_tool_activity(delta)
             })
         })
     {
@@ -240,6 +245,7 @@ fn is_meaningful_model_activity(event: Option<&str>, value: &Value) -> bool {
                                 && input.as_object().is_none_or(|input| !input.is_empty())
                         })
                 }
+                Some("thinking" | "redacted_thinking") => true,
                 _ => false,
             }
         }),
@@ -249,7 +255,11 @@ fn is_meaningful_model_activity(event: Option<&str>, value: &Value) -> bool {
                     .get(field)
                     .and_then(Value::as_str)
                     .is_some_and(|value| !value.is_empty())
-            })
+            }) || (delta.get("type").and_then(Value::as_str) == Some("thinking_delta")
+                && delta
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .is_some_and(|thinking| !thinking.is_empty()))
         }),
         _ => false,
     }
@@ -313,6 +323,7 @@ pub(super) struct LlmStreamAccumulator {
     provider_protocol: ProviderProtocolKey,
     state: ProviderStreamState,
     saw_terminal_signal: bool,
+    activity: AgentModelActivity,
 }
 
 impl LlmStreamAccumulator {
@@ -351,6 +362,7 @@ impl LlmStreamAccumulator {
             provider_protocol: provider_protocol.clone(),
             state: adapter.new_stream_state(provider_profile)?,
             saw_terminal_signal: false,
+            activity: AgentModelActivity::Waiting,
         })
     }
 
@@ -394,8 +406,30 @@ impl LlmStreamAccumulator {
                 event.or_else(|| value.get("type").and_then(Value::as_str)) == Some("message_stop")
             }
         };
+        let activity = &mut self.activity;
         self.adapter
-            .consume_streaming_event(&mut self.state, event, value, on_delta)
+            .consume_streaming_event(&mut self.state, event, value, &mut |stream_event| {
+                match stream_event {
+                    LlmStreamEvent::ModelActivityChanged(next) => {
+                        if *activity != next {
+                            *activity = next;
+                            on_delta(LlmStreamEvent::ModelActivityChanged(next));
+                        }
+                    }
+                    other => on_delta(other),
+                }
+            })
+    }
+
+    fn set_activity(
+        &mut self,
+        activity: AgentModelActivity,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) {
+        if self.activity != activity {
+            self.activity = activity;
+            on_delta(LlmStreamEvent::ModelActivityChanged(activity));
+        }
     }
 
     pub(super) fn finish(self) -> AgentResult<LlmChatResponse> {
@@ -590,11 +624,42 @@ impl OpenAiStreamAccumulator {
         for choice in choices {
             if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
                 self.finish_reason = Some(reason.to_string());
+                if !reason.is_empty() {
+                    on_delta(LlmStreamEvent::ModelActivityChanged(
+                        AgentModelActivity::Waiting,
+                    ));
+                }
             }
 
             let Some(delta) = choice.get("delta") else {
                 continue;
             };
+            // A tool name/ID is already an end to the reasoning phase, even when its
+            // first argument fragment has not arrived yet. Visible output wins when a
+            // compatibility endpoint includes reasoning and content in the same chunk.
+            let has_content = delta
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty());
+            if has_content || has_openai_tool_activity(delta) {
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Waiting,
+                ));
+            } else if choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+                && delta
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reasoning| !reasoning.is_empty())
+            {
+                // DeepSeek and Moonshot validate and retain this field privately before
+                // entering their shared Chat Completions framing accumulator.
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Reasoning,
+                ));
+            }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
                     self.content.push_str(content);
@@ -678,6 +743,7 @@ impl OpenAiStreamAccumulator {
 pub(super) struct AnthropicStreamAccumulator {
     content: String,
     blocks: BTreeMap<usize, AnthropicBlockAccumulator>,
+    reasoning_blocks: BTreeSet<usize>,
     usage: Option<AgentUsage>,
     finish_reason: Option<String>,
 }
@@ -719,6 +785,12 @@ impl AnthropicStreamAccumulator {
                     .and_then(Value::as_str)
                 {
                     self.finish_reason = Some(reason.to_string());
+                    if !reason.is_empty() {
+                        self.reasoning_blocks.clear();
+                        on_delta(LlmStreamEvent::ModelActivityChanged(
+                            AgentModelActivity::Waiting,
+                        ));
+                    }
                 }
                 merge_stream_usage(&mut self.usage, extract_anthropic_stream_usage(value));
             }
@@ -729,7 +801,24 @@ impl AnthropicStreamAccumulator {
                 )
                 .to_agent_error());
             }
-            "ping" | "content_block_stop" | "message_stop" => {}
+            "content_block_stop" => {
+                if let Some(index) = value.get("index").and_then(Value::as_u64) {
+                    if self.reasoning_blocks.remove(&(index as usize))
+                        && self.reasoning_blocks.is_empty()
+                    {
+                        on_delta(LlmStreamEvent::ModelActivityChanged(
+                            AgentModelActivity::Waiting,
+                        ));
+                    }
+                }
+            }
+            "message_stop" => {
+                self.reasoning_blocks.clear();
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Waiting,
+                ));
+            }
+            "ping" => {}
             _ => {}
         }
 
@@ -756,6 +845,10 @@ impl AnthropicStreamAccumulator {
 
         match kind {
             "text" => {
+                self.reasoning_blocks.clear();
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Waiting,
+                ));
                 if let Some(text) = content_block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
                         self.content.push_str(text);
@@ -764,6 +857,10 @@ impl AnthropicStreamAccumulator {
                 }
             }
             "tool_use" => {
+                self.reasoning_blocks.clear();
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Waiting,
+                ));
                 block.id = content_block
                     .get("id")
                     .and_then(Value::as_str)
@@ -783,6 +880,12 @@ impl AnthropicStreamAccumulator {
                         });
                     }
                 }
+            }
+            "thinking" | "redacted_thinking" => {
+                self.reasoning_blocks.insert(index);
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Reasoning,
+                ));
             }
             _ => {}
         }
@@ -814,6 +917,10 @@ impl AnthropicStreamAccumulator {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if !text.is_empty() {
+                    self.reasoning_blocks.clear();
+                    on_delta(LlmStreamEvent::ModelActivityChanged(
+                        AgentModelActivity::Waiting,
+                    ));
                     block.kind = "text".to_string();
                     self.content.push_str(text);
                     on_delta(LlmStreamEvent::Delta(text.to_string()));
@@ -827,12 +934,29 @@ impl AnthropicStreamAccumulator {
                 block.kind = "tool_use".to_string();
                 block.input_json.push_str(partial_json);
                 if !partial_json.is_empty() {
+                    self.reasoning_blocks.clear();
+                    on_delta(LlmStreamEvent::ModelActivityChanged(
+                        AgentModelActivity::Waiting,
+                    ));
                     on_delta(LlmStreamEvent::ToolInputProgress {
                         tool_call_index: index,
                         tool: block.name.clone().unwrap_or_default(),
                         input_delta: partial_json.to_string(),
                         received_bytes: block.input_json.len() as u64,
                     });
+                }
+            }
+            "thinking_delta" => {
+                if delta
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .is_some_and(|thinking| !thinking.is_empty())
+                {
+                    block.kind = "thinking".to_string();
+                    self.reasoning_blocks.insert(index);
+                    on_delta(LlmStreamEvent::ModelActivityChanged(
+                        AgentModelActivity::Reasoning,
+                    ));
                 }
             }
             _ => {}
@@ -892,6 +1016,10 @@ fn append_stream_fragment(target: &mut String, fragment: &str) {
         target.push_str(fragment);
     }
 }
+
+#[cfg(test)]
+#[path = "stream_activity_tests.rs"]
+mod activity_tests;
 
 #[cfg(test)]
 mod tests {

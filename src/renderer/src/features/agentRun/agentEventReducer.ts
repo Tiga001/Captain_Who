@@ -180,7 +180,10 @@ export function settleAgentRunToolActivities(
 ): ChatAgentRunView {
   const runWithStatus = normalizeAgentRunToolActivities({
     ...run,
-    status
+    status,
+    modelActivity: status === 'running' || status === 'starting' ? run.modelActivity : undefined,
+    finalAnswerReady:
+      status === 'running' || status === 'starting' ? run.finalAnswerReady : undefined
   })
   const settledActivityStatus = getSettledActivityStatus(status)
 
@@ -244,7 +247,17 @@ export function applyAgentEventToChatMessage(
   agentEvent: AgentEvent
 ): ChatMessage {
   const runId = agentEvent.runId ?? message.agentRun?.runId ?? null
-  const currentRun = ensureAgentRun(message.agentRun, runId)
+  let currentRun = ensureAgentRun(message.agentRun, runId)
+
+  if (
+    (agentEvent.type === 'model_activity_changed' ||
+      agentEvent.type === 'message_stream_started' ||
+      agentEvent.type === 'message_stream_reset' ||
+      agentEvent.type === 'llm_retry') &&
+    currentRun.runId !== agentEvent.runId
+  ) {
+    return message
+  }
 
   if (agentEvent.type === 'workflow_delivery_applied') {
     if (
@@ -289,6 +302,97 @@ export function applyAgentEventToChatMessage(
     if (doneStatus !== currentRun.status) return message
   }
 
+  if (agentEvent.type === 'final_answer_ready') {
+    if (
+      message.agentRun?.runId !== agentEvent.runId ||
+      (currentRun.status !== 'running' && currentRun.status !== 'starting') ||
+      currentRun.finalAnswerReady
+    ) {
+      return message
+    }
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        finalAnswerReady: true,
+        modelActivity: undefined,
+        llmRetry: undefined
+      }
+    }
+  }
+
+  if (agentEvent.type === 'model_activity_changed') {
+    if (currentRun.status !== 'running' && currentRun.status !== 'starting') return message
+    const activity = currentRun.modelActivity
+    const sameAttempt =
+      activity?.streamId === agentEvent.streamId && activity.attempt === agentEvent.attempt
+    if (!sameAttempt) {
+      // The initial waiting event also establishes requests whose public text stream is blocked.
+      // Reasoning alone cannot revive a retired request or replace the current request identity.
+      if (
+        agentEvent.activity !== 'waiting' ||
+        agentEvent.attempt <= (currentRun.modelActivityAttempts?.[agentEvent.streamId] ?? 0)
+      ) {
+        return message
+      }
+    } else if (activity.activity === agentEvent.activity) {
+      return message
+    }
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        llmRetry: agentEvent.activity === 'reasoning' ? undefined : currentRun.llmRetry,
+        finalAnswerReady: undefined,
+        modelActivity: {
+          streamId: agentEvent.streamId,
+          attempt: agentEvent.attempt,
+          activity: agentEvent.activity
+        },
+        modelActivityAttempts: {
+          ...currentRun.modelActivityAttempts,
+          [agentEvent.streamId]: agentEvent.attempt
+        }
+      }
+    }
+  }
+
+  if (
+    currentRun.finalAnswerReady &&
+    agentEvent.runId === currentRun.runId &&
+    (agentEvent.type === 'tool_call' ||
+      agentEvent.type === 'tool_input_progress' ||
+      agentEvent.type === 'file_change_preview_updated' ||
+      agentEvent.type === 'mcp_tool_invocation_state_changed' ||
+      agentEvent.type === 'context_compaction_started')
+  ) {
+    currentRun = { ...currentRun, finalAnswerReady: undefined }
+  }
+
+  // Visible text and tool work end reasoning even if a provider omits an explicit stop signal.
+  // Retain the request identity so a later reasoning block in the same attempt can be recognized.
+  if (
+    agentEvent.runId === currentRun.runId &&
+    currentRun.modelActivity?.activity === 'reasoning' &&
+    ((agentEvent.type === 'message_delta' &&
+      agentEvent.delta.length > 0 &&
+      (!agentEvent.streamId || agentEvent.streamId === currentRun.modelActivity.streamId)) ||
+      agentEvent.type === 'message' ||
+      agentEvent.type === 'tool_call' ||
+      (agentEvent.type === 'tool_input_progress' &&
+        agentEvent.streamId === currentRun.modelActivity.streamId &&
+        agentEvent.attempt === currentRun.modelActivity.attempt) ||
+      (agentEvent.type === 'file_change_preview_updated' &&
+        agentEvent.preview.streamId === currentRun.modelActivity.streamId &&
+        agentEvent.preview.attempt === currentRun.modelActivity.attempt) ||
+      agentEvent.type === 'mcp_tool_invocation_state_changed')
+  ) {
+    currentRun = {
+      ...currentRun,
+      modelActivity: { ...currentRun.modelActivity, activity: 'waiting' }
+    }
+  }
+
   if (agentEvent.type === 'started') {
     return {
       ...message,
@@ -298,6 +402,8 @@ export function applyAgentEventToChatMessage(
         runId: agentEvent.runId,
         status: 'running',
         llmRetry: undefined,
+        modelActivity: undefined,
+        finalAnswerReady: undefined,
         startedAt: currentRun.startedAt ?? Date.now(),
         toolDefinitions: agentEvent.toolDefinitions
       }
@@ -347,6 +453,15 @@ export function applyAgentEventToChatMessage(
     if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId]) {
       return message
     }
+    const sameAttempt =
+      currentRun.modelActivity?.streamId === agentEvent.streamId &&
+      currentRun.modelActivity.attempt === agentEvent.attempt
+    if (
+      !sameAttempt &&
+      agentEvent.attempt <= (currentRun.modelActivityAttempts?.[agentEvent.streamId] ?? 0)
+    ) {
+      return message
+    }
     return {
       ...message,
       // Every stream is one model turn. Earlier turns stay in the Timeline; the main message
@@ -354,6 +469,18 @@ export function applyAgentEventToChatMessage(
       content: '',
       agentRun: {
         ...currentRun,
+        finalAnswerReady: undefined,
+        modelActivity: sameAttempt
+          ? currentRun.modelActivity
+          : {
+              streamId: agentEvent.streamId,
+              attempt: agentEvent.attempt,
+              activity: 'waiting'
+            },
+        modelActivityAttempts: {
+          ...currentRun.modelActivityAttempts,
+          [agentEvent.streamId]: agentEvent.attempt
+        },
         messageStreamCheckpoints: {
           ...currentRun.messageStreamCheckpoints,
           [agentEvent.streamId]: {
@@ -366,7 +493,22 @@ export function applyAgentEventToChatMessage(
 
   if (agentEvent.type === 'message_stream_reset') {
     const checkpoint = currentRun.messageStreamCheckpoints?.[agentEvent.streamId]
-    if (!checkpoint) return message
+    if (!checkpoint) {
+      return currentRun.modelActivity?.streamId === agentEvent.streamId ||
+        currentRun.finalAnswerReady
+        ? {
+            ...message,
+            agentRun: {
+              ...currentRun,
+              finalAnswerReady: undefined,
+              modelActivity:
+                currentRun.modelActivity?.streamId === agentEvent.streamId
+                  ? undefined
+                  : currentRun.modelActivity
+            }
+          }
+        : message
+    }
     const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
     delete nextCheckpoints[agentEvent.streamId]
     return {
@@ -374,6 +516,11 @@ export function applyAgentEventToChatMessage(
       content: checkpoint.previousContent,
       agentRun: {
         ...currentRun,
+        finalAnswerReady: undefined,
+        modelActivity:
+          currentRun.modelActivity?.streamId === agentEvent.streamId
+            ? undefined
+            : currentRun.modelActivity,
         messageStreamCheckpoints: nextCheckpoints,
         timeline: currentRun.timeline.filter(
           (item) => item.type !== 'message' || item.streamId !== agentEvent.streamId
@@ -396,6 +543,10 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         llmRetry: undefined,
+        modelActivity:
+          currentRun.modelActivity?.streamId === agentEvent.streamId
+            ? undefined
+            : currentRun.modelActivity,
         messageStreamCheckpoints: nextCheckpoints,
         timeline
       }
@@ -403,7 +554,12 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'tool_input_progress') {
-    if (!currentRun.llmRetry) return message
+    if (!currentRun.llmRetry) {
+      return currentRun.modelActivity !== message.agentRun?.modelActivity ||
+        currentRun.finalAnswerReady !== message.agentRun?.finalAnswerReady
+        ? { ...message, agentRun: currentRun }
+        : message
+    }
     const receivedAt = Date.now()
     return {
       ...message,
@@ -485,12 +641,22 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'llm_retry') {
+    // Retry.attempt names the upcoming attempt. An older retry cannot retire a different
+    // request or an attempt that has already started, including after a stream reset.
+    if (
+      (currentRun.modelActivity && currentRun.modelActivity.streamId !== agentEvent.streamId) ||
+      agentEvent.attempt <= (currentRun.modelActivityAttempts?.[agentEvent.streamId] ?? 0)
+    ) {
+      return message
+    }
     return {
       ...message,
       status: 'pending',
       agentRun: {
         ...currentRun,
         status: 'running',
+        modelActivity: undefined,
+        finalAnswerReady: undefined,
         llmRetry: {
           category: agentEvent.category,
           ...(agentEvent.providerCode === undefined
@@ -727,6 +893,8 @@ export function applyAgentEventToChatMessage(
         agentRun: {
           ...currentRun,
           status: 'waiting_for_approval',
+          modelActivity: undefined,
+          finalAnswerReady: undefined,
           approvals: upsertAgentAction(currentRun.approvals, agentEvent.action),
           skillInstallations: mergeSkillInstallationApprovals(currentRun.skillInstallations, [
             agentEvent.action
@@ -751,6 +919,8 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'waiting_for_approval',
+        modelActivity: undefined,
+        finalAnswerReady: undefined,
         toolCalls: call
           ? upsertById(currentRun.toolCalls, call, (candidate) => candidate.id)
           : currentRun.toolCalls,
@@ -981,6 +1151,8 @@ export function applyAgentEventToChatMessage(
           : (currentRun.completedAt ?? Date.now()),
         error: agentEvent.message,
         llmRetry: undefined,
+        modelActivity: undefined,
+        finalAnswerReady: undefined,
         timeline: appendTimelineItem(currentRun, {
           id:
             agentEvent.traceSequence === null
@@ -1036,6 +1208,8 @@ export function applyAgentEventToChatMessage(
       status: nextStatus,
       userInterrupted: agentEvent.userInterrupted ?? currentRun.userInterrupted,
       llmRetry: undefined,
+      modelActivity: undefined,
+      finalAnswerReady: undefined,
       firstResponseAt: finalResponseAt,
       lastResponseAt:
         terminalEventContent !== undefined

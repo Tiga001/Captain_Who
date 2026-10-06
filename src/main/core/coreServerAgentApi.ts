@@ -223,6 +223,8 @@ const AGENT_OBSERVER_EVENT_TYPES = {
   message_stream_started: true,
   message_stream_reset: true,
   message_stream_committed: true,
+  model_activity_changed: true,
+  final_answer_ready: true,
   llm_retry: true,
   tool_input_progress: true,
   file_change_preview_updated: true,

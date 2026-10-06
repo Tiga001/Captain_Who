@@ -171,8 +171,16 @@ const formerlySupportedEvents = [
   },
   { type: 'message_delta', runId, streamId: 'stream-1', delta: 'hello' },
   { type: 'message_stream_started', runId, streamId: 'stream-1', attempt: 1 },
+  { type: 'final_answer_ready', runId },
   { type: 'message_stream_reset', runId, streamId: 'stream-1', reason: 'retrying_model_request' },
   { type: 'message_stream_committed', runId, streamId: 'stream-1', traceSequence: 1 },
+  {
+    type: 'model_activity_changed',
+    runId,
+    streamId: 'stream-1',
+    attempt: 1,
+    activity: 'reasoning'
+  },
   {
     type: 'llm_retry',
     runId,
@@ -348,6 +356,8 @@ const allEventTypes = [
   'message_stream_started',
   'message_stream_reset',
   'message_stream_committed',
+  'model_activity_changed',
+  'final_answer_ready',
   'llm_retry',
   'tool_input_progress',
   'file_change_preview_updated',
@@ -421,10 +431,10 @@ describe('Agent observer event contract', () => {
       expect(() => parseAgentEventForHost({ ...workflowDeliveryEvent, ...patch })).toThrow()
   })
 
-  it('locks the complete 33-variant AgentEvent set across compile-time and runtime fixtures', () => {
+  it('locks the complete 35-variant AgentEvent set across compile-time and runtime fixtures', () => {
     expect(completeEventTypeCoverage).toBe(true)
-    expect(allEventTypes).toHaveLength(33)
-    expect(new Set(allEventTypes).size).toBe(33)
+    expect(allEventTypes).toHaveLength(35)
+    expect(new Set(allEventTypes).size).toBe(35)
     expect(new Set(allEventFixtures.map((event) => event.type))).toEqual(new Set(allEventTypes))
   })
 

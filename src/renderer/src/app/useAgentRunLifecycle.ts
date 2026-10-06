@@ -881,7 +881,12 @@ export function useAgentRunLifecycle({
       }
 
       if (agentEvent.runId) {
-        flushPendingMessageDelta(agentEvent.runId)
+        flushPendingMessageDelta(
+          agentEvent.runId,
+          agentEvent.type === 'model_activity_changed' || agentEvent.type === 'final_answer_ready'
+            ? 'checkpoint'
+            : 'immediate'
+        )
       }
 
       if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {
@@ -942,6 +947,8 @@ export function useAgentRunLifecycle({
           // resurrect a stale countdown after reload; durable Run state remains unchanged.
           persist:
             agentEvent.type !== 'llm_retry' &&
+            agentEvent.type !== 'model_activity_changed' &&
+            agentEvent.type !== 'final_answer_ready' &&
             (!isCommandSessionEvent || isTerminalCommandSessionEvent) &&
             !(agentEvent.type === 'done' && !isSuspendedAgentRunStatus(agentEvent.status)),
           touchConversation:

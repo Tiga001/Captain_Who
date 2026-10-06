@@ -1,12 +1,19 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import type { CSSProperties } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { page } from 'vitest/browser'
+import { frontendConfig, getFrontendCssVariables } from '../../config/frontendConfig'
+import { classicDarkTheme, classicLightTheme } from '../../config/themes/classic'
 import type { ChatReadActivity } from '../../features/chat/chatTypes'
 import {
   ReadToolActivity,
   ReadToolActivityGroup
 } from '../../features/chat/components/toolActivities/ReadToolActivity'
 import type { ImageArtifactResolver } from '../../features/imageGeneration/artifacts/ImageArtifactResolver'
+import '../../styles/global.css'
+import '../../features/chat/ChatConversationPage.agent.css'
+import '../../features/chat/ChatConversationPage.results.css'
 
 const mocks = vi.hoisted(() => ({
   loadImageFile: vi.fn(),
@@ -19,6 +26,7 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
     t: (key: string) =>
       ({
         'agent.read.completedWithPathFailures': '读取了 {label}，{count} 个路径失败',
+        'agent.read.completedCount': '已读取 {label}',
         'agent.read.count.file': '{count} 个文件',
         'agent.read.file.pathIsDirectory': '目录被误用为文件',
         'agent.read.item': '读取 {fileName}',
@@ -283,7 +291,11 @@ describe('ReadToolActivity structured path failures', () => {
     )
 
     expect(screen.container.textContent).toContain('目录被误用为文件')
-    expect(screen.container.textContent).toContain('目录被误用为文件：crates/mcp-client/src')
+    const row = screen.container.querySelector<HTMLElement>('.read-activity__text-item')!
+    expect(row.title).toContain(path)
+    expect(row.querySelector('.read-activity__file-name')?.textContent).toBe('src')
+    expect(row.querySelector('.read-activity__directory')?.textContent).toBe('crates/mcp-client')
+    expect(row.dataset.status).toBe('failed')
   })
 
   it('separates successful files from path failures in a group', async () => {
@@ -313,7 +325,9 @@ describe('ReadToolActivity structured path failures', () => {
     )
 
     expect(screen.container.textContent).toContain('读取了 3 个文件，1 个路径失败')
-    expect(screen.container.textContent).toContain(failedPath)
+    expect(screen.container.querySelector<HTMLElement>('[data-status="failed"]')?.title).toContain(
+      failedPath
+    )
   })
 
   it('keeps ordinary read failures on the generic failure label', async () => {
@@ -335,5 +349,97 @@ describe('ReadToolActivity structured path failures', () => {
 
     expect(screen.container.textContent).toContain('agent.read.file.failed')
     expect(screen.container.textContent).not.toContain('目录被误用为文件')
+  })
+})
+
+describe('compact read file rows', () => {
+  const directory = '03_Cases/C001_FRP_Biomolecular_Termination_CSTR'
+  const names = ['mechanism.md', 'mechanism.md', 'conclusions.md', 'applicability_assessment.md']
+  const items = names.map((name, index) => ({
+    call: {
+      id: `compact-read-${index}`,
+      tool: 'read_file',
+      args: { path: `${directory}/${name}` },
+      approvalStatus: 'not_required' as const,
+      reason: null
+    },
+    result: {
+      callId: `compact-read-${index}`,
+      tool: 'read_file',
+      ok: true,
+      result: { path: `${directory}/${name}` }
+    }
+  }))
+
+  it.each([
+    { mode: 'light', theme: classicLightTheme },
+    { mode: 'dark', theme: classicDarkTheme }
+  ])('keeps long paths on one line in wide and narrow $mode panels', async ({ mode, theme }) => {
+    await page.viewport(1100, 700)
+    const view = (width: number) => (
+      <div
+        style={
+          {
+            ...getFrontendCssVariables(frontendConfig, theme),
+            width,
+            padding: 16,
+            background: 'var(--mc-color-surface-main-panel)',
+            fontFamily: 'var(--mc-font-family)'
+          } as CSSProperties
+        }
+      >
+        <ReadToolActivityGroup items={items} />
+      </div>
+    )
+    const screen = await render(view(960))
+    await screen.getByText('已读取 4 个文件').click()
+    for (const width of [960, 320]) {
+      await screen.rerender(view(width))
+      const rows = [...screen.container.querySelectorAll<HTMLElement>('.read-activity__text-item')]
+      expect(rows).toHaveLength(4)
+      expect(
+        rows.map((row) => row.querySelector('.read-activity__file-name')?.textContent)
+      ).toEqual(names)
+      for (const [index, row] of rows.entries()) {
+        expect(row.title).toBe(`${directory}/${names[index]}`)
+        expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(
+          parseFloat(getComputedStyle(row).lineHeight) + 1
+        )
+        expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+        const name = row.querySelector<HTMLElement>('.read-activity__file-name')!
+        expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth)
+        const path = row.querySelector<HTMLElement>('.read-activity__directory')!
+        expect(path.textContent).toBe(directory)
+        expect(getComputedStyle(path).color).not.toBe(getComputedStyle(name).color)
+        if (width === 320) expect(path.scrollWidth).toBeGreaterThan(path.clientWidth)
+      }
+      const details = screen.container.querySelector<HTMLElement>('.read-activity__details')!
+      if (width === 960) expect(details.getBoundingClientRect().width).toBeGreaterThan(420)
+      await page.screenshot({
+        element: screen.container.firstElementChild as HTMLElement,
+        path: `../../../../../.cache/read-activity/${mode}-${width}.png`
+      })
+    }
+  })
+
+  it('preserves authoritative paths, filenames without directories and Windows path tooltips', async () => {
+    const screen = await render(
+      <ReadToolActivityGroup
+        items={[
+          { ...items[0], result: { ...items[0].result, result: { path: 'actual/result.md' } } },
+          { call: { ...items[1].call, args: { path: 'README.md' } } },
+          { call: { ...items[2].call, args: { path: 'C:\\project\\报告.md' } } }
+        ]}
+      />
+    )
+    const rows = [...screen.container.querySelectorAll<HTMLElement>('.read-activity__text-item')]
+    expect(rows[0].title).toBe('actual/result.md')
+    expect(rows[0].querySelector('.read-activity__file-name')?.textContent).toBe('result.md')
+    expect(rows[0].querySelector('.read-activity__directory')?.textContent).toBe('actual')
+    expect(rows[1].querySelector('.read-activity__file-name')?.textContent).toBe('README.md')
+    expect(rows[1].querySelector('.read-activity__directory')).toBeNull()
+    expect(rows[2].title).toBe('C:\\project\\报告.md')
+    expect(rows[2].querySelector('.read-activity__file-name')?.textContent).toBe('报告.md')
+    expect(rows[2].querySelector('.read-activity__directory')?.textContent).toBe('C:/project')
   })
 })

@@ -89,7 +89,11 @@ function AgentRunElapsedHeader({
   const { t } = useFrontendConfig()
   const now = useRunClock(run.runId, !isRunSettled(run))
   const label = isThinking
-    ? t('agent.thinking')
+    ? t(
+        run.modelActivity?.activity === 'reasoning'
+          ? 'agent.thinking'
+          : 'agent.waitingForNextAction'
+      )
     : formatTranslation(t, run.status === 'cancelled' ? 'agent.stoppedAfter' : 'agent.processed', {
         duration: formatElapsedDuration((run.completedAt ?? now) - (run.startedAt ?? createdAt))
       })
@@ -152,7 +156,12 @@ function AgentThinkingActivity({
     now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
   if (
     !retryLabel &&
-    (!canShowThinking || isStreamingAssistantText || hasRecentFileChangeActivity(run, now))
+    (!canShowThinking ||
+      isStreamingAssistantText ||
+      hasRecentFileChangeActivity(run, now) ||
+      (run.finalAnswerReady &&
+        !waitingForCommandCompletion &&
+        run.modelActivity?.activity !== 'reasoning'))
   ) {
     return null
   }
@@ -161,7 +170,13 @@ function AgentThinkingActivity({
     <div className="agent-thinking">
       <span className="agent-running-text">
         {retryLabel ??
-          t(waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking')}
+          t(
+            waitingForCommandCompletion
+              ? 'agent.command.waitingForCompletion'
+              : run.modelActivity?.activity === 'reasoning'
+                ? 'agent.thinking'
+                : 'agent.waitingForNextAction'
+          )}
       </span>
     </div>
   )
@@ -448,6 +463,7 @@ export function AgentRunView({
 
   const headerIsThinking = Boolean(
     run &&
+    !run.finalAnswerReady &&
     !llmRetryLabel &&
     !run.firstResponseAt &&
     !hasCollapsibleTimelineContent(run, timeline) &&

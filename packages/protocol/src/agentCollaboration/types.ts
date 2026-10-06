@@ -153,7 +153,7 @@ export interface AgentObserverConversation {
   createdAt: number
   updatedAt: number
   messages: AgentObserverMessage[]
-  /** Process-local text at the same read cut as the persisted conversation. */
+  /** Process-local text and content-free activity at the persisted conversation's read cut. */
   liveStream?: AgentObserverLiveStreamSnapshot
 }
 
@@ -166,6 +166,13 @@ export interface AgentObserverLiveStreamSnapshot {
   runId: string
   assistantMessageId: string
   cursor: AgentObserverStreamCursor
+  /** Ephemeral confirmation that the runtime has selected its final answer. */
+  finalAnswerReady?: boolean
+  modelActivity?: {
+    streamId: string
+    attempt: number
+    activity: 'reasoning' | 'waiting'
+  }
   stream: {
     streamId: string
     attempt: number

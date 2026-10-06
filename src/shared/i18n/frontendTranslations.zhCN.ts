@@ -1222,6 +1222,7 @@ export const zhCNTranslations = {
   'chat.usageCacheCreationInputTokens': '缓存写入',
 
   'agent.thinking': '正在思考',
+  'agent.waitingForNextAction': '等待下一步行动',
   'agent.interruption.serviceConnectionFailed': '模型服务连接失败',
   'agent.interruption.serviceUnavailable': '模型服务暂时不可用',
   'agent.interruption.authenticationFailed': '模型服务鉴权失败',

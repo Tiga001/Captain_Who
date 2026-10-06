@@ -130,6 +130,15 @@ pub enum AgentProposedAction {
     },
 }
 
+/// Ephemeral, content-free projection of activity observed on the provider stream.
+/// Waiting also covers providers that do not expose a recognized reasoning signal.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentModelActivity {
+    Reasoning,
+    Waiting,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(
     tag = "type",
@@ -175,6 +184,17 @@ pub enum AgentEvent {
         run_id: String,
         stream_id: String,
         attempt: usize,
+    },
+    ModelActivityChanged {
+        run_id: String,
+        stream_id: String,
+        attempt: usize,
+        activity: AgentModelActivity,
+    },
+    /// Transient presentation hint. The final text is ready, but the Host still owns
+    /// durable completion and the authoritative terminal State/Done publication.
+    FinalAnswerReady {
+        run_id: String,
     },
     MessageStreamReset {
         run_id: String,

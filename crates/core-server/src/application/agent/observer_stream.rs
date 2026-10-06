@@ -1,16 +1,18 @@
 use super::*;
 use mycopilot_protocol_rs::{
-    AgentObserverLiveStreamDto, AgentObserverLiveStreamSnapshotDto, AgentObserverStreamCursorDto,
+    AgentObserverLiveStreamDto, AgentObserverLiveStreamSnapshotDto, AgentObserverModelActivityDto,
+    AgentObserverModelActivityKindDto, AgentObserverStreamCursorDto,
 };
 use serde_json::json;
 
-/// Only provisional text is retained. Committed narration already lives in the trace; the final
-/// answer is released after the terminal persistence notification. No per-token database writes.
+/// Retains provisional text and content-free activity. Committed narration lives in the trace;
+/// this process-local state is released after terminal persistence. No per-token database writes.
 pub(super) struct ObserverStreamState {
     pub agent_id: String,
     pub root_agent_id: String,
     pub root_conversation_id: String,
     pub snapshot: AgentObserverLiveStreamSnapshotDto,
+    pub model_activity_attempts: HashMap<String, usize>,
 }
 
 impl ObserverStreamState {
@@ -27,16 +29,37 @@ impl ObserverStreamState {
                     sequence: 0,
                 },
                 stream: None,
+                model_activity: None,
+                final_answer_ready: false,
             },
+            model_activity_attempts: HashMap::new(),
         }
     }
 
     fn apply(&mut self, event: &AgentEvent, boundary: u64) {
         self.snapshot.cursor.sequence += 1;
         match event {
+            AgentEvent::FinalAnswerReady { .. } => {
+                self.snapshot.final_answer_ready = true;
+                self.snapshot.model_activity = None;
+            }
             AgentEvent::MessageStreamStarted {
                 stream_id, attempt, ..
             } => {
+                if !self
+                    .snapshot
+                    .model_activity
+                    .as_ref()
+                    .is_some_and(|activity| {
+                        activity.stream_id == *stream_id && activity.attempt == *attempt
+                    })
+                {
+                    self.set_model_activity(
+                        stream_id,
+                        *attempt,
+                        AgentObserverModelActivityKindDto::Waiting,
+                    );
+                }
                 self.snapshot.stream = Some(AgentObserverLiveStreamDto {
                     stream_id: stream_id.clone(),
                     attempt: *attempt,
@@ -48,6 +71,17 @@ impl ObserverStreamState {
             AgentEvent::MessageDelta {
                 stream_id, delta, ..
             } => {
+                if !delta.is_empty() {
+                    if let Some(activity) =
+                        self.snapshot.model_activity.as_mut().filter(|activity| {
+                            stream_id
+                                .as_ref()
+                                .is_none_or(|id| id == &activity.stream_id)
+                        })
+                    {
+                        activity.activity = AgentObserverModelActivityKindDto::Waiting;
+                    }
+                }
                 let id = stream_id
                     .clone()
                     .unwrap_or_else(|| format!("observer-{}", self.snapshot.run_id));
@@ -66,6 +100,8 @@ impl ObserverStreamState {
                 }
             }
             AgentEvent::MessageStreamReset { stream_id, .. } => {
+                self.snapshot.final_answer_ready = false;
+                self.clear_model_activity_for_stream(stream_id);
                 if self
                     .snapshot
                     .stream
@@ -80,6 +116,7 @@ impl ObserverStreamState {
                 trace_sequence,
                 ..
             } => {
+                self.clear_model_activity_for_stream(stream_id);
                 if let Some(stream) = self
                     .snapshot
                     .stream
@@ -94,6 +131,9 @@ impl ObserverStreamState {
                 }
             }
             AgentEvent::Message { content, .. } => {
+                if let Some(activity) = self.snapshot.model_activity.as_mut() {
+                    activity.activity = AgentObserverModelActivityKindDto::Waiting;
+                }
                 self.snapshot.stream = Some(AgentObserverLiveStreamDto {
                     stream_id: format!("observer-{}", self.snapshot.run_id),
                     attempt: 1,
@@ -102,7 +142,121 @@ impl ObserverStreamState {
                     committed: true,
                 });
             }
+            AgentEvent::ModelActivityChanged {
+                stream_id,
+                attempt,
+                activity,
+                ..
+            } => {
+                let activity = match activity {
+                    mycopilot_core::AgentModelActivity::Reasoning => {
+                        AgentObserverModelActivityKindDto::Reasoning
+                    }
+                    mycopilot_core::AgentModelActivity::Waiting => {
+                        AgentObserverModelActivityKindDto::Waiting
+                    }
+                };
+                self.set_model_activity(stream_id, *attempt, activity);
+            }
+            AgentEvent::ToolInputProgress {
+                stream_id, attempt, ..
+            } => {
+                self.snapshot.final_answer_ready = false;
+                if let Some(activity) = self.snapshot.model_activity.as_mut().filter(|activity| {
+                    activity.stream_id == *stream_id && activity.attempt == *attempt
+                }) {
+                    activity.activity = AgentObserverModelActivityKindDto::Waiting;
+                }
+            }
+            AgentEvent::FileChangePreviewUpdated { preview, .. } => {
+                self.snapshot.final_answer_ready = false;
+                if let Some(activity) = self.snapshot.model_activity.as_mut().filter(|activity| {
+                    activity.stream_id == preview.stream_id && activity.attempt == preview.attempt
+                }) {
+                    activity.activity = AgentObserverModelActivityKindDto::Waiting;
+                }
+            }
+            AgentEvent::ToolCall { .. } | AgentEvent::McpToolInvocationStateChanged { .. } => {
+                self.snapshot.final_answer_ready = false;
+                if let Some(activity) = self.snapshot.model_activity.as_mut() {
+                    activity.activity = AgentObserverModelActivityKindDto::Waiting;
+                }
+            }
+            AgentEvent::LlmRetry {
+                stream_id, attempt, ..
+            } => {
+                let stale = self
+                    .snapshot
+                    .model_activity
+                    .as_ref()
+                    .is_some_and(|activity| activity.stream_id != *stream_id)
+                    || *attempt
+                        <= self
+                            .model_activity_attempts
+                            .get(stream_id)
+                            .copied()
+                            .unwrap_or(0);
+                if !stale {
+                    self.snapshot.model_activity = None;
+                    self.snapshot.final_answer_ready = false;
+                }
+            }
+            AgentEvent::ContextCompactionStarted { .. } => {
+                self.snapshot.final_answer_ready = false;
+            }
+            AgentEvent::Started { .. }
+            | AgentEvent::ApprovalRequired { .. }
+            | AgentEvent::Error { .. }
+            | AgentEvent::Done { .. } => {
+                self.snapshot.model_activity = None;
+                self.snapshot.final_answer_ready = false;
+            }
+            AgentEvent::State { state, .. } if state.status != AgentRunStatus::Running => {
+                self.snapshot.model_activity = None;
+                self.snapshot.final_answer_ready = false;
+            }
             _ => {}
+        }
+    }
+
+    fn set_model_activity(
+        &mut self,
+        stream_id: &str,
+        attempt: usize,
+        activity: AgentObserverModelActivityKindDto,
+    ) {
+        let matches_active = self
+            .snapshot
+            .model_activity
+            .as_ref()
+            .is_some_and(|current| current.stream_id == stream_id && current.attempt == attempt);
+        let starts_attempt = activity == AgentObserverModelActivityKindDto::Waiting
+            && attempt
+                > self
+                    .model_activity_attempts
+                    .get(stream_id)
+                    .copied()
+                    .unwrap_or(0);
+        if matches_active || starts_attempt {
+            self.snapshot.final_answer_ready = false;
+            self.model_activity_attempts
+                .insert(stream_id.to_string(), attempt);
+            self.snapshot.model_activity = Some(AgentObserverModelActivityDto {
+                stream_id: stream_id.to_string(),
+                attempt,
+                activity,
+            });
+        }
+    }
+
+    fn clear_model_activity_for_stream(&mut self, stream_id: &str) {
+        if self
+            .snapshot
+            .model_activity
+            .as_ref()
+            .is_some_and(|activity| activity.stream_id == stream_id)
+        {
+            self.snapshot.model_activity = None;
         }
     }
 }
@@ -214,6 +368,284 @@ mod tests {
         }
     }
 
+    fn activity(attempt: usize, activity: mycopilot_core::AgentModelActivity) -> AgentEvent {
+        AgentEvent::ModelActivityChanged {
+            run_id: "run".into(),
+            stream_id: "stream".into(),
+            attempt,
+            activity,
+        }
+    }
+
+    #[test]
+    fn observer_snapshot_retains_content_free_activity_without_public_text() {
+        use mycopilot_core::AgentModelActivity::{Reasoning, Waiting};
+
+        let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+        state.apply(&activity(1, Waiting), 0);
+        state.apply(&activity(1, Reasoning), 0);
+        assert!(state.snapshot.stream.is_none());
+        assert_eq!(state.snapshot.cursor.sequence, 2);
+        assert_eq!(
+            serde_json::to_value(&state.snapshot).unwrap()["modelActivity"],
+            json!({"streamId": "stream", "attempt": 1, "activity": "reasoning"})
+        );
+        state.apply(&started(1), 0);
+        assert_eq!(
+            state.snapshot.model_activity.as_ref().unwrap().activity,
+            AgentObserverModelActivityKindDto::Reasoning
+        );
+        state.apply(&delta(""), 0);
+        assert_eq!(
+            state.snapshot.model_activity.as_ref().unwrap().activity,
+            AgentObserverModelActivityKindDto::Reasoning
+        );
+        state.apply(&delta("visible text"), 0);
+        assert_eq!(
+            state.snapshot.model_activity.as_ref().unwrap().activity,
+            AgentObserverModelActivityKindDto::Waiting
+        );
+        state.apply(&activity(1, Reasoning), 0);
+        state.apply(
+            &AgentEvent::ToolInputProgress {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                attempt: 1,
+                tool_call_index: 0,
+                tool_call_id: None,
+                tool: "read_file".into(),
+                received_bytes: 1,
+            },
+            0,
+        );
+        assert_eq!(
+            state.snapshot.model_activity.as_ref().unwrap().activity,
+            AgentObserverModelActivityKindDto::Waiting
+        );
+    }
+
+    #[test]
+    fn observer_activity_cannot_return_from_a_retired_attempt() {
+        use mycopilot_core::AgentModelActivity::{Reasoning, Waiting};
+
+        let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+        state.apply(&activity(1, Waiting), 0);
+        state.apply(&activity(1, Reasoning), 0);
+        state.apply(
+            &AgentEvent::MessageStreamReset {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                reason: "retrying_model_request".into(),
+            },
+            0,
+        );
+        state.apply(&activity(1, Waiting), 0);
+        state.apply(&activity(1, Reasoning), 0);
+        assert!(state.snapshot.model_activity.is_none());
+        state.apply(&activity(2, Waiting), 0);
+        state.apply(&activity(2, Reasoning), 0);
+        state.apply(&activity(1, Waiting), 0);
+        assert_eq!(state.snapshot.model_activity.as_ref().unwrap().attempt, 2);
+        assert_eq!(
+            state.snapshot.model_activity.as_ref().unwrap().activity,
+            AgentObserverModelActivityKindDto::Reasoning
+        );
+        state.apply(
+            &AgentEvent::MessageStreamCommitted {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                trace_sequence: None,
+            },
+            0,
+        );
+        assert!(state.snapshot.model_activity.is_none());
+        assert!(serde_json::to_value(&state.snapshot)
+            .unwrap()
+            .get("modelActivity")
+            .is_none());
+    }
+
+    #[test]
+    fn observer_activity_is_cleared_at_retry_error_and_done_boundaries() {
+        use mycopilot_core::AgentModelActivity::{Reasoning, Waiting};
+
+        let boundaries = [
+            AgentEvent::LlmRetry {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                attempt: 2,
+                max_attempts: 3,
+                category: "network".into(),
+                provider_code: None,
+                delay_ms: 1,
+                retry_at: 1,
+            },
+            AgentEvent::Error {
+                run_id: Some("run".into()),
+                trace_sequence: None,
+                message: "request failed".into(),
+                recoverable: true,
+                code: None,
+                details: None,
+            },
+            AgentEvent::Done {
+                run_id: "run".into(),
+                user_interrupted: Some(true),
+                success: false,
+                status: Some(AgentRunStatus::Cancelled),
+                content: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: vec![],
+            },
+        ];
+        for event in boundaries {
+            let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+            state.apply(&activity(1, Waiting), 0);
+            state.apply(&activity(1, Reasoning), 0);
+            state.apply(&event, 0);
+            assert!(state.snapshot.model_activity.is_none());
+        }
+    }
+
+    #[test]
+    fn observer_activity_survives_retry_notifications_from_an_older_attempt_or_stream() {
+        use mycopilot_core::AgentModelActivity::{Reasoning, Waiting};
+
+        let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+        state.apply(&activity(2, Waiting), 0);
+        state.apply(&activity(2, Reasoning), 0);
+        for (stream_id, attempt) in [("stream", 1), ("stream", 2), ("old-stream", 3)] {
+            state.apply(
+                &AgentEvent::LlmRetry {
+                    run_id: "run".into(),
+                    stream_id: stream_id.into(),
+                    attempt,
+                    max_attempts: 3,
+                    category: "network".into(),
+                    provider_code: None,
+                    delay_ms: 1,
+                    retry_at: 1,
+                },
+                0,
+            );
+            assert_eq!(
+                state.snapshot.model_activity.as_ref().unwrap().activity,
+                AgentObserverModelActivityKindDto::Reasoning
+            );
+            assert_eq!(state.snapshot.model_activity.as_ref().unwrap().attempt, 2);
+        }
+    }
+
+    #[test]
+    fn observer_final_answer_marker_requires_runtime_confirmation_and_survives_persistence_wait() {
+        let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+        state.apply(&started(1), 0);
+        state.apply(&delta("answer"), 0);
+        state.apply(
+            &AgentEvent::MessageStreamCommitted {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                trace_sequence: None,
+            },
+            0,
+        );
+        assert!(!state.snapshot.final_answer_ready);
+        assert!(serde_json::to_value(&state.snapshot)
+            .unwrap()
+            .get("finalAnswerReady")
+            .is_none());
+        state.apply(
+            &AgentEvent::FinalAnswerReady {
+                run_id: "run".into(),
+            },
+            0,
+        );
+        assert!(state.snapshot.final_answer_ready);
+        assert!(state.snapshot.model_activity.is_none());
+        assert_eq!(
+            serde_json::to_value(&state.snapshot).unwrap()["finalAnswerReady"],
+            true
+        );
+        state.apply(
+            &AgentEvent::State {
+                run_id: "run".into(),
+                state: mycopilot_core::AgentStateSnapshot {
+                    status: AgentRunStatus::Running,
+                    active_run_id: Some("run".into()),
+                    last_error: None,
+                    updated_at: 1,
+                },
+            },
+            0,
+        );
+        assert!(state.snapshot.final_answer_ready);
+        assert_eq!(state.snapshot.stream.as_ref().unwrap().content, "answer");
+    }
+
+    #[test]
+    fn observer_final_answer_marker_without_text_clears_at_new_work_and_settlement_boundaries() {
+        let boundaries = [
+            activity(2, mycopilot_core::AgentModelActivity::Waiting),
+            AgentEvent::MessageStreamReset {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                reason: "retrying_model_request".into(),
+            },
+            AgentEvent::LlmRetry {
+                run_id: "run".into(),
+                stream_id: "stream".into(),
+                attempt: 2,
+                max_attempts: 3,
+                category: "network".into(),
+                provider_code: None,
+                delay_ms: 1,
+                retry_at: 1,
+            },
+            AgentEvent::Error {
+                run_id: Some("run".into()),
+                trace_sequence: None,
+                message: "failed".into(),
+                recoverable: true,
+                code: None,
+                details: None,
+            },
+            AgentEvent::State {
+                run_id: "run".into(),
+                state: mycopilot_core::AgentStateSnapshot {
+                    status: AgentRunStatus::WaitingForApproval,
+                    active_run_id: Some("run".into()),
+                    last_error: None,
+                    updated_at: 1,
+                },
+            },
+            AgentEvent::Done {
+                run_id: "run".into(),
+                user_interrupted: None,
+                success: true,
+                status: Some(AgentRunStatus::Completed),
+                content: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: vec![],
+            },
+        ];
+        for boundary in boundaries {
+            let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
+            state.apply(&activity(1, mycopilot_core::AgentModelActivity::Waiting), 0);
+            state.apply(
+                &AgentEvent::FinalAnswerReady {
+                    run_id: "run".into(),
+                },
+                0,
+            );
+            assert!(state.snapshot.stream.is_none());
+            assert!(state.snapshot.final_answer_ready);
+            state.apply(&boundary, 0);
+            assert!(!state.snapshot.final_answer_ready);
+        }
+    }
+
     #[test]
     fn observer_stream_accumulates_complete_text_and_resets_failed_attempts() {
         let mut state = ObserverStreamState::new(&identity(), "run", "assistant");
@@ -284,9 +716,14 @@ mod tests {
         action["approval"]["identity"]["argumentsDigest"] = json!("host-only-arguments-digest");
         let events = [
             started(1),
+            activity(1, mycopilot_core::AgentModelActivity::Waiting),
+            activity(1, mycopilot_core::AgentModelActivity::Reasoning),
             delta("你好 🌍\n```rs\n"),
             delta(""),
             delta("```"),
+            AgentEvent::FinalAnswerReady {
+                run_id: "run".into(),
+            },
             AgentEvent::Done {
                 run_id: "run".into(),
                 user_interrupted: None,
@@ -338,7 +775,9 @@ mod tests {
         }
         let snapshots = service.observer_streams.lock().unwrap();
         let snapshot = &snapshots[&identity.conversation_id].snapshot;
-        assert_eq!(snapshot.cursor.sequence, 5);
+        assert_eq!(snapshot.cursor.sequence, 8);
+        assert!(snapshot.model_activity.is_none());
+        assert!(!snapshot.final_answer_ready);
         assert_eq!(
             snapshot.stream.as_ref().unwrap().content,
             "你好 🌍\n```rs\n```"

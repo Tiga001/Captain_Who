@@ -44,7 +44,7 @@ async function settled(root: ParentNode, value: string) {
 }
 
 describe('rolling file-change counts', () => {
-  it('keeps compact file rows aligned in light and dark themes as the count gains a digit', async () => {
+  it('keeps compact file rows aligned and colored in light and dark themes as counts roll', async () => {
     await page.viewport(900, 500)
     const view = (value: number) => (
       <div style={{ width: 720 }}>
@@ -60,32 +60,62 @@ describe('rolling file-change counts', () => {
               } as CSSProperties
             }
           >
-            <div className="file-change-activity__item-line">
-              <span>正在新建</span>
-              <span className="file-change-activity__path">
-                04_Final_reports/C001_FRP_Biomolecular_Termination_CSTR/report.md
-              </span>
-              <span className="file-change-activity__stats">
-                <RollingLineCount
-                  className="file-change-activity__additions"
-                  sign="+"
-                  value={value}
-                />
-                <RollingLineCount className="file-change-activity__deletions" sign="-" value={0} />
-              </span>
-              <span>›</span>
+            <div className="agent-activity__details file-change-activity__details">
+              <div className="file-change-activity__item-line">
+                <span>正在修改</span>
+                <span className="file-change-activity__path">
+                  04_Final_reports/C001_FRP_Biomolecular_Termination_CSTR/report.md
+                </span>
+                <span className="file-change-activity__stats">
+                  <RollingLineCount
+                    className="file-change-activity__additions"
+                    sign="+"
+                    value={value}
+                  />
+                  <RollingLineCount
+                    className="file-change-activity__deletions"
+                    sign="-"
+                    value={value}
+                  />
+                </span>
+                <span>›</span>
+              </div>
             </div>
           </div>
         ))}
       </div>
     )
     const screen = await render(view(99))
-    const row = screen.container.querySelector('.file-change-activity__item-line')!
-    const height = row.getBoundingClientRect().height
+    const rows = [...screen.container.querySelectorAll('.file-change-activity__item-line')]
+    const heights = rows.map((row) => row.getBoundingClientRect().height)
+    const expectDiffColors = () => {
+      rows.forEach((row, index) => {
+        for (const [kind, color] of [
+          ['additions', 'rgb(22, 163, 74)'],
+          ['deletions', index === 0 ? 'rgb(180, 35, 24)' : 'rgb(255, 107, 95)']
+        ]) {
+          const counter = row.querySelector(`.file-change-activity__${kind}`)!
+          // Check the visible sign and every digit layer, not only the colored outer span.
+          for (const element of [counter, ...counter.querySelectorAll('span')]) {
+            expect(getComputedStyle(element).color).toBe(color)
+          }
+        }
+      })
+    }
+    expectDiffColors()
     await screen.rerender(view(100))
-    await settled(screen.container.querySelector('.file-change-activity__additions')!, '100')
-    expect(row.getBoundingClientRect().height).toBe(height)
-    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+    const counters = [...screen.container.querySelectorAll('.rolling-line-count')]
+    for (const counter of counters) {
+      expect(incoming(counter)).toHaveLength(3)
+      expect(outgoing(counter)).toHaveLength(2)
+    }
+    expectDiffColors()
+    await Promise.all(counters.map((counter) => settled(counter, '100')))
+    expectDiffColors()
+    rows.forEach((row, index) => {
+      expect(row.getBoundingClientRect().height).toBe(heights[index])
+      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+    })
     await page.screenshot({
       element: screen.container.firstElementChild as HTMLElement,
       path: '../../../../../../.cache/rolling-line-count/themes.png'

@@ -6,6 +6,7 @@ import { render } from 'vitest-browser-react'
 import { remarkNormalizeCjkAutolinkBoundaries } from '../components/chatMarkdownAutolinks'
 import { AgentRunView } from '../components/AgentRunView'
 import type { ChatMessage } from '../chatTypes'
+import { applyAgentEventToChatMessage, ensureAgentRun } from '../../agentRun/agentEventReducer'
 
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -15,6 +16,8 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
         'agent.processed': 'Processed {duration}',
         'agent.stoppedAfter': 'Stopped after {duration}',
         'agent.thinking': 'Thinking',
+        'agent.waitingForNextAction': 'Waiting for next action',
+        'agent.command.waitingForCompletion': 'Waiting for command completion',
         'agent.llmRetry.reconnecting': 'Reconnecting {attempt}/{maxAttempts}'
       })[key] ?? key
   })
@@ -127,7 +130,9 @@ it('expires streaming grace, preserves retry labels, and clears clocks on cancel
   const screen = await render(<AgentRunView message={message} mode="observer" />)
   expect(screen.container.querySelector('.agent-thinking')).toBeNull()
   flushSync(() => vi.advanceTimersByTime(1500))
-  expect(screen.container.querySelector('.agent-thinking')?.textContent).toBe('Thinking')
+  expect(screen.container.querySelector('.agent-thinking')?.textContent).toBe(
+    'Waiting for next action'
+  )
 
   const retry: ChatMessage = {
     ...message,
@@ -164,4 +169,203 @@ it('expires streaming grace, preserves retry labels, and clears clocks on cancel
   expect(vi.getTimerCount()).toBeGreaterThan(0)
   await screen.unmount()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it('uses the existing header slot for waiting and evidence-based reasoning, then removes it on completion', async () => {
+  let message: ChatMessage = {
+    id: 'assistant-activity',
+    role: 'assistant',
+    content: '',
+    createdAt: Date.now(),
+    status: 'pending',
+    agentRun: ensureAgentRun(undefined, 'run-activity', 'running')
+  }
+  const screen = await render(<AgentRunView message={message} mode="interactive" />)
+  const header = () => screen.container.querySelector('.agent-run__elapsed .agent-running-text')
+  expect(header()?.textContent).toBe('Waiting for next action')
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  const activity = {
+    type: 'model_activity_changed' as const,
+    runId: 'run-activity',
+    streamId: 'stream-activity',
+    attempt: 1,
+    activity: 'waiting' as const
+  }
+  message = applyAgentEventToChatMessage(message, activity)
+  message = applyAgentEventToChatMessage(message, { ...activity, activity: 'reasoning' })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(header()?.textContent).toBe('Thinking')
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  message = applyAgentEventToChatMessage(message, activity)
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(header()?.textContent).toBe('Waiting for next action')
+  message = applyAgentEventToChatMessage(message, {
+    type: 'done',
+    runId: activity.runId,
+    success: true,
+    status: 'completed',
+    content: 'Final answer.'
+  })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(header()).toBeNull()
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  expect(screen.container.textContent).toContain('Final answer.')
+  await screen.unmount()
+})
+
+it('switches the footer only on model evidence while text streaming keeps the slot suppressed', async () => {
+  let message = runningMessage()
+  message.agentRun!.status = 'running'
+  const activity = {
+    type: 'model_activity_changed' as const,
+    runId: 'run',
+    streamId: 'stream-footer',
+    attempt: 1,
+    activity: 'waiting' as const
+  }
+  message = applyAgentEventToChatMessage(message, activity)
+  const screen = await render(<AgentRunView message={message} mode="interactive" />)
+  const footer = () => screen.container.querySelector('.agent-thinking .agent-running-text')
+  expect(footer()?.textContent).toBe('Waiting for next action')
+  message = applyAgentEventToChatMessage(message, { ...activity, activity: 'reasoning' })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(footer()?.textContent).toBe('Thinking')
+  message = applyAgentEventToChatMessage(message, {
+    type: 'message_delta',
+    runId: activity.runId,
+    streamId: activity.streamId,
+    delta: 'Visible text.'
+  })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(footer()).toBeNull()
+  flushSync(() => vi.advanceTimersByTime(1500))
+  expect(footer()?.textContent).toBe('Waiting for next action')
+  message = applyAgentEventToChatMessage(message, {
+    type: 'message_stream_reset',
+    runId: activity.runId,
+    streamId: activity.streamId,
+    reason: 'retry'
+  })
+  message = applyAgentEventToChatMessage(message, { ...activity, activity: 'reasoning' })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(footer()?.textContent).toBe('Waiting for next action')
+  await screen.unmount()
+})
+
+it('keeps Waiting hidden after final-answer readiness until Done, including a run with earlier tools', async () => {
+  let message = runningMessage()
+  message.agentRun!.status = 'running'
+  message.agentRun!.toolCalls = [
+    {
+      id: 'earlier-call',
+      tool: 'read_file',
+      args: {},
+      approvalStatus: 'not_required',
+      reason: null
+    }
+  ]
+  message.agentRun!.toolResults = [
+    { callId: 'earlier-call', tool: 'read_file', ok: true, result: 'Earlier result' }
+  ]
+  message = applyAgentEventToChatMessage(message, {
+    type: 'message_stream_started',
+    runId: 'run',
+    streamId: 'stream-final',
+    attempt: 1
+  })
+  message = applyAgentEventToChatMessage(message, {
+    type: 'message_delta',
+    runId: 'run',
+    streamId: 'stream-final',
+    delta: 'The complete final answer.'
+  })
+  const screen = await render(<AgentRunView message={message} mode="interactive" />)
+  expect(screen.container.textContent).toContain('The complete final answer.')
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  message = applyAgentEventToChatMessage(message, {
+    type: 'message_stream_committed',
+    runId: 'run',
+    streamId: 'stream-final',
+    traceSequence: null
+  })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  flushSync(() => vi.advanceTimersByTime(1500))
+  // A commit alone can still be followed by a tool or queued guidance.
+  expect(screen.container.querySelector('.agent-thinking')?.textContent).toBe(
+    'Waiting for next action'
+  )
+  message = applyAgentEventToChatMessage(message, { type: 'final_answer_ready', runId: 'run' })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  flushSync(() => vi.advanceTimersByTime(10_000))
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  expect(screen.container.textContent).toContain('The complete final answer.')
+  expect(message.agentRun?.status).toBe('running')
+  expect(message.status).toBe('pending')
+  message = applyAgentEventToChatMessage(message, {
+    type: 'done',
+    runId: 'run',
+    success: true,
+    status: 'completed',
+    content: 'The complete final answer.'
+  })
+  await screen.rerender(<AgentRunView message={message} mode="interactive" />)
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  expect(screen.container.textContent).toContain('The complete final answer.')
+  expect(vi.getTimerCount()).toBe(0)
+  await screen.unmount()
+})
+
+it.each(['reasoning', 'retry', 'command'] as const)(
+  'preserves the specialized %s footer even with a final marker',
+  async (kind) => {
+    const message = runningMessage()
+    const run = message.agentRun!
+    run.status = 'running'
+    run.finalAnswerReady = true
+    if (kind === 'reasoning')
+      run.modelActivity = { streamId: 'next', attempt: 1, activity: 'reasoning' }
+    if (kind === 'retry')
+      run.llmRetry = {
+        category: 'network',
+        delayMs: 1000,
+        retryAt: Date.now() + 1000,
+        attempt: 2,
+        maxAttempts: 4
+      }
+    if (kind === 'command')
+      run.toolCalls = [
+        {
+          id: 'command',
+          tool: 'command_session',
+          args: {},
+          approvalStatus: 'not_required',
+          reason: null
+        }
+      ]
+    const screen = await render(<AgentRunView message={message} mode="interactive" />)
+    expect(screen.container.querySelector('.agent-thinking')?.textContent).toBe(
+      {
+        reasoning: 'Thinking',
+        retry: 'Reconnecting 1/3',
+        command: 'Waiting for command completion'
+      }[kind]
+    )
+    await screen.unmount()
+  }
+)
+
+it('hides the generic header waiting label for metadata-only final readiness', async () => {
+  const message: ChatMessage = {
+    id: 'metadata-only-final',
+    role: 'assistant',
+    content: '',
+    createdAt: Date.now(),
+    status: 'pending',
+    agentRun: { ...ensureAgentRun(undefined, 'metadata-run', 'running'), finalAnswerReady: true }
+  }
+  const screen = await render(<AgentRunView message={message} mode="observer" />)
+  expect(screen.container.querySelector('.agent-run__elapsed')?.textContent).toContain('Processed')
+  expect(screen.container.querySelector('.agent-running-text')).toBeNull()
+  expect(screen.container.querySelector('.agent-thinking')).toBeNull()
+  await screen.unmount()
 })

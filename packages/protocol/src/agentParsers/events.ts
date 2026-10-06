@@ -45,6 +45,8 @@ export const AGENT_EVENT_TYPES = {
   state: true,
   message_delta: true,
   message_stream_started: true,
+  model_activity_changed: true,
+  final_answer_ready: true,
   message_stream_reset: true,
   message_stream_committed: true,
   llm_retry: true,
@@ -148,6 +150,22 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
         runId: expectOpaqueRunId(record.runId, `${context}.runId`),
         streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
         attempt: expectSafeInteger(record.attempt, `${context}.attempt`, 0)
+      }
+    case 'final_answer_ready':
+      expectOnlyKeys(record, ['type', 'runId'] as const, context)
+      return { type, runId: expectOpaqueRunId(record.runId, `${context}.runId`) }
+    case 'model_activity_changed':
+      expectOnlyKeys(record, ['type', 'runId', 'streamId', 'attempt', 'activity'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
+        attempt: expectSafeInteger(record.attempt, `${context}.attempt`, 1),
+        activity: expectEnum(
+          record.activity,
+          ['reasoning', 'waiting'] as const,
+          `${context}.activity`
+        )
       }
     case 'message_stream_reset':
       return parseAgentMessageStreamResetEvent(record)

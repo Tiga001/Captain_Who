@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::AgentModelActivity;
 
 pub(super) struct ModelSamplingContext<'a> {
     pub(super) run_id: &'a str,
@@ -22,6 +23,7 @@ struct ModelStreamProgress {
     received_model_output: bool,
     committed_message_stream_id: Option<String>,
     tool_input_stream: ToolInputStreamObservers,
+    model_activity: Option<AgentModelActivity>,
 }
 
 pub(super) async fn sample_model(
@@ -30,12 +32,12 @@ pub(super) async fn sample_model(
     mut context: ModelSamplingContext<'_>,
 ) -> ModelSamplingResult {
     let mut progress = ModelStreamProgress::default();
+    let stream_id = format!(
+        "{}-stream-{}",
+        context.run_id,
+        context.model_request_index + 1
+    );
     let response = if request.stream {
-        let stream_id = format!(
-            "{}-stream-{}",
-            context.run_id,
-            context.model_request_index + 1
-        );
         let delta_cancellation_token = cancellation_token.clone();
         complete_chat_streaming(request, cancellation_token.clone(), |stream_event| {
             progress.on_event(
@@ -47,8 +49,15 @@ pub(super) async fn sample_model(
         })
         .await
     } else {
+        if !cancellation_token.is_cancelled() {
+            progress.tool_input_stream.start_attempt(1);
+            progress.set_activity(&mut context, &stream_id, AgentModelActivity::Waiting);
+        }
         complete_chat(request, cancellation_token.clone()).await
     };
+    // Cancellation bypasses the normal callback reset, and all callbacks are suppressed
+    // once the token is cancelled. Always release the transient phase when sampling exits.
+    progress.set_activity(&mut context, &stream_id, AgentModelActivity::Waiting);
     ModelSamplingResult {
         response,
         received_model_output: progress.received_model_output,
@@ -57,6 +66,27 @@ pub(super) async fn sample_model(
 }
 
 impl ModelStreamProgress {
+    fn set_activity(
+        &mut self,
+        context: &mut ModelSamplingContext<'_>,
+        stream_id: &str,
+        activity: AgentModelActivity,
+    ) {
+        let attempt = self.tool_input_stream.attempt();
+        if attempt == 0 || self.model_activity == Some(activity) {
+            return;
+        }
+        self.model_activity = Some(activity);
+        context
+            .event_stream
+            .emit_transient(AgentEvent::ModelActivityChanged {
+                run_id: context.run_id.to_string(),
+                stream_id: stream_id.to_string(),
+                attempt,
+                activity,
+            });
+    }
+
     fn on_event(
         &mut self,
         context: &mut ModelSamplingContext<'_>,
@@ -70,12 +100,20 @@ impl ModelStreamProgress {
         self.received_model_output |= matches!(&stream_event,
             LlmStreamEvent::Delta(delta) if !delta.is_empty())
             || matches!(&stream_event, LlmStreamEvent::ToolInputProgress { .. });
+        // These boundaries also apply while visible narration is blocked by a file
+        // transaction. Activity is independent of the user-facing text projection.
+        if matches!(&stream_event, LlmStreamEvent::Delta(delta) if !delta.is_empty())
+            || matches!(&stream_event, LlmStreamEvent::ToolInputProgress { .. })
+        {
+            self.set_activity(context, stream_id, AgentModelActivity::Waiting);
+        }
         match stream_event {
             LlmStreamEvent::AttemptStarted {
                 attempt,
                 max_attempts,
             } => {
                 self.tool_input_stream.start_attempt(attempt);
+                self.model_activity = None;
                 if !context.user_text_blocked {
                     let _ = max_attempts;
                     context.event_stream.emit(AgentEvent::MessageStreamStarted {
@@ -84,6 +122,10 @@ impl ModelStreamProgress {
                         attempt,
                     });
                 }
+                self.set_activity(context, stream_id, AgentModelActivity::Waiting);
+            }
+            LlmStreamEvent::ModelActivityChanged(activity) => {
+                self.set_activity(context, stream_id, activity);
             }
             LlmStreamEvent::Delta(delta) if !context.user_text_blocked && !delta.is_empty() => {
                 context.event_stream.emit(AgentEvent::MessageDelta {
@@ -131,6 +173,7 @@ impl ModelStreamProgress {
                 }
             }
             LlmStreamEvent::AttemptReset { reason } => {
+                self.set_activity(context, stream_id, AgentModelActivity::Waiting);
                 context
                     .event_stream
                     .emit_transient(AgentEvent::FileChangePreviewCleared {
@@ -155,6 +198,7 @@ impl ModelStreamProgress {
                 delay_ms,
                 retry_at,
             } => {
+                self.set_activity(context, stream_id, AgentModelActivity::Waiting);
                 context.event_stream.emit(AgentEvent::LlmRetry {
                     run_id: context.run_id.to_string(),
                     stream_id: stream_id.to_string(),
@@ -167,6 +211,7 @@ impl ModelStreamProgress {
                 });
             }
             LlmStreamEvent::Committed => {
+                self.set_activity(context, stream_id, AgentModelActivity::Waiting);
                 for preview in self.tool_input_stream.flush() {
                     emit_tool_input_preview(context.event_stream, context.run_id, preview);
                 }
@@ -178,6 +223,10 @@ impl ModelStreamProgress {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "model_sampling_activity_tests.rs"]
+mod activity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -259,7 +308,11 @@ mod tests {
             Some("run-stream-3")
         );
 
-        let live = captured.lock().unwrap();
+        let captured = captured.lock().unwrap();
+        let live = captured
+            .iter()
+            .filter(|event| !matches!(event, AgentEvent::ModelActivityChanged { .. }))
+            .collect::<Vec<_>>();
         assert_eq!(live.len(), 7);
         assert!(matches!(
             &live[0],
@@ -301,7 +354,9 @@ mod tests {
         assert_eq!(retained.len(), 4);
         assert!(retained.iter().all(|event| !matches!(
             event,
-            AgentEvent::ToolInputProgress { .. } | AgentEvent::FileChangePreviewCleared { .. }
+            AgentEvent::ToolInputProgress { .. }
+                | AgentEvent::FileChangePreviewCleared { .. }
+                | AgentEvent::ModelActivityChanged { .. }
         )));
     }
 
@@ -334,7 +389,13 @@ mod tests {
             progress.on_event(&mut context, "run-stream-1", &cancellation, event);
         }
         assert!(progress.received_model_output);
-        assert!(captured.lock().unwrap().is_empty());
+        assert!(matches!(
+            captured.lock().unwrap().as_slice(),
+            [AgentEvent::ModelActivityChanged {
+                activity: AgentModelActivity::Waiting,
+                ..
+            }]
+        ));
         for event in [
             tool_progress(),
             LlmStreamEvent::AttemptReset {
@@ -346,7 +407,11 @@ mod tests {
             progress.on_event(&mut context, "run-stream-1", &cancellation, event);
         }
         assert!(progress.committed_message_stream_id.is_none());
-        let live = captured.lock().unwrap();
+        let captured = captured.lock().unwrap();
+        let live = captured
+            .iter()
+            .filter(|event| !matches!(event, AgentEvent::ModelActivityChanged { .. }))
+            .collect::<Vec<_>>();
         assert_eq!(live.len(), 3);
         assert!(matches!(&live[0], AgentEvent::ToolInputProgress { .. }));
         assert!(matches!(
@@ -381,6 +446,7 @@ mod tests {
                 max_attempts: 3,
             },
             LlmStreamEvent::Delta("late delta".to_string()),
+            LlmStreamEvent::ModelActivityChanged(AgentModelActivity::Reasoning),
             tool_progress(),
             LlmStreamEvent::AttemptReset {
                 reason: "late retry".to_string(),

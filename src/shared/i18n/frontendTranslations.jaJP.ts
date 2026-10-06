@@ -1302,6 +1302,7 @@ export const jaJPTranslations = {
   'chat.usageCachedInputTokens': 'キャッシュされた入力',
   'chat.usageCacheCreationInputTokens': 'キャッシュ書き込み',
   'agent.thinking': '考える',
+  'agent.waitingForNextAction': '次のアクションを待っています',
   'agent.interruption.serviceConnectionFailed': 'モデルサービス接続に失敗しました',
   'agent.interruption.serviceUnavailable': 'モデルサービスは一時的に利用できません',
   'agent.interruption.authenticationFailed': 'モデルサービス認証に失敗しました',

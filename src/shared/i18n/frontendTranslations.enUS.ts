@@ -1290,6 +1290,7 @@ export const enUSTranslations = {
   'chat.usageCacheCreationInputTokens': 'Cache write',
 
   'agent.thinking': 'Thinking',
+  'agent.waitingForNextAction': 'Waiting for next action',
   'agent.interruption.serviceConnectionFailed': 'Model service connection failed',
   'agent.interruption.serviceUnavailable': 'Model service is temporarily unavailable',
   'agent.interruption.authenticationFailed': 'Model service authentication failed',

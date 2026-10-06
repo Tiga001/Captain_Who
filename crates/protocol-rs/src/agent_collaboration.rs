@@ -272,6 +272,30 @@ pub struct AgentObserverLiveStreamSnapshotDto {
     pub assistant_message_id: String,
     pub cursor: AgentObserverStreamCursorDto,
     pub stream: Option<AgentObserverLiveStreamDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_activity: Option<AgentObserverModelActivityDto>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub final_answer_ready: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentObserverModelActivityKindDto {
+    Reasoning,
+    Waiting,
+}
+
+/// Content-free, process-local model activity; never part of durable conversation history.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverModelActivityDto {
+    pub stream_id: String,
+    pub attempt: usize,
+    pub activity: AgentObserverModelActivityKindDto,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

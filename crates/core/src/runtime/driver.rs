@@ -3105,6 +3105,9 @@ impl AgentRuntime {
                     delta: content.clone(),
                 });
             }
+            event_stream.emit_transient(AgentEvent::FinalAnswerReady {
+                run_id: run_id.clone(),
+            });
             event_stream.emit(state_event(&run_id, AgentRunStatus::Completed, None, None));
             event_stream.emit(done_event(
                 &run_id,

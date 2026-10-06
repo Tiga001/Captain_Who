@@ -281,6 +281,16 @@ export interface ChatAgentRunView {
   collaborationFinalResponseBoundary?: number
   /** Previous committed answer projection, retained only while the next model stream is provisional. */
   messageStreamCheckpoints?: Record<string, { previousContent: string }>
+  /** Ephemeral provider activity for the active model request; never persisted. */
+  modelActivity?: {
+    streamId: string
+    attempt: number
+    activity: 'reasoning' | 'waiting'
+  }
+  /** Ephemeral attempt watermarks prevent retired activity from returning after a reset. */
+  modelActivityAttempts?: Record<string, number>
+  /** Host-confirmed final answer boundary before durable completion; never persisted. */
+  finalAnswerReady?: boolean
   /** Ephemeral retry status. Cleared by the next model output or a terminal boundary. */
   llmRetry?: {
     category: AgentLlmRetryCategory

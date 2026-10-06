@@ -330,6 +330,9 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const fileName = getDisplayName(activity, call, t)
   const displayPath = getDisplayPath(activity, call, result) || fileName
+  const normalizedPath = displayPath.replace(/\\/g, '/').replace(/\/+$/, '')
+  const separatorIndex = normalizedPath.lastIndexOf('/')
+  const directory = separatorIndex >= 0 ? normalizedPath.slice(0, separatorIndex) || '/' : ''
   const pathIsDirectory = isPathIsDirectoryFailure(call, result)
   const error = activity?.error ?? result?.error
 
@@ -339,9 +342,11 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
       data-status={error ? 'failed' : undefined}
       title={error ? `${displayPath}\n${error}` : displayPath}
     >
-      {pathIsDirectory
-        ? formatTranslation(t, 'agent.read.pathIsDirectoryItem', { path: displayPath })
-        : formatTranslation(t, 'agent.read.item', { fileName: displayPath })}
+      {pathIsDirectory ? (
+        <span className="read-activity__path-error">{t('agent.read.file.pathIsDirectory')}</span>
+      ) : null}
+      <span className="read-activity__file-name">{getFileName(displayPath) || fileName}</span>
+      {directory ? <span className="read-activity__directory">{directory}</span> : null}
     </div>
   )
 }
@@ -429,7 +434,10 @@ function ReadActivityDetails({
   const error = activity?.error ?? result?.error
 
   return (
-    <div className="agent-activity__details read-activity__details">
+    <div
+      className="agent-activity__details read-activity__details"
+      data-kind={getKind(call, activity)}
+    >
       {error ? <p className="read-activity__error">{error}</p> : null}
       <div className="read-activity__items" data-kind={getKind(call, activity)}>
         <ReadActivityCard
@@ -536,7 +544,7 @@ export function ReadToolActivityGroup({
       isPending={isPending}
       label={label}
     >
-      <div className="agent-activity__details read-activity__details">
+      <div className="agent-activity__details read-activity__details" data-kind={kind}>
         <div className="read-activity__items" data-kind={kind}>
           {items.map((item) => (
             <ReadActivityCard
