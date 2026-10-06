@@ -270,7 +270,7 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
     inputs: list(item.inputs, parseWorkflowRuntimeInput, 4096),
     events: list(item.events, parseWorkflowRuntimeEvent, 4096),
     ...(item.preferenceUpdates !== undefined
-      ? { preferenceUpdates: list(item.preferenceUpdates, parseWorkflowPreferenceUpdate, 128) }
+      ? { preferenceUpdates: list(item.preferenceUpdates, parseWorkflowPreferenceUpdate, 256) }
       : {}),
     ...(item.pausedConversationIds !== undefined
       ? { pausedConversationIds: list(item.pausedConversationIds, id, 128) }
@@ -288,12 +288,23 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
         }
       : {})
   }
-  if (
-    result.preferenceUpdates &&
-    new Set(result.preferenceUpdates.map((update) => update.nodeId)).size !==
-      result.preferenceUpdates.length
-  )
-    throw new Error('Duplicate organization preference update')
+  // A coalesced notification can carry different revisions for one member's model and
+  // permission. Never raise one field's revision just to combine it with the other field.
+  const preferenceNodes = new Map<string, { conversationId: string; fields: Set<string> }>()
+  for (const update of result.preferenceUpdates ?? []) {
+    let node = preferenceNodes.get(update.nodeId)
+    if (!node) {
+      node = { conversationId: update.conversationId, fields: new Set() }
+      preferenceNodes.set(update.nodeId, node)
+    }
+    if (node.conversationId !== update.conversationId || preferenceNodes.size > 128)
+      throw new Error('Invalid organization preference update identity')
+    for (const field of ['modelId', 'permissionMode'] as const) {
+      if (!Object.hasOwn(update, field)) continue
+      if (node.fields.has(field)) throw new Error('Duplicate organization preference update')
+      node.fields.add(field)
+    }
+  }
   if (
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
     result.inputRuns?.some((run) => !result.inputs.some((input) => input.id === run.inputId)) ||

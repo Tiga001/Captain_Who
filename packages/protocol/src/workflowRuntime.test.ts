@@ -87,6 +87,65 @@ describe('workflow runtime boundary', () => {
       parseWorkflowRuntimeSnapshot({ ...snapshot, preferenceUpdates: [update, update] })
     ).toThrow()
   })
+  it('preserves independent preference revisions without accepting repeated fields or mixed bindings', () => {
+    const model = {
+      nodeId: 'reviewer',
+      conversationId: 'chat-review',
+      organizationRevision: 3,
+      modelId: 'model-b'
+    }
+    const permission = {
+      nodeId: 'reviewer',
+      conversationId: 'chat-review',
+      organizationRevision: 4,
+      permissionMode: 'full'
+    }
+    const notification = { ...snapshot, preferenceUpdates: [model, permission] }
+    expect(parseWorkflowRuntimeSnapshot(notification)).toEqual(notification)
+    for (const updates of [
+      [model, { ...model, organizationRevision: 4 }],
+      [permission, { ...permission, organizationRevision: 5 }],
+      [model, { ...permission, conversationId: 'other-chat' }],
+      [model, { ...permission, modelId: 'overlap' }]
+    ])
+      expect(() =>
+        parseWorkflowRuntimeSnapshot({ ...snapshot, preferenceUpdates: updates })
+      ).toThrow()
+  })
+  it('accepts two fields for all 128 members while keeping the member and item bounds', () => {
+    const updates = Array.from({ length: 128 }, (_, index) => [
+      {
+        nodeId: `member-${index}`,
+        conversationId: `chat-${index}`,
+        organizationRevision: 2,
+        modelId: 'model-a'
+      },
+      {
+        nodeId: `member-${index}`,
+        conversationId: `chat-${index}`,
+        organizationRevision: 4,
+        permissionMode: 'full'
+      }
+    ]).flat()
+    expect(
+      parseWorkflowRuntimeSnapshot({ ...snapshot, preferenceUpdates: updates }).preferenceUpdates
+    ).toEqual(updates)
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({
+        ...snapshot,
+        preferenceUpdates: [...updates, { ...updates[0], nodeId: 'extra' }]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({
+        ...snapshot,
+        preferenceUpdates: [
+          ...updates.filter((_, index) => index % 2 === 0),
+          { ...updates[0], nodeId: 'extra' }
+        ]
+      })
+    ).toThrow()
+  })
   it('validates queue metadata and node-scoped paginated message bodies', () => {
     const metadata = {
       ...snapshot,

@@ -744,6 +744,12 @@ impl AgentService {
         preference_updates: Vec<mycopilot_core::workflow_execution::PreferenceUpdate>,
         notifications: &CoreServerNotificationSender,
     ) {
+        let Some(preference_updates) = self
+            .workflow_runtime_publications
+            .enqueue(instance_id, preference_updates)
+        else {
+            return;
+        };
         match self.storage.workflow_execution_runtime(instance_id) {
             Ok(mut snapshot) => {
                 snapshot.preference_updates = preference_updates;

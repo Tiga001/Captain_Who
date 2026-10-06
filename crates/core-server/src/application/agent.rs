@@ -153,6 +153,7 @@ mod usage;
 mod web_search_policy;
 mod workflow_execution;
 mod workflow_retry;
+mod workflow_runtime_publication;
 mod workflow_scheduler;
 mod workflows;
 
@@ -682,6 +683,7 @@ pub struct AgentService {
     conversation_admission: Arc<Mutex<()>>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
+    workflow_runtime_publications: workflow_runtime_publication::WorkflowRuntimePublications,
     workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake,
     workflow_dispatch_stopped: Arc<AtomicBool>,
     workflow_retry: Arc<Mutex<workflow_retry::WorkflowRetryState>>,
@@ -898,6 +900,8 @@ impl AgentService {
                 execution_access::ExecutionAccessState::default(),
             )),
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
+            workflow_runtime_publications:
+                workflow_runtime_publication::WorkflowRuntimePublications::default(),
             workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake::default(),
             workflow_dispatch_stopped: Arc::new(AtomicBool::new(false)),
             workflow_retry: Arc::new(Mutex::new(workflow_retry::WorkflowRetryState::default())),

@@ -7,6 +7,7 @@ import type {
   WorkflowResponse,
   WorkflowRuntimeSnapshot
 } from '@mycopilot/protocol'
+import { parseWorkflowRuntimeSnapshot } from '@mycopilot/protocol'
 import type { ChatConversation, ChatComposerDraft } from '../../features/chat/chatTypes'
 import { createComposerDraft } from '../chatMessageFactory'
 import { createWorkflow, createWorkflowNode } from '../../features/workflows/workflowAuthoring'
@@ -751,6 +752,34 @@ describe('organization workspace synchronization', () => {
     expect(mocks.persist).toHaveBeenCalledTimes(2)
     expect(read().drafts.existing.modelId).toBe('latest-model')
     expect(read().drafts.existing.message).toBe('unsent text')
+  })
+
+  it('applies coalesced model and permission edits with independent revisions and preserves a later model update', async () => {
+    mockExistingMember()
+    const screen = await render(<Harness />)
+    const read = () => JSON.parse(screen.getByTestId('state').element().textContent!)
+    await expect.poll(() => read().memberships.existing?.id).toBe(instance.id)
+    const model = freshPreferences(2, { modelId: 'model-revision-2' })
+    const permission = freshPreferences(4, { permissionMode: 'full' })
+    const combined = parseWorkflowRuntimeSnapshot({
+      ...permission,
+      preferenceUpdates: [...model.preferenceUpdates!, ...permission.preferenceUpdates!]
+    })
+    mocks.runtimeListener?.(combined)
+    await expect.poll(() => read().drafts.existing.modelId).toBe('model-revision-2')
+    expect(read().drafts.existing.permissionMode).toBe('full')
+    expect(read().drafts.existing.message).toBe('unsent text')
+    expect(read().drafts.existing.queuedMessages[0].modelId).toBe('queued-model')
+    expect(mocks.persist).toHaveBeenCalledTimes(2)
+
+    // Revision 4 only advanced permission: a later-arriving model revision 3 must still apply.
+    mocks.runtimeListener?.(freshPreferences(3, { modelId: 'model-revision-3' }))
+    await expect.poll(() => read().drafts.existing.modelId).toBe('model-revision-3')
+    mocks.runtimeListener?.(combined)
+    expect(read().drafts.existing.modelId).toBe('model-revision-3')
+    expect(read().drafts.existing.permissionMode).toBe('full')
+    expect(mocks.persist).toHaveBeenCalledTimes(3)
+    expect(mocks.drafts).not.toHaveBeenCalled()
   })
 
   it('does not reapply fresh defaults when a later receipt replay has no preference payload', async () => {

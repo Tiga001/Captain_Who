@@ -482,6 +482,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
             notification_event_startup_cursor,
         )?)
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
+    let workflow_runtime_publisher = agent_service
+        .start_workflow_runtime_publisher(outbound_tx.clone())
+        .map_err(io::Error::other)?;
     agent_service
         .start_collaboration_dispatcher(outbound_tx.clone())
         .map_err(io::Error::other)?;
@@ -644,6 +647,15 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
 
     if let Err(error) = collaboration_dispatcher_shutdown {
         eprintln!("collaboration dispatcher shutdown failed: {error}");
+    }
+
+    // Final run/mail settlements above may have dirtied runtime state. Flush those snapshots
+    // while the writer is still alive; timeout fences late reads and never replays fresh edits.
+    if let Err(error) = workflow_runtime_publisher
+        .shutdown(Duration::from_secs(2))
+        .await
+    {
+        eprintln!("{error}");
     }
 
     let mut outbound_error = None;

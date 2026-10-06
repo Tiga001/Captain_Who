@@ -8,6 +8,7 @@ use tokio::sync::mpsc::unbounded_channel;
 mod awareness;
 mod history_warmup;
 mod personnel;
+mod runtime_publication;
 
 async fn request_body(stream: &mut tokio::net::TcpStream) -> Value {
     let mut bytes = Vec::new();
