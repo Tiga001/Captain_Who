@@ -292,10 +292,9 @@ impl AgentService {
             && matches!(event, AgentEvent::MessageDelta { .. }));
         let boundary = if starts_stream {
             self.storage
-                .get_conversation_turn_trace(assistant_message_id)
+                .get_conversation_turn_trace_next_sequence(assistant_message_id)
                 .ok()
                 .flatten()
-                .and_then(|trace| trace.items.last().map(|item| item.sequence() + 1))
                 .unwrap_or(0)
         } else {
             0

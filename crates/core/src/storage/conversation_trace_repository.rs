@@ -388,6 +388,40 @@ pub fn get_trace_for_message(
         .transpose()
 }
 
+/// Reads an observer's next trace boundary without decoding retained tool/history payloads.
+/// Terminal command lifecycle sidecars can extend the projected trace before materialization;
+/// retain the canonical projection for that uncommon case so this cut matches a full trace read.
+pub fn get_trace_next_sequence_for_message(
+    connection: &Connection,
+    assistant_message_id: &str,
+) -> rusqlite::Result<Option<u64>> {
+    let boundary = connection
+        .query_row(
+            "SELECT
+                 (SELECT MAX(sequence) FROM conversation_turn_trace_items
+                  WHERE assistant_message_id = trace.assistant_message_id),
+                 trace.terminal_status != 'in_progress' AND EXISTS (
+                     SELECT 1 FROM agent_command_session_lifecycle_events
+                     WHERE assistant_message_id = trace.assistant_message_id
+                       AND trace_sequence IS NULL
+                 )
+             FROM conversation_turn_traces AS trace
+             WHERE trace.assistant_message_id = ?1",
+            [assistant_message_id],
+            |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()?;
+    let Some((last_sequence, has_pending_lifecycle)) = boundary else {
+        return Ok(None);
+    };
+    if has_pending_lifecycle {
+        return get_trace_for_message(connection, assistant_message_id).map(|trace| {
+            trace.map(|trace| trace.items.last().map_or(0, |item| item.sequence() + 1))
+        });
+    }
+    Ok(Some(last_sequence.map_or(0, |sequence| sequence + 1)))
+}
+
 pub(crate) fn get_base_trace_for_message(
     connection: &Connection,
     assistant_message_id: &str,
@@ -924,6 +958,145 @@ mod tests {
     };
     use rusqlite::Connection;
     use serde_json::json;
+
+    #[test]
+    fn trace_next_sequence_matches_full_projection_without_reading_payloads() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let mut connection = test_connection();
+        let cases = [
+            ("active", ConversationTurnTraceTerminalStatus::InProgress),
+            ("completed", ConversationTurnTraceTerminalStatus::Completed),
+            ("failed", ConversationTurnTraceTerminalStatus::Failed),
+            ("cancelled", ConversationTurnTraceTerminalStatus::Cancelled),
+        ];
+        for (id, status) in cases {
+            insert_conversation(&connection, id);
+            insert_message(&connection, id, id, 1);
+            let mut value = trace(id, id, id);
+            value.terminal_status = status;
+            replace_trace(&mut connection, &value, 1, 2).unwrap();
+            assert_eq!(
+                get_trace_next_sequence_for_message(&connection, id).unwrap(),
+                get_trace_for_message(&connection, id)
+                    .unwrap()
+                    .map(|trace| { trace.items.last().map_or(0, |item| item.sequence() + 1) })
+            );
+        }
+        insert_conversation(&connection, "empty");
+        insert_message(&connection, "empty", "empty", 1);
+        let mut empty = trace("empty", "empty", "empty");
+        empty.items.clear();
+        replace_trace(&mut connection, &empty, 1, 2).unwrap();
+        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                column_name: "item_json" | "event_json",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+        for id in ["active", "completed", "failed", "cancelled"] {
+            assert_eq!(
+                get_trace_next_sequence_for_message(&connection, id).unwrap(),
+                Some(3)
+            );
+        }
+        assert_eq!(
+            get_trace_next_sequence_for_message(&connection, "empty").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            get_trace_next_sequence_for_message(&connection, "missing").unwrap(),
+            None
+        );
+        assert!(get_trace_for_message(&connection, "active").is_err());
+    }
+
+    #[test]
+    fn trace_next_sequence_keeps_unmaterialized_terminal_lifecycle_in_the_cut() {
+        use crate::storage::agent_command_session_repository::{
+            create_session, AgentCommandSessionCreate, AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+        };
+        use crate::{
+            AgentCommandSessionSnapshot, AgentCommandSessionStatus,
+            ConversationCommandSessionLifecyclePhase,
+        };
+
+        let mut connection = test_connection();
+        insert_conversation(&connection, "conversation-1");
+        insert_message(&connection, "conversation-1", "assistant-1", 1);
+        let mut value = trace("conversation-1", "assistant-1", "run-1");
+        if let ConversationTurnTraceItem::ToolCall {
+            tool, provenance, ..
+        } = &mut value.items[1]
+        {
+            *tool = "run_command".into();
+            *provenance = crate::AgentToolIdentity::Builtin {
+                tool_name: "run_command".into(),
+            };
+        }
+        if let ConversationTurnTraceItem::ToolResult { tool, .. } = &mut value.items[2] {
+            *tool = "run_command".into();
+        }
+        replace_trace(&mut connection, &value, 1, 2).unwrap();
+        let session_id = "cmd_00000000000000000000000000000001";
+        create_session(
+            &mut connection,
+            &AgentCommandSessionCreate {
+                snapshot: AgentCommandSessionSnapshot {
+                    schema_version: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+                    session_id: session_id.into(),
+                    conversation_id: "conversation-1".into(),
+                    assistant_message_id: "assistant-1".into(),
+                    origin_run_id: "run-1".into(),
+                    call_id: "call-1".into(),
+                    project_id: None,
+                    command: "echo test".into(),
+                    cwd: "/tmp".into(),
+                    command_digest: format!("sha256:{}", "0".repeat(64)),
+                    status: AgentCommandSessionStatus::Starting,
+                    started_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    latest_sequence: 0,
+                    output_truncated: false,
+                    outputs: vec![],
+                    artifact_observation: None,
+                    archive_ref: None,
+                },
+                authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
+                approval_provenance: json!({"decision":"approved"}),
+                permission_provenance: json!({"mode":"default"}),
+                created_at: 1,
+            },
+        )
+        .unwrap();
+        let lifecycle = ConversationCommandSessionLifecycle {
+            phase: ConversationCommandSessionLifecyclePhase::Started,
+            session_id: session_id.into(),
+            call_id: "call-1".into(),
+            status: AgentCommandSessionStatus::Starting,
+            exit_code: None,
+            latest_sequence: 0,
+            output_truncated: false,
+            archive: Default::default(),
+            created_at: 1,
+        };
+        // Reproduce a durable sidecar awaiting canonical trace materialization.
+        connection.execute(
+            "INSERT INTO agent_command_session_lifecycle_events(session_id,phase,conversation_id,assistant_message_id,call_id,event_json,created_at,recorded_at)
+             VALUES(?1,'started','conversation-1','assistant-1','call-1',?2,1,2)",
+            params![session_id, serde_json::to_string(&lifecycle).unwrap()],
+        ).unwrap();
+        let projected = get_trace_for_message(&connection, "assistant-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.items.len(), 4);
+        assert_eq!(
+            get_trace_next_sequence_for_message(&connection, "assistant-1").unwrap(),
+            projected.items.last().map(|item| item.sequence() + 1)
+        );
+    }
 
     #[test]
     fn in_progress_identity_matches_full_trace_status_without_reading_history_bodies() {

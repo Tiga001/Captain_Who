@@ -635,6 +635,18 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn get_conversation_turn_trace_next_sequence(
+        &self,
+        assistant_message_id: &str,
+    ) -> Result<Option<u64>, String> {
+        let connection = self.state.connection()?;
+        conversation_trace_repository::get_trace_next_sequence_for_message(
+            &connection,
+            assistant_message_id,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn list_conversation_turn_traces(
         &self,
         conversation_id: &str,
