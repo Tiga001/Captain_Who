@@ -30,6 +30,7 @@ mod automation_turn;
 mod cancellation;
 mod collaboration_harness;
 mod collaboration_request_accounting;
+mod collaboration_tree_summary;
 mod command_approval_rejection;
 mod command_sessions;
 mod context_history;

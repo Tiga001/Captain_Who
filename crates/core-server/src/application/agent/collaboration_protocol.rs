@@ -65,9 +65,16 @@ impl AgentService {
                 "Agent tree exceeds the supported response limit.".to_string(),
             ));
         }
+        // Root nodes use the current composer model, while child nodes retain their frozen
+        // selection. Read the display catalog once for this snapshot, never once per node.
+        let models = if nodes.iter().any(|node| node.model_snapshot.is_none()) {
+            safe_models(&self.storage)?
+        } else {
+            Vec::new()
+        };
         let agents = nodes
             .iter()
-            .map(|node| self.agent_summary(node))
+            .map(|node| self.agent_summary(node, &models))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AgentTreeLookupDto {
             schema_version: AGENT_COLLABORATION_SCHEMA_VERSION,
@@ -89,7 +96,12 @@ impl AgentService {
         input: AgentDetailRequest,
     ) -> Result<AgentDetailDto, AgentServiceError> {
         let node = self.authorized_node(&input.root_conversation_id, &input.agent_id)?;
-        let summary = self.agent_summary(&node)?;
+        let models = if node.model_snapshot.is_none() {
+            safe_models(&self.storage)?
+        } else {
+            Vec::new()
+        };
+        let summary = self.agent_summary(&node, &models)?;
         Ok(AgentDetailDto {
             schema_version: AGENT_COLLABORATION_SCHEMA_VERSION,
             summary,
@@ -466,7 +478,11 @@ impl AgentService {
         Ok(node)
     }
 
-    fn agent_summary(&self, node: &AgentNodeRecord) -> Result<AgentSummaryDto, AgentServiceError> {
+    fn agent_summary(
+        &self,
+        node: &AgentNodeRecord,
+        models: &[mycopilot_core::storage::models::ModelConfigRecord],
+    ) -> Result<AgentSummaryDto, AgentServiceError> {
         let display = self
             .storage
             .get_agent_display_status(&node.agent_id)
@@ -479,12 +495,13 @@ impl AgentService {
             None => {
                 let conversation = self
                     .storage
-                    .load_conversation(&node.conversation_id)
+                    // A tree label needs only model_id, not message bodies, projected tool
+                    // timelines, or attachment previews from a potentially long conversation.
+                    .load_conversation_meta(&node.conversation_id)
                     .map_err(AgentServiceError::from)?
                     .ok_or_else(|| {
                         AgentServiceError::from("Conversation is unavailable.".to_string())
                     })?;
-                let models = safe_models(&self.storage)?;
                 conversation.model_id.and_then(|model_id| {
                     models
                         .iter()
