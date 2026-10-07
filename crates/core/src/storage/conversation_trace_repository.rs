@@ -457,6 +457,49 @@ pub fn list_traces_for_conversation(
         .map(|records| records.into_iter().map(|record| record.trace).collect())
 }
 
+/// Presentation-only subset, not a trace for admission, persistence or model-context recovery.
+/// Filter before decoding so a live mail notification never reloads unrelated narration/tool
+/// bodies or previously published deliveries. Full history reads retain their complete validation.
+pub(crate) fn workflow_delivery_trace_since(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    after_sequence: Option<u64>,
+) -> rusqlite::Result<Option<ConversationTurnTrace>> {
+    let header = connection
+        .query_row(
+            "SELECT assistant_message_id, conversation_id, run_id, schema_version,
+                    terminal_status, terminal_error, truncated
+             FROM conversation_turn_traces
+             WHERE conversation_id = ?1 AND assistant_message_id = ?2",
+            params![conversation_id, assistant_message_id],
+            trace_header_from_row,
+        )
+        .optional()?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    // SQLite sequences cannot exceed i64::MAX; a larger caller cursor has no unseen items.
+    let after_sequence =
+        after_sequence.map_or(-1, |value| i64::try_from(value).unwrap_or(i64::MAX));
+    let mut statement = connection.prepare(
+        "SELECT sequence, item_kind, item_json FROM conversation_turn_trace_items
+         WHERE assistant_message_id = ?1 AND item_kind = 'workflow_delivery'
+           AND sequence > ?2
+         ORDER BY sequence ASC",
+    )?;
+    let rows = statement
+        .query_map(params![assistant_message_id, after_sequence], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<StoredTraceItem>>>()?;
+    #[cfg(test)]
+    crate::storage::trace_performance_metrics::trace(
+        rows.iter().map(|(_, _, json)| json.len()).sum(),
+    );
+    trace_from_stored_items(header, rows).map(Some)
+}
+
 pub struct ConversationTurnTraceRecord {
     pub trace: ConversationTurnTrace,
     pub completed_at: Option<i64>,

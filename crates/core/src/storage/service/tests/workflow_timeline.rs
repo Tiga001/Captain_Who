@@ -4,6 +4,9 @@ use crate::{
 };
 use serde_json::{json, Value};
 
+#[path = "workflow_timeline/delivery_publication.rs"]
+mod delivery_publication;
+
 thread_local! {
     static HISTORY_QUERY_COUNTS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
 }

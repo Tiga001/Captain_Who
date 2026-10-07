@@ -123,27 +123,81 @@ impl StorageService {
         conversation_id: &str,
         assistant_message_id: &str,
     ) -> Result<Vec<DeliveryPresentation>, String> {
-        let connection = self.state.connection()?;
-        let Some(conversation) =
-            crate::storage::chat_repository::get_active_conversation(&connection, conversation_id)
-                .map_err(|error| error.to_string())?
-        else {
-            return Ok(vec![]);
-        };
-        let Some(trace) = crate::storage::conversation_trace_repository::get_trace_for_message(
-            &connection,
+        self.workflow_execution_delivery_presentations_since(
+            conversation_id,
             assistant_message_id,
+            None,
         )
-        .map_err(|error| error.to_string())?
-        else {
-            return Ok(vec![]);
-        };
-        let origins = repository::delivery_origins_for_conversation(&connection, conversation_id)?;
-        Ok(repository::delivery_presentations(
-            &conversation,
-            &trace,
-            &origins,
-        ))
+    }
+
+    pub fn workflow_execution_delivery_presentations_since(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<Vec<DeliveryPresentation>, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let result = (|| -> Result<Vec<DeliveryPresentation>, String> {
+            let Some(trace) =
+                crate::storage::conversation_trace_repository::workflow_delivery_trace_since(
+                    &transaction,
+                    conversation_id,
+                    assistant_message_id,
+                    after_sequence,
+                )
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(vec![]);
+            };
+            let input_ids = trace
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    crate::ConversationTurnTraceItem::WorkflowDelivery {
+                        input_id,
+                        truncated: false,
+                        ..
+                    } => Some(input_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if input_ids.is_empty() {
+                return Ok(vec![]);
+            }
+            let input_ids = serde_json::to_string(&input_ids).map_err(|error| error.to_string())?;
+            let origins = repository::delivery_origins_for_input_scope(
+                &transaction,
+                conversation_id,
+                Some(&input_ids),
+            )?;
+            // Include every matching origin, even before the assistant or across an observer
+            // page boundary: the shared projector must still reject startup/ambiguous evidence.
+            let message_ids = std::iter::once(assistant_message_id)
+                .chain(origins.iter().map(|(id, _)| id.as_str()))
+                .collect::<Vec<_>>();
+            let message_ids =
+                serde_json::to_string(&message_ids).map_err(|error| error.to_string())?;
+            let Some(conversation) =
+                crate::storage::chat_repository::get_active_conversation_in_message_scope(
+                    &transaction,
+                    conversation_id,
+                    &message_ids,
+                )
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(vec![]);
+            };
+            Ok(repository::delivery_presentations(
+                &conversation,
+                &trace,
+                &origins,
+            ))
+        })()?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     pub fn workflow_execution_delivery_origins(

@@ -404,6 +404,17 @@ pub fn get_active_conversation(
     Ok(conversation)
 }
 
+/// Reuses the observer's exact-message evidence read without loading unrelated history bodies.
+pub(crate) fn get_active_conversation_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    get_conversation_with_messages(connection, conversation_id, |connection, id| {
+        list_active_messages_in_scope(connection, id, message_ids_json)
+    })
+}
+
 /// Select a bounded active-message window before reading any bodies or presentation JSON.
 /// The cursor is a durable message identity in this Conversation, never a client timestamp.
 pub(crate) fn get_active_conversation_page(

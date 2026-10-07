@@ -758,13 +758,14 @@ impl AgentService {
     ) {
         match self
             .storage
-            .workflow_execution_delivery_presentations(conversation_id, assistant_message_id)
-        {
+            .workflow_execution_delivery_presentations_since(
+                conversation_id,
+                assistant_message_id,
+                after_sequence,
+            ) {
             Ok(deliveries) => {
                 for delivery in deliveries {
-                    if after_sequence.is_none_or(|sequence| delivery.sequence > sequence) {
-                        let _ = notifications.send(agent_event_notification(delivery.into_event()));
-                    }
+                    let _ = notifications.send(agent_event_notification(delivery.into_event()));
                 }
             }
             // The durable trace still supports exact recovery on the next conversation reload.
