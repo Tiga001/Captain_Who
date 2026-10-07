@@ -588,7 +588,7 @@ button.chat-message-attachment:focus-visible {
   color: var(--mc-color-text-muted);
 }
 
-.chat-message--assistant[data-status='error'] {
+.chat-message--assistant[data-status='error']:not([data-interruption]) {
   padding: 4px 0;
   color: var(--mc-color-text-danger);
   background: transparent;
@@ -596,7 +596,7 @@ button.chat-message-attachment:focus-visible {
   border-radius: 0;
 }
 
-.chat-message--assistant[data-status='error'] .chat-message__body {
+.chat-message--assistant[data-status='error']:not([data-interruption]) .chat-message__body {
   padding: 14px 18px;
   color: var(--mc-color-text-danger);
   background: var(--mc-color-surface-error-subtle);

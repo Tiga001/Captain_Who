@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ChatMessage } from '../../features/chat/chatTypes'
 import { applyAgentEventToChatMessage } from '../../features/agentRun/agentEventReducer'
 import { mergeAuthoritativeTerminalMessage } from '../agentRunLifecycleSupport'
-import { getAssistantFinalContent } from '../../features/chat/components/chatMessageItemUtils'
+import {
+  getAssistantFinalContent,
+  getRunInterruptionReason
+} from '../../features/chat/components/chatMessageItemUtils'
 
 vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
 
@@ -29,20 +32,27 @@ function runningMessage(): ChatMessage {
 }
 
 describe('safe terminal model request interruption', () => {
-  it('restores the backend-owned reason and partial reply after terminal reconciliation', () => {
-    const live = runningMessage()
-    const stored = runningMessage()
-    stored.status = 'sent'
-    stored.content = '已经生成的部分正文'
-    stored.agentRun!.status = 'failed'
-    stored.agentRun!.interruption = { reason: 'output_limit_reached' }
-    stored.agentRun!.timeline = [{ id: 'narration', type: 'message', content: '工具执行前的播报' }]
-    const merged = mergeAuthoritativeTerminalMessage(live, stored)
-    expect(merged.agentRun?.interruption).toEqual({ reason: 'output_limit_reached' })
-    expect(getAssistantFinalContent(merged)).toBe('已经生成的部分正文')
-    stored.content = ''
-    expect(getAssistantFinalContent(mergeAuthoritativeTerminalMessage(live, stored))).toBe('')
-  })
+  it.each(['sent', 'error'] as const)(
+    'restores the reason and partial reply after terminal reconciliation with status %s',
+    (status) => {
+      const live = runningMessage()
+      const stored = runningMessage()
+      stored.status = status
+      stored.content = '已经生成的部分正文'
+      stored.agentRun!.status = 'failed'
+      stored.agentRun!.interruption = { reason: 'output_limit_reached' }
+      stored.agentRun!.timeline = [
+        { id: 'narration', type: 'message', content: '工具执行前的播报' }
+      ]
+      const merged = mergeAuthoritativeTerminalMessage(live, stored)
+      expect(merged.status).toBe(status)
+      expect(merged.agentRun?.interruption).toEqual({ reason: 'output_limit_reached' })
+      expect(getRunInterruptionReason(merged.agentRun)).toBe('output_limit_reached')
+      expect(getAssistantFinalContent(merged)).toBe('已经生成的部分正文')
+      stored.content = ''
+      expect(getAssistantFinalContent(mergeAuthoritativeTerminalMessage(live, stored))).toBe('')
+    }
+  )
   it('drops the failed sampling attempt while preserving the committed prefix', () => {
     const started = applyAgentEventToChatMessage(runningMessage(), {
       type: 'message_stream_started',

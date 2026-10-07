@@ -244,6 +244,18 @@ export function isTokenLimitFinishReason(finishReason: string | undefined) {
   )
 }
 
+export function getRunInterruptionReason(
+  run: ChatAgentRunView | undefined
+): NonNullable<ChatAgentRunView['interruption']>['reason'] | undefined {
+  if (!run) return undefined
+  return (
+    run.interruption?.reason ??
+    (isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
+      ? 'output_limit_reached'
+      : undefined)
+  )
+}
+
 export function hasDisplayableContent(content: string) {
   return Boolean(content.trim())
 }

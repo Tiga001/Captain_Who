@@ -13,6 +13,7 @@ import { humanInteractionRequestsForMessage } from '../../humanInteraction/human
 import {
   formatElapsedDuration,
   getAssistantFinalContent,
+  getRunInterruptionReason,
   groupTimelineItems,
   hasCollapsibleTimelineContent,
   hasDisplayableContent,
@@ -20,7 +21,6 @@ import {
   hasTrustedAnchoredCollaborationActivity,
   isContentFullyRepresentedByTimeline,
   isRunSettled,
-  isTokenLimitFinishReason,
   isWaitingForCommandCompletion,
   shouldShowThinkingActivity,
   type RenderableTimelineItem
@@ -525,11 +525,7 @@ export function AgentRunView({
     !(canToggleTimeline && timelineCollapsed) &&
     !headerIsThinking &&
     (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline))
-  const interruptionReason =
-    run.interruption?.reason ??
-    (isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
-      ? 'output_limit_reached'
-      : undefined)
+  const interruptionReason = getRunInterruptionReason(run)
   const webSearchSources = getUniqueWebSearchSources(run)
 
   return (

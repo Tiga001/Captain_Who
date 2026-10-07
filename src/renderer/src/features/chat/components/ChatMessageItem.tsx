@@ -14,6 +14,7 @@ import { humanInteractionDisplayText } from '../../humanInteraction/humanInterac
 import type { ApprovalSubmissionResult } from './approvalSubmission'
 import {
   getAssistantFinalContent,
+  getRunInterruptionReason,
   getUserVisibleContent,
   isRunSettled,
   shouldShowAssistantActions
@@ -270,6 +271,9 @@ export const ChatMessageItem = memo(function ChatMessageItem({
       className={`chat-message chat-message--${message.role}`}
       data-copy-pinned={pinCopyAction ? 'true' : undefined}
       data-editing={isEditing ? 'true' : undefined}
+      data-interruption={
+        message.role === 'assistant' ? getRunInterruptionReason(message.agentRun) : undefined
+      }
       data-message-id={message.id}
       data-status={message.status}
       key={message.id}
