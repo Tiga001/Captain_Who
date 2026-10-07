@@ -50,7 +50,7 @@ fn v69_upgrade_preserves_messages_revisions_and_search_rows() {
     let c = seeded_v68();
     let before = message_snapshot(&c);
     run_migrations(&c).unwrap();
-    assert_eq!(read_schema_version(&c).unwrap(), 69);
+    assert_eq!(read_schema_version(&c).unwrap(), STORAGE_SCHEMA_VERSION);
     assert_eq!(message_snapshot(&c), before);
     let changes = c.total_changes();
     run_migrations(&c).unwrap();

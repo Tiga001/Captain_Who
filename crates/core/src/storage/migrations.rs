@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 69;
+pub const STORAGE_SCHEMA_VERSION: i32 = 70;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -33,8 +33,10 @@ const V67_SCHEMA_FINGERPRINT: &str =
 const V68_SCHEMA_FINGERPRINT: &str =
     "sha256:e851d17035a3ed9536f2aa7a960436dfc6c7ec28e4f9ab293b6ed6b485645a0c";
 
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V69_SCHEMA_FINGERPRINT: &str =
     "sha256:8532d89f095b602369e576f3541172a7b872b7e22619228865cc9cf85eb403d8";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:843221527806ceaf0563ede4973442c4040432cc9827639d0d411951ef66714b";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -55,6 +57,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v67 versions model-bearing message changes independently of conversation presentation metadata.
 /// v68 refreshes message presentation independently and ignores unchanged trace publications.
 /// v69 skips full-text index rewrites for unchanged message values, preserving existing history.
+/// v70 keeps organization recovery cursors as transaction-owned metadata, without reading bodies.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -140,6 +143,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 68 {
         install_semantic_message_search_updates_v68(connection)?;
+    }
+
+    if read_schema_version(connection)? == 69 {
+        install_workflow_recovery_metadata_v69(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -470,12 +477,24 @@ fn message_presentation_revisions_schema() -> &'static str {
     &CANONICAL_SCHEMA[start..end]
 }
 fn semantic_message_search_updates_schema() -> &'static str {
-    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+    let start = CANONICAL_SCHEMA
         .find("-- Reindex message history only when indexed values change, schema v69.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Durable organization recovery metadata, schema v70.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+fn workflow_recovery_metadata_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Durable organization recovery metadata, schema v70.")
         .unwrap()..]
 }
+fn canonical_schema_v69() -> String {
+    CANONICAL_SCHEMA.replace(workflow_recovery_metadata_schema(), "")
+}
 fn canonical_schema_v68() -> String {
-    CANONICAL_SCHEMA.replace(semantic_message_search_updates_schema(), "")
+    canonical_schema_v69().replace(semantic_message_search_updates_schema(), "")
 }
 fn canonical_schema_v67() -> String {
     canonical_schema_v68().replace(message_presentation_revisions_schema(), "")
@@ -496,6 +515,14 @@ fn install_semantic_message_search_updates_v68(connection: &Connection) -> rusql
     validate_schema_fingerprint(&transaction, V68_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(semantic_message_search_updates_schema())?;
     transaction.pragma_update(None, "user_version", 69)?;
+    validate_schema_fingerprint(&transaction, V69_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+fn install_workflow_recovery_metadata_v69(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V69_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_recovery_metadata_schema())?;
+    transaction.pragma_update(None, "user_version", 70)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
 }
@@ -4406,3 +4433,7 @@ mod workflow_pending_tests;
 #[cfg(test)]
 #[path = "migrations_message_search_tests.rs"]
 mod message_search_tests;
+
+#[cfg(test)]
+#[path = "migrations_workflow_recovery_tests.rs"]
+mod workflow_recovery_tests;

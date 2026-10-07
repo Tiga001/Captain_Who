@@ -7418,3 +7418,155 @@ BEGIN
         NEW.content
     );
 END;
+
+-- Durable organization recovery metadata, schema v70.
+-- Presentation invalidations only, never organization membership or permission authority.
+CREATE TABLE workflow_mail_conversation_changes (
+    instance_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    last_sequence INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, conversation_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX workflow_mail_event_structure
+ON workflow_mail_events(instance_id, sequence) WHERE kind = 'members_changed';
+CREATE INDEX workflow_mail_event_preferences
+ON workflow_mail_events(instance_id, kind, target_node_id, sequence)
+WHERE kind IN ('member_model_changed', 'member_permissions_changed');
+CREATE INDEX workflow_mail_event_input
+ON workflow_mail_events(instance_id, input_id, sequence);
+CREATE INDEX workflow_mail_delivered_input_conversation
+ON workflow_mail_inputs(instance_id, conversation_id, input_id) WHERE delivery_id IS NOT NULL;
+
+INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+SELECT input.instance_id, input.conversation_id, MAX(event.sequence)
+FROM workflow_mail_inputs AS input
+JOIN workflow_mail_events AS event
+  ON event.instance_id = input.instance_id AND event.input_id = input.input_id
+WHERE input.conversation_id IS NOT NULL AND input.delivery_id IS NOT NULL
+GROUP BY input.instance_id, input.conversation_id;
+
+CREATE TRIGGER workflow_mail_change_event_insert
+AFTER INSERT ON workflow_mail_events
+BEGIN
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT NEW.instance_id, input.conversation_id, NEW.sequence
+    FROM workflow_mail_inputs AS input
+    WHERE input.input_id = NEW.input_id AND input.instance_id = NEW.instance_id
+      AND input.conversation_id IS NOT NULL AND input.delivery_id IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE
+    SET last_sequence = MAX(last_sequence, excluded.last_sequence)
+    WHERE excluded.last_sequence > last_sequence;
+END;
+CREATE TRIGGER workflow_mail_change_input_insert
+AFTER INSERT ON workflow_mail_inputs
+WHEN NEW.conversation_id IS NOT NULL AND NEW.delivery_id IS NOT NULL
+BEGIN
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT NEW.instance_id, NEW.conversation_id, MAX(sequence)
+    FROM workflow_mail_events
+    WHERE instance_id = NEW.instance_id AND input_id = NEW.input_id
+      AND NEW.conversation_id IS NOT NULL AND NEW.delivery_id IS NOT NULL
+    HAVING MAX(sequence) IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE
+    SET last_sequence = MAX(last_sequence, excluded.last_sequence)
+    WHERE excluded.last_sequence > last_sequence;
+END;
+CREATE TRIGGER workflow_mail_change_input_update
+AFTER UPDATE OF input_id, instance_id, conversation_id, delivery_id ON workflow_mail_inputs
+WHEN NEW.input_id IS NOT OLD.input_id OR NEW.instance_id IS NOT OLD.instance_id
+  OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.delivery_id IS NOT OLD.delivery_id
+BEGIN
+    DELETE FROM workflow_mail_conversation_changes
+    WHERE instance_id = OLD.instance_id AND conversation_id = OLD.conversation_id
+      AND OLD.delivery_id IS NOT NULL;
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT OLD.instance_id, OLD.conversation_id, MAX(event.sequence)
+    FROM workflow_mail_inputs AS input
+    JOIN workflow_mail_events AS event
+      ON event.instance_id = input.instance_id AND event.input_id = input.input_id
+    WHERE input.instance_id = OLD.instance_id AND input.conversation_id = OLD.conversation_id
+      AND input.delivery_id IS NOT NULL AND OLD.delivery_id IS NOT NULL
+    HAVING MAX(event.sequence) IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence;
+
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT NEW.instance_id, NEW.conversation_id, MAX(sequence)
+    FROM workflow_mail_events
+    WHERE instance_id = NEW.instance_id AND input_id = NEW.input_id
+      AND NEW.conversation_id IS NOT NULL AND NEW.delivery_id IS NOT NULL
+    HAVING MAX(sequence) IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE
+    SET last_sequence = MAX(last_sequence, excluded.last_sequence)
+    WHERE excluded.last_sequence > last_sequence;
+END;
+CREATE TRIGGER workflow_mail_change_input_delete
+AFTER DELETE ON workflow_mail_inputs
+WHEN OLD.conversation_id IS NOT NULL AND OLD.delivery_id IS NOT NULL
+BEGIN
+    DELETE FROM workflow_mail_conversation_changes
+    WHERE instance_id = OLD.instance_id AND conversation_id = OLD.conversation_id
+      AND OLD.delivery_id IS NOT NULL;
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT OLD.instance_id, OLD.conversation_id, MAX(event.sequence)
+    FROM workflow_mail_inputs AS input
+    JOIN workflow_mail_events AS event
+      ON event.instance_id = input.instance_id AND event.input_id = input.input_id
+    WHERE input.instance_id = OLD.instance_id AND input.conversation_id = OLD.conversation_id
+      AND input.delivery_id IS NOT NULL AND OLD.delivery_id IS NOT NULL
+    HAVING MAX(event.sequence) IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence;
+END;
+CREATE TRIGGER workflow_mail_change_event_update
+AFTER UPDATE OF sequence, instance_id, input_id ON workflow_mail_events
+WHEN NEW.sequence IS NOT OLD.sequence OR NEW.instance_id IS NOT OLD.instance_id
+  OR NEW.input_id IS NOT OLD.input_id
+BEGIN
+    DELETE FROM workflow_mail_conversation_changes
+    WHERE instance_id = OLD.instance_id AND conversation_id = (
+        SELECT conversation_id FROM workflow_mail_inputs
+        WHERE input_id = OLD.input_id AND instance_id = OLD.instance_id AND delivery_id IS NOT NULL
+    );
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT OLD.instance_id, input.conversation_id, MAX(event.sequence)
+    FROM workflow_mail_inputs AS input
+    JOIN workflow_mail_events AS event
+      ON event.instance_id = input.instance_id AND event.input_id = input.input_id
+    WHERE input.instance_id = OLD.instance_id AND input.delivery_id IS NOT NULL
+      AND input.conversation_id = (
+          SELECT conversation_id FROM workflow_mail_inputs
+          WHERE input_id = OLD.input_id AND instance_id = OLD.instance_id AND delivery_id IS NOT NULL
+      )
+    GROUP BY input.conversation_id
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence;
+
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT NEW.instance_id, input.conversation_id, NEW.sequence
+    FROM workflow_mail_inputs AS input
+    WHERE input.input_id = NEW.input_id AND input.instance_id = NEW.instance_id
+      AND input.conversation_id IS NOT NULL AND input.delivery_id IS NOT NULL
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE
+    SET last_sequence = MAX(last_sequence, excluded.last_sequence)
+    WHERE excluded.last_sequence > last_sequence;
+END;
+CREATE TRIGGER workflow_mail_change_event_delete
+AFTER DELETE ON workflow_mail_events
+WHEN OLD.input_id IS NOT NULL
+BEGIN
+    DELETE FROM workflow_mail_conversation_changes
+    WHERE instance_id = OLD.instance_id AND conversation_id = (
+        SELECT conversation_id FROM workflow_mail_inputs
+        WHERE input_id = OLD.input_id AND instance_id = OLD.instance_id AND delivery_id IS NOT NULL
+    );
+    INSERT INTO workflow_mail_conversation_changes(instance_id, conversation_id, last_sequence)
+    SELECT OLD.instance_id, input.conversation_id, MAX(event.sequence)
+    FROM workflow_mail_inputs AS input
+    JOIN workflow_mail_events AS event
+      ON event.instance_id = input.instance_id AND event.input_id = input.input_id
+    WHERE input.instance_id = OLD.instance_id AND input.delivery_id IS NOT NULL
+      AND input.conversation_id = (
+          SELECT conversation_id FROM workflow_mail_inputs
+          WHERE input_id = OLD.input_id AND instance_id = OLD.instance_id AND delivery_id IS NOT NULL
+      )
+    GROUP BY input.conversation_id
+    ON CONFLICT(instance_id, conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence;
+END;
