@@ -193,6 +193,30 @@ pub struct RuntimeSnapshot {
     /// so reconnecting cannot overwrite a user's later composer preferences.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preference_updates: Vec<PreferenceUpdate>,
+    /// Complete metadata facts, independent of the bounded recent-event animation window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<RuntimeSummary>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeSummary {
+    pub pending_by_node: Vec<PendingNodeMail>,
+    /// One durable cursor per conversation that has received mail, including retired bindings.
+    /// This grows with conversation identities, never with individual letters or their bodies.
+    pub conversation_changes: Vec<ConversationMailChange>,
+    pub structure_revision: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PendingNodeMail {
+    pub node_id: String,
+    pub count: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationMailChange {
+    pub conversation_id: String,
+    pub sequence: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-07
 ---
 
 # 组织：邮件与分层协作
@@ -187,7 +187,19 @@ last_verified: 2026-10-04
 
 ### Runtime 通知合并与恢复
 
-`agent.workflows.runtime.changed` 仍是完整 runtime 投影，事件序号和显式读取的恢复契约不变。Core Server 按组织在第一次变更后开启固定 100 ms 窗口，窗口内后续变更只标记脏状态，不重新生成快照、不延后截止时间；单个 worker 串行读取投影，生成期间到达的变更保留到下一轮。持续活动不会因不断重置计时而饥饿，不同组织按各自截止时间刷新。此合并不改变邮件事务、投递调度、停止屏障或真实运行并发。
+`agent.workflows.runtime.changed` 发布元数据摘要：`inputs`、`inputRuns` 为空，保留事件窗口、暂停对话和新鲜偏好修改，并附带 `summary`。显式 `runtimeSnapshot` 默认仍返回完整投影；传入 `summaryOnly: true` 使用与通知相同的摘要读取。两种读取均保留真实事件序号，摘要不是完整输入或 Run 列表，不能凭空数组推断没有邮件或活动。
+
+| 摘要字段 | 恢复语义 |
+| --- | --- |
+| `pendingByNode` | 当前成员绑定的真实 pending 邮件数，零值可省略；不从最近事件或有限输入窗口推算 |
+| `conversationChanges` | 曾正式绑定 delivery 的每个对话及其最新关联邮件事件序号，包含已解绑成员和迟到的 Run 完成事件；不按最近 512 条事件截断 |
+| `structureRevision` | 最新 `members_changed` 事件序号，触发组织结构重新读取；没有结构事件时为 0 |
+
+`summary` 的恢复事实与 `afterSequence` 无关。在同一个 SQLite 读取事务内取得实例事件水位、摘要和暂停状态，避免组合出跨版本快照。`events` 包含游标之后最新 512 条事件，再补充每个当前成员的模型、权限字段各自最新历史失效事件，按序号去重排序。因此历史偏好事件可能早于请求游标；消费者按字段去重并复核当前草稿，不能把它们当作新鲜偏好值，也不能重新播放动画。临时连线只使用新游标之后的真实 sent/recalled 事件。
+
+对话变化水位由 `workflow_mail_conversation_changes` 在邮件写事务内维护，升级时从已有输入与事件回填。通知读取不再联表扫描全部历史输入和事件，也不读取邮件正文、输入 JSON 或 Turn Trace。结构与偏好通过索引定位最新事件。摘要大小会随曾接收邮件的对话身份数增长，并非固定长度；不会以静默截断丢失旧对话的恢复信号。此派生表只服务展示与恢复，不作为成员授权、投递资格或邮件处理完成的依据。
+
+Core Server 按组织在第一次变更后开启固定 100 ms 窗口，窗口内后续变更只标记脏状态，不重新生成快照、不延后截止时间；单个 worker 串行读取投影，生成期间到达的变更保留到下一轮。持续活动不会因不断重置计时而饥饿，不同组织按各自截止时间刷新。此合并不改变邮件事务、投递调度、停止屏障或真实运行并发。
 
 新鲜的模型/权限修改按成员、原 conversation 和字段合并，保留各字段最高的原始 organization revision；不能用另一个字段的较新 revision 抬高旧字段版本。一个 snapshot 可为同一成员携带两条不重叠字段更新，同 revision 可合一；每包仍限 128 个不同成员、256 条更新。窗口内成员重绑导致同 node 对应不同 conversation 时，保留原绑定，复用同一次投影分包通知。历史读取、启动恢复和回执重放不重新注入这些新鲜偏好，避免覆盖用户后来手动选择的草稿设置。
 
@@ -195,11 +207,13 @@ worker 由 bootstrap 显式启动并持有，构造服务不启动后台任务�
 
 ## 7. 持久化与版本边界
 
-当前 SQLite canonical schema 为 v66；definition schema v1、组织 revision 与成员 incarnation 是不同版本维度。
+当前 SQLite canonical schema 为 v70；definition schema v1、组织 revision 与成员 incarnation 是不同版本维度。
 
 - v64 建立独立 `workflow_mail_*` 信封、输入、收发操作回执、事件、Run 身份、来源及停止屏障；不转换旧图执行记录。
 - v65 将组织完整定义存入实例、解除对模板的外键依赖，保存独立成员身份及人员工具回执；精确 v64 升级不改写旧 Run 授权。
 - v66 原子清除 7 张已退役 `workflow_execution_*` 图执行表及索引，保留当前组织邮件、人员回执和聊天。旧定义不会被自动转换或补齐，损坏/不兼容目录记录隔离展示。
+- v67–v69 分离对话模型历史与展示版本，并避免未变消息的全文索引重写；不改变组织定义或邮件语义。
+- v70 增加对话邮件变化水位派生表及结构、偏好事件索引，事务内回填既有历史并维护后续变化；原输入、事件和正文保留。
 
 邮件终态结算与权威 Turn Trace 在同一事务提交，包括正常结束、停止、交互终止与启动恢复；没有正式投递证据的已领取邮件不能误标 processed。持久输入、Run/delivery 绑定和 Trace 共同防止重复投递。启动迁移和显式开发 reset 的支持范围不同，见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)及[恢复 Runbook](../operations/recovery-runbook.md)。
 

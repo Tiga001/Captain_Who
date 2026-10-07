@@ -18,6 +18,7 @@ fn preference(
 }
 fn snapshot(instance: &str) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        summary: None,
         instance_id: instance.into(),
         sequence: 9,
         inputs: vec![],

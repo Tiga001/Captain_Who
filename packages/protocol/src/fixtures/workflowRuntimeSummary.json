@@ -1,0 +1,86 @@
+{
+  "instanceId": "instance",
+  "sequence": 6,
+  "inputs": [],
+  "events": [
+    {
+      "sequence": 1,
+      "instanceId": "instance",
+      "inputId": "pending-input",
+      "messageId": "pending-mail",
+      "sourceNodeId": "a",
+      "targetNodeId": "b",
+      "kind": "queued",
+      "createdAt": 1
+    },
+    {
+      "sequence": 2,
+      "instanceId": "instance",
+      "inputId": "delivered-input",
+      "messageId": "delivered-mail",
+      "sourceNodeId": "a",
+      "targetNodeId": "b",
+      "kind": "accepted",
+      "createdAt": 2
+    },
+    {
+      "sequence": 3,
+      "instanceId": "instance",
+      "inputId": "delivered-input",
+      "messageId": "delivered-mail",
+      "sourceNodeId": "a",
+      "targetNodeId": "b",
+      "kind": "delivered",
+      "createdAt": 3
+    },
+    {
+      "sequence": 4,
+      "instanceId": "instance",
+      "inputId": null,
+      "messageId": null,
+      "sourceNodeId": "a",
+      "targetNodeId": null,
+      "kind": "members_changed",
+      "createdAt": 4
+    },
+    {
+      "sequence": 5,
+      "instanceId": "instance",
+      "inputId": null,
+      "messageId": null,
+      "sourceNodeId": "a",
+      "targetNodeId": "b",
+      "kind": "member_model_changed",
+      "createdAt": 5
+    },
+    {
+      "sequence": 6,
+      "instanceId": "instance",
+      "inputId": "delivered-input",
+      "messageId": null,
+      "sourceNodeId": null,
+      "targetNodeId": null,
+      "kind": "run_completed",
+      "createdAt": 6
+    }
+  ],
+  "pausedConversationIds": [
+    "fixture-b"
+  ],
+  "inputRuns": [],
+  "summary": {
+    "pendingByNode": [
+      {
+        "nodeId": "b",
+        "count": 1
+      }
+    ],
+    "conversationChanges": [
+      {
+        "conversationId": "fixture-b",
+        "sequence": 6
+      }
+    ],
+    "structureRevision": 4
+  }
+}

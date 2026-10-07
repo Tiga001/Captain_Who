@@ -489,6 +489,7 @@ pub fn runtime_snapshot(
         paused_conversation_ids,
         input_runs,
         preference_updates: vec![],
+        summary: None,
     })
 }
 pub fn bind_run(

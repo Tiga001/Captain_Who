@@ -307,4 +307,18 @@ impl StorageService {
     ) -> Result<RuntimeSnapshot, String> {
         repository::runtime_snapshot(&*self.state.connection()?, instance_id, after_sequence)
     }
+
+    pub fn workflow_execution_runtime_summary(
+        &self,
+        instance_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<RuntimeSnapshot, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let snapshot = repository::runtime_summary(&transaction, instance_id, after_sequence)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(snapshot)
+    }
 }

@@ -1,4 +1,4 @@
-//! Coalesce committed organization changes before reading their full runtime projection.
+//! Coalesce committed organization changes before reading their runtime metadata summary.
 //! The queue is a process-local hint; SQLite and explicit runtime reads remain authoritative.
 use super::{AgentService, CoreServerNotificationSender};
 use mycopilot_core::workflow_execution::{PreferenceUpdate, RuntimeSnapshot};
@@ -308,7 +308,7 @@ impl AgentService {
         let storage = Arc::clone(&self.storage);
         let project = Arc::new(move |instance: &str| {
             storage
-                .workflow_execution_runtime(instance)
+                .workflow_execution_runtime_summary(instance, None)
                 .map_err(classify_storage_projection_error)
         });
         Ok(spawn_worker(

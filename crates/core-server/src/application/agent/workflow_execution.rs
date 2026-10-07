@@ -725,9 +725,15 @@ impl AgentService {
         &self,
         instance_id: &str,
         after_sequence: Option<u64>,
+        summary_only: bool,
     ) -> Result<RuntimeSnapshot, String> {
-        self.storage
-            .workflow_execution_runtime_since(instance_id, after_sequence)
+        if summary_only {
+            self.storage
+                .workflow_execution_runtime_summary(instance_id, after_sequence)
+        } else {
+            self.storage
+                .workflow_execution_runtime_since(instance_id, after_sequence)
+        }
     }
     pub(super) fn publish_workflow_runtime(
         &self,
@@ -748,7 +754,10 @@ impl AgentService {
         else {
             return;
         };
-        match self.storage.workflow_execution_runtime(instance_id) {
+        match self
+            .storage
+            .workflow_execution_runtime_summary(instance_id, None)
+        {
             Ok(mut snapshot) => {
                 snapshot.preference_updates = preference_updates;
                 let _ = notifications.send(json!({"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":snapshot}));

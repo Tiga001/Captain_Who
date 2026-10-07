@@ -93,9 +93,19 @@ async fn workflow_runtime_publication_real_storage_drains_final_mail_metadata() 
     assert_eq!(expected.inputs[0].status, InputStatus::Recalled);
     assert!(expected.inputs[0].content.is_empty());
     assert!(expected.inputs[0].messages[0].content.is_empty());
+    let summary = storage
+        .workflow_execution_runtime_summary("instance", None)
+        .unwrap();
+    assert_eq!(summary.sequence, expected.sequence);
+    assert!(summary.inputs.is_empty() && summary.input_runs.is_empty());
+    assert!(summary.summary.as_ref().unwrap().pending_by_node.is_empty());
+    assert_eq!(
+        serde_json::to_value(&summary.events).unwrap(),
+        serde_json::to_value(&expected.events).unwrap()
+    );
     let event = events.try_recv().unwrap();
     assert_eq!(event["method"], "agent.workflows.runtime.changed");
-    assert_eq!(event["params"], serde_json::to_value(expected).unwrap());
+    assert_eq!(event["params"], serde_json::to_value(&summary).unwrap());
     assert!(
         events.try_recv().is_err(),
         "burst must publish only the final projection"
@@ -107,4 +117,24 @@ async fn workflow_runtime_publication_real_storage_drains_final_mail_metadata() 
     assert_eq!(durable.mail_status, MailStatus::Recalled);
     assert_eq!(durable.messages[0].content, body);
     assert!(!durable.content.is_empty());
+
+    let full_read = service
+        .workflow_runtime_snapshot("instance", None, false)
+        .unwrap();
+    assert!(full_read.summary.is_none());
+    assert_eq!(full_read.inputs.len(), 1);
+    let recovery = service
+        .workflow_runtime_snapshot("instance", Some(full_read.sequence), true)
+        .unwrap();
+    assert!(recovery.events.is_empty());
+    assert_eq!(recovery.summary, summary.summary);
+
+    // Callers without an installed worker retain the same summary wire contract.
+    let fallback = AgentService::new_authorized_for_test(storage);
+    let (notifications, mut events) = crate::transport::outbound_channel();
+    fallback.publish_workflow_runtime("instance", &notifications);
+    assert_eq!(
+        events.try_recv().unwrap()["params"],
+        serde_json::to_value(summary).unwrap()
+    );
 }

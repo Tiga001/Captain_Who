@@ -42,6 +42,16 @@ mod tests {
             json!({"operation":"runtimeSnapshot", "instanceId":"i", "afterSequence":20})
         )
         .is_ok());
+        assert!(matches!(
+            serde_json::from_value::<RuntimeRequest>(json!({
+                "operation":"runtimeSnapshot", "instanceId":"i", "summaryOnly":true
+            }))
+            .unwrap(),
+            RuntimeRequest::RuntimeSnapshot {
+                summary_only: true,
+                ..
+            }
+        ));
         assert!(serde_json::from_value::<RuntimeRequest>(json!({
             "operation":"discardFailedInput", "instanceId":"i", "inputId":"p"
         }))
@@ -49,6 +59,8 @@ mod tests {
         for params in [
             json!({"operation":"runtimeSnapshot", "instanceId":"i", "resume":true}),
             json!({"operation":"runtimeSnapshot", "instanceId":"i", "afterSequence":-1}),
+            json!({"operation":"runtimeSnapshot", "instanceId":"i", "summaryOnly":"true"}),
+            json!({"operation":"runtimeSnapshot", "instanceId":"i", "summaryOnly":null}),
             json!({"operation":"discardFailedInput", "instanceId":"i", "inputId":"p", "runId":"spoof"}),
             json!({"operation":"completeUserInput", "instanceId":"i", "inputId":"p", "content":"spoof"}),
         ] {
@@ -424,6 +436,8 @@ enum RuntimeRequest {
     RuntimeSnapshot {
         instance_id: String,
         after_sequence: Option<u64>,
+        #[serde(default)]
+        summary_only: bool,
     },
 }
 
@@ -439,7 +453,8 @@ pub(crate) fn handle_workflow_runtime_request(
         RuntimeRequest::RuntimeSnapshot {
             instance_id,
             after_sequence,
-        } => service.workflow_runtime_snapshot(&instance_id, after_sequence),
+            summary_only,
+        } => service.workflow_runtime_snapshot(&instance_id, after_sequence, summary_only),
     };
     match result {
         Ok(runtime) => response_success(
