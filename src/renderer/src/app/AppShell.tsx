@@ -106,6 +106,7 @@ import { selectRenderableModelTransitionOperations } from '../features/chat/mode
 import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
+import { useObserverConversationCache } from '../features/agentCollaboration/observerConversationCache'
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 import { hostClient } from '../host/hostClient'
 import { WorkflowSidebarPage } from '../features/workflows/project/WorkflowSidebarPage'
@@ -574,6 +575,7 @@ export function AppShell() {
     },
     [activeConversation?.id, openRightSidebar]
   )
+  const observerConversationCache = useObserverConversationCache()
   const renderAgentObserver = useCallback(
     ({
       agent,
@@ -585,6 +587,7 @@ export function AppShell() {
       rootConversationId
     }) => (
       <AgentObserverConversationSurface
+        cache={observerConversationCache}
         agent={agent}
         agentLabelsById={agentLabelsById}
         activities={activities}
@@ -595,7 +598,7 @@ export function AppShell() {
         showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
       />
     ),
-    [uiPreferences.showTokenUsageDetails]
+    [uiPreferences.showTokenUsageDetails, observerConversationCache]
   )
   const collaborationAgentLabelsById = useMemo(
     () => Object.fromEntries(collaborationChildren.map((agent) => [agent.agentId, agent.taskName])),

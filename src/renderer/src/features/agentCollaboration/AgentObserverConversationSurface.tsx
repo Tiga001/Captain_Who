@@ -3,8 +3,10 @@ import { ConversationSurface } from '../chat/ConversationSurface'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useObserverConversation } from './useObserverConversation'
 import type { CollaborationTimelineActivity } from './collaborationTimelineModel'
+import type { ObserverConversationCache } from './observerConversationCache'
 
 interface AgentObserverConversationSurfaceProps {
+  cache?: ObserverConversationCache
   collaborationTreeAgentIds: readonly string[]
   agent: AgentSummary
   agentLabelsById: Readonly<Record<string, string>>
@@ -16,6 +18,7 @@ interface AgentObserverConversationSurfaceProps {
 }
 
 export function AgentObserverConversationSurface({
+  cache,
   agent,
   agentLabelsById,
   activities,
@@ -27,6 +30,7 @@ export function AgentObserverConversationSurface({
 }: AgentObserverConversationSurfaceProps) {
   const { t } = useFrontendConfig()
   const { conversation, error, loading, reload } = useObserverConversation({
+    cache,
     agentId: agent.agentId,
     rootAgentId: agent.rootAgentId,
     conversationId: agent.conversationId,

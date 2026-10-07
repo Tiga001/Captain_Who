@@ -107,7 +107,7 @@ export interface AgentConversationLocator {
 export interface AgentObserverConversationRequest {
   rootConversationId: string
   conversationId: string
-  /** Omit for legacy full history reads; paged reads are bounded to 100 messages. */
+  /** Target page size (1–100). The newest page also retains the current active turn. */
   messageLimit?: number
   beforeMessageId?: string
 }

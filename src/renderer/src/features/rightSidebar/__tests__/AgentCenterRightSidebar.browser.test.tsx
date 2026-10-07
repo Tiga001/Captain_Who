@@ -9,6 +9,7 @@ import { classicDarkTheme, classicLightTheme } from '../../../config/themes/clas
 import type { CollaborationStoreSnapshot } from '../../agentCollaboration/collaborationStore'
 import type { CollaborationTimelineActivity } from '../../agentCollaboration/collaborationTimelineModel'
 import { CollaborationTimelineActivityList } from '../../agentCollaboration/CollaborationTimelineActivity'
+import '../../chat/ChatConversationPage.css'
 import type {
   AgentObserverRenderContext,
   RightSidebarModuleDefinition,
@@ -719,7 +720,12 @@ describe('Agent Center right sidebar', () => {
     const observerStyle = getComputedStyle(messages)
     expect(observerStyle.paddingLeft).toBe('14px')
     expect(observerStyle.paddingRight).toBe('14px')
-    expect(observerStyle.gap).toBe('40px')
+    // Message spacing lives on the inner content/segments; the outer element owns scrolling.
+    const contentStyle = getComputedStyle(
+      requiredElement(messages, '.chat-conversation-page__content')
+    )
+    expect(contentStyle.gap).toBe('36px')
+    expect(contentStyle.getPropertyValue('--chat-turn-gap').trim()).toBe('48px')
     expect(center.scrollWidth).toBeLessThanOrEqual(center.clientWidth)
     expect(observer.scrollWidth).toBeLessThanOrEqual(observer.clientWidth)
     expect(screen.container.querySelector('.chat-composer')).toBeNull()
@@ -1008,11 +1014,13 @@ function NarrowSidebar({
             <div className="chat-conversation-page" data-testid={`agent-observer-${agent.agentId}`}>
               <div className="chat-conversation-page__messages-region">
                 <div className="chat-conversation-page__messages">
-                  <article className="chat-message">
-                    <div className="chat-message__content">
-                      observer-content-that-must-not-force-horizontal-overflow-at-the-sidebar-floor
-                    </div>
-                  </article>
+                  <div className="chat-conversation-page__content">
+                    <article className="chat-message">
+                      <div className="chat-message__content">
+                        observer-content-that-must-not-force-horizontal-overflow-at-the-sidebar-floor
+                      </div>
+                    </article>
+                  </div>
                 </div>
               </div>
             </div>

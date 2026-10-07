@@ -5,6 +5,7 @@ import {
   type AgentObserverConversation
 } from '@mycopilot/protocol'
 import { useObserverConversation } from '../../agentCollaboration/useObserverConversation'
+import { ObserverConversationCache } from '../../agentCollaboration/observerConversationCache'
 
 const mocks = vi.hoisted(() => ({
   load: vi.fn(),
@@ -230,10 +231,12 @@ it('reloads the exact observer snapshot when the external durable sequence advan
   await expect.element(screen.getByText('updated snapshot')).toBeVisible()
 
   expect(mocks.load).toHaveBeenNthCalledWith(1, {
+    messageLimit: 40,
     rootConversationId: 'root-conversation',
     conversationId: 'child-a'
   })
   expect(mocks.load).toHaveBeenNthCalledWith(2, {
+    messageLimit: 40,
     rootConversationId: 'root-conversation',
     conversationId: 'child-a'
   })
@@ -695,4 +698,132 @@ it('resets an obsolete model attempt before streaming the retry through the shar
 
   await expect.element(screen.getByText(' fresh')).toBeVisible()
   expect(screen.container.textContent).not.toContain('obsolete')
+})
+
+function PageProbe({
+  conversationId = 'child-a',
+  cache,
+  invalidationVersion = 0
+}: {
+  conversationId?: string
+  cache?: ObserverConversationCache
+  invalidationVersion?: number
+}) {
+  const state = useObserverConversation({
+    agentId: `agent-${conversationId}`,
+    rootAgentId: 'root-agent',
+    rootConversationId: 'root-conversation',
+    conversationId,
+    cache,
+    invalidationVersion
+  })
+  return (
+    <div data-loading={state.loading}>
+      {state.conversation?.messages.map((message) => (
+        <p key={message.id}>{message.content}</p>
+      ))}
+      {state.error ? <span role="alert">{state.error}</span> : null}
+    </div>
+  )
+}
+
+function historyPage(conversationId: string, id: string, content: string, hasMore: boolean) {
+  const page = observer(conversationId, content)
+  page.messages[0].messageId = id
+  page.history = { hasMore, beforeMessageId: hasMore ? id : null }
+  return page
+}
+
+it('shows the recent page before old history and preserves live deltas during background paging', async () => {
+  const old = deferred<AgentObserverConversation | null>()
+  const recent = streamingObserver('recent', 1)
+  recent.history = { hasMore: true, beforeMessageId: 'assistant-a' }
+  mocks.load.mockResolvedValueOnce(recent).mockReturnValueOnce(old.promise)
+  const screen = await render(<PageProbe />)
+  await expect.element(screen.getByText('recent', { exact: true })).toBeVisible()
+  expect(screen.container.querySelector('[data-loading]')?.getAttribute('data-loading')).toBe(
+    'false'
+  )
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
+  mocks.observerEvent?.(sequencedDelta(' plus live', 2))
+  await expect.element(screen.getByText('recent plus live')).toBeVisible()
+  old.resolve(historyPage('child-a', 'older', 'older history', false))
+  await expect.element(screen.getByText('older history')).toBeVisible()
+  await expect.element(screen.getByText('recent plus live')).toBeVisible()
+  expect([...screen.container.querySelectorAll('p')].map((p) => p.textContent)).toEqual([
+    'older history',
+    'recent plus live'
+  ])
+  expect(mocks.load).toHaveBeenLastCalledWith({
+    rootConversationId: 'root-conversation',
+    conversationId: 'child-a',
+    messageLimit: 40,
+    beforeMessageId: 'assistant-a'
+  })
+})
+
+it('discards late history pages and stops paging after a child switch', async () => {
+  const old = deferred<AgentObserverConversation | null>()
+  mocks.load
+    .mockResolvedValueOnce(historyPage('child-a', 'recent-a', 'recent A', true))
+    .mockReturnValueOnce(old.promise)
+    .mockResolvedValueOnce(observer('child-b', 'only B'))
+  const screen = await render(<PageProbe />)
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
+  await screen.rerender(<PageProbe conversationId="child-b" />)
+  await expect.element(screen.getByText('only B')).toBeVisible()
+  old.resolve(historyPage('child-a', 'older-a', 'must not appear', true))
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(screen.container.textContent).toBe('only B')
+  expect(mocks.load).toHaveBeenCalledTimes(3)
+})
+
+it('restores a cached prefix only after fresh authorization and removes stale prefix after paging', async () => {
+  const cache = new ObserverConversationCache()
+  const initial = historyPage('child-a', 'recent-a', 'recent', false)
+  initial.messages.unshift({
+    ...initial.messages[0],
+    messageId: 'stale-old',
+    content: 'cached old'
+  })
+  mocks.load.mockResolvedValueOnce(initial)
+  const first = await render(<PageProbe cache={cache} />)
+  await expect.element(first.getByText('cached old')).toBeVisible()
+  await first.unmount()
+
+  const authorized = deferred<AgentObserverConversation | null>()
+  const old = deferred<AgentObserverConversation | null>()
+  mocks.load.mockReturnValueOnce(authorized.promise).mockReturnValueOnce(old.promise)
+  const second = await render(<PageProbe cache={cache} />)
+  expect(second.container.textContent).not.toContain('cached old')
+  authorized.resolve(historyPage('child-a', 'recent-a', 'current recent', true))
+  await expect.element(second.getByText('cached old')).toBeVisible()
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(3))
+  old.resolve(historyPage('child-a', 'actual-old', 'verified history', false))
+  await expect.element(second.getByText('verified history')).toBeVisible()
+  expect(second.container.textContent).not.toContain('cached old')
+  await expect.element(second.getByText('current recent')).toBeVisible()
+})
+
+it('coalesces rapid durable invalidations without clearing the current conversation', async () => {
+  mocks.load
+    .mockResolvedValueOnce(observer('child-a', 'initial'))
+    .mockResolvedValue(observer('child-a', 'updated'))
+  const screen = await render(<PageProbe invalidationVersion={1} />)
+  await expect.element(screen.getByText('initial')).toBeVisible()
+  await screen.rerender(<PageProbe invalidationVersion={2} />)
+  await screen.rerender(<PageProbe invalidationVersion={3} />)
+  await screen.rerender(<PageProbe invalidationVersion={4} />)
+  await expect.element(screen.getByText('updated')).toBeVisible()
+  expect(mocks.load).toHaveBeenCalledTimes(2)
+})
+
+it('clears the visible child when the account-scoped cache owner changes', async () => {
+  mocks.load
+    .mockResolvedValueOnce(observer('child-a', 'old account'))
+    .mockReturnValueOnce(new Promise(() => {}))
+  const screen = await render(<PageProbe cache={new ObserverConversationCache()} />)
+  await expect.element(screen.getByText('old account')).toBeVisible()
+  await screen.rerender(<PageProbe cache={new ObserverConversationCache()} />)
+  expect(screen.container.textContent).not.toContain('old account')
 })
