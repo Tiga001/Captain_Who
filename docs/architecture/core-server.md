@@ -132,6 +132,8 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、Agent 各通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
 
+组织与子智能体混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server organization_child_mixed_transport_benchmark -- --nocapture`。使用独立内存管道，组合 1/16/50 个子智能体、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。报告固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
+
 上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
 
 附件导入的 begin/append/finish/cancel 进入修改队列，派生预览进入查询队列。大文件先在 Host 受管存储中形成 durable import，聊天、草稿与引导请求只携带短引用；这与大图片 outbound semaphore 是两个不同边界。契约见[会话输入](../subsystems/conversation-inputs.md)。

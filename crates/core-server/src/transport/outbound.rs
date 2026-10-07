@@ -650,3 +650,7 @@ mod tests;
 #[cfg(test)]
 #[path = "outbound_benchmarks.rs"]
 mod benchmarks;
+
+#[cfg(test)]
+#[path = "outbound_workload_tests.rs"]
+mod workload_tests;
