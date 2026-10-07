@@ -730,6 +730,7 @@ fn explicit_child_model_uses_provider_model_id_not_config_id_for_protocol_valida
 mod approval_resume;
 mod attachments_spawn;
 mod model_recovery;
+mod observer_pages;
 mod recursive_forks;
 mod snapshot_history;
 

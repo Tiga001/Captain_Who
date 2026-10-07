@@ -473,6 +473,15 @@ pub fn list_sessions_for_conversation(
     conversation_id: &str,
     terminal_limit: usize,
 ) -> rusqlite::Result<Vec<AgentCommandSessionRecord>> {
+    list_sessions_in_message_scope(connection, conversation_id, terminal_limit, None)
+}
+
+pub(crate) fn list_sessions_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    terminal_limit: usize,
+    message_ids_json: Option<&str>,
+) -> rusqlite::Result<Vec<AgentCommandSessionRecord>> {
     if conversation_id.trim().is_empty() {
         return Err(invalid_input("command session conversation id is empty"));
     }
@@ -480,6 +489,13 @@ pub fn list_sessions_for_conversation(
         terminal_limit.min(MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION);
     let mut statement = connection.prepare(&format!(
         "{} WHERE conversation_id = ?1
+           AND (?2 IS NULL OR assistant_message_id IN (SELECT value FROM json_each(?2)))
+           AND (?2 IS NULL OR status IN ('starting', 'running') OR session_id IN (
+               SELECT session_id FROM agent_command_sessions
+               WHERE conversation_id = ?1 AND status NOT IN ('starting', 'running')
+               ORDER BY CASE WHEN status = 'outcome_unknown' THEN 0 ELSE 1 END,
+                        COALESCE(ended_at, started_at) DESC, session_id ASC LIMIT ?3
+           ))
          ORDER BY
              CASE
                  WHEN status IN ('starting', 'running') THEN 0
@@ -491,10 +507,18 @@ pub fn list_sessions_for_conversation(
         record_select()
     ))?;
     let mut records = statement
-        .query_map([conversation_id], record_from_row)?
+        .query_map(
+            params![conversation_id, message_ids_json, terminal_limit],
+            record_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    attach_terminal_outputs_for_conversation(connection, conversation_id, &mut records)?;
+    attach_terminal_outputs_for_conversation(
+        connection,
+        conversation_id,
+        &mut records,
+        message_ids_json,
+    )?;
     let mut terminal_seen = 0_usize;
     Ok(records
         .into_iter()
@@ -1196,6 +1220,7 @@ fn attach_terminal_outputs_for_conversation(
     connection: &Connection,
     conversation_id: &str,
     records: &mut [AgentCommandSessionRecord],
+    message_ids_json: Option<&str>,
 ) -> rusqlite::Result<()> {
     let mut statement = connection.prepare(
         "SELECT
@@ -1212,10 +1237,11 @@ fn attach_terminal_outputs_for_conversation(
          INNER JOIN agent_command_sessions AS session
            ON session.session_id = output.session_id
          WHERE session.conversation_id = ?1
+           AND (?2 IS NULL OR session.assistant_message_id IN (SELECT value FROM json_each(?2)))
          ORDER BY output.session_id ASC, output.ordinal ASC",
     )?;
     let rows = statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             let size_bytes = u64::try_from(row.get::<_, i64>(5)?).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(5, Type::Integer, Box::new(error))
             })?;

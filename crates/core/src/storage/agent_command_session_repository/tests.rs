@@ -192,6 +192,62 @@ fn create_get_and_list_are_idempotent_and_conversation_scoped() {
 }
 
 #[test]
+fn message_page_keeps_the_conversation_wide_terminal_session_retention_window() {
+    let mut connection = test_connection();
+    seed_conversation(&connection, "project-1", "conversation-1", "assistant-1");
+    connection
+        .execute(
+            "INSERT INTO messages(id,conversation_id,role,content,created_at,position)
+         VALUES('assistant-2','conversation-1','assistant','',2,1)",
+            [],
+        )
+        .unwrap();
+    for (suffix, message, started_at) in [("01", "assistant-1", 10), ("02", "assistant-2", 20)] {
+        let session_id = format!("cmd_000000000000000000000000000000{suffix}");
+        create_session(
+            &mut connection,
+            &create_input(
+                &session_id,
+                "conversation-1",
+                message,
+                "project-1",
+                started_at,
+            ),
+        )
+        .unwrap();
+        connection.execute(
+            "UPDATE agent_command_sessions SET status='exited',ended_at=?2,settled_at=?2,exit_code=0 WHERE session_id=?1",
+            params![session_id, started_at + 1],
+        ).unwrap();
+    }
+    let full = list_sessions_for_conversation(&connection, "conversation-1", 1).unwrap();
+    assert_eq!(full.len(), 1);
+    assert_eq!(full[0].snapshot.assistant_message_id, "assistant-2");
+    let old_page = list_sessions_in_message_scope(
+        &connection,
+        "conversation-1",
+        1,
+        Some(r#"["assistant-1"]"#),
+    )
+    .unwrap();
+    assert!(
+        old_page.is_empty(),
+        "paging must not revive a terminal outside the global window"
+    );
+    let latest_page = list_sessions_in_message_scope(
+        &connection,
+        "conversation-1",
+        1,
+        Some(r#"["assistant-2"]"#),
+    )
+    .unwrap();
+    assert_eq!(
+        latest_page[0].snapshot.session_id,
+        full[0].snapshot.session_id
+    );
+}
+
+#[test]
 fn output_and_model_cursors_are_independent_and_terminal_cas_is_idempotent() {
     let mut connection = test_connection();
     seed_conversation(&connection, "project-1", "conversation-1", "assistant-1");

@@ -130,6 +130,13 @@ pub use trace_publication::ConversationTraceCommitCursor;
 pub struct ConversationObserverSnapshot {
     pub conversation: ChatConversationRecord,
     pub input_origins: BTreeMap<String, crate::ConversationMessageOrigin>,
+    pub history: Option<ConversationObserverHistoryPage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationObserverHistoryPage {
+    pub has_more: bool,
+    pub before_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

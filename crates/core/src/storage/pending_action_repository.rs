@@ -439,6 +439,14 @@ pub(crate) fn list_mcp_actions_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
+    list_mcp_actions_in_message_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn list_mcp_actions_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
+) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -458,11 +466,12 @@ pub(crate) fn list_mcp_actions_for_conversation(
         FROM agent_pending_actions
         WHERE conversation_id = ?1
           AND action_type = 'mcp_tool_call'
+          AND (?2 IS NULL OR assistant_message_id IN (SELECT value FROM json_each(?2)))
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
     let records = statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok(AgentPendingActionRecord {
                 action_id: row.get(0)?,
                 run_id: row.get(1)?,

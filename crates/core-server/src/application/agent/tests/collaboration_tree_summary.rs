@@ -137,3 +137,98 @@ fn tree_uses_current_root_model_label_and_preserves_child_frozen_label() {
         .unwrap();
     assert_eq!(detail.summary, *child_summary);
 }
+
+#[test]
+fn observer_pages_keep_latest_live_snapshot_and_omit_it_from_older_pages() {
+    use mycopilot_protocol_rs::{
+        AgentObserverConversationRequest, AgentObserverLiveStreamSnapshotDto,
+        AgentObserverStreamCursorDto,
+    };
+    let (directory, storage, service) = fixture();
+    seed_root_effective_permissions(
+        &storage,
+        ROOT_AGENT,
+        ROOT_CONVERSATION,
+        "observer-page",
+        AgentPermissions::default(),
+    );
+    let child =
+        crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage))
+            .create_child(&mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: ROOT_AGENT.into(),
+                creation_request_id: "observer-page-child".into(),
+                task_name: "observer_child".into(),
+                task: "Observer page test".into(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            })
+            .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("tree.sqlite")).unwrap();
+    connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES('observer-assistant',?1,'assistant','','pending',2,1)", [&child.agent.conversation_id]).unwrap();
+    service.observer_streams.lock().unwrap().insert(
+        child.agent.conversation_id.clone(),
+        super::super::observer_stream::ObserverStreamState {
+            agent_id: child.agent.agent_id.clone(),
+            root_agent_id: ROOT_AGENT.into(),
+            root_conversation_id: ROOT_CONVERSATION.into(),
+            snapshot: AgentObserverLiveStreamSnapshotDto {
+                run_id: "observer-run".into(),
+                assistant_message_id: "observer-assistant".into(),
+                cursor: AgentObserverStreamCursorDto {
+                    generation: "observer-generation".into(),
+                    sequence: 3,
+                },
+                stream: None,
+                model_activity: None,
+                final_answer_ready: false,
+            },
+            model_activity_attempts: Default::default(),
+        },
+    );
+    let request = AgentObserverConversationRequest {
+        root_conversation_id: ROOT_CONVERSATION.into(),
+        conversation_id: child.agent.conversation_id,
+        message_limit: Some(1),
+        before_message_id: None,
+    };
+    let latest = service
+        .load_collaboration_observer_conversation(request.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.messages.len(), 1);
+    assert_eq!(latest.messages[0].message_id, "observer-assistant");
+    assert_eq!(latest.live_stream.unwrap().cursor.sequence, 3);
+    let history = latest.history.unwrap();
+    assert!(history.has_more);
+    let older = service
+        .load_collaboration_observer_conversation(AgentObserverConversationRequest {
+            before_message_id: history.before_message_id,
+            ..request.clone()
+        })
+        .unwrap()
+        .unwrap();
+    assert!(older.live_stream.is_none());
+    assert!(!older.history.unwrap().has_more);
+    assert_eq!(
+        older.messages[0].message_id,
+        child.task_message.projection_message_id
+    );
+    assert!(service
+        .load_collaboration_observer_conversation(AgentObserverConversationRequest {
+            before_message_id: Some("assistant-permission-seed-observer-page".into()),
+            ..request.clone()
+        })
+        .is_err());
+    let old_client = service
+        .load_collaboration_observer_conversation(AgentObserverConversationRequest {
+            message_limit: None,
+            ..request
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_client.messages.len(), 2);
+    assert!(old_client.history.is_none());
+    assert!(old_client.live_stream.is_some());
+}

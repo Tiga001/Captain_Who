@@ -953,11 +953,31 @@ impl StorageService {
         connection: &rusqlite::Connection,
         conversations: &mut [ChatConversationRecord],
     ) -> Result<Vec<AttachmentRecord>, String> {
+        self.attach_message_attachments_in_scope(connection, conversations, false)
+    }
+
+    pub(super) fn attach_message_attachments_in_scope(
+        &self,
+        connection: &rusqlite::Connection,
+        conversations: &mut [ChatConversationRecord],
+        selected_messages_only: bool,
+    ) -> Result<Vec<AttachmentRecord>, String> {
         let mut preview_attachments = Vec::new();
         for conversation in conversations {
-            let attachments = attachment_repository::list_ordinary_conversation_attachments(
+            let ids = selected_messages_only.then(|| {
+                serde_json::to_string(
+                    &conversation
+                        .messages
+                        .iter()
+                        .map(|message| &message.id)
+                        .collect::<Vec<_>>(),
+                )
+                .expect("message IDs are serializable")
+            });
+            let attachments = attachment_repository::list_ordinary_attachments_in_message_scope(
                 connection,
                 &conversation.id,
+                ids.as_deref(),
             )
             .map_err(storage_error)?;
             if attachments.is_empty() {

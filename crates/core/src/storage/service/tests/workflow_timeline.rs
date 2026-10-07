@@ -33,6 +33,37 @@ fn seed(service: &StorageService, startup: bool, proof: bool) {
     seed_with_trace_truncation(service, startup, proof, false);
 }
 
+#[test]
+fn observer_pages_preserve_workflow_delivery_evidence_across_page_boundaries() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seed(&service, false, true);
+    let full = service
+        .load_conversation_observer_snapshot("mail-chat")
+        .unwrap()
+        .unwrap();
+    let mut before = None;
+    let mut messages = Vec::new();
+    loop {
+        let page = service
+            .load_conversation_observer_snapshot_page("mail-chat", Some(1), before.as_deref())
+            .unwrap()
+            .unwrap();
+        let history = page.history.unwrap();
+        let mut older = page.conversation.messages;
+        older.append(&mut messages);
+        messages = older;
+        if !history.has_more {
+            break;
+        }
+        before = history.before_message_id;
+    }
+    assert_eq!(
+        serde_json::to_value(messages).unwrap(),
+        serde_json::to_value(full.conversation.messages).unwrap()
+    );
+}
+
 fn seed_with_trace_truncation(
     service: &StorageService,
     startup: bool,

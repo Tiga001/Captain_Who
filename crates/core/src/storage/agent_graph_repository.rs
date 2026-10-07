@@ -26,7 +26,7 @@ pub use mailbox::{
     renew_agent_message_lease, send_agent_message, send_agent_message_from_run,
 };
 pub(crate) use mailbox::{
-    create_initial_agent_task_and_wake_in_transaction,
+    conversation_message_origins_in_scope, create_initial_agent_task_and_wake_in_transaction,
     project_pending_agent_messages_in_transaction,
     satisfy_agent_wake_by_source_message_in_transaction,
 };

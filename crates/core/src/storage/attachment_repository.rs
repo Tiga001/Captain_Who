@@ -310,6 +310,14 @@ pub fn list_ordinary_conversation_attachments(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    list_ordinary_attachments_in_message_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn list_ordinary_attachments_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -326,6 +334,7 @@ pub fn list_ordinary_conversation_attachments(
             attachment.pasted_text_json
         FROM attachments AS attachment
         WHERE attachment.conversation_id = ?1
+          AND (?2 IS NULL OR attachment.message_id IN (SELECT value FROM json_each(?2)))
           AND NOT EXISTS (
             SELECT 1
             FROM agent_run_guidance_attachments AS ownership
@@ -335,7 +344,10 @@ pub fn list_ordinary_conversation_attachments(
         ",
     )?;
     let attachments = statement
-        .query_map([conversation_id], attachment_from_row)?
+        .query_map(
+            params![conversation_id, message_ids_json],
+            attachment_from_row,
+        )?
         .collect();
     attachments
 }
@@ -348,6 +360,14 @@ pub fn list_ordinary_conversation_attachments(
 pub(crate) fn list_guidance_attachments_for_conversation(
     connection: &Connection,
     conversation_id: &str,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    list_guidance_attachments_in_message_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn list_guidance_attachments_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
 ) -> rusqlite::Result<Vec<AttachmentRecord>> {
     let mut statement = connection.prepare(
         "SELECT DISTINCT
@@ -368,11 +388,15 @@ pub(crate) fn list_guidance_attachments_for_conversation(
          INNER JOIN attachments AS attachment
            ON attachment.id = ownership.attachment_id
          WHERE guidance.conversation_id = ?1
+           AND (?2 IS NULL OR guidance.assistant_message_id IN (SELECT value FROM json_each(?2)))
            AND guidance.status IN ('queued', 'abandoned')
          ORDER BY attachment.created_at ASC, attachment.id ASC",
     )?;
     let attachments = statement
-        .query_map([conversation_id], attachment_from_row)?
+        .query_map(
+            params![conversation_id, message_ids_json],
+            attachment_from_row,
+        )?
         .collect();
     attachments
 }

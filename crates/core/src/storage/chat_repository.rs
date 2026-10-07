@@ -404,6 +404,87 @@ pub fn get_active_conversation(
     Ok(conversation)
 }
 
+/// Select a bounded active-message window before reading any bodies or presentation JSON.
+/// The cursor is a durable message identity in this Conversation, never a client timestamp.
+pub(crate) fn get_active_conversation_page(
+    connection: &Connection,
+    conversation_id: &str,
+    limit: u32,
+    before_message_id: Option<&str>,
+) -> rusqlite::Result<(Option<ChatConversationRecord>, bool)> {
+    if !(1..=100).contains(&limit) || before_message_id.is_some_and(|id| id.trim().is_empty()) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some(cursor) = before_message_id {
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id=?1 AND m.id=?2
+             AND NOT EXISTS(SELECT 1 FROM conversation_turn_rewrites r WHERE r.conversation_id=?1
+                 AND (r.source_user_message_id=m.id OR r.source_assistant_message_id=m.id)))",
+            params![conversation_id, cursor],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT m.id FROM messages m
+         WHERE m.conversation_id=?1
+           AND NOT EXISTS(SELECT 1 FROM conversation_turn_rewrites r WHERE r.conversation_id=?1
+               AND (r.source_user_message_id=m.id OR r.source_assistant_message_id=m.id))
+           AND (?2 IS NULL OR (m.position,m.created_at,m.id) <
+               (SELECT position,created_at,id FROM messages WHERE id=?2 AND conversation_id=?1))
+         ORDER BY m.position DESC,m.created_at DESC,m.id DESC LIMIT ?3",
+    )?;
+    let mut ids = statement
+        .query_map(
+            params![conversation_id, before_message_id, limit + 1],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut has_more = ids.len() > limit as usize;
+    ids.truncate(limit as usize);
+    // The latest window is a target size: an active Assistant can precede many in-turn
+    // mailbox inputs. Keep that whole contiguous suffix so the live stream always has its
+    // owning card. Older cursor pages retain the requested hard limit.
+    if before_message_id.is_none() {
+        if let Some(active) = super::conversation_trace_repository::get_in_progress_turn_identity(
+            connection,
+            conversation_id,
+        )? {
+            if !ids.contains(&active.assistant_message_id) {
+                let mut active_window = connection.prepare(
+                    "SELECT m.id FROM messages m WHERE m.conversation_id=?1
+                     AND NOT EXISTS(SELECT 1 FROM conversation_turn_rewrites r WHERE r.conversation_id=?1
+                         AND (r.source_user_message_id=m.id OR r.source_assistant_message_id=m.id))
+                     AND (m.position,m.created_at,m.id) >=
+                         (SELECT position,created_at,id FROM messages WHERE id=?2 AND conversation_id=?1)
+                     ORDER BY m.position DESC,m.created_at DESC,m.id DESC",
+                )?;
+                ids = active_window
+                    .query_map(
+                        params![conversation_id, active.assistant_message_id],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                has_more = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id=?1
+                     AND NOT EXISTS(SELECT 1 FROM conversation_turn_rewrites r WHERE r.conversation_id=?1
+                         AND (r.source_user_message_id=m.id OR r.source_assistant_message_id=m.id))
+                     AND (m.position,m.created_at,m.id) <
+                         (SELECT position,created_at,id FROM messages WHERE id=?2 AND conversation_id=?1))",
+                    params![conversation_id, active.assistant_message_id], |row| row.get(0),
+                )?;
+            }
+        }
+    }
+    let ids = serde_json::to_string(&ids).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let conversation = get_conversation_with_messages(connection, conversation_id, |c, id| {
+        list_messages_in_scope(c, id, Some(&ids))
+    })?;
+    Ok((conversation, has_more))
+}
+
 /// Reads exactly the Conversation/message fields stored in SQLite, without renderer-owned
 /// overlays such as authoritative Usage. Write-side CAS/admission callers must use this form so
 /// a derived presentation cannot be mistaken for an attempted rewrite of immutable history.
@@ -444,7 +525,7 @@ fn retain_active_messages(
 fn get_conversation_with_messages(
     connection: &Connection,
     conversation_id: &str,
-    load_messages: fn(&Connection, &str) -> rusqlite::Result<Vec<ChatMessageRecord>>,
+    load_messages: impl FnOnce(&Connection, &str) -> rusqlite::Result<Vec<ChatMessageRecord>>,
 ) -> rusqlite::Result<Option<ChatConversationRecord>> {
     let mut conversation = connection
         .query_row(
@@ -1687,6 +1768,14 @@ fn list_messages(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<ChatMessageRecord>> {
+    list_messages_in_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn list_messages_in_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
+) -> rusqlite::Result<Vec<ChatMessageRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -1719,12 +1808,13 @@ fn list_messages(
           ON trace.conversation_id = message.conversation_id
          AND trace.assistant_message_id = message.id
         WHERE message.conversation_id = ?1
-        ORDER BY message.position ASC, message.created_at ASC
+          AND (?2 IS NULL OR message.id IN (SELECT value FROM json_each(?2)))
+        ORDER BY message.position ASC, message.created_at ASC, message.id ASC
         ",
     )?;
 
     let mut messages: Vec<ChatMessageRecord> = statement
-        .query_map(params![conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             let authoritative_usage = match row.get::<_, Option<String>>(8)? {
                 Some(run_id) => Some(AuthoritativeMessageUsage {
                     run_id,
@@ -1774,6 +1864,20 @@ fn list_messages(
         conversation_id,
         &mut messages,
     )?;
+    Ok(messages)
+}
+
+pub(crate) fn list_active_messages_in_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: &str,
+) -> rusqlite::Result<Vec<ChatMessageRecord>> {
+    let mut messages = list_messages_in_scope(connection, conversation_id, Some(message_ids_json))?;
+    let superseded = super::conversation_turn_rewrite_repository::superseded_message_ids(
+        connection,
+        conversation_id,
+    )?;
+    messages.retain(|message| !superseded.contains(&message.id));
     Ok(messages)
 }
 

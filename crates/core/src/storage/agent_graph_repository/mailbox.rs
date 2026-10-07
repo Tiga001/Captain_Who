@@ -835,6 +835,14 @@ pub fn conversation_message_origins(
     connection: &Connection,
     conversation_id: &str,
 ) -> Result<Vec<(String, ConversationMessageOrigin)>, AgentGraphError> {
+    conversation_message_origins_in_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn conversation_message_origins_in_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
+) -> Result<Vec<(String, ConversationMessageOrigin)>, AgentGraphError> {
     validate_id("conversation_id", conversation_id)?;
     let mut statement = connection
         .prepare(
@@ -844,11 +852,12 @@ pub fn conversation_message_origins(
                     snapshot_original_agent_id, snapshot_original_mailbox_message_id
              FROM messages
              WHERE conversation_id = ?1 AND role = 'user'
+               AND (?2 IS NULL OR id IN (SELECT value FROM json_each(?2)))
              ORDER BY position, id",
         )
         .map_err(read_error)?;
     let rows = statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 (

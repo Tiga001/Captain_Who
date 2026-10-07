@@ -19,45 +19,115 @@ fn attach_message_guidance_timelines(
     connection: &rusqlite::Connection,
     conversations: &mut [ChatConversationRecord],
 ) -> Result<ConversationProjectionEvidence, String> {
+    attach_message_guidance_timelines_in_scope(connection, conversations, false)
+}
+
+fn attach_message_guidance_timelines_in_scope(
+    connection: &rusqlite::Connection,
+    conversations: &mut [ChatConversationRecord],
+    selected_messages_only: bool,
+) -> Result<ConversationProjectionEvidence, String> {
     let _timing = crate::performance::Span::new("storage.projection", "conversation_timeline");
     let mut evidence = ConversationProjectionEvidence::default();
     for conversation in conversations {
-        let traces = conversation_trace_repository::list_trace_records_for_conversation(
-            connection,
-            &conversation.id,
-        )
+        let ids = selected_messages_only.then(|| {
+            serde_json::to_string(
+                &conversation
+                    .messages
+                    .iter()
+                    .map(|message| &message.id)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("message IDs are serializable")
+        });
+        let traces = match ids.as_deref() {
+            Some(ids) => conversation_trace_repository::list_trace_records_for_message_scope(
+                connection,
+                &conversation.id,
+                ids,
+            ),
+            None => conversation_trace_repository::list_trace_records_for_conversation(
+                connection,
+                &conversation.id,
+            ),
+        }
         .map_err(storage_error)?;
         let traces = traces
             .into_iter()
             .map(|record| (record.trace.assistant_message_id.clone(), record))
             .collect::<HashMap<_, _>>();
+        let workflow_inputs = selected_messages_only.then(|| {
+            let inputs = traces
+                .values()
+                .flat_map(|record| record.trace.items.iter())
+                .filter_map(|item| {
+                    if let crate::ConversationTurnTraceItem::WorkflowDelivery { input_id, .. } =
+                        item
+                    {
+                        Some(input_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            serde_json::to_string(&inputs).expect("input IDs are serializable")
+        });
         let workflow_origins =
-            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+            crate::storage::workflow_execution_repository::delivery_origins_for_input_scope(
                 connection,
                 &conversation.id,
+                workflow_inputs.as_deref(),
             )?;
+        // A mailbox delivery can fall across a page boundary from its owning Assistant.
+        // Load only those referenced rows for the existing authoritative placement check;
+        // they are projection evidence, not extra messages added to the returned page.
+        let delivery_context = if selected_messages_only && !workflow_origins.is_empty() {
+            let mut context = conversation.clone();
+            let ids = conversation
+                .messages
+                .iter()
+                .map(|message| &message.id)
+                .chain(workflow_origins.iter().map(|(id, _)| id))
+                .collect::<Vec<_>>();
+            let ids = serde_json::to_string(&ids).expect("message IDs are serializable");
+            context.messages =
+                chat_repository::list_active_messages_in_scope(connection, &conversation.id, &ids)
+                    .map_err(storage_error)?;
+            Some(context)
+        } else {
+            None
+        };
         let workflow_deliveries = traces
             .iter()
             .map(|(message_id, record)| {
                 (
                     message_id.clone(),
                     crate::storage::workflow_execution_repository::delivery_presentations(
-                        conversation,
+                        delivery_context.as_ref().unwrap_or(conversation),
                         &record.trace,
                         &workflow_origins,
                     ),
                 )
             })
             .collect::<HashMap<_, _>>();
-        let command_sessions = agent_command_session_repository::list_sessions_for_conversation(
+        let command_sessions = agent_command_session_repository::list_sessions_in_message_scope(
             connection,
             &conversation.id,
             agent_command_session_repository::MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION,
+            ids.as_deref(),
         )
         .map_err(storage_error)?;
-        let guidances =
-            guidance_repository::list_guidances_for_conversation(connection, &conversation.id)
-                .map_err(storage_error)?;
+        let guidances = match ids.as_deref() {
+            Some(ids) => guidance_repository::list_guidances_in_message_scope(
+                connection,
+                &conversation.id,
+                Some(ids),
+            ),
+            None => {
+                guidance_repository::list_guidances_for_conversation(connection, &conversation.id)
+            }
+        }
+        .map_err(storage_error)?;
         let mut guidances_by_message = HashMap::<String, Vec<AgentRunGuidanceRecord>>::new();
         for guidance in guidances {
             guidances_by_message
@@ -65,19 +135,32 @@ fn attach_message_guidance_timelines(
                 .or_default()
                 .push(guidance);
         }
-        let guidance_attachments =
-            attachment_repository::list_guidance_attachments_for_conversation(
+        let guidance_attachments = match ids.as_deref() {
+            Some(ids) => attachment_repository::list_guidance_attachments_in_message_scope(
                 connection,
                 &conversation.id,
-            )
-            .map_err(storage_error)?
-            .into_iter()
-            .map(|attachment| (attachment.id.clone(), attachment))
-            .collect::<HashMap<_, _>>();
-        let mcp_actions = pending_action_repository::list_mcp_actions_for_conversation(
-            connection,
-            &conversation.id,
-        )
+                Some(ids),
+            ),
+            None => attachment_repository::list_guidance_attachments_for_conversation(
+                connection,
+                &conversation.id,
+            ),
+        }
+        .map_err(storage_error)?
+        .into_iter()
+        .map(|attachment| (attachment.id.clone(), attachment))
+        .collect::<HashMap<_, _>>();
+        let mcp_actions = match ids.as_deref() {
+            Some(ids) => pending_action_repository::list_mcp_actions_in_message_scope(
+                connection,
+                &conversation.id,
+                Some(ids),
+            ),
+            None => pending_action_repository::list_mcp_actions_for_conversation(
+                connection,
+                &conversation.id,
+            ),
+        }
         .map_err(storage_error)?;
         let mut mcp_actions_by_message_and_run =
             HashMap::<(String, String), Vec<AgentPendingActionRecord>>::new();

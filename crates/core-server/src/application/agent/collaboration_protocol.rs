@@ -150,24 +150,44 @@ impl AgentService {
         &self,
         input: AgentObserverConversationRequest,
     ) -> Result<Option<AgentObserverConversationDto>, AgentServiceError> {
+        if input
+            .message_limit
+            .is_some_and(|limit| !(1..=100).contains(&limit))
+            || input
+                .before_message_id
+                .as_ref()
+                .is_some_and(|id| input.message_limit.is_none() || id.trim().is_empty())
+        {
+            return Err(AgentServiceError::from(
+                "Invalid observer history page request.".to_string(),
+            ));
+        }
         let node = self.authorize_exact_child_observer_read(
             &input.root_conversation_id,
             &input.conversation_id,
         )?;
-        let observer_streams = self
-            .observer_streams
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        // Only the latest page needs the durable/live cut. Background history pages have
+        // their own SQLite read snapshot and must not hold up live event publication.
+        let observer_streams = input.before_message_id.is_none().then(|| {
+            self.observer_streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
         let Some(snapshot) = self
             .storage
-            .load_conversation_observer_snapshot(&input.conversation_id)
+            .load_conversation_observer_snapshot_page(
+                &input.conversation_id,
+                input.message_limit,
+                input.before_message_id.as_deref(),
+            )
             .map_err(AgentServiceError::from)?
         else {
             return Ok(None);
         };
         let conversation = snapshot.conversation;
         let live_stream = observer_streams
-            .get(&input.conversation_id)
+            .as_ref()
+            .and_then(|streams| streams.get(&input.conversation_id))
             .filter(|state| {
                 state.agent_id == node.agent_id
                     && state.root_agent_id == node.root_agent_id
@@ -242,6 +262,12 @@ impl AgentService {
             created_at: conversation.created_at,
             updated_at: conversation.updated_at,
             messages,
+            history: snapshot.history.map(|history| {
+                mycopilot_protocol_rs::AgentObserverHistoryPageDto {
+                    has_more: history.has_more,
+                    before_message_id: history.before_message_id,
+                }
+            }),
             live_stream,
         }))
     }

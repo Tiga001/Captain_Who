@@ -144,6 +144,12 @@ pub struct AgentConversationLocatorDto {
 pub struct AgentObserverConversationRequest {
     pub root_conversation_id: String,
     pub conversation_id: String,
+    /// Target page size (1..=100). The latest page expands to include the active Assistant;
+    /// historical cursor pages have a hard limit. Omission retains the full snapshot API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -255,7 +261,16 @@ pub struct AgentObserverConversationDto {
     pub updated_at: i64,
     pub messages: Vec<AgentObserverMessageDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<AgentObserverHistoryPageDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_stream: Option<AgentObserverLiveStreamSnapshotDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverHistoryPageDto {
+    pub has_more: bool,
+    pub before_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

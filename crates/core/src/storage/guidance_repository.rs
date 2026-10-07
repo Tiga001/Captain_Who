@@ -193,6 +193,14 @@ pub(crate) fn list_guidances_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<AgentRunGuidanceRecord>> {
+    list_guidances_in_message_scope(connection, conversation_id, None)
+}
+
+pub(crate) fn list_guidances_in_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
+) -> rusqlite::Result<Vec<AgentRunGuidanceRecord>> {
     let mut guidance_statement = connection.prepare(
         "SELECT
             guidance.guidance_id,
@@ -209,10 +217,14 @@ pub(crate) fn list_guidances_for_conversation(
             guidance.folder_references_json
          FROM agent_run_guidances AS guidance
          WHERE guidance.conversation_id = ?1
+           AND (?2 IS NULL OR guidance.assistant_message_id IN (SELECT value FROM json_each(?2)))
          ORDER BY guidance.created_at ASC, guidance.guidance_id ASC",
     )?;
     let mut guidances = guidance_statement
-        .query_map([conversation_id], guidance_from_row)?
+        .query_map(
+            params![conversation_id, message_ids_json],
+            guidance_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(guidance_statement);
 
@@ -226,10 +238,11 @@ pub(crate) fn list_guidances_for_conversation(
          INNER JOIN agent_run_guidances AS guidance
            ON guidance.guidance_id = ownership.guidance_id
          WHERE guidance.conversation_id = ?1
+           AND (?2 IS NULL OR guidance.assistant_message_id IN (SELECT value FROM json_each(?2)))
          ORDER BY ownership.guidance_id ASC, ownership.position ASC",
     )?;
     let attachment_rows = attachment_statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

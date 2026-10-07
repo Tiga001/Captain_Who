@@ -582,9 +582,17 @@ pub fn delivery_origins_for_conversation(
     c: &Connection,
     conversation_id: &str,
 ) -> Result<Vec<(String, Input)>, String> {
-    let mut s=c.prepare("SELECT o.message_id,i.input_json FROM workflow_mail_message_origins o JOIN workflow_mail_inputs i ON i.input_id=o.input_id WHERE o.conversation_id=?1 ORDER BY o.message_id").map_err(db)?;
+    delivery_origins_for_input_scope(c, conversation_id, None)
+}
+
+pub(crate) fn delivery_origins_for_input_scope(
+    c: &Connection,
+    conversation_id: &str,
+    input_ids_json: Option<&str>,
+) -> Result<Vec<(String, Input)>, String> {
+    let mut s=c.prepare("SELECT o.message_id,i.input_json FROM workflow_mail_message_origins o JOIN workflow_mail_inputs i ON i.input_id=o.input_id WHERE o.conversation_id=?1 AND (?2 IS NULL OR i.input_id IN (SELECT value FROM json_each(?2))) ORDER BY o.message_id").map_err(db)?;
     let result = s
-        .query_map([conversation_id], |r| {
+        .query_map(params![conversation_id, input_ids_json], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(db)?

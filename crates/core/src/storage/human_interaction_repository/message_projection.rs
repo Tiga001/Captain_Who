@@ -35,10 +35,17 @@ pub(crate) fn attach_message_projections(
     conversation_id: &str,
     messages: &mut [crate::storage::models::ChatMessageRecord],
 ) -> rusqlite::Result<()> {
+    let ids = serde_json::to_string(
+        &messages
+            .iter()
+            .map(|message| &message.id)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let mut statement = connection.prepare(
-        "SELECT p.message_id,p.request_id,p.response_id,p.content_json FROM human_interaction_message_projections p JOIN messages m ON m.id=p.message_id WHERE m.conversation_id=?1",
+        "SELECT p.message_id,p.request_id,p.response_id,p.content_json FROM human_interaction_message_projections p JOIN messages m ON m.id=p.message_id WHERE m.conversation_id=?1 AND p.message_id IN (SELECT value FROM json_each(?2))",
     )?;
-    let records = statement.query_map([conversation_id], |row| {
+    let records = statement.query_map(params![conversation_id, ids], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,

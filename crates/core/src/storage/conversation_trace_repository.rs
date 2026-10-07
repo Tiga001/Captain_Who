@@ -508,6 +508,15 @@ pub fn list_trace_records_for_conversation(
     load_stored_trace_records_for_conversation(connection, conversation_id)?.decode()
 }
 
+pub(crate) fn list_trace_records_for_message_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: &str,
+) -> rusqlite::Result<Vec<ConversationTurnTraceRecord>> {
+    load_stored_trace_records_in_scope(connection, conversation_id, Some(message_ids_json))?
+        .decode()
+}
+
 pub(crate) struct StoredConversationTraces {
     headers: Vec<(TraceHeader, Option<i64>)>,
     items_by_message: HashMap<String, Vec<StoredTraceItem>>,
@@ -517,6 +526,14 @@ pub(crate) struct StoredConversationTraces {
 pub(crate) fn load_stored_trace_records_for_conversation(
     connection: &Connection,
     conversation_id: &str,
+) -> rusqlite::Result<StoredConversationTraces> {
+    load_stored_trace_records_in_scope(connection, conversation_id, None)
+}
+
+fn load_stored_trace_records_in_scope(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids_json: Option<&str>,
 ) -> rusqlite::Result<StoredConversationTraces> {
     let mut statement = connection.prepare(
         "
@@ -533,6 +550,7 @@ pub(crate) fn load_stored_trace_records_for_conversation(
         INNER JOIN messages AS message
             ON message.id = trace.assistant_message_id
         WHERE trace.conversation_id = ?1
+          AND (?2 IS NULL OR trace.assistant_message_id IN (SELECT value FROM json_each(?2)))
         ORDER BY
             message.position ASC,
             message.created_at ASC,
@@ -540,17 +558,22 @@ pub(crate) fn load_stored_trace_records_for_conversation(
         ",
     )?;
     let headers = statement
-        .query_map(params![conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok((trace_header_from_row(row)?, row.get::<_, Option<i64>>(7)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     Ok(StoredConversationTraces {
         headers,
-        items_by_message: trace_items_for_conversation(connection, conversation_id)?,
+        items_by_message: trace_items_for_conversation(
+            connection,
+            conversation_id,
+            message_ids_json,
+        )?,
         pending_lifecycle_by_message: pending_command_session_lifecycle_for_conversation(
             connection,
             conversation_id,
+            message_ids_json,
         )?,
     })
 }
@@ -592,6 +615,7 @@ type StoredTraceItem = (i64, String, String);
 fn trace_items_for_conversation(
     connection: &Connection,
     conversation_id: &str,
+    message_ids_json: Option<&str>,
 ) -> rusqlite::Result<HashMap<String, Vec<StoredTraceItem>>> {
     let mut statement = connection.prepare(
         "SELECT
@@ -603,10 +627,11 @@ fn trace_items_for_conversation(
          INNER JOIN conversation_turn_traces AS trace
            ON trace.assistant_message_id = item.assistant_message_id
          WHERE trace.conversation_id = ?1
+           AND (?2 IS NULL OR item.assistant_message_id IN (SELECT value FROM json_each(?2)))
          ORDER BY item.assistant_message_id ASC, item.sequence ASC",
     )?;
     let rows = statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -792,6 +817,7 @@ type PendingCommandSessionLifecycle = (u64, i64, ConversationCommandSessionLifec
 fn pending_command_session_lifecycle_for_conversation(
     connection: &Connection,
     conversation_id: &str,
+    message_ids_json: Option<&str>,
 ) -> rusqlite::Result<HashMap<String, Vec<PendingCommandSessionLifecycle>>> {
     let mut statement = connection.prepare(
         "SELECT
@@ -803,6 +829,7 @@ fn pending_command_session_lifecycle_for_conversation(
          INNER JOIN conversation_turn_traces AS trace
            ON trace.assistant_message_id = lifecycle.assistant_message_id
          WHERE trace.conversation_id = ?1
+           AND (?2 IS NULL OR lifecycle.assistant_message_id IN (SELECT value FROM json_each(?2)))
            AND trace.terminal_status != 'in_progress'
            AND lifecycle.trace_sequence IS NULL
          ORDER BY
@@ -813,7 +840,7 @@ fn pending_command_session_lifecycle_for_conversation(
              lifecycle.event_id ASC",
     )?;
     let rows = statement
-        .query_map([conversation_id], |row| {
+        .query_map(params![conversation_id, message_ids_json], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, u64>(1)?,

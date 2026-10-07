@@ -259,23 +259,77 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<ConversationObserverSnapshot>, String> {
+        self.load_conversation_observer_snapshot_page(conversation_id, None, None)
+    }
+
+    pub fn load_conversation_observer_snapshot_page(
+        &self,
+        conversation_id: &str,
+        message_limit: Option<u32>,
+        before_message_id: Option<&str>,
+    ) -> Result<Option<ConversationObserverSnapshot>, String> {
+        if message_limit.is_some_and(|limit| !(1..=100).contains(&limit))
+            || before_message_id.is_some_and(|id| message_limit.is_none() || id.trim().is_empty())
+        {
+            return Err("Invalid observer history page request.".into());
+        }
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
-        let mut conversation =
-            chat_repository::get_active_conversation(&transaction, conversation_id)
-                .map_err(storage_error)?;
+        let (mut conversation, has_more) = match message_limit {
+            Some(limit) => chat_repository::get_active_conversation_page(
+                &transaction,
+                conversation_id,
+                limit,
+                before_message_id,
+            ),
+            None => chat_repository::get_active_conversation(&transaction, conversation_id)
+                .map(|conversation| (conversation, false)),
+        }
+        .map_err(storage_error)?;
         let Some(mut conversation) = conversation.take() else {
             transaction.commit().map_err(storage_error)?;
             return Ok(None);
         };
-        let preview_attachments =
-            self.attach_message_attachments(&transaction, std::slice::from_mut(&mut conversation))?;
-        attach_message_guidance_timelines(&transaction, std::slice::from_mut(&mut conversation))?;
-        let mut input_origins =
-            agent_graph_repository::conversation_message_origins(&transaction, conversation_id)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .collect::<BTreeMap<_, _>>();
+        let selected_messages_only = message_limit.is_some();
+        let ids = selected_messages_only.then(|| {
+            serde_json::to_string(
+                &conversation
+                    .messages
+                    .iter()
+                    .map(|message| &message.id)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("message IDs are serializable")
+        });
+        let history = message_limit.map(|_| ConversationObserverHistoryPage {
+            has_more,
+            before_message_id: has_more.then(|| {
+                conversation
+                    .messages
+                    .first()
+                    .expect("nonempty page has older rows")
+                    .id
+                    .clone()
+            }),
+        });
+        let preview_attachments = self.attach_message_attachments_in_scope(
+            &transaction,
+            std::slice::from_mut(&mut conversation),
+            selected_messages_only,
+        )?;
+        attach_message_guidance_timelines_in_scope(
+            &transaction,
+            std::slice::from_mut(&mut conversation),
+            selected_messages_only,
+        )?;
+        let mut input_origins = agent_graph_repository::conversation_message_origins_in_scope(
+            &transaction,
+            conversation_id,
+            ids.as_deref(),
+        )
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let active_user_ids = conversation
             .messages
             .iter()
@@ -308,6 +362,7 @@ impl StorageService {
         Ok(Some(ConversationObserverSnapshot {
             conversation,
             input_origins,
+            history,
         }))
     }
 
