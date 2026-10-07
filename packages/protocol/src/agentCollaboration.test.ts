@@ -31,6 +31,7 @@ import {
   parseAgentDetail,
   parseAgentConversationLocator,
   parseAgentObserverConversation,
+  parseAgentObserverConversationRequest,
   parseAgentObserverEventEnvelope,
   parseAgentTreeLookup,
   parseAgentTreeSnapshot,
@@ -1306,5 +1307,33 @@ describe('collaboration settings contract', () => {
     expect(() =>
       parseAgentCollaborationSettings({ enabled: true, revision: 1, updatedAt: -1 })
     ).toThrow()
+  })
+})
+
+describe('observer history page contract', () => {
+  it('validates bounded pages and requires a limit with an exact message cursor', () => {
+    const identity = { rootConversationId: 'root', conversationId: 'child' }
+    const request = { ...identity, messageLimit: 40, beforeMessageId: 'older' }
+    expect(parseAgentObserverConversationRequest(request)).toEqual(request)
+    expect(parseAgentObserverConversationRequest(identity)).toEqual(identity)
+    for (const value of [0, 101, -1, 1.5, null, '40'])
+      expect(() =>
+        parseAgentObserverConversationRequest({ ...identity, messageLimit: value })
+      ).toThrow()
+    expect(() =>
+      parseAgentObserverConversationRequest({ ...identity, beforeMessageId: 'older' })
+    ).toThrow()
+  })
+
+  it('rejects history cursors that do not identify the oldest returned message', () => {
+    const observer = parseAgentObserverConversation(fixture.observer)!
+    const history = { hasMore: true, beforeMessageId: observer.messages[0].messageId }
+    expect(parseAgentObserverConversation({ ...observer, history })?.history).toEqual(history)
+    for (const invalid of [
+      { hasMore: true, beforeMessageId: null },
+      { hasMore: false, beforeMessageId: 'older' },
+      { hasMore: true, beforeMessageId: 'wrong-message' }
+    ])
+      expect(() => parseAgentObserverConversation({ ...observer, history: invalid })).toThrow()
   })
 })

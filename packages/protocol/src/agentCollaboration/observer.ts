@@ -23,14 +23,44 @@ const MAX_OBSERVER_PREVIEW_BYTES = 48 * 1024 * 1024
 
 const MAX_OBSERVER_STATE_JSON_BYTES = 32 * 1024 * 1024
 
+function parseObserverHistory(value: unknown): NonNullable<AgentObserverConversation['history']> {
+  const item = record(value, 'history')
+  exact(item, ['hasMore', 'beforeMessageId'], 'history')
+  const history = {
+    hasMore: bool(item.hasMore, 'history.hasMore'),
+    beforeMessageId: nullableText(item.beforeMessageId, 'history.beforeMessageId')
+  }
+  if (history.hasMore !== (history.beforeMessageId !== null))
+    throw new Error('Invalid history cursor')
+  return history
+}
+
 export function parseAgentObserverConversationRequest(
   value: unknown
 ): AgentObserverConversationRequest {
   const item = record(value, 'AgentObserverConversationRequest')
-  exact(item, ['rootConversationId', 'conversationId'], 'AgentObserverConversationRequest')
+  exact(
+    item,
+    [
+      'rootConversationId',
+      'conversationId',
+      ...('messageLimit' in item ? ['messageLimit'] : []),
+      ...('beforeMessageId' in item ? ['beforeMessageId'] : [])
+    ],
+    'AgentObserverConversationRequest'
+  )
+  if (item.beforeMessageId !== undefined && item.messageLimit === undefined)
+    throw new Error('beforeMessageId requires messageLimit')
+  const messageLimit =
+    item.messageLimit === undefined ? undefined : integer(item.messageLimit, 'messageLimit', 1)
+  if (messageLimit !== undefined && messageLimit > 100) throw new Error('Invalid messageLimit')
   return {
     rootConversationId: text(item.rootConversationId, 'rootConversationId'),
-    conversationId: text(item.conversationId, 'conversationId')
+    conversationId: text(item.conversationId, 'conversationId'),
+    ...(messageLimit === undefined ? {} : { messageLimit }),
+    ...(item.beforeMessageId === undefined
+      ? {}
+      : { beforeMessageId: text(item.beforeMessageId, 'beforeMessageId') })
   }
 }
 
@@ -174,6 +204,7 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
       'createdAt',
       'updatedAt',
       'messages',
+      ...('history' in item ? ['history'] : []),
       ...('liveStream' in item ? ['liveStream'] : [])
     ],
     'AgentObserverConversation'
@@ -182,6 +213,7 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
     throw new Error('Invalid AgentObserverConversation.messages')
   }
   const parsed: AgentObserverConversation = {
+    ...(item.history === undefined ? {} : { history: parseObserverHistory(item.history) }),
     ...(item.liveStream === undefined
       ? {}
       : { liveStream: parseObserverLiveStream(item.liveStream) }),
@@ -304,6 +336,8 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
       }
     })
   }
+  if (parsed.history?.hasMore && parsed.history.beforeMessageId !== parsed.messages[0]?.messageId)
+    throw new Error('Invalid history cursor identity')
   if (
     parsed.liveStream &&
     !parsed.messages.some(

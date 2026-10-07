@@ -692,7 +692,13 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   ): Promise<AgentObserverConversation | null> {
     const request = parseAgentObserverConversationRequest(input)
     return this.conversationReads.run(
-      JSON.stringify(['observer', request.rootConversationId, request.conversationId]),
+      JSON.stringify([
+        'observer',
+        request.rootConversationId,
+        request.conversationId,
+        request.messageLimit,
+        request.beforeMessageId
+      ]),
       () =>
         this.rpc
           .request<unknown, AgentObserverConversationRequest>(
@@ -709,7 +715,8 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
               throw new Error('Invalid observer Conversation response identity')
             }
             return response
-          })
+          }),
+      request.messageLimit === undefined ? 0 : request.beforeMessageId ? -1 : 1
     )
   }
 

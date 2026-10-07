@@ -107,6 +107,9 @@ export interface AgentConversationLocator {
 export interface AgentObserverConversationRequest {
   rootConversationId: string
   conversationId: string
+  /** Omit for legacy full history reads; paged reads are bounded to 100 messages. */
+  messageLimit?: number
+  beforeMessageId?: string
 }
 
 export interface AgentObserverInputOrigin {
@@ -153,6 +156,7 @@ export interface AgentObserverConversation {
   createdAt: number
   updatedAt: number
   messages: AgentObserverMessage[]
+  history?: { hasMore: boolean; beforeMessageId: string | null }
   /** Process-local text and content-free activity at the persisted conversation's read cut. */
   liveStream?: AgentObserverLiveStreamSnapshot
 }

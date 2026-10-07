@@ -177,3 +177,83 @@ describe('full conversation read scheduling', () => {
     await history
   })
 })
+
+describe('observer page read scheduling', () => {
+  beforeEach(() => rpcRequest.mockReset())
+
+  it('lets the selected recent page pass queued bulk and older pages without concurrent reads', async () => {
+    const active = deferred<StorageChatConversationRecord>()
+    rpcRequest.mockImplementation((method: string) => {
+      if (method === 'storage.loadConversation') return active.promise
+      if (method === 'storage.loadConversations') return Promise.resolve([])
+      return Promise.resolve(null)
+    })
+    const server = new CoreServer()
+    const first = server.loadConversation('active')
+    const all = server.loadConversations()
+    const identity = { rootConversationId: 'root', conversationId: 'child', messageLimit: 40 }
+    const older = server.loadCollaborationObserverConversation({
+      ...identity,
+      beforeMessageId: 'oldest'
+    })
+    const recent = server.loadCollaborationObserverConversation(identity)
+    expect(rpcRequest).toHaveBeenCalledTimes(1)
+    active.resolve(conversation('active'))
+    await Promise.all([first, all, older, recent])
+    expect(rpcRequest.mock.calls.slice(1)).toEqual([
+      ['agent.collaboration.loadObserverConversation', identity],
+      ['storage.loadConversations'],
+      ['agent.collaboration.loadObserverConversation', { ...identity, beforeMessageId: 'oldest' }]
+    ])
+  })
+
+  it('does not starve a queued bulk read behind repeated foreground pages', async () => {
+    const active = deferred<StorageChatConversationRecord>()
+    rpcRequest.mockImplementation((method: string) => {
+      if (method === 'storage.loadConversation') return active.promise
+      return Promise.resolve(method === 'storage.loadConversations' ? [] : null)
+    })
+    const server = new CoreServer()
+    const first = server.loadConversation('active')
+    const bulk = server.loadConversations()
+    const pages = Array.from({ length: 8 }, (_, index) =>
+      server.loadCollaborationObserverConversation({
+        rootConversationId: 'root',
+        conversationId: `child-${index}`,
+        messageLimit: 40
+      })
+    )
+    active.resolve(conversation('active'))
+    await Promise.all([first, bulk, ...pages])
+    expect(
+      rpcRequest.mock.calls.findIndex(([method]) => method === 'storage.loadConversations')
+    ).toBe(5)
+  })
+
+  it('never coalesces different observer page cursors or page sizes', async () => {
+    const active = deferred<StorageChatConversationRecord>()
+    rpcRequest.mockImplementation((method: string) =>
+      method === 'storage.loadConversation' ? active.promise : Promise.resolve(null)
+    )
+    const server = new CoreServer()
+    const first = server.loadConversation('active')
+    const identity = { rootConversationId: 'root', conversationId: 'child', messageLimit: 40 }
+    const page = server.loadCollaborationObserverConversation({ ...identity, beforeMessageId: 'a' })
+    const same = server.loadCollaborationObserverConversation({ ...identity, beforeMessageId: 'a' })
+    const other = server.loadCollaborationObserverConversation({
+      ...identity,
+      beforeMessageId: 'b'
+    })
+    const larger = server.loadCollaborationObserverConversation({
+      ...identity,
+      messageLimit: 80,
+      beforeMessageId: 'a'
+    })
+    expect(same).toBe(page)
+    expect(other).not.toBe(page)
+    expect(larger).not.toBe(page)
+    active.resolve(conversation('active'))
+    await Promise.all([first, page, other, larger])
+    expect(rpcRequest).toHaveBeenCalledTimes(4)
+  })
+})
