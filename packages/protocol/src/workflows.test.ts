@@ -11,6 +11,23 @@ import {
 } from './workflows'
 
 describe('organization hierarchy authoring contract', () => {
+  it('accepts targeted board reads and validates optional activity enrichment', () => {
+    for (const request of [
+      { operation: 'getInstance', instanceId: 'board' },
+      { operation: 'getInstance', instanceId: 'board', includeActivity: true },
+      { operation: 'getInstance', instanceId: 'board', includeActivity: false }
+    ])
+      expect(parseWorkflowRequest(request)).toEqual(request)
+    for (const extra of [
+      { includeActivity: 1 },
+      { includeActivity: null },
+      { projectId: 'spoof' },
+      { instanceId: '' }
+    ])
+      expect(() =>
+        parseWorkflowRequest({ operation: 'getInstance', instanceId: 'board', ...extra })
+      ).toThrow()
+  })
   it('round trips nested departments, independent rank and management identity', () => {
     expect(parseWorkflowDefinition(hierarchy)).toEqual(hierarchy)
     for (const operation of ['save', 'saveDraft']) {

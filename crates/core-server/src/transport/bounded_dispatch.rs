@@ -29,7 +29,7 @@ pub(crate) fn rpc_dispatch_class(request: &JsonRpcRequest) -> RpcDispatchClass {
             .and_then(|p| p.get("operation"))
             .and_then(Value::as_str)
         {
-            Some("list" | "listInstances" | "validate" | "runtimeSnapshot") => {
+            Some("list" | "listInstances" | "getInstance" | "validate" | "runtimeSnapshot") => {
                 RpcDispatchClass::Read
             }
             _ => RpcDispatchClass::Write,
@@ -594,7 +594,13 @@ mod tests {
                 params: operation.map(|operation| json!({"operation":operation})),
             })
         };
-        for operation in ["list", "listInstances", "validate", "runtimeSnapshot"] {
+        for operation in [
+            "list",
+            "listInstances",
+            "getInstance",
+            "validate",
+            "runtimeSnapshot",
+        ] {
             assert_eq!(
                 class("agent.workflows.request", Some(operation)),
                 RpcDispatchClass::Read

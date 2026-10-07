@@ -6,7 +6,10 @@ impl StorageService {
     pub fn workflow_request(&self, request: Request) -> Result<Response, Error> {
         if matches!(
             request,
-            Request::Manage(crate::workflow_management::Request::ListInstances {})
+            Request::Manage(
+                crate::workflow_management::Request::ListInstances {}
+                    | crate::workflow_management::Request::GetInstance { .. }
+            )
         ) {
             let mut connection = self.state.connection().map_err(Error::Storage)?;
             return workflow_repository::request(&mut connection, request, &Default::default());

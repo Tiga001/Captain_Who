@@ -57,12 +57,24 @@ pub fn request(
 ) -> Result<Response, Error> {
     if matches!(
         request,
-        Request::Manage(crate::workflow_management::Request::ListInstances {})
+        Request::Manage(
+            crate::workflow_management::Request::ListInstances {}
+                | crate::workflow_management::Request::GetInstance { .. }
+        )
     ) {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(storage_error)?;
-        let instances = management::list_instances(&transaction)?;
+        let instances = match request {
+            Request::Manage(crate::workflow_management::Request::GetInstance {
+                instance_id,
+                include_activity,
+            }) => {
+                validate_id(&instance_id)?;
+                management::read_instance(&transaction, &instance_id, include_activity)?
+            }
+            _ => management::list_instances(&transaction)?,
+        };
         transaction.commit().map_err(storage_error)?;
         return Ok(Response {
             instances,
@@ -70,7 +82,13 @@ pub fn request(
         });
     }
     let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .transaction_with_behavior(
+            if matches!(request, Request::List | Request::Validate { .. }) {
+                TransactionBehavior::Deferred
+            } else {
+                TransactionBehavior::Immediate
+            },
+        )
         .map_err(storage_error)?;
     let mut response = Response::default();
     match request {

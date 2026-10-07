@@ -74,6 +74,44 @@ fn workflow_readiness_is_derived_from_graph_and_current_model_availability() {
 }
 
 #[test]
+fn single_board_read_skips_catalog_and_activity_projection() {
+    use crate::workflow_management::Request as ManagementRequest;
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    let mut definition = graph();
+    definition.id = "board".into();
+    connection.execute(
+        "INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,definition_json) VALUES('board','template',1,'Board','#123456',1,1,0,0,'{}',1,?1)",
+        [serde_json::to_string(&definition).unwrap()],
+    ).unwrap();
+    // A board read must not touch authoring tables or historical activity. Dropping these
+    // tables makes accidental fallback to the full list/activity query observable.
+    connection.execute_batch("DROP TABLE workflow_editing_drafts; DROP TABLE workflow_definitions; DROP TABLE workflow_mail_runs;").unwrap();
+    let query = |include_activity| {
+        Request::Manage(ManagementRequest::GetInstance {
+            instance_id: "board".into(),
+            include_activity,
+        })
+    };
+    let response = request(&mut connection, query(false)).unwrap();
+    assert_eq!(response.instances.len(), 1);
+    assert_eq!(response.instances[0].id, "board");
+    assert!(response.instances[0].activity.is_none());
+    assert!(response.records.is_empty());
+    assert!(response.drafts.is_empty());
+    assert!(request(&mut connection, query(true)).is_err());
+    let missing = request(
+        &mut connection,
+        Request::Manage(ManagementRequest::GetInstance {
+            instance_id: "missing".into(),
+            include_activity: false,
+        }),
+    )
+    .unwrap();
+    assert!(missing.instances.is_empty());
+}
+
+#[test]
 fn workflow_reopens_with_exact_graph_layout_and_revision() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workflows.sqlite");

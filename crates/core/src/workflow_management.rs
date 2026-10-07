@@ -69,6 +69,12 @@ pub struct InvalidEditingDraft {
 )]
 pub enum Request {
     ListInstances {},
+    /// Read one board without loading the authoring catalog or historical activity by default.
+    GetInstance {
+        instance_id: String,
+        #[serde(default)]
+        include_activity: bool,
+    },
     SaveInstance {
         id: String,
         #[serde(default)]

@@ -6,12 +6,23 @@ use crate::workflow_management::{
 use std::collections::HashMap;
 
 pub(super) fn list_instances(c: &Connection) -> Result<Vec<Instance>, Error> {
-    instance_rows(c, None)
+    instance_rows(c, None, true)
 }
 pub(super) fn get_instance(c: &Connection, id: &str) -> Result<Option<Instance>, Error> {
-    Ok(instance_rows(c, Some(id))?.pop())
+    Ok(instance_rows(c, Some(id), true)?.pop())
 }
-fn instance_rows(c: &Connection, id: Option<&str>) -> Result<Vec<Instance>, Error> {
+pub(super) fn read_instance(
+    c: &Connection,
+    id: &str,
+    include_activity: bool,
+) -> Result<Vec<Instance>, Error> {
+    instance_rows(c, Some(id), include_activity)
+}
+fn instance_rows(
+    c: &Connection,
+    id: Option<&str>,
+    include_activity: bool,
+) -> Result<Vec<Instance>, Error> {
     let mut statement = c.prepare("SELECT instance_id, template_id, template_revision, name, color, revision, updated_at, needs_review, (enabled AND (running OR EXISTS(SELECT 1 FROM workflow_instance_bindings b JOIN conversation_turn_traces t ON (t.conversation_id=b.conversation_id OR t.conversation_id IN (SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=b.conversation_id)) WHERE b.instance_id=workflow_instances.instance_id AND t.terminal_status='in_progress'))), enabled, project_id, definition_json FROM workflow_instances WHERE (?1 IS NULL OR instance_id=?1) ORDER BY updated_at DESC, instance_id").map_err(storage_error)?;
     let rows = statement
         .query_map([id], |r| {
@@ -42,13 +53,17 @@ fn instance_rows(c: &Connection, id: Option<&str>) -> Result<Vec<Instance>, Erro
     let mut result: Vec<Instance> = rows
         .collect::<rusqlite::Result<_>>()
         .map_err(storage_error)?;
-    let mut activities = super::activity::latest_for_instances(
-        c,
-        &result
-            .iter()
-            .map(|instance| instance.id.as_str())
-            .collect::<Vec<_>>(),
-    )?;
+    let mut activities = if include_activity {
+        super::activity::latest_for_instances(
+            c,
+            &result
+                .iter()
+                .map(|instance| instance.id.as_str())
+                .collect::<Vec<_>>(),
+        )?
+    } else {
+        HashMap::new()
+    };
     for instance in &mut result {
         instance.activity = activities.remove(&instance.id);
         let mut query = c.prepare("SELECT node_id, conversation_id FROM workflow_instance_bindings WHERE instance_id=?1 ORDER BY node_id").map_err(storage_error)?;
@@ -212,7 +227,7 @@ pub(super) fn request(
 ) -> Result<Vec<String>, Error> {
     let request_json = serde_json::to_string(&request).map_err(storage_error)?;
     match request {
-        ManagementRequest::ListInstances {} => Ok(vec![]),
+        ManagementRequest::ListInstances {} | ManagementRequest::GetInstance { .. } => Ok(vec![]),
         ManagementRequest::SetInstanceEnabled {
             id,
             enabled,

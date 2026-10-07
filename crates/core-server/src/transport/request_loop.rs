@@ -765,6 +765,7 @@ where
             {
                 Some("runtimeSnapshot") => "workflow.runtimeSnapshot",
                 Some("listInstances") => "workflow.listInstances",
+                Some("getInstance") => "workflow.getInstance",
                 _ => "workflow.other",
             },
             _ => "other",

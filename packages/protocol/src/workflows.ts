@@ -65,6 +65,7 @@ export type WorkflowRequest =
   | { operation: 'delete'; id: string; expectedRevision: number }
   | { operation: 'setInstanceEnabled'; id: string; enabled: boolean; expectedRevision: number }
   | { operation: 'listInstances' }
+  | { operation: 'getInstance'; instanceId: string; includeActivity?: boolean }
   | {
       operation: 'saveInstance'
       id: string
@@ -385,6 +386,17 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   if (op === 'list' || op === 'listInstances') {
     object(value, ['operation'])
     return { operation: op }
+  }
+  if (op === 'getInstance') {
+    const item = object(value, ['operation', 'instanceId', 'includeActivity'], ['includeActivity'])
+    if (!text(item.instanceId).trim()) throw new Error('Invalid instanceId')
+    if (item.includeActivity !== undefined && typeof item.includeActivity !== 'boolean')
+      throw new Error('Invalid includeActivity')
+    return {
+      operation: op,
+      instanceId: text(item.instanceId),
+      ...(item.includeActivity !== undefined ? { includeActivity: item.includeActivity } : {})
+    }
   }
   if (op === 'validate' || op === 'save') {
     const item = object(
