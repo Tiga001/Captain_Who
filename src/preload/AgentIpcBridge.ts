@@ -15,6 +15,25 @@ import type {
 type AgentIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostApi {
+  // One validated projection per incoming IPC message, regardless of the number of panels.
+  // Keep no last-value cache: subscribing after navigation/auth changes must not replay old data.
+  const runtimeSubscribers = new Set<Parameters<AgentHostApi['onWorkflowRuntimeChanged']>[0]>()
+  const runtimeListener = (_event: IpcRendererEvent, payload: unknown): void => {
+    let snapshot: ReturnType<typeof parseWorkflowRuntimeSnapshot>
+    try {
+      snapshot = parseWorkflowRuntimeSnapshot(payload)
+    } catch {
+      return
+    }
+    for (const subscriber of [...runtimeSubscribers]) {
+      try {
+        subscriber(snapshot)
+      } catch {
+        // A broken panel must not prevent terminal/unread/preference subscribers from updating.
+        console.error('Organization runtime subscriber failed')
+      }
+    }
+  }
   return {
     onPromptPreferencesChanged: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: unknown): void => {
@@ -60,17 +79,14 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationListEvents, input),
     requestWorkflows: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.workflows, input),
     onWorkflowRuntimeChanged: (handler) => {
-      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
-        let snapshot: ReturnType<typeof parseWorkflowRuntimeSnapshot>
-        try {
-          snapshot = parseWorkflowRuntimeSnapshot(payload)
-        } catch {
-          return
-        }
-        handler(snapshot)
+      const subscriber: typeof handler = (snapshot) => handler(snapshot)
+      if (!runtimeSubscribers.size)
+        ipcRenderer.on(HOST_CHANNELS.agent.workflowRuntimeChanged, runtimeListener)
+      runtimeSubscribers.add(subscriber)
+      return () => {
+        if (runtimeSubscribers.delete(subscriber) && !runtimeSubscribers.size)
+          ipcRenderer.removeListener(HOST_CHANNELS.agent.workflowRuntimeChanged, runtimeListener)
       }
-      ipcRenderer.on(HOST_CHANNELS.agent.workflowRuntimeChanged, listener)
-      return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.workflowRuntimeChanged, listener)
     },
     listAgentTemplates: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateList, input),

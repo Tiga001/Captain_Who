@@ -2,6 +2,63 @@ import type { IpcRenderer } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 import { createAgentIpcBridge } from './AgentIpcBridge'
 
+describe('shared organization runtime IPC', () => {
+  it('strictly parses once for all subscribers and detaches only after the final unsubscribe', () => {
+    const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
+    const bridge = createAgentIpcBridge(ipc as unknown as IpcRenderer)
+    const first = vi.fn(),
+      second = vi.fn()
+    const stopFirst = bridge.onWorkflowRuntimeChanged(first)
+    const stopSecond = bridge.onWorkflowRuntimeChanged(second)
+    expect(ipc.on).toHaveBeenCalledTimes(1)
+    const listener = ipc.on.mock.calls[0][1]
+    const snapshot = { instanceId: 'org', sequence: 1, inputs: [], events: [] }
+    listener({}, snapshot)
+    expect(first).toHaveBeenCalledWith(snapshot)
+    expect(second.mock.calls[0][0]).toBe(first.mock.calls[0][0])
+    expect(first.mock.calls[0][0]).not.toBe(snapshot)
+    listener({}, { ...snapshot, untrusted: true })
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).toHaveBeenCalledTimes(1)
+    stopFirst()
+    stopFirst()
+    expect(ipc.removeListener).not.toHaveBeenCalled()
+    listener({}, { ...snapshot, sequence: 2 })
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).toHaveBeenCalledTimes(2)
+    stopSecond()
+    expect(ipc.removeListener).toHaveBeenCalledExactlyOnceWith(
+      'host:agent.workflows.runtime.changed',
+      listener
+    )
+    const next = vi.fn()
+    const stopNext = bridge.onWorkflowRuntimeChanged(next)
+    expect(ipc.on).toHaveBeenCalledTimes(2)
+    expect(next).not.toHaveBeenCalled()
+    stopNext()
+  })
+
+  it('isolates faulty subscribers without swallowing valid updates for other consumers', () => {
+    const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
+    const bridge = createAgentIpcBridge(ipc as unknown as IpcRenderer)
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const broken = bridge.onWorkflowRuntimeChanged(() => {
+      throw new Error('panel failure')
+    })
+    const healthy = vi.fn()
+    const stop = bridge.onWorkflowRuntimeChanged(healthy)
+    try {
+      ipc.on.mock.calls[0][1]({}, { instanceId: 'org', sequence: 1, inputs: [], events: [] })
+      expect(healthy).toHaveBeenCalledTimes(1)
+      expect(log).toHaveBeenCalledExactlyOnceWith('Organization runtime subscriber failed')
+    } finally {
+      broken()
+      stop()
+      log.mockRestore()
+    }
+  })
+})
+
 describe('Agent IPC bridge command Sessions', () => {
   it('uses dedicated, conversation-scoped list and get channels', async () => {
     const invoke = vi.fn().mockResolvedValue({ ok: true, value: { sessions: [] } })

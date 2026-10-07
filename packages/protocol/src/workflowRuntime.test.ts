@@ -159,6 +159,24 @@ describe('workflow runtime boundary', () => {
       })
     ).toThrow()
   })
+  it('validates every run reference and duplicate input identity in a large projection', () => {
+    const inputs = Array.from({ length: 1024 }, (_, index) => ({
+      ...snapshot.inputs[0],
+      id: `input-${index}`
+    }))
+    const inputRuns = inputs.map((input) => ({ inputId: input.id, status: 'in_progress' }))
+    const large = { ...snapshot, inputs, inputRuns, events: [] }
+    expect(parseWorkflowRuntimeSnapshot(large).inputRuns).toHaveLength(1024)
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({
+        ...large,
+        inputRuns: [...inputRuns.slice(0, -1), { inputId: 'missing', status: 'completed' }]
+      })
+    ).toThrow()
+    expect(() =>
+      parseWorkflowRuntimeSnapshot({ ...large, inputs: [...inputs, inputs[0]] })
+    ).toThrow()
+  })
   it('round-trips one independently delivered mail', () => {
     expect(parseWorkflowRuntimeSnapshot(snapshot)).toEqual(snapshot)
     expect(parseWorkflowResponse({ records: [], issues: [], runtime: snapshot }).runtime).toEqual(

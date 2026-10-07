@@ -291,13 +291,14 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
       node.fields.add(field)
     }
   }
+  const inputIds = new Set(result.inputs.map((input) => input.id))
   if (
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
-    result.inputRuns?.some((run) => !result.inputs.some((input) => input.id === run.inputId)) ||
+    result.inputRuns?.some((run) => !inputIds.has(run.inputId)) ||
     result.events.some(
       (event) => event.instanceId !== result.instanceId || event.sequence > result.sequence
     ) ||
-    new Set(result.inputs.map((input) => input.id)).size !== result.inputs.length ||
+    inputIds.size !== result.inputs.length ||
     result.events.some(
       (event, index) => index > 0 && event.sequence <= result.events[index - 1].sequence
     )
