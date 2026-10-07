@@ -115,6 +115,135 @@ async function settle(): Promise<void> {
 }
 
 describe('CollaborationStore', () => {
+  it('revalidates a paused root and resumes from its completed cursor without replaying old transfers', async () => {
+    const root = 'root-conversation'
+    const events = [
+      activityEvent(root, 1, 'child', 'started'),
+      activityEvent(root, 2, 'child', 'completed')
+    ]
+    events[1]!.transmission = {
+      id: 'while-paused',
+      kind: 'completion',
+      sourceAgentId: 'child',
+      targetAgentId: `root:${root}`
+    }
+    events[1]!.occurredAt = Date.now()
+    let lastSequence = 1
+    let releaseTree: ((value: AgentTreeSnapshot) => void) | undefined
+    const treeSnapshot = () => ({
+      ...tree(root, lastSequence),
+      agents: [childSummary('child', 'child-conversation')]
+    })
+    const unsubscribe = vi.fn()
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => treeSnapshot()),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          root,
+          events.filter((entry) => entry.sequence > afterSequence && entry.sequence <= lastSequence)
+        )
+      ),
+      subscribe: () => unsubscribe,
+      subscribeResync: () => unsubscribe,
+      subscribeAgentEvents: () => unsubscribe
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    store.pause()
+    expect(unsubscribe).toHaveBeenCalledTimes(3)
+    expect(store.getSnapshot().tree).toBeNull()
+    lastSequence = 2
+    vi.mocked(source.getTree).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseTree = resolve
+        })
+    )
+    vi.mocked(source.listEvents).mockClear()
+    store.start()
+    expect(store.getSnapshot().tree).toBeNull()
+    expect(source.listEvents).not.toHaveBeenCalled()
+    releaseTree?.(treeSnapshot())
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    expect(vi.mocked(source.listEvents).mock.calls.map(([input]) => input.afterSequence)).toEqual([
+      1
+    ])
+    expect(store.getSnapshot().activities.map((entry) => entry.sequence)).toEqual([1, 2])
+    expect(store.getSnapshot().agentInvalidationSequences.child).toBe(2)
+    expect(store.getSnapshot().transmissions).toEqual([])
+    store.destroy()
+  })
+
+  it('does not resurrect a paused root when a slow history request finishes', async () => {
+    const root = 'root-conversation'
+    let releaseHistory!: (value: CollaborationEventsPage) => void
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree(root, 1)),
+      listEvents: vi.fn(
+        () =>
+          new Promise<CollaborationEventsPage>((resolve) => {
+            releaseHistory = resolve
+          })
+      ),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await settle()
+    store.pause()
+    releaseHistory(page(root, [event(root, 1)]))
+    await settle()
+    expect(store.getSnapshot()).toMatchObject({ tree: null, activities: [] })
+    expect(source.getTree).toHaveBeenCalledTimes(1)
+    store.destroy()
+  })
+
+  it.each(['rewound', 'replaced', 'gap'] as const)(
+    'fully recovers a %s log rather than trusting an idle cursor',
+    async (change) => {
+      const root = 'root-conversation'
+      let lastSequence = 2
+      let replaced = false
+      let exposeGap = false
+      const source: CollaborationDataSource = {
+        getTree: vi.fn(async () => ({
+          ...tree(root, lastSequence),
+          ...(replaced ? { rootAgentId: 'replacement-root' } : {})
+        })),
+        listEvents: vi.fn(async ({ afterSequence }) =>
+          page(
+            root,
+            exposeGap && afterSequence === 2
+              ? [event(root, 4)]
+              : durableEventsThrough(root, afterSequence, lastSequence)
+          )
+        ),
+        subscribe: () => () => undefined,
+        subscribeResync: () => () => undefined
+      }
+      const store = new CollaborationStore(root, source)
+      store.start()
+      await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+      store.pause()
+      if (change === 'rewound') lastSequence = 1
+      if (change === 'replaced') replaced = true
+      if (change === 'gap') {
+        lastSequence = 4
+        exposeGap = true
+      }
+      vi.mocked(source.listEvents).mockClear()
+      store.start()
+      await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+      expect(store.getSnapshot()).toMatchObject({ error: false, tree: { lastSequence } })
+      expect(vi.mocked(source.listEvents).mock.calls.map(([input]) => input.afterSequence)).toEqual(
+        change === 'gap' ? [2, 0] : [0]
+      )
+      store.destroy()
+    }
+  )
+
   it('exposes the authorized tree before history completes without skipping activity recovery', async () => {
     const root = 'root-conversation'
     const historical = activityEvent(root, 1, 'child', 'started')

@@ -11,6 +11,13 @@ const MAX_SEEN_TRANSMISSIONS = 2_048
 
 class CollaborationEventGapError extends Error {}
 
+interface CollaborationRecoveryCheckpoint {
+  activities: readonly CollaborationTimelineActivity[]
+  agentInvalidationSequences: Readonly<Record<string, number>>
+  cursor: number
+  tree: AgentTreeSnapshot
+}
+
 export interface CollaborationStoreSnapshot {
   /** Durable activity by direct parent; completed inline history also lives in message snapshots. */
   activities: readonly CollaborationTimelineActivity[]
@@ -33,11 +40,14 @@ export interface CollaborationStoreSnapshot {
 export class CollaborationStore {
   private catchUpRequested = false
   private destroyed = false
+  private paused = false
   /** Independent durable-log cursor; tree hydration alone never proves activity recovery. */
   private eventCursor = 0
   private generation = 0
   private readonly listeners = new Set<() => void>()
   private runningCatchUp: Promise<void> | null = null
+  /** Only completed, cursor-validated recovery is reusable after navigation. */
+  private recoveryCheckpoint: CollaborationRecoveryCheckpoint | null = null
   private snapshot: CollaborationStoreSnapshot
   private unsubscribe: (() => void) | null = null
   private unsubscribeResync: (() => void) | null = null
@@ -75,15 +85,18 @@ export class CollaborationStore {
 
   start(): void {
     if (this.destroyed || this.unsubscribe) return
+    this.paused = false
     this.unsubscribe = this.source.subscribe(this.handleEvent)
     this.unsubscribeResync = this.source.subscribeResync(this.handleResync)
     this.unsubscribeAgentEvents = this.source.subscribeAgentEvents?.(this.handleAgentEvent) ?? null
-    void this.hydrate()
+    void this.hydrate(true)
   }
 
-  async hydrate(): Promise<void> {
-    if (this.destroyed) return
+  async hydrate(resumeCheckpoint = false): Promise<void> {
+    if (this.destroyed || this.paused) return
     const generation = ++this.generation
+    const previousCheckpoint = resumeCheckpoint ? this.recoveryCheckpoint : null
+    if (!resumeCheckpoint) this.recoveryCheckpoint = null
     this.clearTransmissionTimer()
     this.pendingGuidanceTransmissions.clear()
     this.publish({ error: false, loading: true, transmissions: [] })
@@ -92,6 +105,7 @@ export class CollaborationStore {
       if (!this.isCurrent(generation)) return
       if (!initialTree) {
         this.eventCursor = 0
+        this.recoveryCheckpoint = null
         this.publish({
           activities: [],
           agentInvalidationSequences: {},
@@ -103,11 +117,39 @@ export class CollaborationStore {
         return
       }
       if (initialTree.rootConversationId !== this.rootConversationId) throw new Error('Wrong root')
+      // A cached cursor is never authorization. Revalidate the root and graph identity with the
+      // Host before exposing anything cached; replacement/rewound graphs start from event zero.
+      const checkpoint =
+        previousCheckpoint &&
+        previousCheckpoint.tree.rootAgentId === initialTree.rootAgentId &&
+        previousCheckpoint.tree.workspaceId === initialTree.workspaceId &&
+        previousCheckpoint.tree.projectId === initialTree.projectId &&
+        previousCheckpoint.cursor <= initialTree.lastSequence
+          ? previousCheckpoint
+          : null
+      if (previousCheckpoint && !checkpoint) {
+        this.recoveryCheckpoint = null
+        this.rootRunIds.clear()
+        this.seenTransmissionIds.clear()
+      }
       // The Host has already authorized this tree. Navigation and the tree view need only that
       // snapshot; durable activity recovery keeps its independent cursor and must not block them.
       // Keep loading true so notifications queue a catch-up rather than racing this replay.
-      this.publish({ tree: initialTree })
-      const replay = await this.replayDurableEvents(generation, 0, [])
+      this.publish({
+        tree: initialTree,
+        ...(resumeCheckpoint
+          ? {
+              activities: checkpoint?.activities ?? [],
+              agentInvalidationSequences: checkpoint?.agentInvalidationSequences ?? {}
+            }
+          : {})
+      })
+      const replay = await this.replayDurableEvents(
+        generation,
+        checkpoint?.cursor ?? 0,
+        checkpoint?.activities ?? [],
+        checkpoint?.agentInvalidationSequences
+      )
       if (!this.isCurrent(generation)) return
       let tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
       if (!this.isCurrent(generation)) return
@@ -135,17 +177,26 @@ export class CollaborationStore {
       }
       if (tree.lastSequence < cursor) throw new Error('Stale collaboration snapshot')
       this.eventCursor = cursor
+      const agentInvalidationSequences = seedAgentInvalidationSequences(invalidationSequences, tree)
+      this.recoveryCheckpoint = { activities, agentInvalidationSequences, cursor, tree }
       this.publish({
         activities,
-        agentInvalidationSequences: seedAgentInvalidationSequences(invalidationSequences, tree),
+        agentInvalidationSequences,
         error: false,
         hydrationRevision: this.snapshot.hydrationRevision + 1,
         loading: false,
         tree
       })
       if (this.catchUpRequested) this.requestCatchUp()
-    } catch {
+    } catch (error) {
       if (!this.isCurrent(generation)) return
+      this.recoveryCheckpoint = null
+      if (previousCheckpoint && error instanceof CollaborationEventGapError) {
+        // An idle root may have missed a resync or had its log replaced. Preserve the same
+        // full-recovery path used by active catch-up rather than trusting the cached cursor.
+        void this.hydrate()
+        return
+      }
       // The RPC currently reports legacy/no-graph and transient storage failures through the same
       // safe Host error envelope. Keep that distinction fail-closed and retry on the next durable
       // notification or explicit hydration rather than permanently hiding a tree.
@@ -153,10 +204,12 @@ export class CollaborationStore {
     }
   }
 
-  destroy(): void {
+  /** Stop all hidden-root work but retain only the last completed recovery checkpoint. */
+  pause(): void {
     if (this.destroyed) return
-    this.destroyed = true
+    this.paused = true
     this.generation += 1
+    this.catchUpRequested = false
     this.unsubscribe?.()
     this.unsubscribe = null
     this.unsubscribeResync?.()
@@ -164,6 +217,26 @@ export class CollaborationStore {
     this.unsubscribeAgentEvents?.()
     this.unsubscribeAgentEvents = null
     this.clearTransmissionTimer()
+    this.pendingGuidanceTransmissions.clear()
+    // Do not expose cached identities after navigation until start() revalidates with the Host.
+    this.publish({
+      activities: [],
+      agentInvalidationSequences: {},
+      loading: true,
+      tree: null,
+      transmissions: []
+    })
+  }
+
+  invalidateRecoveryCheckpoint(): void {
+    this.recoveryCheckpoint = null
+  }
+
+  destroy(): void {
+    if (this.destroyed) return
+    this.pause()
+    this.destroyed = true
+    this.recoveryCheckpoint = null
     this.rootRunIds.clear()
     this.seenTransmissionIds.clear()
     this.pendingGuidanceTransmissions.clear()
@@ -171,7 +244,8 @@ export class CollaborationStore {
   }
 
   private readonly handleEvent = (event: CollaborationEventEnvelope): void => {
-    if (this.destroyed || event.rootConversationId !== this.rootConversationId) return
+    if (this.destroyed || this.paused || event.rootConversationId !== this.rootConversationId)
+      return
     if (this.snapshot.loading) {
       this.catchUpRequested = true
       return
@@ -207,7 +281,7 @@ export class CollaborationStore {
   }
 
   private requestCatchUp(): void {
-    if (this.destroyed || !this.snapshot.tree) return
+    if (this.destroyed || this.paused || !this.snapshot.tree) return
     this.catchUpRequested = true
     if (this.runningCatchUp) return
     this.runningCatchUp = this.catchUp().finally(() => {
@@ -244,6 +318,7 @@ export class CollaborationStore {
           if (!this.isCurrent(generation)) return
           if (!tree) {
             this.eventCursor = 0
+            this.recoveryCheckpoint = null
             this.publish({
               activities: [],
               agentInvalidationSequences: {},
@@ -265,12 +340,19 @@ export class CollaborationStore {
             continue
           }
           this.eventCursor = cursor
+          const validatedInvalidationSequences = seedAgentInvalidationSequences(
+            agentInvalidationSequences,
+            tree
+          )
+          this.recoveryCheckpoint = {
+            activities,
+            agentInvalidationSequences: validatedInvalidationSequences,
+            cursor,
+            tree
+          }
           this.publish({
             activities,
-            agentInvalidationSequences: seedAgentInvalidationSequences(
-              agentInvalidationSequences,
-              tree
-            ),
+            agentInvalidationSequences: validatedInvalidationSequences,
             error: false,
             loading: false,
             tree,
@@ -368,7 +450,7 @@ export class CollaborationStore {
   }
 
   private isCurrent(generation: number): boolean {
-    return !this.destroyed && generation === this.generation
+    return !this.destroyed && !this.paused && generation === this.generation
   }
 
   private rememberTransmission(id: string): void {
