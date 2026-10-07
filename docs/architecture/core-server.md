@@ -132,7 +132,19 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、Agent 各通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
 
-组织与子智能体混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server organization_child_mixed_transport_benchmark -- --nocapture`。使用独立内存管道，组合 1/16/50 个子智能体、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。报告固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
+组织与子 Agent 混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server --bin core-server transport::outbound::workload_tests -- --nocapture`。使用独立内存管道，组合 1/16/50 个子 Agent、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。每组对比完整信封与运行摘要，同一组的子事件、历史响应、控制响应及待收邮件事实完全相同。报告固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制和摘要计数等价。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
+
+2026-10-07 本地配对结果（十进制 MB，正常接收端完整输出）：
+
+| 子 Agent / 待收邮件 | 完整信封 | 运行摘要 | 完整投递帧数 |
+| ------------------- | -------: | -------: | -----------: |
+| 1 / 128             |  2.46 MB |  1.13 MB |          276 |
+| 16 / 512            |  7.41 MB |  2.05 MB |         2196 |
+| 50 / 1024           | 14.88 MB |  4.13 MB |         6548 |
+
+50 子 Agent 负载的字节量减少约 72.2%。在逐行人为延迟的接收端，完整信封版本触发原有容量限制，摘要版本完整送达 6548 帧；摘要在全部六种组合中均未超载。接收端的每行延迟仍会积累，摘要不减少子事件帧数；慢接收端的控制响应 p95 不能与提前中止的完整版本作速度比较，也不能由此声称 UI 延迟下降相同比例。此结果支持先采用运行摘要，保留已有 childEvent cursor 协议与 writer 批写，不新增子流合并协议。后续若真实诊断仍显示 childEvent 帧数或解析成本占主导，再评估保留逐项 cursor、工具与终态边界的批量封装。
+
+数据库侧可用 `python3 scripts/benchmark-workflow-summary.py` 独立复现。脚本读取实际 canonical schema 和查询 SQL，以 32 个成员、每个输入 4 条事件及 8 KiB JSON 构造内存库，比较旧完整查询、会扫描历史的初版摘要和最终摘要，并检查后两者事实等价及查询计划。SQLite 3.51 的 7 次热查询中位数中，1000 / 10000 / 100000 条事件的最终摘要分别约 0.31 / 0.31 / 0.36 ms；100000 条时旧查询约 6.51 ms，初版摘要约 46.06 ms。最终读取通过事务维护的对话变化水位及定向索引避免随已处理邮件历史增长；待收计数仍与当前待收邮件数相关，对话变化列表仍与历史对话身份数相关。结果包含 SQLite 取行与 Python 行对象分配，不含 Rust JSON 解码、真实磁盘或 UI 渲染；索引和回填成本另行报告。
 
 上述分派边界覆盖普通 RPC。Browser risk、受管 Playwright、MCP、Git、Skills 等保留专用生命周期；其中既有 Browser risk 授权分支仍可能在接收循环等待 active-run/SQLite 锁，不能据此声称整个接收循环已彻底消除阻塞 I/O。
 

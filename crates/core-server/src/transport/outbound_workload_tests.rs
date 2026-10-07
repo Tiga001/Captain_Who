@@ -35,6 +35,21 @@ fn runtime_snapshot(mail: usize, sequence: usize) -> Value {
         "pausedConversationIds":[],"inputRuns":[]}})
 }
 
+fn runtime_summary(mail: usize, sequence: usize) -> Value {
+    // Same pending envelopes as runtime_snapshot. This workload has no accepted deliveries or
+    // management events, so only the per-node counts belong in its compact wire projection.
+    let pending = (0..16)
+        .filter_map(|node| {
+            let count = (node..mail).step_by(16).count();
+            (count > 0).then(|| json!({"nodeId":format!("node-{node}"),"count":count}))
+        })
+        .collect::<Vec<_>>();
+    json!({"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":{
+        "instanceId":"organization","sequence":sequence,"inputs":[],"events":[],
+        "pausedConversationIds":[],"inputRuns":[],"summary":{
+            "pendingByNode":pending,"conversationChanges":[],"structureRevision":0}}})
+}
+
 #[test]
 fn mixed_workload_fixtures_are_valid_and_attribute_byte_pressure() {
     let snapshot = runtime_snapshot(1024, 1);
@@ -61,7 +76,33 @@ fn mixed_workload_fixtures_are_valid_and_attribute_byte_pressure() {
     assert!(sender.stats().peak_bytes <= DATA_BYTES + CONTROL_RESERVE_BYTES);
 }
 
-async fn sample(children: usize, mail: usize, slow: bool) -> Value {
+#[test]
+fn summary_workload_preserves_counts_without_repeating_envelopes() {
+    for mail in [128, 512, 1024] {
+        let full = runtime_snapshot(mail, 128);
+        let compact = runtime_summary(mail, 128);
+        let snapshot: mycopilot_core::workflow_execution::RuntimeSnapshot =
+            serde_json::from_value(compact["params"].clone()).unwrap();
+        assert_eq!(snapshot.sequence, 128);
+        assert!(snapshot.inputs.is_empty());
+        let summary = snapshot.summary.unwrap();
+        assert_eq!(
+            summary
+                .pending_by_node
+                .iter()
+                .map(|row| row.count)
+                .sum::<u64>(),
+            mail as u64
+        );
+        assert!(summary.conversation_changes.is_empty());
+        assert!(
+            serde_json::to_vec(&compact).unwrap().len() * 20
+                < serde_json::to_vec(&full).unwrap().len()
+        );
+    }
+}
+
+async fn sample(children: usize, mail: usize, slow: bool, summary: bool) -> Value {
     let (sender, receiver) = outbound_channel();
     let (sink, source) = tokio::io::duplex(16 * 1024);
     let (images, image_receiver) = mpsc::channel(1);
@@ -115,7 +156,11 @@ async fn sample(children: usize, mail: usize, slow: bool) -> Value {
             .map(|agent| child_delta(agent, round))
             .collect::<Vec<_>>();
         if round % 8 == 0 {
-            values.push(runtime_snapshot(mail, round));
+            values.push(if summary {
+                runtime_summary(mail, round)
+            } else {
+                runtime_snapshot(mail, round)
+            });
         }
         if round % 32 == 0 {
             values.push(
@@ -157,6 +202,7 @@ async fn sample(children: usize, mail: usize, slow: bool) -> Value {
     report["children"] = json!(children);
     report["mail"] = json!(mail);
     report["slow"] = json!(slow);
+    report["projection"] = json!(if summary { "summary" } else { "full" });
     report["acceptedEvents"] = json!(accepted);
     report["attemptedBytesByCategory"] = json!(attempted_bytes);
     report["queuePeakBytes"] = json!(state.stats.peak_bytes);
@@ -166,6 +212,17 @@ async fn sample(children: usize, mail: usize, slow: bool) -> Value {
     report["overloaded"] = json!(state.overloaded);
     assert!(state.stats.peak_bytes <= DATA_BYTES + CONTROL_RESERVE_BYTES);
     assert!(state.stats.peak_frames <= MAX_FRAMES);
+    if summary {
+        assert!(
+            !state.overloaded,
+            "compact mixed workload exhausted original queue budgets: {report}"
+        );
+        assert!(
+            writer_result.is_ok(),
+            "compact mixed workload failed to drain: {report}"
+        );
+        assert_eq!(report["receivedFrames"], accepted);
+    }
     report
 }
 
@@ -183,7 +240,9 @@ fn organization_child_mixed_transport_benchmark() {
         let mut rows = Vec::new();
         for (children, mail) in [(1, 128), (16, 512), (50, 1024)] {
             for slow in [false, true] {
-                rows.push(sample(children, mail, slow).await);
+                for summary in [false, true] {
+                    rows.push(sample(children, mail, slow, summary).await);
+                }
             }
         }
         rows
