@@ -1,8 +1,10 @@
 //! Read projections over immutable envelopes and their minimal processing state.
 mod configuration;
+mod request_observation;
 mod summary;
 use super::*;
 use crate::workflow_awareness::{MailboxDirection, MailboxQuery, StateQuery, StateView};
+pub use request_observation::request_observation;
 
 fn scope(
     c: &Connection,

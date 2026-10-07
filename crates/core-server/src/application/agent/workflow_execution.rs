@@ -70,6 +70,13 @@ impl StoredWorkflowRuntime {
     }
 }
 impl WorkflowRuntimeHost for StoredWorkflowRuntime {
+    fn request_observation(&self) -> AgentResult<Option<(ConversationSnapshot, Value)>> {
+        self.validate_owner()?;
+        self.service
+            .storage
+            .workflow_execution_request_observation(&self.conversation_id, Some(&self.run_id))
+            .map_err(AgentError::new)
+    }
     fn mail_receipt(
         &self,
         query: WorkflowMailReceiptQuery,
@@ -1074,6 +1081,12 @@ struct WorkflowPreview {
     run_id: Option<String>,
 }
 impl WorkflowRuntimeHost for WorkflowPreview {
+    fn request_observation(&self) -> AgentResult<Option<(ConversationSnapshot, Value)>> {
+        self.service
+            .storage
+            .workflow_execution_request_observation(&self.conversation_id, self.run_id.as_deref())
+            .map_err(AgentError::new)
+    }
     fn snapshot(&self) -> AgentResult<Option<ConversationSnapshot>> {
         match &self.run_id {
             Some(run_id) => self

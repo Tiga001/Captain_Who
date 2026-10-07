@@ -3,6 +3,8 @@ use crate::storage::workflow_execution_repository::tests::{
     action, conversation, fixture, prove, send_mail, start_run,
 };
 
+mod request_observation;
+
 #[test]
 fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monotonic() {
     let mut c = fixture();

@@ -246,6 +246,15 @@ pub fn organization_state_model_projection(
 
 pub trait WorkflowRuntimeHost: Send + Sync {
     fn snapshot(&self) -> AgentResult<Option<WorkflowConversationSnapshot>>;
+    /// One sampling observation. Storage-backed Hosts override this to read the admitted
+    /// identity and caller mailbox together, without constructing unrelated member status.
+    /// The default preserves compatibility with other Hosts; Runtime still checks identity.
+    fn request_observation(&self) -> AgentResult<Option<(WorkflowConversationSnapshot, Value)>> {
+        let Some(snapshot) = self.snapshot()?.filter(|snapshot| snapshot.enabled) else {
+            return Ok(None);
+        };
+        Ok(Some((snapshot, self.awareness()?)))
+    }
     fn send(&self, invocation: WorkflowSendInvocation) -> AgentResult<WorkflowSendReceipt>;
     fn mutate(&self, _invocation: WorkflowMutationInvocation) -> AgentResult<Value> {
         Err(crate::AgentError::new(

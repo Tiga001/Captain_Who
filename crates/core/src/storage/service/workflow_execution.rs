@@ -83,6 +83,13 @@ impl StorageService {
     ) -> Result<serde_json::Value, String> {
         repository::awareness_for_conversation(&*self.state.connection()?, conversation_id)
     }
+    pub fn workflow_execution_request_observation(
+        &self,
+        conversation_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<Option<(ConversationSnapshot, serde_json::Value)>, String> {
+        repository::request_observation(&*self.state.connection()?, conversation_id, run_id)
+    }
     pub fn workflow_execution_state_for_run(
         &self,
         conversation_id: &str,

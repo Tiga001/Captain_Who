@@ -159,6 +159,8 @@ last_verified: 2026-10-04
 - `organization.execution`：组织名、公共背景和本人职责、部门路径、职级、管理身份及范围。
 - `organization.mailbox`：本人 pending/processing 数量和上次实际观察后新信的简短提示。
 
+每次采样由 Host 在同一个 SQLite 读取事务中取得当前有效身份和本人的邮箱摘要，只构建一次组织定义，不生成随后丢弃的其他成员运行状态。完整成员目录仍保留在可信身份中用于姓名寻址与权限校验；跨采样不缓存身份，关闭、移除或改绑后继续拒绝旧 Run 的权限。
+
 全员目录、部门树和其他成员活动按需查询，不自动注入 `organization.awareness`。`organization_get_state` 要求简短用户可读 `reason`，提供五个视图：
 
 | view            | 用途                                                                                                   |

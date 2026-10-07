@@ -79,9 +79,12 @@ impl RuntimeExtension for WorkflowExtension {
         // Fail closed on unavailable Host state. A previous on-state must never survive a failed
         // refresh, and a successful checkpoint cannot resurrect a disabled workflow.
         let snapshot = self.host.as_ref().and_then(|host| {
-            let workflow = host.snapshot().ok().flatten().filter(|s| s.enabled)?;
-            let awareness = host.awareness().ok()?;
-            // Preview Hosts may not have a run admission. A rebind between these two reads
+            let (workflow, awareness) = host
+                .request_observation()
+                .ok()
+                .flatten()
+                .filter(|(workflow, _)| workflow.enabled)?;
+            // Compatibility Hosts may still read identity and awareness separately. A rebind
             // must not pair an old membership identity with another workflow's live observation.
             if awareness["available"] != true
                 || awareness["instanceId"].as_str() != Some(workflow.instance_id.as_str())
