@@ -117,16 +117,29 @@ async fn sample(children: usize, mail: usize, slow: bool, summary: bool) -> Valu
     let sent_controls = Arc::new(Mutex::new(BTreeMap::<usize, Instant>::new()));
     let controls = Arc::clone(&sent_controls);
     let reader = tokio::spawn(async move {
-        let mut lines = BufReader::new(source).lines();
+        let mut reader = BufReader::new(source);
+        let mut line = Vec::new();
         let mut bytes = 0;
         let mut frames = 0;
+        let mut truncated_tail_bytes = 0;
         let mut latencies = Vec::new();
         let mut positions = BTreeMap::new();
         let mut overloaded = false;
-        while let Some(line) = lines.next_line().await.unwrap() {
-            bytes += line.len() + 1;
+        loop {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes += read;
+            // A failed connection can reach its drain deadline mid-frame. Record that tail;
+            // the caller permits it only after overload, never for a healthy/summary workload.
+            if line.last() != Some(&b'\n') {
+                truncated_tail_bytes = read;
+                break;
+            }
             frames += 1;
-            let value: Value = serde_json::from_str(&line).unwrap();
+            let value: Value = serde_json::from_slice(&line).unwrap();
             if let Some(id) = value["id"].as_u64() {
                 if let Some(sent) = controls.lock().unwrap().remove(&(id as usize)) {
                     latencies.push(sent.elapsed().as_secs_f64() * 1000.0);
@@ -147,6 +160,7 @@ async fn sample(children: usize, mail: usize, slow: bool, summary: bool) -> Valu
         }
         latencies.sort_by(f64::total_cmp);
         json!({"receivedBytes":bytes,"receivedFrames":frames,"receivedOverload":overloaded,
+            "truncatedTailBytes":truncated_tail_bytes,
             "controlP95Ms":latencies.get(latencies.len()*95/100),"totalMs":started.elapsed().as_secs_f64()*1000.0})
     });
     let mut attempted_bytes = BTreeMap::<&str, usize>::new();
@@ -207,15 +221,30 @@ async fn sample(children: usize, mail: usize, slow: bool, summary: bool) -> Valu
     report["attemptedBytesByCategory"] = json!(attempted_bytes);
     report["queuePeakBytes"] = json!(state.stats.peak_bytes);
     report["queuePeakFrames"] = json!(state.stats.peak_frames);
+    report["limits"] = json!({
+        "dataBytes":sender.shared.limits.data_bytes,
+        "controlBytes":sender.shared.limits.control_bytes,
+        "frames":sender.shared.limits.frames,
+        "controlFrames":sender.shared.limits.control_frames
+    });
     report["serializationMs"] = json!(state.stats.serialization_ns as f64 / 1e6);
     report["writerCompleted"] = json!(writer_result.is_ok());
+    let writer_timed_out = writer_result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
+    report["writerTimedOut"] = json!(writer_timed_out);
     report["overloaded"] = json!(state.overloaded);
     assert!(state.stats.peak_bytes <= DATA_BYTES + CONTROL_RESERVE_BYTES);
     assert!(state.stats.peak_frames <= MAX_FRAMES);
+    assert!(
+        report["truncatedTailBytes"] == 0 || (state.overloaded && writer_timed_out),
+        "healthy mixed workload ended with a truncated frame: {report}"
+    );
     if summary {
         assert!(
             !state.overloaded,
-            "compact mixed workload exhausted original queue budgets: {report}"
+            "compact mixed workload exhausted configured queue budgets: {report}"
         );
         assert!(
             writer_result.is_ok(),

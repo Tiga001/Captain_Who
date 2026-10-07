@@ -13,8 +13,8 @@ use tokio::sync::{
     Notify,
 };
 
-const DATA_BYTES: usize = 4 * 1024 * 1024;
-const CONTROL_RESERVE_BYTES: usize = 512 * 1024;
+const DATA_BYTES: usize = 8 * 1024 * 1024;
+const CONTROL_RESERVE_BYTES: usize = 1024 * 1024;
 const MAX_FRAMES: usize = 8192;
 const CONTROL_RESERVE_FRAMES: usize = 64;
 const MAX_MERGED_BYTES: usize = 64 * 1024;

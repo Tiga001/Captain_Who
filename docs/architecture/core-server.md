@@ -102,17 +102,17 @@ mycopilot-core       adapters
 
 request loop 当前按风险与阻塞特征分流：
 
-| 类别                   |                                    默认边界 | owner/执行方式                                                                           |
-| ---------------------- | ------------------------------------------: | ---------------------------------------------------------------------------------------- |
-| MCP management         |                                     16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                          |
-| Browser risk           |                                     32 并发 | 独立 tracker；关停先取消授权                                                             |
-| 大型图片 Artifact 读取 |                                      2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                       |
-| 普通查询 RPC           |                4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、组织只读、Automation/Notification 查询；阻塞处理离开接收循环 |
-| 普通修改 RPC           |                1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和组织/交互修改；保留业务准入锁、CAS 与幂等                       |
-| 停止/取消 RPC          |                2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                  |
-| Conversation fork      |                         运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                               |
-| Git/Skill/图片配置写入 |                             各自 dispatcher | 显式队列和独立 shutdown                                                                  |
-| 普通响应/notification  | 4 MiB 正文 + 512 KiB 控制预留，最多 8192 帧 | 单 FIFO、相邻正文合并、就绪批量写入；大非正文帧独立单 lease                              |
+| 类别                   |                                  默认边界 | owner/执行方式                                                                           |
+| ---------------------- | ----------------------------------------: | ---------------------------------------------------------------------------------------- |
+| MCP management         |                                   16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                          |
+| Browser risk           |                                   32 并发 | 独立 tracker；关停先取消授权                                                             |
+| 大型图片 Artifact 读取 |                                    2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                       |
+| 普通查询 RPC           |              4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、组织只读、Automation/Notification 查询；阻塞处理离开接收循环 |
+| 普通修改 RPC           |              1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和组织/交互修改；保留业务准入锁、CAS 与幂等                       |
+| 停止/取消 RPC          |              2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                  |
+| Conversation fork      |                       运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                               |
+| Git/Skill/图片配置写入 |                           各自 dispatcher | 显式队列和独立 shutdown                                                                  |
+| 普通响应/notification  | 8 MiB 正文 + 1 MiB 控制预留，最多 8192 帧 | 单 FIFO、相邻正文合并、就绪批量写入；大非正文帧独立单 lease                              |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
 
@@ -122,9 +122,9 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。输出准入独立按字节和帧数限制；不在 Runtime 回调或持业务锁时阻塞等待 stdout。
 
-普通输出由 `outbound.rs` 拥有序列化后的行：4 MiB 正文预算，另为响应和非正文事件预留 512 KiB / 64 帧，总帧上限 8192。普通、单份 childEvent 及旧 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；childEvent 与旧 observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
+普通输出由 `outbound.rs` 拥有序列化后的行：8 MiB 正文预算，另为响应和非正文事件预留 1 MiB / 64 帧，总帧上限 8192。普通、单份 childEvent 及旧 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；childEvent 与旧 observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
 
-既有 JSON-RPC 未限制响应大小，所以允许最多一个超预算完整非 delta 帧（RPC 响应、完整消息或终态等），其 lease 持到 flush；预算按实际已分配缓冲容量记账，为常规队列加一个最大在途完整帧，再加有限 writer batch、序列化临时空间和既有两个图片 Artifact permit。不能把它描述为整个进程严格 4.5 MiB。控制预留保证入队空间，不赋予跨越同 Run 前序正文的权限，慢管道及单个大行仍可延迟控制。
+既有 JSON-RPC 未限制响应大小，所以允许最多一个超预算完整非 delta 帧（RPC 响应、完整消息或终态等），其 lease 持到 flush；预算按实际已分配缓冲容量记账，为常规队列加一个最大在途完整帧，再加有限 writer batch、序列化临时空间和既有两个图片 Artifact permit。不能把它描述为整个进程严格 9 MiB。控制预留保证入队空间，不赋予跨越同 Run 前序正文的权限，慢管道及单个大行仍可延迟控制。
 
 同步生产者耗尽容量时让整条连接明确失败：拒绝后续发送、唤醒请求准入停止，尽可能按 FIFO 刷完已接纳行，再发送固定错误 `id:null / -32002 / data.code=outbound_overloaded`。独立错误槽不占正文预算；失败或关闭开始后 writer 排空最多等 5 秒，正常写入没有这个总时限。Main 立即拒绝 pending 请求，屏蔽该连接的迟到通知，等待旧进程实际退出才允许惰性重启。断管或超时无法保证错误行已送达，按断连和持久恢复处理；已开始的阻塞业务仍需完成收尾，writer 的 5 秒不是进程退出承诺。
 
@@ -132,9 +132,9 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、Agent 各通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
 
-组织与子 Agent 混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server --bin core-server transport::outbound::workload_tests -- --nocapture`。使用独立内存管道，组合 1/16/50 个子 Agent、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。每组对比完整信封与运行摘要，同一组的子事件、历史响应、控制响应及待收邮件事实完全相同。报告固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制和摘要计数等价。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
+组织与子 Agent 混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server --bin core-server transport::outbound::workload_tests -- --nocapture`。使用独立内存管道，组合 1/16/50 个子 Agent、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。每组对比完整信封与运行摘要，同一组的子事件、历史响应、控制响应及待收邮件事实完全相同。报告实际使用的字节/帧预算、固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制和摘要计数等价。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
 
-2026-10-07 本地配对结果（十进制 MB，正常接收端完整输出）：
+2026-10-07 扩容前的本地配对结果（数据 4 MiB + 控制预留 512 KiB、8192 帧；十进制 MB，正常接收端完整输出）：
 
 | 子 Agent / 待收邮件 | 完整信封 | 运行摘要 | 完整投递帧数 |
 | ------------------- | -------: | -------: | -----------: |
@@ -142,7 +142,9 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 | 16 / 512            |  7.41 MB |  2.05 MB |         2196 |
 | 50 / 1024           | 14.88 MB |  4.13 MB |         6548 |
 
-50 子 Agent 负载的字节量减少约 72.2%。在逐行人为延迟的接收端，完整信封版本触发原有容量限制，摘要版本完整送达 6548 帧；摘要在全部六种组合中均未超载。接收端的每行延迟仍会积累，摘要不减少子事件帧数；慢接收端的控制响应 p95 不能与提前中止的完整版本作速度比较，也不能由此声称 UI 延迟下降相同比例。此结果支持先采用运行摘要，保留已有 childEvent cursor 协议与 writer 批写，不新增子流合并协议。后续若真实诊断仍显示 childEvent 帧数或解析成本占主导，再评估保留逐项 cursor、工具与终态边界的批量封装。
+50 子 Agent 负载的字节量减少约 72.2%。在该次逐行人为延迟的接收端测试中，完整信封版本触发原有容量限制，摘要版本完整送达 6548 帧；摘要在全部六种组合中均未超载。接收端的每行延迟仍会积累，摘要不减少子事件帧数；慢接收端的控制响应 p95 不能与提前中止的完整版本作速度比较，也不能由此声称 UI 延迟下降相同比例。此结果支持先采用运行摘要，保留已有 childEvent cursor 协议与 writer 批写，不新增子流合并协议。后续若真实诊断仍显示 childEvent 帧数或解析成本占主导，再评估保留逐项 cursor、工具与终态边界的批量封装。
+
+后续将默认字节预算扩至 8 MiB + 1 MiB，帧数、writer 批大小和 5 秒关闭截止保持不变，用于增加突发缓冲余量。扩容后的同负载测试中，摘要的六种组合均完整投递且无截尾；旧完整投影在 50 个子 Agent 的慢读取场景仍会超载，扩容不等于提高持续消费速度。基准记录关闭超时及末帧截断字节，只有已超载且关闭超时的失败连接允许末帧截断，健康连接和摘要负载仍必须完整投递。慢读取测试先等待正常消费追赶再关闭，不能据此承诺满队列可在 5 秒内排空。
 
 数据库侧可用 `python3 scripts/benchmark-workflow-summary.py` 独立复现。脚本读取实际 canonical schema 和查询 SQL，以 32 个成员、每个输入 4 条事件及 8 KiB JSON 构造内存库，比较旧完整查询、会扫描历史的初版摘要和最终摘要，并检查后两者事实等价及查询计划。SQLite 3.51 的 7 次热查询中位数中，1000 / 10000 / 100000 条事件的最终摘要分别约 0.31 / 0.31 / 0.36 ms；100000 条时旧查询约 6.51 ms，初版摘要约 46.06 ms。最终读取通过事务维护的对话变化水位及定向索引避免随已处理邮件历史增长；待收计数仍与当前待收邮件数相关，对话变化列表仍与历史对话身份数相关。结果包含 SQLite 取行与 Python 行对象分配，不含 Rust JSON 解码、真实磁盘或 UI 渲染；索引和回填成本另行报告。
 
