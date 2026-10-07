@@ -465,51 +465,59 @@ describe('organization workspace synchronization', () => {
       )
       .toBe(instance.id)
   })
-  it('refreshes managed members and initializes new conversation defaults without a source template', async () => {
-    mocks.request.mockResolvedValue({
-      records: [],
-      issues: [],
-      instances: [
-        {
-          ...instance,
-          bindings: instance.bindings.slice(0, 1),
-          definition: { ...definition, nodes: definition.nodes.slice(0, 1) }
-        }
-      ]
-    })
-    const screen = await render(<Harness />)
-    const read = () => JSON.parse(screen.getByTestId('state').element().textContent!)
-    await expect.poll(() => read().memberships.existing?.id).toBe(instance.id)
-    expect(read().neighbors.existing).toEqual([])
-    mocks.request.mockResolvedValue({ records: [], issues: [], instances: [instance] })
-    const snapshot: WorkflowRuntimeSnapshot = {
-      instanceId: instance.id,
-      sequence: 1,
-      inputs: [],
-      events: [
-        {
-          instanceId: instance.id,
-          sequence: 1,
-          kind: 'members_changed',
-          sourceNodeId: 'agent-a',
-          targetNodeId: null,
-          inputId: null,
-          messageId: null,
-          createdAt: 2
-        }
-      ]
+  it.each(['events', 'summary'])(
+    'refreshes managed members and initializes new defaults from %s',
+    async (mode) => {
+      mocks.request.mockResolvedValue({
+        records: [],
+        issues: [],
+        instances: [
+          {
+            ...instance,
+            bindings: instance.bindings.slice(0, 1),
+            definition: { ...definition, nodes: definition.nodes.slice(0, 1) }
+          }
+        ]
+      })
+      const screen = await render(<Harness />)
+      const read = () => JSON.parse(screen.getByTestId('state').element().textContent!)
+      await expect.poll(() => read().memberships.existing?.id).toBe(instance.id)
+      expect(read().neighbors.existing).toEqual([])
+      mocks.request.mockResolvedValue({ records: [], issues: [], instances: [instance] })
+      const snapshot: WorkflowRuntimeSnapshot = {
+        instanceId: instance.id,
+        sequence: 1,
+        inputs: [],
+        events: [
+          {
+            instanceId: instance.id,
+            sequence: 1,
+            kind: 'members_changed',
+            sourceNodeId: 'agent-a',
+            targetNodeId: null,
+            inputId: null,
+            messageId: null,
+            createdAt: 2
+          }
+        ]
+      }
+      if (mode === 'summary') {
+        snapshot.sequence = 700
+        snapshot.events = []
+        snapshot.summary = { pendingByNode: [], conversationChanges: [], structureRevision: 1 }
+      }
+      mocks.runtimeListener?.(snapshot)
+      await expect.poll(() => read().conversations).toHaveLength(3)
+      await expect.poll(() => read().drafts.created?.modelId).toBe('template-model')
+      expect(read().drafts.existing.modelId).toBe('existing-model')
+      expect(read().neighbors.existing).toEqual([
+        { nodeId: 'agent-b', name: 'Created role', conversationId: 'created' }
+      ])
+      const reads = mocks.request.mock.calls.length
+      mocks.runtimeListener?.(snapshot)
+      expect(mocks.request.mock.calls.length).toBe(reads)
     }
-    mocks.runtimeListener?.(snapshot)
-    await expect.poll(() => read().conversations).toHaveLength(3)
-    await expect.poll(() => read().drafts.created?.modelId).toBe('template-model')
-    expect(read().drafts.existing.modelId).toBe('existing-model')
-    expect(read().neighbors.existing).toEqual([
-      { nodeId: 'agent-b', name: 'Created role', conversationId: 'created' }
-    ])
-    const reads = mocks.request.mock.calls.length
-    mocks.runtimeListener?.(snapshot)
-    expect(mocks.request.mock.calls.length).toBe(reads)
-  })
+  )
   it('does not reset existing preferences when member invalidation overtakes the initial catalog read', async () => {
     let resolveInitial!: (value: WorkflowResponse) => void
     mocks.request

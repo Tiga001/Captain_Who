@@ -300,7 +300,7 @@ function WorkflowPageContent({
     window.addEventListener('focus', focused)
     const unsubscribe = hostClient.agent.onWorkflowRuntimeChanged?.((snapshot) => {
       const sequence = Math.max(
-        0,
+        snapshot.summary?.structureRevision ?? 0,
         ...snapshot.events
           .filter((event) => event.kind === 'members_changed')
           .map((event) => event.sequence)

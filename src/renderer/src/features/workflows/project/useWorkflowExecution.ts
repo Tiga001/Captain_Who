@@ -106,6 +106,7 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
         const response = await requestWorkflows({
           operation: 'runtimeSnapshot',
           instanceId,
+          summaryOnly: true,
           ...(cursor === null ? {} : { afterSequence: cursor })
         })
         if (response.runtime) accept(response.runtime, true)

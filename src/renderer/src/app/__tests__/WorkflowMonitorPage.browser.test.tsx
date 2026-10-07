@@ -143,6 +143,23 @@ beforeEach(async () => {
 })
 
 describe('organization read-only monitor', () => {
+  it('shows pending counts and stopped markers from a summary without mail envelopes', async () => {
+    execution.snapshot = {
+      instanceId: instance.id,
+      sequence: 700,
+      inputs: [],
+      events: [],
+      pausedConversationIds: ['chat-plan'],
+      summary: {
+        pendingByNode: [{ nodeId: 'plan', count: 9 }],
+        conversationChanges: [],
+        structureRevision: 1
+      }
+    }
+    const view = await render(renderPage())
+    await expect.element(view.getByLabelText('9 封未处理邮件')).toBeVisible()
+    await expect.element(view.getByText('被停止')).toBeVisible()
+  })
   it('pans a fitted graph and zooms around the mouse without editing the graph', async () => {
     const before = structuredClone(graph)
     const screen = await render(renderPage())

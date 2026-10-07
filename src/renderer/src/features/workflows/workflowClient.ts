@@ -60,7 +60,11 @@ export function requestWorkflows(input: WorkflowRequest): Promise<WorkflowRespon
     input.operation === 'listInstances'
       ? 'instances'
       : input.operation === 'runtimeSnapshot'
-        ? JSON.stringify([input.instanceId, input.afterSequence ?? null])
+        ? JSON.stringify([
+            input.instanceId,
+            input.afterSequence ?? null,
+            input.summaryOnly ?? false
+          ])
         : null
   if (key === null) return performRequest(input)
   const pending = pendingRecoveryReads.get(key)

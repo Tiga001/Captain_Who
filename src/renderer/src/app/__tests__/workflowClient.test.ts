@@ -73,15 +73,16 @@ it('does not substitute cursor queries for full recovery or retain failed reads'
   const reads = [
     requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org' }),
     requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org', afterSequence: 0 }),
-    requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org', afterSequence: 5 })
+    requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org', afterSequence: 5 }),
+    requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org', summaryOnly: true })
   ]
-  expect(host.request).toHaveBeenCalledTimes(3)
+  expect(host.request).toHaveBeenCalledTimes(4)
   const settled = Promise.allSettled(reads)
   reject(new Error('temporarily unavailable'))
   expect((await settled).every((result) => result.status === 'rejected')).toBe(true)
   host.request.mockResolvedValue(success)
   await requestWorkflows({ operation: 'runtimeSnapshot', instanceId: 'org' })
-  expect(host.request).toHaveBeenCalledTimes(4)
+  expect(host.request).toHaveBeenCalledTimes(5)
 })
 
 it('starts fresh reads after a committed notification without disrupting unrelated organizations', async () => {

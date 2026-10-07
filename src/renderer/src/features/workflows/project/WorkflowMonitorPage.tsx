@@ -65,13 +65,15 @@ export function WorkflowMonitorPage({
     [conversations]
   )
   const pendingMailByNode = useMemo(() => {
+    if (snapshot?.summary)
+      return new Map(snapshot.summary.pendingByNode.map((row) => [row.nodeId, row.count]))
     const counts = new Map<string, number>()
     for (const input of snapshot?.inputs ?? []) {
       if (input.mailStatus === 'pending')
         counts.set(input.nodeId, (counts.get(input.nodeId) ?? 0) + 1)
     }
     return counts
-  }, [snapshot?.inputs])
+  }, [snapshot])
   const modelById = useMemo(() => new Map(models.map((model) => [model.id, model])), [models])
   const departments = useMemo(
     () =>

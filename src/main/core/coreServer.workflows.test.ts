@@ -35,7 +35,8 @@ describe('workflow IPC contract boundary', () => {
     const runtime = { instanceId: 'workflow', sequence: 3, inputs: [], events: [] }
     rpcRequest.mockResolvedValue({ records: [], issues: [], runtime })
     for (const request of [
-      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', afterSequence: 2 }
+      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', afterSequence: 2 },
+      { operation: 'runtimeSnapshot' as const, instanceId: 'workflow', summaryOnly: true }
     ]) {
       await expect(server.requestWorkflows(request)).resolves.toEqual({
         records: [],

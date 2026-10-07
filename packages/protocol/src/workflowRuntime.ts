@@ -63,6 +63,14 @@ export interface WorkflowRuntimeSnapshot {
   inputRuns?: { inputId: string; status: string }[]
   /** Present only on a fresh edit notification, never on historical/replayed snapshots. */
   preferenceUpdates?: WorkflowPreferenceUpdate[]
+  /** Metadata projection; historical bodies/envelopes remain available through explicit reads. */
+  summary?: WorkflowRuntimeSummary
+}
+export interface WorkflowRuntimeSummary {
+  pendingByNode: { nodeId: string; count: number }[]
+  conversationChanges: { conversationId: string; sequence: number }[]
+  /** Durable management event sequence, independent of the recent event window. */
+  structureRevision: number
 }
 export interface WorkflowPreferenceUpdate {
   nodeId: string
@@ -248,13 +256,14 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   const item = record(
     value,
     ['instanceId', 'sequence', 'inputs', 'events'],
-    ['pausedConversationIds', 'inputRuns', 'preferenceUpdates']
+    ['pausedConversationIds', 'inputRuns', 'preferenceUpdates', 'summary']
   )
   const result = {
     instanceId: id(item.instanceId),
     sequence: integer(item.sequence),
     inputs: list(item.inputs, parseWorkflowRuntimeInput, 4096),
     events: list(item.events, parseWorkflowRuntimeEvent, 4096),
+    ...(item.summary !== undefined ? { summary: parseWorkflowRuntimeSummary(item.summary) } : {}),
     ...(item.preferenceUpdates !== undefined
       ? { preferenceUpdates: list(item.preferenceUpdates, parseWorkflowPreferenceUpdate, 256) }
       : {}),
@@ -293,6 +302,11 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   }
   const inputIds = new Set(result.inputs.map((input) => input.id))
   if (
+    (result.summary !== undefined &&
+      (result.inputs.length > 0 ||
+        (result.inputRuns?.length ?? 0) > 0 ||
+        result.summary.structureRevision > result.sequence ||
+        result.summary.conversationChanges.some((change) => change.sequence > result.sequence))) ||
     result.inputs.some((input) => input.instanceId !== result.instanceId) ||
     result.inputRuns?.some((run) => !inputIds.has(run.inputId)) ||
     result.events.some(
@@ -305,6 +319,36 @@ export function parseWorkflowRuntimeSnapshot(value: unknown): WorkflowRuntimeSna
   )
     throw new Error('Invalid organization runtime snapshot identity or cursor')
   return result
+}
+
+function parseWorkflowRuntimeSummary(value: unknown): WorkflowRuntimeSummary {
+  const item = record(value, ['pendingByNode', 'conversationChanges', 'structureRevision'])
+  const pendingByNode = list(
+    item.pendingByNode,
+    (value) => {
+      const row = record(value, ['nodeId', 'count'])
+      return { nodeId: id(row.nodeId), count: integer(row.count) }
+    },
+    128
+  )
+  // This recovery index includes former members and grows with historical conversation count.
+  // An item cap would reject the entire notification and silently lose terminal facts. Transport
+  // remains byte-accounted; consumers retain cursors only for their local conversations.
+  const conversationChanges = list(
+    item.conversationChanges,
+    (value) => {
+      const row = record(value, ['conversationId', 'sequence'])
+      return { conversationId: id(row.conversationId), sequence: integer(row.sequence) }
+    },
+    Number.POSITIVE_INFINITY
+  )
+  if (
+    new Set(pendingByNode.map((row) => row.nodeId)).size !== pendingByNode.length ||
+    new Set(conversationChanges.map((row) => row.conversationId)).size !==
+      conversationChanges.length
+  )
+    throw new Error('Duplicate organization runtime summary identity')
+  return { pendingByNode, conversationChanges, structureRevision: integer(item.structureRevision) }
 }
 
 function parseWorkflowPreferenceUpdate(value: unknown): WorkflowPreferenceUpdate {

@@ -2031,6 +2031,25 @@ describe('global organization management', () => {
     })
   })
 
+  it('recovers member changes from a durable summary revision outside the event window', async () => {
+    instances = [instance('existing', '原组织', [])]
+    await mount()
+    await expect.element(page.getByText('原组织', { exact: true })).toBeVisible()
+    instances = [{ ...instances[0], name: '恢复后的组织', revision: 2 }]
+    const snapshot: WorkflowRuntimeSnapshot = {
+      instanceId: 'existing',
+      sequence: 700,
+      inputs: [],
+      events: [],
+      summary: { pendingByNode: [], conversationChanges: [], structureRevision: 42 }
+    }
+    service.runtimeListeners.forEach((listener) => listener(snapshot))
+    await expect.element(page.getByText('恢复后的组织', { exact: true })).toBeVisible()
+    const reads = service.request.mock.calls.length
+    service.runtimeListeners.forEach((listener) => listener(snapshot))
+    expect(service.request).toHaveBeenCalledTimes(reads)
+  })
+
   it('preserves edits made during automatic synchronization and applies a later member notification', async () => {
     instances = [
       instance('existing', '独立组织', [

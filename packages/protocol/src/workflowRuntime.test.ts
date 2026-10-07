@@ -7,6 +7,7 @@ import {
 } from './workflowRuntime'
 import { parseWorkflowRequest, parseWorkflowResponse } from './workflows'
 import { assertNoHumanInteractionMessageProof } from './storageHumanInteraction'
+import rustSummaryFixture from './fixtures/workflowRuntimeSummary.json'
 
 const source = (node: string): WorkflowSourceMessage => ({
   id: `message-${node}`,
@@ -58,6 +59,68 @@ const snapshot: WorkflowRuntimeSnapshot = {
   ]
 }
 describe('workflow runtime boundary', () => {
+  it('accepts the exact summary serialized by the Rust storage projection fixture', () => {
+    expect(parseWorkflowRuntimeSnapshot(rustSummaryFixture)).toEqual(rustSummaryFixture)
+    expect(
+      parseWorkflowResponse({ records: [], issues: [], runtime: rustSummaryFixture }).runtime
+    ).toEqual(rustSummaryFixture)
+  })
+  it('accepts complete runtime summaries without silently limiting historical conversations', () => {
+    const compact = {
+      ...snapshot,
+      inputs: [],
+      events: [],
+      summary: {
+        pendingByNode: [{ nodeId: 'reviewer', count: 7 }],
+        conversationChanges: Array.from({ length: 5000 }, (_, index) => ({
+          conversationId: `old-chat-${index}`,
+          sequence: 3
+        })),
+        structureRevision: 2
+      }
+    }
+    expect(parseWorkflowRuntimeSnapshot(compact)).toEqual(compact)
+    for (const summary of [
+      { ...compact.summary, structureRevision: 5 },
+      { ...compact.summary, extra: true },
+      { ...compact.summary, pendingByNode: [{ nodeId: 'reviewer', count: -1 }] },
+      {
+        ...compact.summary,
+        pendingByNode: [
+          { nodeId: 'reviewer', count: 1 },
+          { nodeId: 'reviewer', count: 2 }
+        ]
+      },
+      { ...compact.summary, conversationChanges: [{ conversationId: 'chat', sequence: 5 }] },
+      {
+        ...compact.summary,
+        conversationChanges: [
+          { conversationId: 'chat', sequence: 1 },
+          { conversationId: 'chat', sequence: 2 }
+        ]
+      }
+    ])
+      expect(() => parseWorkflowRuntimeSnapshot({ ...compact, summary })).toThrow()
+    expect(() => parseWorkflowRuntimeSnapshot({ ...compact, inputs: snapshot.inputs })).toThrow()
+    expect(
+      parseWorkflowRequest({
+        operation: 'runtimeSnapshot',
+        instanceId: 'workflow',
+        summaryOnly: true
+      })
+    ).toEqual({
+      operation: 'runtimeSnapshot',
+      instanceId: 'workflow',
+      summaryOnly: true
+    })
+    expect(() =>
+      parseWorkflowRequest({
+        operation: 'runtimeSnapshot',
+        instanceId: 'workflow',
+        summaryOnly: 'true'
+      })
+    ).toThrow()
+  })
   it('accepts only bounded, field-specific fresh organization preference notifications', () => {
     const update = {
       nodeId: 'reviewer',

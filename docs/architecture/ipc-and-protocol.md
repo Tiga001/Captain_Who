@@ -208,6 +208,18 @@ readFileChange / getFileChangeDiff / getFileChangeHistoryDiff
 
 当前响应投影模板目录、校验问题、隔离的损坏记录、独立实例、编辑草稿及受影响对话；活动监视复用 Agent/协作事件和权威树/实例读取，收发邮件通过独立运行事件更新看板。定义含公共背景、成员职责/模型/权限、职级/管理身份、部门树与布局，不含固定连线或逻辑门；开启空邮箱不会启动模型。
 
+组织运行通知使用 `WorkflowRuntimeSnapshot`。生产通知和 Renderer 的恢复查询使用摘要投影；`runtimeSnapshot` 请求的可选 `summaryOnly: true` 选择该投影，省略或为 `false` 时保留完整格式供显式查询。两种格式使用同一个严格 parser，Main 和 Preload 都校验；Preload 在每个窗口内仅解析一次，再分发给当前订阅者，不缓存或重放上一份通知。
+
+摘要保留 `sequence`、真实事件、暂停对话和本次新编辑的 `preferenceUpdates`，`inputs` 与 `inputRuns` 为空，并附加 `summary`：
+
+- `pendingByNode` 是当前节点的待处理计数。
+- `conversationChanges` 是每个曾经实际投递过的对话的最新持久事件序号，包含已解绑的旧成员；它会随历史对话数量增长，并非固定长度快照，不做静默截断。
+- `structureRevision` 是最新成员结构变更事件序号，不是实例 revision。
+
+事件部分保留最新 512 条真实事件，以及每个当前节点、每种偏好字段的最新历史失效事件。`afterSequence` 只筛选最近事件，不能证明超过窗口的事件连续性；即使请求带游标，摘要事实仍然完整，历史偏好失效事件也可能早于游标。Renderer 仅对比新增的真实收发事件播放动画，历史偏好按节点及字段去重并使用预期值保护恢复，不能把它们重放为新的 `preferenceUpdates`。共享 [Rust/TypeScript fixture](../../packages/protocol/src/fixtures/workflowRuntimeSummary.json) 验证实际序列化与严格解析一致。
+
+常驻对话同步按摘要中的持久序号重新读取权威对话，保留终态、未读和交互状态合并；水位只保存本地已知对话，同一对话在读取期间的多次通知合并为一次后续读取，并限制恢复读取并发。首次 scope、聚焦和定时恢复仍查询完整摘要，失败可重试；不能用游标查询替代这一兜底。相同参数仅共享在途恢复请求，完成后不缓存结果，账号切换清理水位和在途请求范围。隐藏看板只保留最新投影，暂停轮询和图渲染，常驻对话及偏好同步继续运行。
+
 模型侧使用 `organization_send`、`organization_get_state`、`organization_get_mailbox`、`organization_accept`、`organization_complete`、`organization_recall`，管理员另有 `organization_edit`。这些动态工具通过可信 Run 身份复验当前资格，与受信 UI 管理 RPC 的授权面不同；语义参数使用成员姓名、部门完整路径及邮件 ID，不允许模型填写内部绑定身份。实现真源见[动态工具扩展](../../crates/core/src/runtime/extensions/workflow.rs)，完整状态与事务边界见[组织邮件网络](../subsystems/organizations.md)。
 
 ## 输入引用与工作区来源

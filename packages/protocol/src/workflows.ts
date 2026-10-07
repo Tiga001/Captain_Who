@@ -53,7 +53,12 @@ export interface WorkflowRecord {
   issues: WorkflowIssue[]
 }
 export type WorkflowRequest =
-  | { operation: 'runtimeSnapshot'; instanceId: string; afterSequence?: number }
+  | {
+      operation: 'runtimeSnapshot'
+      instanceId: string
+      afterSequence?: number
+      summaryOnly?: boolean
+    }
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
   | {
@@ -376,10 +381,17 @@ function validateWorkflowDepartments(definition: WorkflowDefinition): void {
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
   if (op === 'runtimeSnapshot') {
-    const item = object(value, ['operation', 'instanceId', 'afterSequence'], ['afterSequence'])
+    const item = object(
+      value,
+      ['operation', 'instanceId', 'afterSequence', 'summaryOnly'],
+      ['afterSequence', 'summaryOnly']
+    )
+    if (item.summaryOnly !== undefined && typeof item.summaryOnly !== 'boolean')
+      throw new Error('Invalid summaryOnly')
     return {
       operation: op,
       instanceId: text(item.instanceId),
+      ...(item.summaryOnly !== undefined ? { summaryOnly: item.summaryOnly } : {}),
       ...(item.afterSequence !== undefined ? { afterSequence: integer(item.afterSequence) } : {})
     }
   }
