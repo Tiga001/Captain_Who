@@ -23,6 +23,7 @@ import {
   WORKFLOW_CONVERSATION_DRAG_TYPE
 } from '../../features/workflows/project/projectWorkflowText'
 import '../../styles/global.css'
+import { invalidateWorkflowPages } from '../../features/workflows/workflowPageCache'
 
 const service = vi.hoisted(() => ({
   request: vi.fn(),
@@ -133,6 +134,7 @@ const instance = (
 })
 
 beforeEach(async () => {
+  invalidateWorkflowPages()
   await page.viewport(1440, 900)
   const css = getFrontendCssVariables(undefined, classicDarkTheme)
   for (const [key, value] of Object.entries(css))
@@ -385,6 +387,64 @@ function SidebarWorkflowHarness({
 }
 
 describe('organization sidebar adapter', () => {
+  it('opens a single organization without loading templates and reuses its snapshot after external navigation', async () => {
+    instances = [
+      instance('workflow-a', '交付看板', [{ nodeId: 'analysis', conversationId: 'chat-a' }])
+    ]
+    service.request.mockImplementation(async (input: WorkflowRequest) => {
+      if (input.operation !== 'getInstance') throw new Error('Catalog must not block the board')
+      return { records: [], issues: [], instances }
+    })
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByTestId('workflow-tab-title')).toHaveTextContent('交付看板')
+    expect(service.request).toHaveBeenCalledExactlyOnceWith({
+      operation: 'getInstance',
+      instanceId: 'workflow-a'
+    })
+    service.request.mockClear()
+    service.request.mockImplementation(() => new Promise(() => undefined))
+    await screen.rerender(<SidebarWorkflowHarness instanceId="workflow-a" navigationId={2} />)
+    await expect.element(screen.getByTestId('workflow-tab-title')).toHaveTextContent('交付看板')
+    expect(screen.container.textContent).not.toContain('正在加载组织')
+    expect(service.request).toHaveBeenCalledExactlyOnceWith({
+      operation: 'getInstance',
+      instanceId: 'workflow-a'
+    })
+  })
+
+  it('shares an unresolved initial read with focus recovery and ends loading when the read fails', async () => {
+    let reject!: (error: Error) => void
+    service.request.mockImplementation(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail
+        })
+    )
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByText('正在加载组织…')).toBeVisible()
+    window.dispatchEvent(new Event('focus'))
+    expect(service.request).toHaveBeenCalledTimes(1)
+    reject(new Error('read failed'))
+    await expect.element(screen.getByText('组织已不可用')).toBeVisible()
+    await expect.element(screen.getByRole('button', { name: '重试', exact: true })).toBeVisible()
+  })
+
+  it('retains the initial result when focus refresh overlaps its request', async () => {
+    let resolve!: (response: WorkflowResponse) => void
+    service.request.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        })
+    )
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByText('正在加载组织…')).toBeVisible()
+    window.dispatchEvent(new Event('focus'))
+    resolve({ records: [], issues: [], instances: [instance('workflow-a', '交付看板', [])] })
+    await expect.element(screen.getByTestId('workflow-tab-title')).toHaveTextContent('交付看板')
+    expect(service.request).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the live diagram when conversations update and changes the tab title when returning home', async () => {
     instances = [
       instance('workflow-a', '交付看板', [{ nodeId: 'analysis', conversationId: 'chat-a' }])
@@ -463,7 +523,7 @@ describe('global organization management', () => {
     expect(onMonitorChange).toHaveBeenCalledWith('workflow-a')
     expect(
       service.request.mock.calls.every(([input]) =>
-        ['list', 'listInstances'].includes(input.operation)
+        ['list', 'listInstances', 'getInstance'].includes(input.operation)
       )
     ).toBe(true)
     await page.getByRole('button', { name: '返回组织', exact: true }).click()
@@ -513,7 +573,7 @@ describe('global organization management', () => {
     })
     await expect.element(conversation).toBeVisible()
     const listReads = () =>
-      service.request.mock.calls.filter(([input]) => input.operation === 'list').length
+      service.request.mock.calls.filter(([input]) => input.operation === 'getInstance').length
     const before = listReads()
     instances = [{ ...instances[0], name: '自动恢复的看板', revision: 2 }]
     service.request.mockRejectedValueOnce(new Error('Invalid organization fields'))

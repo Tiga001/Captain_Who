@@ -24,6 +24,12 @@ import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
 import type { ConversationAttentionById } from '../../chat/useConversationAttention'
 import { SettingsSelect } from '../../settings/components/SettingsSelect'
 import { requestWorkflows } from '../workflowClient'
+import {
+  getCachedWorkflowPage,
+  invalidateWorkflowPages,
+  isCurrentWorkflowPage,
+  readWorkflowPage
+} from '../workflowPageCache'
 import { workflowErrorDetail, workflowUnavailableMemberModels } from '../workflowErrors'
 import { WorkflowIssues } from '../WorkflowIssues'
 import { WorkflowGraphEditor } from '../WorkflowGraphEditor'
@@ -116,8 +122,9 @@ export function WorkflowsPage({
   const editorId = useId()
   const [editorTab, setEditorTab] = useState<'details' | 'structure'>('structure')
   const t = useMemo(() => projectWorkflowText(language), [language])
-  const [records, setRecords] = useState<WorkflowRecord[]>([])
-  const [instances, setInstances] = useState<WorkflowInstance[]>([])
+  const [initialSnapshot] = useState(() => getCachedWorkflowPage(initialMonitorId ?? null))
+  const [records, setRecords] = useState<WorkflowRecord[]>(initialSnapshot?.records ?? [])
+  const [instances, setInstances] = useState<WorkflowInstance[]>(initialSnapshot?.instances ?? [])
   const [monitorId, setMonitorId] = useState<string | null>(initialMonitorId ?? null)
   useEffect(() => {
     setMonitorId(initialMonitorId ?? null)
@@ -128,10 +135,11 @@ export function WorkflowsPage({
   }
   const { runningInstanceIds, activityByInstanceId } = useWorkflowActivity(
     monitorId ? [] : instances,
-    conversations
+    conversations,
+    foreground
   )
-  const [loading, setLoading] = useState(true)
-  const [hasSnapshot, setHasSnapshot] = useState(false)
+  const [loading, setLoading] = useState(!initialSnapshot)
+  const [hasSnapshot, setHasSnapshot] = useState(!!initialSnapshot)
   const [error, setErrorMessage] = useState('')
   const [errorKind, setErrorKind] = useState<'models_unavailable' | null>(null)
   const [errorAcknowledged, setErrorAcknowledged] = useState(false)
@@ -161,6 +169,10 @@ export function WorkflowsPage({
   const managementVersions = useRef(new Map<string, number>())
   const pendingManagementVersions = useRef(new Map<string, number>())
   const pendingOrganizationRefresh = useRef(false)
+  const foregroundRef = useRef(foreground)
+  useLayoutEffect(() => {
+    foregroundRef.current = foreground
+  }, [foreground])
   const dirty =
     !!draft &&
     (draftKey(draft) !== draft.baseline || (!!graph && workflowContentKey(graph) !== graphBaseline))
@@ -187,11 +199,13 @@ export function WorkflowsPage({
   )
 
   const reload = useCallback(async () => {
-    const generation = ++requestGeneration.current
+    const generation = requestGeneration.current
     setLoading(true)
     setError('')
     try {
-      const templates = await requestWorkflows({ operation: 'list' })
+      // Cached content paints immediately, but closing a tab can miss structural
+      // notifications. Always revalidate on navigation without blanking the board.
+      const templates = await readWorkflowPage(monitorId, requestWorkflows, true)
       if (generation !== requestGeneration.current) return
       setRecords(templates.records)
       setInstances((current) => keepInstanceOrder(current, templates.instances ?? []))
@@ -206,7 +220,7 @@ export function WorkflowsPage({
     } finally {
       if (generation === requestGeneration.current) setLoading(false)
     }
-  }, [language, setError, setLoading, setRecords, setInstances, setHasSnapshot])
+  }, [language, monitorId, setError, setLoading, setRecords, setInstances, setHasSnapshot])
 
   useEffect(() => {
     void reload()
@@ -232,6 +246,7 @@ export function WorkflowsPage({
     const flush = async () => {
       if (
         stopped ||
+        !foregroundRef.current ||
         reading ||
         !pendingOrganizationRefresh.current ||
         busyRef.current ||
@@ -242,18 +257,18 @@ export function WorkflowsPage({
       clearTimeout(retryTimer)
       pendingOrganizationRefresh.current = false
       reading = true
-      const versions = new Map(pendingManagementVersions.current)
       const result = await synchronizeVersionRef.current()
       reading = false
       if (stopped) return
       if (result === 'applied') {
         failures = 0
-        for (const [id, sequence] of versions) {
+        // readWorkflowPage folds invalidations received during the flight into its
+        // result. They do not require a third, identical read after it completes.
+        pendingOrganizationRefresh.current = false
+        for (const [id, sequence] of pendingManagementVersions.current) {
           managementVersions.current.set(id, sequence)
-          if ((pendingManagementVersions.current.get(id) ?? 0) <= sequence)
-            pendingManagementVersions.current.delete(id)
         }
-        if (pendingOrganizationRefresh.current) void flush()
+        pendingManagementVersions.current.clear()
       } else {
         pendingOrganizationRefresh.current = true
         // Retry failed reads without spinning or interrupting editing.
@@ -261,13 +276,17 @@ export function WorkflowsPage({
         retryTimer = setTimeout(() => void flush(), delay)
       }
     }
-    const changed = () => {
+    const focused = () => {
       pendingOrganizationRefresh.current = true
       void flush()
     }
+    const changed = () => {
+      invalidateWorkflowPages()
+      focused()
+    }
     flushRefreshRef.current = () => void flush()
     window.addEventListener('captain:workflows-changed', changed)
-    window.addEventListener('focus', changed)
+    window.addEventListener('focus', focused)
     const unsubscribe = hostClient.agent.onWorkflowRuntimeChanged?.((snapshot) => {
       const sequence = Math.max(
         0,
@@ -291,13 +310,13 @@ export function WorkflowsPage({
       clearTimeout(retryTimer)
       flushRefreshRef.current = () => undefined
       window.removeEventListener('captain:workflows-changed', changed)
-      window.removeEventListener('focus', changed)
+      window.removeEventListener('focus', focused)
       unsubscribe?.()
     }
   }, [])
   useEffect(() => {
     flushRefreshRef.current()
-  }, [busy, togglingId, pendingSync])
+  }, [busy, togglingId, pendingSync, foreground])
 
   const agents = graph?.nodes.filter((node) => node.kind === 'agent') ?? []
   const readyRecords = records.filter((record) => record.enabled && record.issues.length === 0)
@@ -396,11 +415,12 @@ export function WorkflowsPage({
   }
 
   const synchronizeVersion = async (): Promise<'applied' | 'deferred' | 'failed'> => {
-    const generation = ++requestGeneration.current
+    const generation = requestGeneration.current
     try {
-      const templates = await requestWorkflows({ operation: 'list' })
+      const templates = await readWorkflowPage(monitorId, requestWorkflows, true)
       if (
         generation !== requestGeneration.current ||
+        !isCurrentWorkflowPage(monitorId, templates) ||
         busyRef.current ||
         togglingIdRef.current ||
         editorSnapshot.current.pendingSync
@@ -543,6 +563,7 @@ export function WorkflowsPage({
   }
 
   const acceptCommit = async (response: WorkflowResponse) => {
+    invalidateWorkflowPages()
     requestGeneration.current += 1
     setLoading(false)
     setInstances((current) => keepInstanceOrder(current, response.instances ?? []))
@@ -756,6 +777,7 @@ export function WorkflowsPage({
         enabled: !instance.enabled,
         expectedRevision: instance.revision
       })
+      invalidateWorkflowPages()
       setInstances((current) => keepInstanceOrder(current, response.instances ?? []))
       setRecords(response.records)
       await synchronizeCommit(response)

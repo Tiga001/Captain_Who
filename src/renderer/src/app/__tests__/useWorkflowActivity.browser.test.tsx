@@ -94,12 +94,18 @@ const emitCollaboration = (root: string, kind: CollaborationEventEnvelope['kind'
 
 function Harness({
   instances,
-  conversations = []
+  conversations = [],
+  foreground = true
 }: {
   instances: WorkflowInstance[]
   conversations?: ChatConversation[]
+  foreground?: boolean
 }) {
-  const { runningInstanceIds, activityByInstanceId } = useWorkflowActivity(instances, conversations)
+  const { runningInstanceIds, activityByInstanceId } = useWorkflowActivity(
+    instances,
+    conversations,
+    foreground
+  )
   return (
     <>
       <output data-testid="activity">{[...runningInstanceIds].sort().join(',') || 'idle'}</output>
@@ -128,6 +134,21 @@ afterEach(() => {
 })
 
 describe('organization live activity', () => {
+  it('pauses list polling in a hidden retained tab and reconciles once on return', async () => {
+    const instances = [workflow()]
+    const view = await render(<Harness instances={instances} />)
+    await advance(200)
+    expect(mocks.request).toHaveBeenCalledTimes(1)
+    await view.rerender(<Harness instances={instances} foreground={false} />)
+    mocks.request.mockClear()
+    window.dispatchEvent(new Event('focus'))
+    await advance(10_200)
+    expect(mocks.request).not.toHaveBeenCalled()
+    await view.rerender(<Harness instances={instances} />)
+    await advance(200)
+    expect(mocks.request).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a local root run immediately, stops after settlement, and never lights disabled organizations', async () => {
     const instances = [workflow(), workflow({ id: 'disabled', enabled: false, running: true })]
     const view = await render(

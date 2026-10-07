@@ -80,7 +80,7 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
       timers.add(timer)
     }
     const refresh = async () => {
-      if (disposed || document.visibilityState === 'hidden') return
+      if (disposed || !foregroundRef.current || document.visibilityState === 'hidden') return
       if (pending) {
         dirty = true
         return

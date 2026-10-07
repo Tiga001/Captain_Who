@@ -150,14 +150,17 @@ const advance = async (ms = 100) => {
 }
 function Harness({
   instance = workflow(),
-  conversations = []
+  conversations = [],
+  foreground = true
 }: {
   instance?: WorkflowInstance
   conversations?: ChatConversation[]
+  foreground?: boolean
 }) {
   const { runningConversationIds, waitingApprovalConversationIds } = useWorkflowMonitor(
     instance,
-    conversations
+    conversations,
+    foreground
   )
   return (
     <>
@@ -188,6 +191,21 @@ afterEach(() => {
 })
 
 describe('organization read-only activity monitor', () => {
+  it('reads each member once on mount and suspends recovery while its retained tab is hidden', async () => {
+    const view = await render(<Harness />)
+    await advance(200)
+    expect(mocks.getTree).toHaveBeenCalledTimes(2)
+    await view.rerender(<Harness foreground={false} />)
+    mocks.getTree.mockClear()
+    mocks.resync.forEach((listener) => listener())
+    window.dispatchEvent(new Event('focus'))
+    await advance(10_200)
+    expect(mocks.getTree).not.toHaveBeenCalled()
+    await view.rerender(<Harness />)
+    await advance(200)
+    expect(mocks.getTree).toHaveBeenCalledTimes(2)
+  })
+
   it('aggregates root and child approvals from authoritative trees even for unloaded and disabled conversations', async () => {
     mocks.getTree.mockImplementation(async ({ rootConversationId }) =>
       tree(rootConversationId, [], 0, [rootConversationId === 'chat-a' ? 'chat-a' : 'chat-b-child'])

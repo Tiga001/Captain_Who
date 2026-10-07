@@ -6,6 +6,7 @@ import { getFrontendCssVariables } from '../../config/frontendConfig'
 import { classicLightTheme } from '../../config/themes/classic'
 import { ToastProvider } from '../../components/toast/ToastProvider'
 import '../../styles/global.css'
+import { invalidateWorkflowPages } from '../../features/workflows/workflowPageCache'
 
 const service = vi.hoisted(() => ({ request: vi.fn(), openConversation: vi.fn() }))
 vi.mock('../../host/hostClient', () => ({
@@ -89,6 +90,7 @@ const instance: WorkflowInstance = {
 }
 
 beforeEach(async () => {
+  invalidateWorkflowPages()
   await page.viewport(1440, 900)
   for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, classicLightTheme)))
     document.documentElement.style.setProperty(key, value)

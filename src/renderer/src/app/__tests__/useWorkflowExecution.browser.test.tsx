@@ -43,8 +43,14 @@ function snapshot(
     ]
   }
 }
-function Harness({ instanceId = 'workflow' }: { instanceId?: string }) {
-  const execution = useWorkflowExecution(instanceId)
+function Harness({
+  instanceId = 'workflow',
+  foreground = true
+}: {
+  instanceId?: string
+  foreground?: boolean
+}) {
+  const execution = useWorkflowExecution(instanceId, foreground)
   return (
     <>
       <output data-testid="sequence">{execution.snapshot?.sequence ?? 'none'}</output>
@@ -62,9 +68,34 @@ beforeEach(() => {
   mocks.request.mockReset().mockResolvedValue({ records: [], issues: [], runtime: snapshot(4) })
   mocks.listeners.clear()
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('organization execution projection', () => {
+  it('keeps background mail state without polling or replaying its transmissions on return', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date']
+    })
+    const view = await render(<Harness />)
+    await expect.element(view.getByTestId('sequence')).toHaveTextContent('4')
+    await view.rerender(<Harness foreground={false} />)
+    mocks.request.mockClear()
+    await emit(snapshot(5))
+    window.dispatchEvent(new Event('focus'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+    })
+    expect(mocks.request).not.toHaveBeenCalled()
+    await expect.element(view.getByTestId('sequence')).toHaveTextContent('5')
+    mocks.request.mockResolvedValue({ records: [], issues: [], runtime: snapshot(6) })
+    await view.rerender(<Harness />)
+    await expect.element(view.getByTestId('sequence')).toHaveTextContent('6')
+    expect(mocks.request).toHaveBeenCalledTimes(1)
+    await expect.element(view.getByTestId('transmissions')).toHaveTextContent('none')
+  })
+
   it('never revives old transmissions when switching away and back to an instance', async () => {
     mocks.request.mockImplementation(async (request) => ({
       records: [],

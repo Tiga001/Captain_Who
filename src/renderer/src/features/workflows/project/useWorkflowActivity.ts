@@ -39,15 +39,19 @@ function instanceKey(instance: WorkflowInstance): string {
 /** Live presentation only: activity never reloads cards or changes a staged configuration. */
 export function useWorkflowActivity(
   instances: readonly WorkflowInstance[],
-  conversations: readonly ChatConversation[]
+  conversations: readonly ChatConversation[],
+  foreground = true
 ): {
   runningInstanceIds: ReadonlySet<string>
   activityByInstanceId: ReadonlyMap<string, WorkflowActivity | null>
 } {
   const latestInstances = useRef(instances)
+  const foregroundRef = useRef(foreground)
+  const previousForeground = useRef(foreground)
   useLayoutEffect(() => {
     latestInstances.current = instances
-  }, [instances])
+    foregroundRef.current = foreground
+  }, [instances, foreground])
   const [activity, setActivity] = useState<ReadonlyMap<string, ActivitySnapshot>>(new Map())
   const subscriptionKey = JSON.stringify(instances.map(instanceKey).sort())
   const intervalKey = JSON.stringify(
@@ -102,7 +106,7 @@ export function useWorkflowActivity(
     let refreshAgain = false
     let timer: ReturnType<typeof setTimeout> | null = null
     let scheduledAt = 0
-    const visible = () => document.visibilityState !== 'hidden'
+    const visible = () => foregroundRef.current && document.visibilityState !== 'hidden'
 
     const refresh = async () => {
       if (disposed || !visible()) return
@@ -213,6 +217,10 @@ export function useWorkflowActivity(
     // Root messages update immediately; a completion also reconciles a previously running snapshot.
     invalidate.current?.()
   }, [localActivityKey, intervalKey])
+  useEffect(() => {
+    if (foreground && !previousForeground.current) invalidate.current?.()
+    previousForeground.current = foreground
+  }, [foreground])
 
   return useMemo(
     () => ({

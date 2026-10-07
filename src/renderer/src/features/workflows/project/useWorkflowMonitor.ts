@@ -17,7 +17,8 @@ const sameIds = (left: ReadonlySet<string>, right: ReadonlySet<string>) =>
 /** Read-only live state; disabling a workflow does not stop its conversations. */
 export function useWorkflowMonitor(
   instance: WorkflowInstance,
-  conversations: readonly ChatConversation[]
+  conversations: readonly ChatConversation[],
+  foreground = true
 ): {
   runningConversationIds: ReadonlySet<string>
   waitingApprovalConversationIds: ReadonlySet<string>
@@ -28,9 +29,11 @@ export function useWorkflowMonitor(
   const key = JSON.stringify([instance.id, bindingKey])
   const roots = useMemo(() => new Set<string>(JSON.parse(bindingKey)), [bindingKey])
   const latestConversations = useRef(conversations)
+  const foregroundRef = useRef(foreground)
   useLayoutEffect(() => {
     latestConversations.current = conversations
-  }, [conversations])
+    foregroundRef.current = foreground
+  }, [conversations, foreground])
   const [state, setState] = useState<MonitorState>({
     key,
     running: new Set(),
@@ -50,6 +53,8 @@ export function useWorkflowMonitor(
     [conversations, roots]
   )
   const localKey = JSON.stringify([...localRunning].sort())
+  const previousLocalKey = useRef(localKey)
+  const previousForeground = useRef(foreground)
 
   useEffect(() => {
     if (!roots.size) return
@@ -64,7 +69,7 @@ export function useWorkflowMonitor(
     const pending = new Set<string>()
     const again = new Set<string>()
     const timers = new Map<string, { deadline: number; handle: ReturnType<typeof setTimeout> }>()
-    const visible = () => document.visibilityState !== 'hidden'
+    const visible = () => foregroundRef.current && document.visibilityState !== 'hidden'
     const publish = () => {
       if (disposed) return
       const running = new Set([...activeAgents].filter(([, ids]) => ids.size).map(([id]) => id))
@@ -290,8 +295,15 @@ export function useWorkflowMonitor(
   }, [key, roots])
 
   useEffect(() => {
-    invalidate.current?.()
+    // The subscription already reads each root once on mount. Only a later local
+    // transition needs reconciliation, otherwise opening N members reads 2N trees.
+    if (previousLocalKey.current !== localKey) invalidate.current?.()
+    previousLocalKey.current = localKey
   }, [localKey])
+  useEffect(() => {
+    if (foreground && !previousForeground.current) invalidate.current?.()
+    previousForeground.current = foreground
+  }, [foreground])
   return useMemo(
     () => ({
       runningConversationIds: new Set([

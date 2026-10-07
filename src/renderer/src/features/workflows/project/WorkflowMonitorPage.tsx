@@ -19,7 +19,6 @@ import { projectWorkflowText } from './projectWorkflowText'
 import { useWorkflowMonitor } from './useWorkflowMonitor'
 import { useWorkflowExecution } from './useWorkflowExecution'
 import { useWorkflowMonitorViewport } from './useWorkflowMonitorViewport'
-import { workflowNodeQueue } from './workflowNodeQueue'
 import '../workflowCanvas.css'
 import './workflowBindingCanvas.css'
 import './workflowMonitor.css'
@@ -53,7 +52,8 @@ export function WorkflowMonitorPage({
   const { snapshot, transmissions } = useWorkflowExecution(instance.id, foreground)
   const { runningConversationIds, waitingApprovalConversationIds } = useWorkflowMonitor(
     instance,
-    conversations
+    conversations,
+    foreground
   )
   const bounds = useMemo(() => graphBounds(graph), [graph])
   const bindings = useMemo(
@@ -63,6 +63,25 @@ export function WorkflowMonitorPage({
   const conversationById = useMemo(
     () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
     [conversations]
+  )
+  const pendingMailByNode = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const input of snapshot?.inputs ?? []) {
+      if (input.mailStatus === 'pending')
+        counts.set(input.nodeId, (counts.get(input.nodeId) ?? 0) + 1)
+    }
+    return counts
+  }, [snapshot?.inputs])
+  const modelById = useMemo(() => new Map(models.map((model) => [model.id, model])), [models])
+  const departments = useMemo(
+    () =>
+      [...(graph.departments ?? [])]
+        .sort((a, b) => b.width * b.height - a.width * a.height)
+        .map((department) => ({
+          ...department,
+          level: workflowDepartmentLevel(graph, department.id)
+        })),
+    [graph]
   )
   const origin = { x: 64 - bounds.left, y: 64 - bounds.top }
   const width = Math.max(400, bounds.right - bounds.left + 128)
@@ -116,32 +135,27 @@ export function WorkflowMonitorPage({
                   transform: `scale(${zoom})`
                 }}
               >
-                {[...(graph.departments ?? [])]
-                  .sort((a, b) => b.width * b.height - a.width * a.height)
-                  .map((department) => (
-                    <div
-                      key={department.id}
-                      className="workflow-department workflow-monitor__department"
-                      data-workflow-department-id={department.id}
-                      aria-label={`${department.name} · ${text('departmentLevel').replace('{level}', String(workflowDepartmentLevel(graph, department.id)))}`}
-                      style={{
-                        left: department.x + origin.x,
-                        top: department.y + origin.y,
-                        width: department.width,
-                        height: department.height
-                      }}
-                    >
-                      <div className="workflow-department__heading">
-                        <strong>{department.name}</strong>
-                        <span>
-                          {text('departmentLevel').replace(
-                            '{level}',
-                            String(workflowDepartmentLevel(graph, department.id))
-                          )}
-                        </span>
-                      </div>
+                {departments.map((department) => (
+                  <div
+                    key={department.id}
+                    className="workflow-department workflow-monitor__department"
+                    data-workflow-department-id={department.id}
+                    aria-label={`${department.name} · ${text('departmentLevel').replace('{level}', String(department.level))}`}
+                    style={{
+                      left: department.x + origin.x,
+                      top: department.y + origin.y,
+                      width: department.width,
+                      height: department.height
+                    }}
+                  >
+                    <div className="workflow-department__heading">
+                      <strong>{department.name}</strong>
+                      <span>
+                        {text('departmentLevel').replace('{level}', String(department.level))}
+                      </span>
                     </div>
-                  ))}
+                  </div>
+                ))}
                 <WorkflowTransmissionLayer
                   nodes={graph.nodes}
                   events={transmissions}
@@ -191,9 +205,8 @@ export function WorkflowMonitorPage({
                     node.managementRole === 'organization_admin' ||
                     node.managementRole === 'department_admin'
                   const draft = conversationId ? conversationDrafts?.[conversationId] : undefined
-                  const model = models.find(
-                    (item) => item.id === (draft?.modelId ?? conversation?.modelId)
-                  )
+                  const modelId = draft?.modelId ?? conversation?.modelId
+                  const model = modelId ? modelById.get(modelId) : undefined
                   const permission = draft?.permissionMode ?? node.permissionMode
                   const PermissionIcon = getChatPermissionPresentation(permission).icon
                   const tooltip = (
@@ -276,9 +289,7 @@ export function WorkflowMonitorPage({
                             <rect className="workflow-monitor__node-orbit-trail" pathLength="100" />
                             <rect className="workflow-monitor__node-orbit-head" pathLength="100" />
                           </svg>
-                          <WorkflowNodeMailbox
-                            count={workflowNodeQueue(snapshot, node.id).waiting.length}
-                          />
+                          <WorkflowNodeMailbox count={pendingMailByNode.get(node.id) ?? 0} />
                           <AgentAvatar agentId={node.id} className="workflow-node__avatar" />
                           <span className="workflow-node__copy workflow-node__copy--configurable">
                             <strong>{conversation?.title || node.name}</strong>
