@@ -31,9 +31,23 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
   useEffect(() => {
     let disposed = false
     let cursor: number | null = null
+    let latestSnapshot: WorkflowRuntimeSnapshot | null = null
+    let publishedSequence: number | null = null
     let pending = false
     let dirty = false
     const timers = new Set<ReturnType<typeof setTimeout>>()
+    const publishLatest = () => {
+      if (
+        !disposed &&
+        foregroundRef.current &&
+        document.visibilityState !== 'hidden' &&
+        latestSnapshot &&
+        latestSnapshot.sequence !== publishedSequence
+      ) {
+        publishedSequence = latestSnapshot.sequence
+        setSnapshot({ scope, value: latestSnapshot })
+      }
+    }
     const accept = (value: WorkflowRuntimeSnapshot, baseline = false) => {
       if (
         disposed ||
@@ -47,7 +61,9 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
       if (value.sequence === cursor) return
       const previousCursor = cursor
       cursor = value.sequence
-      setSnapshot({ scope, value })
+      latestSnapshot = value
+      // Hidden tabs retain one newest projection without repeatedly rendering the graph.
+      publishLatest()
       // The initial snapshot is a baseline, so opening a diagram never replays its history.
       const fresh =
         previousCursor === null ||
@@ -105,6 +121,7 @@ export function useWorkflowExecution(instanceId: string, foreground = true) {
     }
     const unsubscribe = hostClient.agent.onWorkflowRuntimeChanged?.(accept)
     const recover = () => {
+      publishLatest()
       void refresh()
     }
     refreshRef.current = recover

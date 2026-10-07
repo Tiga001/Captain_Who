@@ -30,13 +30,22 @@ export function useWorkflowConversationSync({
     const failed = new Set<string>()
     const versions = new Map<string, string>()
     const terminalSequences = new Map<string, number>()
+    let indexedConversations: ChatConversation[] | null = null
+    let conversationsById = new Map<string, ChatConversation>()
+    const currentConversations = () => {
+      if (indexedConversations !== conversationsRef.current) {
+        indexedConversations = conversationsRef.current
+        conversationsById = new Map(indexedConversations.map((item) => [item.id, item]))
+      }
+      return conversationsById
+    }
     const refresh = async (id: string): Promise<void> => {
       if (disposed) return
       if (pending.has(id)) {
         dirty.add(id)
         return
       }
-      const baseline = conversationsRef.current.find((item) => item.id === id)
+      const baseline = currentConversations().get(id)
       if (!baseline) return
       pending.add(id)
       try {
@@ -73,14 +82,13 @@ export function useWorkflowConversationSync({
     }
     const accept = (snapshot: WorkflowRuntimeSnapshot) => {
       const affected = new Set<string>()
+      const conversations = currentConversations()
+      const inputsById = new Map(snapshot.inputs.map((input) => [input.id, input]))
       for (const input of snapshot.inputs) {
         if (!input.conversationId || !input.deliveryId) continue
         // Metadata hydration can lag the first Host notification. Do not acknowledge a receipt
         // until there is a local conversation to attach it to; recovery will observe it again.
-        if (
-          !conversationsRef.current.some((conversation) => conversation.id === input.conversationId)
-        )
-          continue
+        if (!conversations.has(input.conversationId)) continue
         const version = JSON.stringify([input.runId, input.deliveryId, input.status])
         if (versions.get(input.id) === version) continue
         versions.set(input.id, version)
@@ -96,12 +104,8 @@ export function useWorkflowConversationSync({
           event.sequence <= (terminalSequences.get(event.inputId) ?? 0)
         )
           continue
-        const input = snapshot.inputs.find((item) => item.id === event.inputId)
-        if (
-          !input?.conversationId ||
-          !conversationsRef.current.some((conversation) => conversation.id === input.conversationId)
-        )
-          continue
+        const input = inputsById.get(event.inputId)
+        if (!input?.conversationId || !conversations.has(input.conversationId)) continue
         terminalSequences.set(event.inputId, event.sequence)
         if (terminalSequences.size > 4096)
           terminalSequences.delete(terminalSequences.keys().next().value!)
@@ -130,7 +134,7 @@ export function useWorkflowConversationSync({
                 .map((input) => input.conversationId)
             )
             for (const id of ids) {
-              const current = conversationsRef.current.find((item) => item.id === id)
+              const current = id ? currentConversations().get(id) : undefined
               if (
                 id &&
                 !pending.has(id) &&
