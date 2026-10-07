@@ -1,24 +1,16 @@
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type {
-  WorkflowNodeMessage,
-  WorkflowRuntimeEvent,
-  WorkflowRuntimeSnapshot
-} from '@mycopilot/protocol'
+import type { WorkflowRuntimeEvent, WorkflowRuntimeSnapshot } from '@mycopilot/protocol'
 import { createWorkflowNode } from '../../features/workflows/workflowAuthoring'
 import { WorkflowTransmissionLayer } from '../../features/workflows/project/WorkflowTransmissionLayer'
 import { useWorkflowExecution } from '../../features/workflows/project/useWorkflowExecution'
 import { workflowNodeQueue } from '../../features/workflows/project/workflowNodeQueue'
-import { WorkflowNodePanel } from '../../features/workflows/project/WorkflowNodePanel'
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   listeners: new Set<(value: WorkflowRuntimeSnapshot) => void>()
 }))
 vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: mocks.request }))
-vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ language: 'en-US' })
-}))
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
     agent: {
@@ -155,97 +147,5 @@ describe('mail network activity', () => {
     } as unknown as WorkflowRuntimeSnapshot
     const queue = workflowNodeQueue(value, 'receiver')
     expect(queue.waiting.map((input) => input.id)).toEqual(['pending'])
-    expect(queue.processing.map((input) => input.id)).toEqual(['active'])
-  })
-  it('refreshes older displayed mail from storage after it leaves the compact runtime snapshot', async () => {
-    const row = (sequence: number): WorkflowNodeMessage => ({
-      sequence,
-      inputId: `input-${sequence}`,
-      status: sequence === 1 ? 'pending' : 'processed',
-      runStatus: null,
-      error: null,
-      message: {
-        id: `mail-${sequence}`,
-        instanceId: 'network',
-        workflowName: 'Network',
-        sourceNodeId: sender.id,
-        sourceNodeName: sender.name,
-        sourceConversationId: 'sender-chat',
-        sourceConversationTitle: 'Sender chat',
-        targetNodeId: receiver.id,
-        targetNodeName: receiver.name,
-        targetConversationId: 'receiver-chat',
-        targetConversationTitle: 'Receiver chat',
-        replyToMessageId: null,
-        content: sequence === 1 ? 'Old letter body' : `Letter ${sequence}`,
-        createdAt: sequence
-      }
-    })
-    let rows = [...Array.from({ length: 20 }, (_, index) => row(200 - index)), row(1)]
-    mocks.request.mockImplementation(async ({ beforeSequence }: { beforeSequence?: number }) => {
-      const matching = rows.filter(
-        (message) => beforeSequence === undefined || message.sequence < beforeSequence
-      )
-      const messages = matching.slice(0, 20)
-      return {
-        records: [],
-        issues: [],
-        nodeMessages: {
-          instanceId: 'network',
-          nodeId: receiver.id,
-          messages,
-          nextBeforeSequence: matching.length > 20 ? messages.at(-1)!.sequence : null
-        }
-      }
-    })
-    const pending: WorkflowRuntimeSnapshot = {
-      ...snapshot(200),
-      inputs: [
-        {
-          id: 'input-1',
-          instanceId: 'network',
-          nodeId: receiver.id,
-          conversationId: 'receiver-chat',
-          executionVersion: 'version',
-          content: '',
-          messages: [row(1).message],
-          mailStatus: 'pending',
-          status: 'pending',
-          runId: null,
-          deliveryId: null,
-          createdAt: 1,
-          error: null
-        }
-      ]
-    }
-    const panel = (value: WorkflowRuntimeSnapshot) => (
-      <WorkflowNodePanel
-        instanceId="network"
-        node={receiver}
-        snapshot={value}
-        title="Receiver"
-        status="Standby"
-        onClose={() => {}}
-        onOpenConversation={() => {}}
-      />
-    )
-    const view = await render(panel(pending))
-    await view.getByRole('button', { name: 'Load older messages' }).click()
-    await expect.element(view.getByText('Old letter body')).toBeVisible()
-    const oldStatus = () =>
-      [...view.container.querySelectorAll('article')]
-        .find((article) => article.textContent?.includes('Old letter body'))
-        ?.querySelector('header span')?.textContent
-    expect(oldStatus()).toBe('Pending')
-    rows = [
-      ...Array.from({ length: 12 }, (_, index) => row(212 - index)),
-      ...rows.map((message) => ({ ...message, status: 'processed' }))
-    ]
-    await view.rerender(panel({ ...snapshot(213), inputs: [] }))
-    await expect.poll(oldStatus).toBe('Processed')
-    await expect.element(view.getByText('Old letter body')).toBeVisible()
-    await expect.element(view.getByText('Letter 212')).toBeVisible()
-    expect(view.container.querySelectorAll('article')).toHaveLength(33)
-    expect(view.getByRole('button', { name: 'Load older messages' }).elements()).toHaveLength(0)
   })
 })

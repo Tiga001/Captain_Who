@@ -34,12 +34,6 @@
   font-weight: var(--mc-font-weight-regular);
   line-height: 1.5;
 }
-.workflow-binding-node-tooltip > strong {
-  display: block;
-  margin-bottom: 9px;
-  overflow-wrap: anywhere;
-  font-weight: var(--mc-font-weight-strong);
-}
 .workflow-binding-node-tooltip dl {
   display: grid;
   gap: 7px;

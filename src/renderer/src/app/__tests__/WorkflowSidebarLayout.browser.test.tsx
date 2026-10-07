@@ -227,33 +227,18 @@ it('keeps the active organization toolbar on one row at 1040px and colors beside
   })
 })
 
-it('contains the node dashboard in the sidebar and restores the unobstructed canvas when closed', async () => {
+it('keeps the canvas unobstructed after a single click in narrow and wide sidebars', async () => {
   const view = await render(sidebar(360))
   await page.getByRole('button', { name: '组织看板 文案润色', exact: true }).click()
-  await page.getByRole('button', { name: '双击打开对话 · 文书对话', exact: true }).click()
-  const close = page.getByRole('button', { name: '收起节点看板', exact: true })
-  await expect.element(close).toBeVisible()
-  expect(service.openConversation).not.toHaveBeenCalled()
-  expectInsideSidebar(close.element())
-  expectInsideSidebar(document.querySelector('.workflow-node-panel')!)
-  expect(getComputedStyle(document.querySelector('.workflow-node-panel')!).position).toBe(
-    'absolute'
-  )
-  await view.rerender(sidebar(1100))
-  await expect
-    .poll(() => getComputedStyle(document.querySelector('.workflow-node-panel')!).position)
-    .toBe('static')
-  expectInsideSidebar(document.querySelector('.workflow-node-panel')!)
-  expect(
-    document.querySelector('.workflow-node-panel')!.getBoundingClientRect().left
-  ).toBeGreaterThanOrEqual(
-    document.querySelector('.workflow-monitor__canvas')!.getBoundingClientRect().right
-  )
-  await view.rerender(sidebar(360))
-  await close.click()
-  expect(document.querySelector('.workflow-node-panel')).toBeNull()
-  expectInsideSidebar(document.querySelector('.workflow-monitor__canvas')!)
-  expectInsideSidebar(document.querySelector('.workflow-canvas-controls')!)
+  for (const width of [360, 1100]) {
+    await view.rerender(sidebar(width))
+    await page.getByRole('button', { name: '双击打开对话 · 文书对话', exact: true }).click()
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(service.openConversation).not.toHaveBeenCalled()
+    expect(document.querySelector('.workflow-node-panel')).toBeNull()
+    expectInsideSidebar(document.querySelector('.workflow-monitor__canvas')!)
+    expectInsideSidebar(document.querySelector('.workflow-canvas-controls')!)
+  }
 })
 
 it.each([360, 1100])(

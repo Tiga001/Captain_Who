@@ -1,10 +1,5 @@
 /** Organization definitions only. Saving member configuration grants no execution capability. */
-import {
-  parseWorkflowRuntimeSnapshot,
-  parseWorkflowNodeMessages,
-  type WorkflowRuntimeSnapshot,
-  type WorkflowNodeMessages
-} from './workflowRuntime'
+import { parseWorkflowRuntimeSnapshot, type WorkflowRuntimeSnapshot } from './workflowRuntime'
 interface WorkflowNodeBase {
   id: string
   name: string
@@ -59,7 +54,6 @@ export interface WorkflowRecord {
 }
 export type WorkflowRequest =
   | { operation: 'runtimeSnapshot'; instanceId: string; afterSequence?: number }
-  | { operation: 'nodeMessages'; instanceId: string; nodeId: string; beforeSequence?: number }
   | { operation: 'list' }
   | { operation: 'validate'; definition: WorkflowDefinition }
   | {
@@ -143,7 +137,6 @@ export interface WorkflowInvalidDraft extends WorkflowInvalidRecord {
 }
 export interface WorkflowResponse {
   runtime?: WorkflowRuntimeSnapshot
-  nodeMessages?: WorkflowNodeMessages
   records: WorkflowRecord[]
   issues: WorkflowIssue[]
   instances?: WorkflowInstance[]
@@ -381,19 +374,6 @@ function validateWorkflowDepartments(definition: WorkflowDefinition): void {
 
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
-  if (op === 'nodeMessages') {
-    const item = object(
-      value,
-      ['operation', 'instanceId', 'nodeId', 'beforeSequence'],
-      ['beforeSequence']
-    )
-    return {
-      operation: op,
-      instanceId: text(item.instanceId),
-      nodeId: text(item.nodeId),
-      ...(item.beforeSequence !== undefined ? { beforeSequence: integer(item.beforeSequence) } : {})
-    }
-  }
   if (op === 'runtimeSnapshot') {
     const item = object(value, ['operation', 'instanceId', 'afterSequence'], ['afterSequence'])
     return {
@@ -558,18 +538,9 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       'invalidRecords',
       'invalidDrafts',
       'affectedConversationIds',
-      'runtime',
-      'nodeMessages'
+      'runtime'
     ],
-    [
-      'instances',
-      'drafts',
-      'invalidRecords',
-      'invalidDrafts',
-      'affectedConversationIds',
-      'runtime',
-      'nodeMessages'
-    ]
+    ['instances', 'drafts', 'invalidRecords', 'invalidDrafts', 'affectedConversationIds', 'runtime']
   )
   const records = array(
     data.records,
@@ -619,9 +590,6 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     throw new Error('Duplicate invalid organization drafts')
   return {
     records,
-    ...(data.nodeMessages !== undefined
-      ? { nodeMessages: parseWorkflowNodeMessages(data.nodeMessages) }
-      : {}),
     ...(data.runtime !== undefined ? { runtime: parseWorkflowRuntimeSnapshot(data.runtime) } : {}),
     issues: issues(data.issues),
     ...(invalidRecords ? { invalidRecords } : {}),

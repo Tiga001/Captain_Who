@@ -27,7 +27,7 @@ pub(crate) fn handle_request(
                 .as_ref()
                 .and_then(|params| params.get("operation"))
                 .and_then(Value::as_str)
-                .is_some_and(|operation| matches!(operation, "runtimeSnapshot" | "nodeMessages"))
+                .is_some_and(|operation| operation == "runtimeSnapshot")
             {
                 workflow_rpc::handle_workflow_runtime_request(agent_service, request)
             } else {

@@ -71,20 +71,6 @@ export interface WorkflowPreferenceUpdate {
   modelId?: string
   permissionMode?: 'default' | 'custom' | 'full'
 }
-export interface WorkflowNodeMessage {
-  sequence: number
-  message: WorkflowSourceMessage
-  inputId: string | null
-  status: string
-  runStatus: string | null
-  error: string | null
-}
-export interface WorkflowNodeMessages {
-  instanceId: string
-  nodeId: string
-  messages: WorkflowNodeMessage[]
-  nextBeforeSequence: number | null
-}
 export interface WorkflowMessageSource {
   inputId: string
   instanceId: string
@@ -343,48 +329,6 @@ function parseWorkflowPreferenceUpdate(value: unknown): WorkflowPreferenceUpdate
     ...(item.modelId !== undefined ? { modelId: id(item.modelId) } : {}),
     ...(item.permissionMode !== undefined ? { permissionMode: item.permissionMode } : {})
   }
-}
-export function parseWorkflowNodeMessages(value: unknown): WorkflowNodeMessages {
-  const item = record(value, ['instanceId', 'nodeId', 'messages', 'nextBeforeSequence'])
-  const result = {
-    instanceId: id(item.instanceId),
-    nodeId: id(item.nodeId),
-    nextBeforeSequence: item.nextBeforeSequence === null ? null : integer(item.nextBeforeSequence),
-    messages: list(
-      item.messages,
-      (value) => {
-        const row = record(value, [
-          'sequence',
-          'message',
-          'inputId',
-          'status',
-          'runStatus',
-          'error'
-        ])
-        return {
-          sequence: integer(row.sequence),
-          message: parseWorkflowSourceMessage(row.message),
-          inputId: nullableId(row.inputId),
-          status: id(row.status),
-          runStatus: row.runStatus === null ? null : id(row.runStatus),
-          error: row.error === null ? null : text(row.error)
-        }
-      },
-      20
-    )
-  }
-  if (
-    result.messages.some(
-      (row, index) =>
-        row.message.instanceId !== result.instanceId ||
-        row.message.targetNodeId !== result.nodeId ||
-        (index > 0 && row.sequence >= result.messages[index - 1].sequence)
-    ) ||
-    (result.nextBeforeSequence !== null &&
-      result.nextBeforeSequence !== result.messages.at(-1)?.sequence)
-  )
-    throw new Error('Invalid organization node message identity or cursor')
-  return result
 }
 export function parseWorkflowMessageSource(value: unknown): WorkflowMessageSource {
   const item = record(value, ['inputId', 'instanceId', 'workflowName', 'sources'])

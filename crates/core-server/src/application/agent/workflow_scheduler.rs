@@ -247,7 +247,6 @@ mod tests {
                 json!({"operation":"listInstances"}),
                 json!({"operation":"validate","definition":definition}),
                 json!({"operation":"runtimeSnapshot","instanceId":"missing"}),
-                json!({"operation":"nodeMessages","instanceId":"missing","nodeId":"missing"}),
             ] {
                 let _ = call(params);
                 assert!(!take_wake(&service.workflow_scheduler_wake));

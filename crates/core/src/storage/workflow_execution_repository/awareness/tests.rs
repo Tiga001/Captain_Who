@@ -490,13 +490,20 @@ fn workflow_awareness_monitor_uses_mail_state_without_bodies_or_terminal_overrid
     assert!(snapshot.inputs[0].content.is_empty());
     assert!(snapshot.inputs[0].messages[0].content.is_empty());
     assert_eq!(snapshot.inputs[0].mail_status, MailStatus::Processed);
-    let messages = node_messages(&c, "instance", "b", None).unwrap();
-    assert_eq!(messages.messages[0].status, "processed");
-    assert_eq!(messages.messages[0].message.content, "private body");
-    assert_eq!(
-        messages.messages[0].run_status.as_deref(),
-        Some("cancelled")
-    );
+    assert_eq!(snapshot.input_runs[0].status, "cancelled");
+    let mailbox = mailbox_for_run(
+        &c,
+        &conversation(&c, "b"),
+        "run-b",
+        &MailboxQuery {
+            message_id: Some(receipt.messages[0].id.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(mailbox["messages"][0]["status"], "processed");
+    assert_eq!(mailbox["messages"][0]["content"], "private body");
+    assert_eq!(mailbox["messages"][0]["runStatus"], "cancelled");
 }
 #[test]
 fn workflow_awareness_backlog_does_not_hide_mail_accepted_by_current_turn() {

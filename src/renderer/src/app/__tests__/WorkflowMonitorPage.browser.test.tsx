@@ -8,11 +8,6 @@ import type { ChatConversation } from '../../features/chat/chatTypes'
 import type { ConversationAttentionById } from '../../features/chat/useConversationAttention'
 import '../../styles/global.css'
 
-const messageService = vi.hoisted(() => ({ request: vi.fn() }))
-vi.mock('../../features/workflows/workflowClient', () => ({
-  requestWorkflows: messageService.request
-}))
-
 const activity = vi.hoisted(() => ({
   running: new Set<string>(),
   waitingApproval: new Set<string>()
@@ -139,16 +134,6 @@ beforeEach(async () => {
   await page.viewport(1440, 900)
   for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, classicDarkTheme)))
     document.documentElement.style.setProperty(key, value)
-  messageService.request.mockReset().mockImplementation(async (request) => ({
-    records: [],
-    issues: [],
-    nodeMessages: {
-      instanceId: request.instanceId,
-      nodeId: request.nodeId,
-      messages: [],
-      nextBeforeSequence: null
-    }
-  }))
   activity.running = new Set()
   activity.waitingApproval = new Set()
   execution.snapshot = null
@@ -419,11 +404,6 @@ describe('organization read-only monitor', () => {
     )
     expect(build.dataset.waiting).toBeUndefined()
     expect(build.querySelector('[aria-label="未读消息"]')).toBeNull()
-    await screen.getByRole('button', { name: '双击打开对话 · 开发设置页面', exact: true }).click()
-    const panel = screen.getByRole('complementary', { name: '节点看板' })
-    await expect.element(panel).toBeVisible()
-    expect(panel.element().querySelector('header')?.textContent).not.toContain('等待交互')
-    expect(panel.element().querySelector('header')?.textContent).not.toContain('等待批准')
     activity.waitingApproval = new Set(['chat-build'])
     await screen.rerender(
       renderPage(instance, {

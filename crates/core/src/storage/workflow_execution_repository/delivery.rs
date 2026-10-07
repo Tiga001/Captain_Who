@@ -491,52 +491,6 @@ pub fn runtime_snapshot(
         preference_updates: vec![],
     })
 }
-pub fn node_messages(
-    c: &Connection,
-    instance_id: &str,
-    node_id: &str,
-    before: Option<u64>,
-) -> Result<NodeMessages, String> {
-    let graph = graph(c, instance_id)?.ok_or("Organization no longer exists")?;
-    let target = node(&graph, node_id)?;
-    let mut s=c.prepare("SELECT m.sequence,m.message_json,m.input_id,m.mail_status,t.terminal_status,json_extract(i.input_json,'$.error') FROM workflow_mail_messages m LEFT JOIN workflow_mail_inputs i ON i.input_id=m.input_id LEFT JOIN conversation_turn_traces t ON t.run_id=i.run_id AND t.conversation_id=i.conversation_id WHERE m.instance_id=?1 AND m.node_id=?2 AND m.recipient_conversation_id IS ?3 AND (?4 IS NULL OR m.sequence<?4) ORDER BY m.sequence DESC LIMIT 21").map_err(db)?;
-    let mut messages = vec![];
-    for row in s
-        .query_map(
-            params![instance_id, target.id, graph.bindings.get(node_id), before],
-            |r| {
-                Ok((
-                    r.get::<_, u64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
-        )
-        .map_err(db)?
-    {
-        let (sequence, raw, input_id, status, run_status, error) = row.map_err(db)?;
-        messages.push(NodeMessage {
-            sequence,
-            message: parse(&raw)?,
-            input_id,
-            status,
-            run_status,
-            error,
-        });
-    }
-    let has_more = messages.len() > 20;
-    messages.truncate(20);
-    let next_before_sequence = has_more.then(|| messages.last().unwrap().sequence);
-    Ok(NodeMessages {
-        instance_id: instance_id.into(),
-        node_id: node_id.into(),
-        messages,
-        next_before_sequence,
-    })
-}
 pub fn bind_run(
     c: &mut Connection,
     conversation_id: &str,

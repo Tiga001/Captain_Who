@@ -211,25 +211,6 @@ pub struct InputRunState {
     pub input_id: String,
     pub status: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NodeMessage {
-    pub sequence: u64,
-    pub message: SourceMessage,
-    pub input_id: Option<String>,
-    pub status: String,
-    pub run_status: Option<String>,
-    pub error: Option<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NodeMessages {
-    pub instance_id: String,
-    pub node_id: String,
-    pub messages: Vec<NodeMessage>,
-    pub next_before_sequence: Option<u64>,
-}
-
 pub fn assemble_message(snapshot: &ConversationSnapshot, messages: &[SourceMessage]) -> String {
     let bodies = messages
         .iter()

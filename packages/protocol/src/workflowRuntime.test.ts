@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   parseWorkflowRuntimeSnapshot,
-  parseWorkflowNodeMessages,
   parseWorkflowMessageSource,
   type WorkflowRuntimeSnapshot,
   type WorkflowSourceMessage
@@ -146,7 +145,7 @@ describe('workflow runtime boundary', () => {
       })
     ).toThrow()
   })
-  it('validates queue metadata and node-scoped paginated message bodies', () => {
+  it('validates queue metadata', () => {
     const metadata = {
       ...snapshot,
       pausedConversationIds: ['chat-review'],
@@ -159,40 +158,6 @@ describe('workflow runtime boundary', () => {
         pendingMessages: [{ ...source('a'), instanceId: 'other' }]
       })
     ).toThrow()
-    const page = {
-      instanceId: 'workflow',
-      nodeId: 'reviewer',
-      messages: [
-        {
-          sequence: 8,
-          message: source('a'),
-          inputId: 'input',
-          status: 'pending',
-          runStatus: null,
-          error: null
-        }
-      ],
-      nextBeforeSequence: 8
-    }
-    expect(parseWorkflowNodeMessages(page)).toEqual(page)
-    expect(
-      parseWorkflowResponse({ records: [], issues: [], nodeMessages: page }).nodeMessages
-    ).toEqual(page)
-    expect(() => parseWorkflowNodeMessages({ ...page, nodeId: 'other' })).toThrow()
-    expect(() => parseWorkflowNodeMessages({ ...page, nextBeforeSequence: 9 })).toThrow()
-    expect(
-      parseWorkflowRequest({
-        operation: 'nodeMessages',
-        instanceId: 'workflow',
-        nodeId: 'reviewer',
-        beforeSequence: 8
-      })
-    ).toEqual({
-      operation: 'nodeMessages',
-      instanceId: 'workflow',
-      nodeId: 'reviewer',
-      beforeSequence: 8
-    })
   })
   it('round-trips one independently delivered mail', () => {
     expect(parseWorkflowRuntimeSnapshot(snapshot)).toEqual(snapshot)

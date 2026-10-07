@@ -106,15 +106,6 @@ impl StorageService {
     ) -> Result<serde_json::Value, String> {
         repository::awareness_for_run(&*self.state.connection()?, conversation_id, run_id)
     }
-    pub fn workflow_execution_node_messages(
-        &self,
-        instance_id: &str,
-        node_id: &str,
-        before: Option<u64>,
-    ) -> Result<NodeMessages, String> {
-        repository::node_messages(&*self.state.connection()?, instance_id, node_id, before)
-    }
-
     pub fn workflow_execution_mark_run_unread(&self, run_id: &str) -> Result<(), String> {
         repository::mark_run_unread(&mut *self.state.connection()?, run_id)
     }

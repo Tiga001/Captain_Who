@@ -2,7 +2,7 @@ import { WorkflowTransmissionLayer } from './WorkflowTransmissionLayer'
 import { WorkflowNodeMailbox } from './WorkflowNodeMailbox'
 import type { WorkflowInstance } from '@mycopilot/protocol'
 import { ArrowLeft, Maximize2, Minus, Plus } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useMemo, type CSSProperties } from 'react'
 import { dismissActiveTooltip, Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { AgentAvatar } from '../../agentCollaboration/AgentAvatar'
@@ -19,7 +19,6 @@ import { projectWorkflowText } from './projectWorkflowText'
 import { useWorkflowMonitor } from './useWorkflowMonitor'
 import { useWorkflowExecution } from './useWorkflowExecution'
 import { useWorkflowMonitorViewport } from './useWorkflowMonitorViewport'
-import { WorkflowNodePanel } from './WorkflowNodePanel'
 import { workflowNodeQueue } from './workflowNodeQueue'
 import '../workflowCanvas.css'
 import './workflowBindingCanvas.css'
@@ -52,29 +51,6 @@ export function WorkflowMonitorPage({
   const text = workflowText(language)
   const t = projectWorkflowText(language)
   const { snapshot, transmissions } = useWorkflowExecution(instance.id, foreground)
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const selectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const cancelNodeSelection = () => {
-    if (selectionTimer.current !== null) {
-      clearTimeout(selectionTimer.current)
-      selectionTimer.current = null
-    }
-  }
-  useEffect(
-    () => () => {
-      if (selectionTimer.current !== null) clearTimeout(selectionTimer.current)
-    },
-    [instance.id]
-  )
-  const selectNode = (nodeId: string) => {
-    cancelNodeSelection()
-    // Keep the target in place until the browser can deliver a second click.
-    // Opening the panel immediately would cover it or resize the canvas.
-    selectionTimer.current = setTimeout(() => {
-      selectionTimer.current = null
-      setSelectedNodeId(nodeId)
-    }, 300)
-  }
   const { runningConversationIds, waitingApprovalConversationIds } = useWorkflowMonitor(
     instance,
     conversations
@@ -93,33 +69,6 @@ export function WorkflowMonitorPage({
   const height = Math.max(260, bounds.bottom - bounds.top + 128)
   const { viewportRef, size, zoom, left, top, dragging, zoomTo, resetView, panHandlers } =
     useWorkflowMonitorViewport(width, height)
-
-  const selectedNode = graph.nodes.find(
-    (node) => node.id === selectedNodeId && node.kind === 'agent'
-  )
-  const selectedConversationId = selectedNode ? bindings.get(selectedNode.id) : undefined
-  const nodeStatus = (nodeId: string, conversationId?: string) => {
-    if (!conversationId) return t('未绑定', 'Unbound')
-    const paused = snapshot?.pausedConversationIds?.includes(conversationId)
-    if (paused) return t('被停止', 'Stopped')
-    const attention = conversationAttention?.[conversationId]
-    const latestRun = conversationById
-      .get(conversationId)
-      ?.messages.findLast((message) => message.role === 'assistant')?.agentRun
-    if (
-      waitingApprovalConversationIds?.has(conversationId) ||
-      (attention?.waitingApproval ?? latestRun?.status === 'waiting_for_approval')
-    )
-      return t('等待批准', 'Waiting for approval')
-    if (attention?.waitingAnswer ?? latestRun?.status === 'waiting_for_user_input')
-      return t('等待交互', 'Waiting for interaction')
-    if (runningConversationIds.has(conversationId)) return t('活跃中', 'Active')
-    if (!snapshot) return t('正在读取状态', 'Loading state')
-    const queue = workflowNodeQueue(snapshot, nodeId)
-    if (!instance.enabled) return t('组织已关闭', 'Organization disabled')
-    if (queue.waiting.length) return t('等待处理', 'Waiting to process')
-    return t('待命', 'Standby')
-  }
 
   return (
     <section
@@ -238,16 +187,9 @@ export function WorkflowMonitorPage({
                     : waitingAnswer
                       ? t('等待交互', 'Waiting for interaction')
                       : null
-                  const statusLabel =
-                    (snapshot?.pausedConversationIds?.includes(conversationId ?? '')
-                      ? t('被停止', 'Stopped')
-                      : null) ??
-                    waitingLabel ??
-                    (running
-                      ? t('运行中', 'Running')
-                      : conversationId
-                        ? t('待命', 'Standby')
-                        : t('未绑定', 'Unbound'))
+                  const isAdmin =
+                    node.managementRole === 'organization_admin' ||
+                    node.managementRole === 'department_admin'
                   const draft = conversationId ? conversationDrafts?.[conversationId] : undefined
                   const model = models.find(
                     (item) => item.id === (draft?.modelId ?? conversation?.modelId)
@@ -256,17 +198,16 @@ export function WorkflowMonitorPage({
                   const PermissionIcon = getChatPermissionPresentation(permission).icon
                   const tooltip = (
                     <div className="workflow-binding-node-tooltip">
-                      <strong>{conversation?.title || node.name}</strong>
                       <dl>
                         <div>
                           <dt>{t('节点', 'Node')}</dt>
                           <dd>{node.name}</dd>
                         </div>
                         <div>
-                          <dt>{t('状态', 'Status')}</dt>
+                          <dt>{text('rank')}</dt>
                           <dd>
-                            {statusLabel}
-                            {unread && ` · ${t('未读消息', 'Unread messages')}`}
+                            {node.rank ?? 1}
+                            {isAdmin && ` ${t('管理员', 'Administrator')}`}
                           </dd>
                         </div>
                         <div>
@@ -309,26 +250,20 @@ export function WorkflowMonitorPage({
                       >
                         <button
                           type="button"
-                          className={`workflow-node workflow-monitor__node${conversationId ? ' is-bound' : ''}${running ? ' is-running' : ''}${selectedNodeId === node.id ? ' is-selected' : ''}`}
-                          aria-pressed={selectedNodeId === node.id}
+                          className={`workflow-node workflow-monitor__node${conversationId ? ' is-bound' : ''}${running ? ' is-running' : ''}`}
                           data-node-id={node.id}
                           data-waiting={
                             waitingApproval ? 'approval' : waitingAnswer ? 'answer' : undefined
                           }
                           aria-label={`${conversationId ? t('双击打开对话', 'Double-click to open conversation') : t('未绑定', 'Unbound')} · ${conversation?.title || node.name}`}
-                          onClick={(event) => {
-                            if (event.detail < 2) selectNode(node.id)
-                          }}
                           onDoubleClick={() => {
                             if (conversationId) {
-                              cancelNodeSelection()
                               onOpenConversation(conversationId)
                             }
                           }}
                           onKeyDown={(event) => {
                             if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) {
                               event.preventDefault()
-                              cancelNodeSelection()
                               if (conversationId) onOpenConversation(conversationId)
                             }
                           }}
@@ -424,24 +359,6 @@ export function WorkflowMonitorPage({
             </div>
           </div>
         </div>
-        {selectedNode?.kind === 'agent' && (
-          <WorkflowNodePanel
-            key={`${instance.id}:${selectedNode.id}`}
-            instanceId={instance.id}
-            node={selectedNode}
-            snapshot={snapshot}
-            title={conversationById.get(selectedConversationId ?? '')?.title || selectedNode.name}
-            status={nodeStatus(selectedNode.id, selectedConversationId)}
-            conversationId={selectedConversationId}
-            currentTask={
-              conversationById
-                .get(selectedConversationId ?? '')
-                ?.messages.findLast((message) => message.role === 'user')?.content
-            }
-            onClose={() => setSelectedNodeId(null)}
-            onOpenConversation={onOpenConversation}
-          />
-        )}
       </div>
     </section>
   )

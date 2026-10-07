@@ -722,15 +722,6 @@ impl AgentService {
         self.storage
             .workflow_execution_runtime_since(instance_id, after_sequence)
     }
-    pub(crate) fn workflow_node_messages(
-        &self,
-        instance_id: &str,
-        node_id: &str,
-        before: Option<u64>,
-    ) -> Result<mycopilot_core::workflow_execution::NodeMessages, String> {
-        self.storage
-            .workflow_execution_node_messages(instance_id, node_id, before)
-    }
     pub(super) fn publish_workflow_runtime(
         &self,
         instance_id: &str,

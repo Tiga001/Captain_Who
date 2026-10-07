@@ -189,18 +189,6 @@ beforeEach(async () => {
   service.request
     .mockReset()
     .mockImplementation(async (input: WorkflowRequest): Promise<WorkflowResponse> => {
-      if (input.operation === 'nodeMessages') {
-        return {
-          records: [],
-          issues: [],
-          nodeMessages: {
-            instanceId: input.instanceId,
-            nodeId: input.nodeId,
-            messages: [],
-            nextBeforeSequence: null
-          }
-        }
-      }
       if (input.operation === 'saveInstance') {
         if (
           instances.some(
@@ -475,7 +463,7 @@ describe('global organization management', () => {
     expect(onMonitorChange).toHaveBeenCalledWith('workflow-a')
     expect(
       service.request.mock.calls.every(([input]) =>
-        ['list', 'listInstances', 'nodeMessages'].includes(input.operation)
+        ['list', 'listInstances'].includes(input.operation)
       )
     ).toBe(true)
     await page.getByRole('button', { name: '返回组织', exact: true }).click()
@@ -924,7 +912,7 @@ describe('global organization management', () => {
     })
     const listRequests = () =>
       service.request.mock.calls.filter(([input]) =>
-        ['list', 'listInstances', 'nodeMessages'].includes(input.operation)
+        ['list', 'listInstances'].includes(input.operation)
       ).length
     const initialReads = listRequests()
     library.scrollTop = 160
