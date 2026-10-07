@@ -115,6 +115,68 @@ async function settle(): Promise<void> {
 }
 
 describe('CollaborationStore', () => {
+  it('exposes the authorized tree before history completes without skipping activity recovery', async () => {
+    const root = 'root-conversation'
+    const historical = activityEvent(root, 1, 'child', 'started')
+    const live = activityEvent(root, 2, 'child', 'completed')
+    let lastSequence = 1
+    let notify: ((event: CollaborationEventEnvelope) => void) | undefined
+    let releaseHistory!: (page: CollaborationEventsPage) => void
+    const history = new Promise<CollaborationEventsPage>((resolve) => {
+      releaseHistory = resolve
+    })
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => ({
+        ...tree(root, lastSequence),
+        agents: [childSummary('child', 'child-conversation')]
+      })),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        afterSequence === 0 ? history : page(root, afterSequence === 1 ? [live] : [])
+      ),
+      subscribe: (handler) => {
+        notify = handler
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await settle()
+    expect(store.getSnapshot()).toMatchObject({
+      loading: true,
+      tree: { lastSequence: 1, agents: [{ agentId: 'child' }] },
+      activities: []
+    })
+    lastSequence = 2
+    notify?.(live)
+    expect(source.listEvents).toHaveBeenCalledTimes(1)
+    releaseHistory(page(root, [historical]))
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    expect(store.getSnapshot().tree?.lastSequence).toBe(2)
+    expect(store.getSnapshot().activities.map((activity) => activity.activityId)).toEqual([
+      historical.activities[0]!.activityId,
+      live.activities[0]!.activityId
+    ])
+    expect(store.getSnapshot().agentInvalidationSequences.child).toBe(2)
+    store.destroy()
+  })
+
+  it('does not publish an unauthorized root while history is loading', async () => {
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree('wrong-root', 1)),
+      listEvents: vi.fn(),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    const observedTrees: Array<AgentTreeSnapshot | null> = []
+    store.subscribe(() => observedTrees.push(store.getSnapshot().tree))
+    await store.hydrate()
+    expect(observedTrees.every((snapshot) => snapshot === null)).toBe(true)
+    expect(store.getSnapshot()).toMatchObject({ error: true, loading: false, tree: null })
+    expect(source.listEvents).not.toHaveBeenCalled()
+  })
+
   it('expands one execution event into stable task projections without skipping a sequence or duplicating its transfer', async () => {
     const root = 'root-conversation'
     const completed = activityEvent(root, 1, 'grandchild', 'completed')

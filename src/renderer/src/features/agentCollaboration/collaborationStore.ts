@@ -103,6 +103,10 @@ export class CollaborationStore {
         return
       }
       if (initialTree.rootConversationId !== this.rootConversationId) throw new Error('Wrong root')
+      // The Host has already authorized this tree. Navigation and the tree view need only that
+      // snapshot; durable activity recovery keeps its independent cursor and must not block them.
+      // Keep loading true so notifications queue a catch-up rather than racing this replay.
+      this.publish({ tree: initialTree })
       const replay = await this.replayDurableEvents(generation, 0, [])
       if (!this.isCurrent(generation)) return
       let tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
