@@ -1,5 +1,9 @@
 // Traditional Chinese UI translation strings.
 export const zhTWTranslations = {
+  'chat.turnNavigationSourceHuman': '你',
+  'chat.turnNavigationSourceAgent': '智能體訊息',
+  'chat.turnNavigationSourceWorkflow': '組織郵件',
+  'chat.turnNavigationSourceContext': '歷史上下文',
   'chat.history.loadSection': '載入這段歷史',
   'chat.history.searchPlaceholder': '搜尋對話內容',
   'chat.history.expanding': '正在展開歷史…',

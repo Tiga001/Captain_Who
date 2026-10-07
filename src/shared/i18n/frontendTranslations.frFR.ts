@@ -1,5 +1,9 @@
 // French UI translation strings.
 export const frFRTranslations = {
+  'chat.turnNavigationSourceHuman': 'Vous',
+  'chat.turnNavigationSourceAgent': 'Message d’agent',
+  'chat.turnNavigationSourceWorkflow': 'Courrier de l’organisation',
+  'chat.turnNavigationSourceContext': 'Contexte historique',
   'chat.history.loadSection': 'Charger cet historique',
   'chat.history.searchPlaceholder': 'Rechercher du texte',
   'chat.history.expanding': 'Chargement de l’historique…',

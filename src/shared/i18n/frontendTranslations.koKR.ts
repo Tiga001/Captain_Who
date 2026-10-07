@@ -1,5 +1,9 @@
 // Korean UI translation strings.
 export const koKRTranslations = {
+  'chat.turnNavigationSourceHuman': '나',
+  'chat.turnNavigationSourceAgent': '에이전트 메시지',
+  'chat.turnNavigationSourceWorkflow': '조직 메일',
+  'chat.turnNavigationSourceContext': '이전 컨텍스트',
   'chat.history.loadSection': '이 기록 불러오기',
   'chat.history.searchPlaceholder': '대화 검색',
   'chat.history.expanding': '기록 펼치는 중…',

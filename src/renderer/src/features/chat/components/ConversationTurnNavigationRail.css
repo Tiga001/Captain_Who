@@ -1,8 +1,10 @@
 /* Read-only conversation-turn navigation rail beside the chat viewport. */
 .conversation-turn-navigation {
-  --conversation-turn-idle-opacity: 0.2;
-  --conversation-turn-visible-opacity: 0.66;
-  --conversation-turn-favorite-opacity: 0.62;
+  --conversation-turn-human-opacity: 0.58;
+  --conversation-turn-mail-opacity: 0.26;
+  --conversation-turn-human-visible-opacity: 0.8;
+  --conversation-turn-mail-visible-opacity: 0.5;
+  --conversation-turn-favorite-opacity: 0.72;
   display: flex;
   flex-direction: column;
   position: absolute;
@@ -16,12 +18,16 @@
 .conversation-turn-navigation:not([data-pointer-preview-suppressed='true']):hover,
 .conversation-turn-navigation:has(.conversation-turn-navigation__row:focus-visible),
 .conversation-turn-navigation[data-scrubbing='true'] {
-  --conversation-turn-idle-opacity: 0.4;
-  --conversation-turn-visible-opacity: 0.8;
-  --conversation-turn-favorite-opacity: 0.86;
+  --conversation-turn-human-opacity: 0.7;
+  --conversation-turn-mail-opacity: 0.38;
+  --conversation-turn-human-visible-opacity: 0.9;
+  --conversation-turn-mail-visible-opacity: 0.6;
+  --conversation-turn-favorite-opacity: 0.88;
 }
 
 .conversation-turn-navigation__list {
+  --turn-fade-top: black;
+  --turn-fade-bottom: black;
   display: flex;
   min-height: 0;
   max-height: 100%;
@@ -35,11 +41,19 @@
   user-select: none;
   mask-image: linear-gradient(
     to bottom,
-    transparent,
+    var(--turn-fade-top),
     black 18px,
     black calc(100% - 18px),
-    transparent
+    var(--turn-fade-bottom)
   );
+}
+
+.conversation-turn-navigation__list[data-can-scroll-up='true'] {
+  --turn-fade-top: transparent;
+}
+
+.conversation-turn-navigation__list[data-can-scroll-down='true'] {
+  --turn-fade-bottom: transparent;
 }
 
 .conversation-turn-navigation[data-scrubbing='true'],
@@ -52,26 +66,50 @@
 }
 
 .conversation-turn-navigation__row {
+  --turn-color: var(--mc-color-text-primary);
+  --turn-idle-opacity: var(--conversation-turn-mail-opacity);
+  --turn-visible-opacity: var(--conversation-turn-mail-visible-opacity);
+  --turn-preview-opacity: 0.78;
+  --turn-base-scale: 0.230769;
   display: flex;
   width: 30px;
   height: 10px;
   min-height: 10px;
   padding: 0;
   align-items: center;
+  justify-content: center;
   background: transparent;
   border: 0;
   cursor: pointer;
   outline: none;
 }
 
+.conversation-turn-navigation__row[data-source='human'] {
+  --turn-idle-opacity: var(--conversation-turn-human-opacity);
+  --turn-visible-opacity: var(--conversation-turn-human-visible-opacity);
+  --turn-preview-opacity: 1;
+  --turn-base-scale: 0.461538;
+}
+
+.conversation-turn-navigation__row[data-favorited='true'] {
+  --turn-color: var(--mc-color-text-accent);
+  --turn-idle-opacity: var(--conversation-turn-favorite-opacity);
+  --turn-visible-opacity: 0.9;
+  --turn-preview-opacity: 1;
+}
+
 .conversation-turn-navigation__row > span {
   width: 26px;
+  flex-shrink: 0;
   height: 2px;
-  background: var(--mc-color-text-muted);
+  background: var(--turn-color);
   border-radius: 999px;
-  opacity: var(--conversation-turn-idle-opacity);
-  transform: scaleX(calc(0.2308 + 0.7692 * var(--conversation-turn-wave-progress, 0)));
-  transform-origin: left center;
+  opacity: var(--turn-idle-opacity);
+  /* Both sources extend by 14px, keeping human marks longer throughout the wave. */
+  transform: scaleX(
+    calc(var(--turn-base-scale) + 0.538462 * var(--conversation-turn-wave-progress, 0))
+  );
+  transform-origin: center;
   transition:
     transform 160ms cubic-bezier(0.23, 1, 0.32, 1),
     opacity 120ms ease,
@@ -79,12 +117,7 @@
 }
 
 .conversation-turn-navigation__row[data-visible='true'] > span {
-  background: var(--mc-color-text-primary);
-  opacity: var(--conversation-turn-visible-opacity);
-}
-
-.conversation-turn-navigation__row[data-favorited='true'] > span {
-  opacity: var(--conversation-turn-favorite-opacity);
+  opacity: var(--turn-visible-opacity);
 }
 
 .conversation-turn-navigation:not([data-pointer-preview-suppressed='true'])
@@ -92,12 +125,7 @@
   > span,
 .conversation-turn-navigation__row[data-previewed='true'] > span,
 .conversation-turn-navigation__row:focus-visible > span {
-  background: var(--mc-color-text-primary);
-  opacity: 1;
-}
-
-.conversation-turn-navigation__row[data-favorited='true'] > span {
-  background: var(--mc-color-text-accent);
+  opacity: var(--turn-preview-opacity);
 }
 
 .conversation-turn-navigation__row:focus-visible {
@@ -131,6 +159,15 @@
 .conversation-turn-navigation__tooltip[data-ready='true'] {
   visibility: visible;
   opacity: 1;
+}
+
+.conversation-turn-navigation__tooltip-source {
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-turn-navigation__tooltip strong,

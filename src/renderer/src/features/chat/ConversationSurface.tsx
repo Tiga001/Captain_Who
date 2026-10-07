@@ -986,6 +986,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
         </div>
         {historyTools.controls}
         <ConversationTurnNavigationRail
+          agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
           items={turnNavigationItems}
           scrollContainerRef={messagesRef}
           onRevealMessage={segments.segmented ? segments.revealMessage : undefined}

@@ -23,6 +23,7 @@ const SCRUB_ACTIVATION_DISTANCE_PX = 4
 
 interface ConversationTurnNavigationRailProps {
   items: ConversationTurnNavigationItem[]
+  agentLabelsById?: Readonly<Record<string, string>>
   scrollContainerRef: RefObject<HTMLDivElement | null>
   onRevealMessage?: (id: string, block?: ScrollLogicalPosition) => void
   visibleMessageIds?: ReadonlySet<string>
@@ -157,12 +158,23 @@ function sameStringSet(left: Set<string>, right: Set<string>) {
 
 export function ConversationTurnNavigationRail({
   items,
+  agentLabelsById,
   scrollContainerRef,
   onRevealMessage,
   visibleMessageIds,
   messageTurnIds
 }: ConversationTurnNavigationRailProps) {
   const { t } = useFrontendConfig()
+  const sourceLabels = {
+    human: t('chat.turnNavigationSourceHuman'),
+    agent: t('chat.turnNavigationSourceAgent'),
+    workflow: t('chat.turnNavigationSourceWorkflow'),
+    context: t('chat.turnNavigationSourceContext')
+  }
+  const sourceLabel = (item: ConversationTurnNavigationItem) => {
+    const name = item.sourceLabel || (item.senderAgentId && agentLabelsById?.[item.senderAgentId])
+    return name ? `${sourceLabels[item.source]} · ${name}` : sourceLabels[item.source]
+  }
   const tooltipId = useId()
   const itemIdsKey = useMemo(() => items.map((item) => item.id).join('\0'), [items])
   const itemIds = useMemo(() => new Set(itemIdsKey ? itemIdsKey.split('\0') : []), [itemIdsKey])
@@ -177,6 +189,8 @@ export function ConversationTurnNavigationRail({
     top: 0,
     ready: false
   })
+  const [scrollEdges, setScrollEdges] = useState({ up: false, down: false })
+  const listRef = useRef<HTMLDivElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
   const pointerScrubRef = useRef<PointerScrubState | null>(null)
   const pointerPreviewSuppressedRef = useRef(false)
@@ -185,6 +199,34 @@ export function ConversationTurnNavigationRail({
   const previewItem = items.find((item) => item.id === previewTurnId) ?? null
   const waveTurnId = previewTurnId
   const waveIndex = items.findIndex((item) => item.id === waveTurnId)
+
+  useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return
+
+    const updateScrollEdges = () => {
+      const maximumScrollTop = Math.max(0, list.scrollHeight - list.clientHeight)
+      const scrollTop = Math.max(0, Math.min(list.scrollTop, maximumScrollTop))
+      // Fractional scroll offsets and rounded dimensions can differ by a subpixel at the edge.
+      const up = scrollTop > 1
+      const down = maximumScrollTop - scrollTop > 1
+      setScrollEdges((current) =>
+        current.up === up && current.down === down ? current : { up, down }
+      )
+    }
+
+    updateScrollEdges()
+    list.addEventListener('scroll', updateScrollEdges, { passive: true })
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateScrollEdges)
+    resizeObserver?.observe(list)
+    window.addEventListener('resize', updateScrollEdges)
+    return () => {
+      list.removeEventListener('scroll', updateScrollEdges)
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', updateScrollEdges)
+    }
+  }, [items.length])
 
   useEffect(() => {
     if (items.length < MINIMUM_TURN_COUNT) {
@@ -290,13 +332,16 @@ export function ConversationTurnNavigationRail({
     updatePosition()
     const animationFrameId = window.requestAnimationFrame(updatePosition)
     const scrollElement = scrollContainerRef.current
+    const listElement = listRef.current
     window.addEventListener('resize', updatePosition)
     scrollElement?.addEventListener('scroll', updatePosition)
+    listElement?.addEventListener('scroll', updatePosition)
 
     return () => {
       window.cancelAnimationFrame(animationFrameId)
       window.removeEventListener('resize', updatePosition)
       scrollElement?.removeEventListener('scroll', updatePosition)
+      listElement?.removeEventListener('scroll', updatePosition)
     }
   }, [previewItem, scrollContainerRef, tooltipAnchor])
 
@@ -443,6 +488,9 @@ export function ConversationTurnNavigationRail({
               top: tooltipPosition.top
             }}
           >
+            <div className="conversation-turn-navigation__tooltip-source">
+              {sourceLabel(previewItem)}
+            </div>
             <strong>
               {previewItem.userPreview || t('chat.turnNavigationAttachmentOnlyMessage')}
             </strong>
@@ -462,11 +510,14 @@ export function ConversationTurnNavigationRail({
       >
         <div
           className="conversation-turn-navigation__list"
+          data-can-scroll-up={scrollEdges.up ? 'true' : undefined}
+          data-can-scroll-down={scrollEdges.down ? 'true' : undefined}
           onLostPointerCapture={finishPointerScrub}
           onPointerCancel={finishPointerScrub}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={finishPointerScrub}
+          ref={listRef}
         >
           {items.map((item, index) => {
             const distance = waveIndex < 0 ? -1 : Math.abs(index - waveIndex)
@@ -479,10 +530,11 @@ export function ConversationTurnNavigationRail({
               <button
                 aria-current={isVisible ? 'location' : undefined}
                 aria-describedby={isPreviewed ? tooltipId : undefined}
-                aria-label={`${t('chat.turnNavigationJumpToTurn')} ${index + 1}`}
+                aria-label={`${t('chat.turnNavigationJumpToTurn')} ${index + 1} · ${sourceLabel(item)}`}
                 className="conversation-turn-navigation__row"
                 data-favorited={item.favorited ? 'true' : undefined}
                 data-previewed={isPreviewed ? 'true' : undefined}
+                data-source={item.source}
                 data-turn-id={item.id}
                 data-visible={isVisible ? 'true' : undefined}
                 key={item.id}

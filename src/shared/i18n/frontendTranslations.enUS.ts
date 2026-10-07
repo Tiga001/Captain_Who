@@ -1,5 +1,9 @@
 // English UI translation strings.
 export const enUSTranslations = {
+  'chat.turnNavigationSourceHuman': 'You',
+  'chat.turnNavigationSourceAgent': 'Agent message',
+  'chat.turnNavigationSourceWorkflow': 'Organization mail',
+  'chat.turnNavigationSourceContext': 'Historical context',
   'chat.history.loadSection': 'Load this history section',
   'chat.history.searchPlaceholder': 'Search conversation',
   'chat.history.expanding': 'Expanding history…',

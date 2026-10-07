@@ -6,6 +6,9 @@ export interface ConversationTurnNavigationItem {
   favorited: boolean
   id: string
   userMessageId: string
+  source: 'human' | 'agent' | 'workflow' | 'context'
+  sourceLabel?: string
+  senderAgentId?: string
   userPreview: string
   assistantPreview: string
 }
@@ -50,16 +53,45 @@ export function normalizeTurnNavigationPreview(value: string) {
 
 type PreviewNormalizer = (message: ChatMessage, content: string) => string
 
-function getUserPreview(message: ChatMessage, normalize: PreviewNormalizer) {
-  const visibleContent = normalize(message, getUserVisibleContent(message))
+function getInputSource(
+  message: ChatMessage
+): Pick<ConversationTurnNavigationItem, 'source' | 'sourceLabel' | 'senderAgentId'> {
+  if (message.workflowSource) {
+    const names = [
+      message.workflowSource.workflowName,
+      ...message.workflowSource.sources.map((source) => source.nodeName)
+    ]
+    const sourceLabel = [...new Set(names.map((name) => name.trim()).filter(Boolean))].join(' · ')
+    return { source: 'workflow', ...(sourceLabel ? { sourceLabel } : {}) }
+  }
+  const origin = message.inputOrigin
+  if (origin?.kind === 'agent' || origin?.kind === 'historical_snapshot') {
+    return {
+      source: origin.kind === 'agent' ? 'agent' : 'context',
+      ...(origin.senderAgentId ? { senderAgentId: origin.senderAgentId } : {})
+    }
+  }
+  // Older root conversations have no origin proof and retain their human presentation.
+  return { source: 'human' }
+}
+
+function getUserPreview(message: ChatMessage, normalize: PreviewNormalizer, sourceLabel?: string) {
+  const sources = message.workflowSource?.sources
+  // Legacy organization receipts may lack original bodies. Keep their source names instead of
+  // guessing message boundaries or showing protocol headers from the assembled input.
+  const content = message.workflowSource
+    ? sources?.length && sources.every((source) => typeof source.content === 'string')
+      ? sources.map((source) => source.content).join('\n\n')
+      : ''
+    : getUserVisibleContent(message)
+  const visibleContent = normalize(message, content)
   if (visibleContent) return visibleContent
 
-  return (
-    message.attachments
-      ?.map((attachment) => attachment.name.trim())
-      .filter(Boolean)
-      .join(' · ') ?? ''
-  )
+  const attachmentNames = message.attachments
+    ?.map((attachment) => attachment.name.trim())
+    .filter(Boolean)
+    .join(' · ')
+  return attachmentNames || sourceLabel || ''
 }
 
 export function getConversationTurnNavigationItems(
@@ -92,29 +124,41 @@ function deriveConversationTurnNavigationItems(
   normalize: PreviewNormalizer
 ): ConversationTurnNavigationItem[] {
   const items: ConversationTurnNavigationItem[] = []
+  let inputs: ChatMessage[] = []
+  let finalAssistant: ChatMessage | null = null
 
-  for (let userIndex = 0; userIndex < messages.length; userIndex += 1) {
-    const userMessage = messages[userIndex]
-    if (userMessage.role !== 'user') continue
-
-    let finalAssistant: ChatMessage | null = null
-    for (let messageIndex = userIndex + 1; messageIndex < messages.length; messageIndex += 1) {
-      const candidate = messages[messageIndex]
-      if (candidate.role === 'user') break
-      if (candidate.role === 'assistant') finalAssistant = candidate
+  const appendSettledInputs = () => {
+    // Consecutive inputs share the following reply, including its final retry. Keep every input
+    // anchor, but omit the whole pending group until that final assistant message settles.
+    if (finalAssistant && isAssistantReplySettled(finalAssistant)) {
+      const assistantPreview = normalize(finalAssistant, getAssistantFinalContent(finalAssistant))
+      for (const input of inputs) {
+        const source = getInputSource(input)
+        items.push({
+          favorited: input.uiState?.favorited === true,
+          id: input.id,
+          userMessageId: input.id,
+          ...source,
+          userPreview: getUserPreview(input, normalize, source.sourceLabel),
+          assistantPreview
+        })
+      }
     }
-
-    // A pending final turn is deliberately absent from the rail until its reply settles.
-    if (!finalAssistant || !isAssistantReplySettled(finalAssistant)) continue
-
-    items.push({
-      favorited: userMessage.uiState?.favorited === true,
-      id: userMessage.id,
-      userMessageId: userMessage.id,
-      userPreview: getUserPreview(userMessage, normalize),
-      assistantPreview: normalize(finalAssistant, getAssistantFinalContent(finalAssistant))
-    })
+    inputs = []
+    finalAssistant = null
   }
+
+  // Each message and input is visited once. A user after an assistant begins a new group;
+  // it must never lend its later reply to an earlier unfinished group.
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (finalAssistant) appendSettledInputs()
+      inputs.push(message)
+    } else if (inputs.length) {
+      finalAssistant = message
+    }
+  }
+  appendSettledInputs()
 
   return items
 }

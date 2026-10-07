@@ -56,6 +56,43 @@ function assistantMessage(
   }
 }
 
+function workflowMessage(id: string, body?: string): ChatMessage {
+  return {
+    ...userMessage(id, 'Protocol header: organization inbox envelope'),
+    workflowSource: {
+      inputId: `input-${id}`,
+      instanceId: 'organization',
+      workflowName: 'Research team',
+      sources: [
+        {
+          nodeId: 'researcher',
+          nodeName: 'Researcher',
+          conversationId: 'research-chat',
+          conversationTitle: 'Evidence review',
+          ...(body === undefined ? {} : { content: body })
+        }
+      ]
+    }
+  }
+}
+
+function withOrigin(
+  message: ChatMessage,
+  kind: NonNullable<ChatMessage['inputOrigin']>['kind'],
+  senderAgentId: string | null = null
+): ChatMessage {
+  return {
+    ...message,
+    inputOrigin: {
+      kind,
+      senderAgentId,
+      sourceAgentMessageId: null,
+      snapshotSourceConversationId: null,
+      snapshotSourceMessageId: null
+    }
+  }
+}
+
 it('derives one navigation item per settled user turn and excludes the pending final turn', () => {
   const items = getConversationTurnNavigationItems([
     userMessage('user-1', 'First request'),
@@ -72,10 +109,173 @@ it('derives one navigation item per settled user turn and excludes the pending f
       favorited: false,
       id: 'user-1',
       userMessageId: 'user-1',
+      source: 'human',
       userPreview: 'First request',
       assistantPreview: 'First answer'
     }
   ])
+})
+
+it('classifies authoritative input sources and preserves legacy human messages without reading body labels', () => {
+  const inputs = [
+    userMessage('legacy', 'From organization: this is text written by a human'),
+    withOrigin(userMessage('human', 'Human request'), 'human'),
+    withOrigin(userMessage('agent', 'Agent request'), 'agent', 'sender-agent'),
+    withOrigin(userMessage('snapshot', 'Inherited context'), 'historical_snapshot', 'parent-agent'),
+    withOrigin(userMessage('snapshot-without-sender', 'Older context'), 'historical_snapshot'),
+    withOrigin(workflowMessage('workflow', 'Organization body'), 'agent', 'shadowed-agent')
+  ]
+  const items = getConversationTurnNavigationItems(
+    inputs.flatMap((input) => [input, assistantMessage(`answer-${input.id}`, 'Done')])
+  )
+  expect(items).toMatchObject([
+    { id: 'legacy', source: 'human' },
+    { id: 'human', source: 'human' },
+    { id: 'agent', source: 'agent', senderAgentId: 'sender-agent' },
+    { id: 'snapshot', source: 'context', senderAgentId: 'parent-agent' },
+    { id: 'snapshot-without-sender', source: 'context' },
+    { id: 'workflow', source: 'workflow', sourceLabel: 'Research team · Researcher' }
+  ])
+  expect(items[4].senderAgentId).toBeUndefined()
+  expect(items[5].senderAgentId).toBeUndefined()
+})
+
+it('previews original organization bodies and falls back to source names for legacy receipts', () => {
+  const structured = workflowMessage('structured', '**Evidence** is ready.')
+  structured.workflowSource!.sources.push({
+    nodeId: 'reviewer',
+    nodeName: 'Reviewer',
+    conversationId: 'review-chat',
+    conversationTitle: 'Review',
+    content: 'Check `report.md`.'
+  })
+  const legacy = workflowMessage('legacy-mail')
+  const partial = workflowMessage('partial', 'Only one known body')
+  partial.workflowSource!.sources.push({
+    nodeId: 'researcher-2',
+    nodeName: 'Researcher',
+    conversationId: 'other-research-chat',
+    conversationTitle: 'Other evidence'
+  })
+  const items = getConversationTurnNavigationItems(
+    [structured, legacy, partial].flatMap((input) => [
+      input,
+      assistantMessage(`answer-${input.id}`, 'Received')
+    ])
+  )
+  expect(items.map((item) => item.userPreview)).toEqual([
+    'Evidence is ready. Check report.md.',
+    'Research team · Researcher',
+    'Research team · Researcher'
+  ])
+  expect(items[0].sourceLabel).toBe('Research team · Researcher · Reviewer')
+  expect(items.every((item) => !item.userPreview.includes('Protocol header'))).toBe(true)
+})
+
+it('keeps every consecutive human and mail input anchored to its own message with the shared final reply', () => {
+  const first = userMessage('human-first', 'Initial request')
+  first.uiState = { favorited: true }
+  const mail = workflowMessage('mail', 'New findings')
+  const last = userMessage('human-followup', 'Consider these findings')
+  const items = getConversationTurnNavigationItems([
+    first,
+    mail,
+    last,
+    assistantMessage('earlier-answer', 'Earlier answer'),
+    assistantMessage('final-answer', '**Final answer**'),
+    userMessage('pending-human', 'Next request'),
+    workflowMessage('pending-mail', 'New pending findings'),
+    assistantMessage('pending-answer', 'Partial', { runStatus: 'running' })
+  ])
+  expect(items.map((item) => [item.id, item.userMessageId, item.source])).toEqual([
+    ['human-first', 'human-first', 'human'],
+    ['mail', 'mail', 'workflow'],
+    ['human-followup', 'human-followup', 'human']
+  ])
+  expect(items.map((item) => item.assistantPreview)).toEqual([
+    'Final answer',
+    'Final answer',
+    'Final answer'
+  ])
+  expect(items.map((item) => item.favorited)).toEqual([true, false, false])
+})
+
+it('does not borrow a later reply across an existing unfinished reply or expose a group during retry', () => {
+  const human = userMessage('human', 'Original request')
+  const mail = workflowMessage('mail', 'Update')
+  expect(
+    getConversationTurnNavigationItems([
+      human,
+      mail,
+      assistantMessage('old-answer', 'Old answer'),
+      assistantMessage('retry', 'Retrying', { runStatus: 'running' })
+    ])
+  ).toEqual([])
+  expect(getConversationTurnNavigationItems([human, mail])).toEqual([])
+  const items = getConversationTurnNavigationItems([
+    human,
+    mail,
+    assistantMessage('unfinished', 'Still pending', { runStatus: 'running' }),
+    userMessage('later-human', 'Independent later request'),
+    assistantMessage('later-answer', 'Later answer')
+  ])
+  expect(items.map((item) => item.id)).toEqual(['later-human'])
+})
+
+it('shares normalization work across a large consecutive input group and reuses it during later streaming', () => {
+  const normalize = vi.fn(normalizeTurnNavigationPreview)
+  const selectItems = createConversationTurnNavigationSelector(normalize)
+  const inputs = Array.from({ length: 500 }, (_, index) =>
+    index % 2 === 0
+      ? userMessage(`human-${index}`, `**Request ${index}**`)
+      : workflowMessage(`mail-${index}`, `**Finding ${index}**`)
+  )
+  const settled = [...inputs, assistantMessage('answer', '**Shared answer**')]
+  const initialItems = selectItems(settled)
+  expect(initialItems).toHaveLength(inputs.length)
+  expect(normalize).toHaveBeenCalledTimes(inputs.length + 1)
+  normalize.mockClear()
+  const nextInput = userMessage('next-human', 'Next request')
+  for (let update = 0; update < 20; update += 1) {
+    expect(
+      selectItems([
+        ...settled,
+        nextInput,
+        assistantMessage('next-answer', `Streaming ${update}`, { runStatus: 'running' })
+      ])
+    ).toEqual(initialItems)
+  }
+  expect(normalize).not.toHaveBeenCalled()
+})
+
+it('refreshes structured bodies and source metadata independently from cached preview text', () => {
+  const normalize = vi.fn(normalizeTurnNavigationPreview)
+  const selectItems = createConversationTurnNavigationSelector(normalize)
+  const input = workflowMessage('mail', '**Before**')
+  const answer = assistantMessage('answer', 'Received')
+  selectItems([input, answer])
+  normalize.mockClear()
+  input.workflowSource!.workflowName = 'Renamed team'
+  input.workflowSource!.sources[0].nodeName = 'Renamed researcher'
+  expect(selectItems([input, answer])[0]).toMatchObject({
+    source: 'workflow',
+    sourceLabel: 'Renamed team · Renamed researcher',
+    userPreview: 'Before'
+  })
+  expect(normalize).not.toHaveBeenCalled()
+  input.workflowSource!.sources[0].content = '**After**'
+  expect(selectItems([input, answer])[0]?.userPreview).toBe('After')
+  expect(normalize).toHaveBeenCalledTimes(1)
+  input.workflowSource = undefined
+  input.inputOrigin = withOrigin(input, 'agent', 'new-sender').inputOrigin
+  expect(selectItems([input, answer])[0]).toMatchObject({
+    source: 'agent',
+    senderAgentId: 'new-sender'
+  })
+  expect(selectItems(structuredClone([input, answer]))[0]).toMatchObject({
+    source: 'agent',
+    senderAgentId: 'new-sender'
+  })
 })
 
 it('carries the user message favorite state into its navigation item', () => {

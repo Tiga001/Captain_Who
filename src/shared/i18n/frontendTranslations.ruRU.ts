@@ -1,5 +1,9 @@
 // Russian UI translation strings.
 export const ruRUTranslations = {
+  'chat.turnNavigationSourceHuman': 'Вы',
+  'chat.turnNavigationSourceAgent': 'Сообщение агента',
+  'chat.turnNavigationSourceWorkflow': 'Почта организации',
+  'chat.turnNavigationSourceContext': 'Исторический контекст',
   'chat.history.loadSection': 'Загрузить эту часть истории',
   'chat.history.searchPlaceholder': 'Поиск по беседе',
   'chat.history.expanding': 'Загрузка истории…',

@@ -1,5 +1,9 @@
 // Japanese UI translation strings.
 export const jaJPTranslations = {
+  'chat.turnNavigationSourceHuman': 'あなた',
+  'chat.turnNavigationSourceAgent': 'エージェントのメッセージ',
+  'chat.turnNavigationSourceWorkflow': '組織メール',
+  'chat.turnNavigationSourceContext': '過去のコンテキスト',
   'chat.history.loadSection': 'この履歴を読み込む',
   'chat.history.searchPlaceholder': '会話を検索',
   'chat.history.expanding': '履歴を展開中…',

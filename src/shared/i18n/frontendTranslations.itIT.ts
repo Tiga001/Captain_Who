@@ -1,5 +1,9 @@
 // Italian UI translation strings.
 export const itITTranslations = {
+  'chat.turnNavigationSourceHuman': 'Tu',
+  'chat.turnNavigationSourceAgent': 'Messaggio dell’agente',
+  'chat.turnNavigationSourceWorkflow': 'Posta dell’organizzazione',
+  'chat.turnNavigationSourceContext': 'Contesto storico',
   'chat.history.loadSection': 'Carica questa cronologia',
   'chat.history.searchPlaceholder': 'Cerca testo',
   'chat.history.expanding': 'Espansione della cronologia…',
