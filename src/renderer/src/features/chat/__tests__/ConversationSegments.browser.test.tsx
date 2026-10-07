@@ -198,6 +198,19 @@ function scroller() {
   return document.querySelector<HTMLDivElement>('.chat-conversation-page__messages')!
 }
 
+function ObserverWorkspace({ chat }: { chat: ChatConversation }) {
+  return (
+    <div style={{ width: 1100, height: 780 }}>
+      <ConversationSurface
+        conversation={chat}
+        mode="observer"
+        rootConversationId="parent-conversation"
+        showTokenUsageDetails={false}
+      />
+    </div>
+  )
+}
+
 function historyShortcut(key: string, target: HTMLElement = document.body) {
   const event = new KeyboardEvent('keydown', {
     bubbles: true,
@@ -479,6 +492,52 @@ it('keeps independent anchors when the same surface switches A to B to A', async
     <Workspace chat={a} onScroll={remember} initialScrollTop={positions.get('a')} />
   )
   await expect.poll(() => Math.abs(top(saved.messageId) - saved.offset)).toBeLessThan(2)
+})
+
+it('keeps the visible observer card and reading anchor while paged history crosses the segment threshold', async () => {
+  const complete = conversation(60, 'paged-observer')
+  const recent = { ...complete, messages: complete.messages.slice(-40) }
+  const view = await render(<ObserverWorkspace chat={recent} />)
+  await frames(3)
+  await jump(46)
+  scroller().scrollTop += 24
+  await frames(4)
+  const card = message('user-46')!
+  const before = top('user-46')
+  expect(card).not.toBeNull()
+  for (const count of [80, 120]) {
+    await view.rerender(
+      <ObserverWorkspace chat={{ ...complete, messages: complete.messages.slice(-count) }} />
+    )
+    await frames(4)
+    expect(message('user-46')).toBe(card)
+    expect(Math.abs(top('user-46') - before)).toBeLessThan(2)
+    expect(
+      scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight
+    ).toBeGreaterThan(100)
+  }
+  // Navigation must resolve the variable-length prefix sections, not index / 16.
+  await jump(30)
+  expect(Math.abs(top('user-30'))).toBeLessThan(2)
+  await jump(7)
+  expect(Math.abs(top('user-7'))).toBeLessThan(2)
+})
+
+it('keeps observer bottom follow and mounted recent cards while older pages arrive', async () => {
+  const complete = conversation(60, 'paged-observer-bottom')
+  const view = await render(
+    <ObserverWorkspace chat={{ ...complete, messages: complete.messages.slice(-40) }} />
+  )
+  await frames(4)
+  const tail = message('assistant-59')!
+  for (const count of [80, 120]) {
+    await view.rerender(
+      <ObserverWorkspace chat={{ ...complete, messages: complete.messages.slice(-count) }} />
+    )
+    await frames(4)
+    expect(message('assistant-59')).toBe(tail)
+    expect(scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight).toBeLessThan(2)
+  }
 })
 
 it('mounts the section reached by a direct scrollbar jump without snapping back to the tail', async () => {

@@ -56,53 +56,101 @@ export function useConversationSegments({
   followsBottom
 }: Options) {
   const segmented = messages.length > CONVERSATION_SEGMENT_THRESHOLD
+  const firstMessageId = messages[0]?.id
   const messageIndices = useMemo(
     () => new Map(messages.map((message, index) => [message.id, index])),
     [messages]
   )
+  const [committedBoundaries, setCommittedBoundaries] = useState<{
+    conversationId: string
+    keys: string[]
+  } | null>(null)
   const definitions = useMemo(() => {
     const result: Omit<ConversationMessageSegment, 'mounted'>[] = []
-    for (let start = 0; start < messages.length; start += CONVERSATION_SEGMENT_SIZE) {
-      const end = Math.min(messages.length, start + CONVERSATION_SEGMENT_SIZE)
-      let estimatedHeight = 0
-      for (let index = start; index < end; index += 1) {
-        const message = messages[index]
-        estimatedHeight +=
-          40 +
-          (message.role === 'user' ? 72 : 120) +
-          Math.min(1200, Math.ceil(message.content.length / 65) * 24) +
-          (message.attachments?.length ? 126 : 0) +
-          (message.agentRun ? 48 : 0)
+    const previous = committedBoundaries
+    const anchors =
+      previous?.conversationId === conversationId
+        ? previous.keys.flatMap((key) => {
+            const index = messageIndices.get(key)
+            return index === undefined ? [] : [index]
+          })
+        : []
+    // Preserve already-mounted message groups when older pages are prepended. Paging and segment
+    // sizes need not align; repartitioning from index zero would remount live cards and lose the
+    // reader's anchor as soon as the list crosses the lazy-mount threshold.
+    const ordered = anchors.every((index, order) => order === 0 || index > anchors[order - 1])
+    const stops = [...(ordered ? anchors : []), messages.length]
+    let start = 0
+    for (const stop of stops) {
+      while (start < stop) {
+        const end = Math.min(stop, start + CONVERSATION_SEGMENT_SIZE)
+        let estimatedHeight = 0
+        for (let index = start; index < end; index += 1) {
+          const message = messages[index]
+          estimatedHeight +=
+            40 +
+            (message.role === 'user' ? 72 : 120) +
+            Math.min(1200, Math.ceil(message.content.length / 65) * 24) +
+            (message.attachments?.length ? 126 : 0) +
+            (message.agentRun ? 48 : 0)
+        }
+        result.push({ index: result.length, start, end, key: messages[start].id, estimatedHeight })
+        start = end
       }
-      result.push({ index: result.length, start, end, key: messages[start].id, estimatedHeight })
     }
     return result
-  }, [messages])
+  }, [committedBoundaries, conversationId, messageIndices, messages])
+  useLayoutEffect(() => {
+    setCommittedBoundaries((previous) =>
+      previous?.conversationId === conversationId &&
+      previous.keys.length === definitions.length &&
+      definitions.every((definition, index) => definition.key === previous.keys[index])
+        ? previous
+        : { conversationId, keys: definitions.map((definition) => definition.key) }
+    )
+  }, [conversationId, definitions])
+  const messageSegmentIndices = useMemo(() => {
+    const indices = new Map<string, number>()
+    for (const segment of definitions) {
+      for (let index = segment.start; index < segment.end; index++)
+        indices.set(messages[index].id, segment.index)
+    }
+    return indices
+  }, [definitions, messages])
   const initialIndices = useMemo(() => {
     if (!segmented) return new Set(definitions.map((definition) => definition.index))
     const last = definitions.length - 1
     const id =
       targetMessageId ?? (typeof initialPosition === 'object' ? initialPosition?.messageId : null)
-    const targetIndex = id ? messageIndices.get(id) : undefined
+    const targetIndex = id ? messageSegmentIndices.get(id) : undefined
     const center =
       targetIndex === undefined
         ? initialPosition !== null &&
           !(typeof initialPosition === 'object' && initialPosition.atBottom)
           ? 0
           : last
-        : Math.floor(targetIndex / CONVERSATION_SEGMENT_SIZE)
+        : targetIndex
     return new Set(
       [center, center > 0 ? center - 1 : center + 1].filter((index) => index >= 0 && index <= last)
     )
-  }, [definitions, initialPosition, messageIndices, segmented, targetMessageId])
-  const [state, setState] = useState(() => ({ conversationId, mounted: initialIndices }))
+  }, [definitions, initialPosition, messageSegmentIndices, segmented, targetMessageId])
+  const initialKeys = useMemo(
+    () => new Set([...initialIndices].map((index) => definitions[index].key)),
+    [definitions, initialIndices]
+  )
+  const [state, setState] = useState(() => ({ conversationId, mounted: initialKeys }))
   const [expanding, setExpanding] = useState(false)
   const [visibleMessageIds, setVisibleMessageIds] = useState<ReadonlySet<string>>(() => new Set())
-  const mounted = state.conversationId === conversationId ? state.mounted : initialIndices
+  const mountedKeys = state.conversationId === conversationId ? state.mounted : initialKeys
+  const mounted = new Set(
+    definitions
+      .filter((definition) => mountedKeys.has(definition.key))
+      .map((definition) => definition.index)
+  )
   const pinnedIndices = new Set<number>()
   for (const id of pinnedMessageIds) {
-    const index = messageIndices.get(id)
-    if (index !== undefined) pinnedIndices.add(Math.floor(index / CONVERSATION_SEGMENT_SIZE))
+    const index = messageSegmentIndices.get(id)
+    if (index !== undefined) pinnedIndices.add(index)
   }
   const segments = definitions.map((definition) => ({
     ...definition,
@@ -110,9 +158,9 @@ export function useConversationSegments({
   }))
   const remaining = segments.filter((segment) => !segment.mounted).length
   const segmentElements = useRef(new Map<number, HTMLElement>())
-  const current = useRef({ segments, mounted, conversationId, messageIndices })
+  const current = useRef({ segments, mounted, mountedKeys, conversationId, messageSegmentIndices })
   useLayoutEffect(() => {
-    current.current = { segments, mounted, conversationId, messageIndices }
+    current.current = { segments, mounted, mountedKeys, conversationId, messageSegmentIndices }
   })
   const anchor = useRef<ConversationScrollAnchor | null>(null)
   const placeholderAnchor = useRef<{ index: number; fraction: number; scrollTop: number } | null>(
@@ -130,9 +178,12 @@ export function useConversationSegments({
     if (!indices.some((index) => snapshot.segments[index] && !snapshot.mounted.has(index))) return
     setState((previous) => {
       const base =
-        previous.conversationId === snapshot.conversationId ? previous.mounted : snapshot.mounted
+        previous.conversationId === snapshot.conversationId
+          ? previous.mounted
+          : snapshot.mountedKeys
       const next = new Set(base)
-      for (const index of indices) if (snapshot.segments[index]) next.add(index)
+      for (const index of indices)
+        if (snapshot.segments[index]) next.add(snapshot.segments[index].key)
       return next.size === base.size
         ? previous
         : { conversationId: snapshot.conversationId, mounted: next }
@@ -270,12 +321,12 @@ export function useConversationSegments({
 
   const revealMessage = useCallback(
     (id: string, block: ScrollLogicalPosition = 'start') => {
-      const index = current.current.messageIndices.get(id)
+      const index = current.current.messageSegmentIndices.get(id)
       if (index === undefined) return
       const root = containerRef.current
       if (root) setPosition(root.scrollTop, false)
       pending.current = { id, block }
-      mountIndices([Math.floor(index / CONVERSATION_SEGMENT_SIZE)])
+      mountIndices([index])
       setNavigationRevision((value) => value + 1)
     },
     [containerRef, mountIndices, setPosition]
@@ -287,7 +338,7 @@ export function useConversationSegments({
     anchor.current = null
     placeholderAnchor.current = null
     setExpanding(false)
-    setState({ conversationId, mounted: initialIndices })
+    setState({ conversationId, mounted: initialKeys })
     if (targetMessageId && messageIndices.has(targetMessageId)) {
       pending.current = { id: targetMessageId, block: 'center' }
     } else if (
@@ -311,7 +362,7 @@ export function useConversationSegments({
   }, [
     containerRef,
     conversationId,
-    initialIndices,
+    initialKeys,
     initialPosition,
     messageIndices,
     scheduleScan,
@@ -345,7 +396,8 @@ export function useConversationSegments({
     restoreAnchor,
     scheduleScan,
     setPosition,
-    state
+    state,
+    firstMessageId
   ])
 
   useLayoutEffect(() => {
