@@ -87,6 +87,7 @@ mod trace_publication;
 mod trace_reconciliation;
 mod turn_diffs;
 mod workflow_execution;
+mod workflow_member_state;
 mod workflows;
 mod world_state;
 
@@ -122,6 +123,7 @@ pub use settings::ModelProviderCredentialReconciliationReport;
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;
 pub use trace_publication::ConversationTraceCommitCursor;
+pub use workflow_member_state::WorkflowMemberRuntimeState;
 
 /// A renderer-facing Conversation and every durable actor origin captured from the same
 /// SQLite read transaction. Keeping the provenance map beside the Conversation prevents

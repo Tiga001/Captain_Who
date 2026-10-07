@@ -202,3 +202,74 @@ fn awareness_host_distinguishes_async_questions_from_blocking_sync_waits_and_app
     assert_eq!(nodes[2]["waitingForApproval"], true);
     assert_eq!(nodes[2]["waitingForInteraction"], false);
 }
+
+#[test]
+fn batched_awareness_keeps_sync_wait_boundaries_and_approval_over_pause_priority() {
+    let (directory, storage, service) = fixture();
+    let owner = seed_chat(&storage, "sync-batch", true);
+    resident(&service, &owner);
+    storage
+        .admit_sync_human_interaction(&HumanInteractionSyncAdmission {
+            owner: owner.clone(),
+            input: serde_json::from_value(json!({"questions":[{"title":"Continue?"}]})).unwrap(),
+            checkpoint: json!({"schemaVersion":1}),
+            usage: None,
+            content: String::new(),
+            predecessor: None,
+            pending_action_predecessor: None,
+        })
+        .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("awareness.sqlite")).unwrap();
+    for status in ["waiting", "claimed", "executing", "model_in_flight"] {
+        connection
+            .execute(
+                "UPDATE human_interaction_suspensions SET status=?1",
+                [status],
+            )
+            .unwrap();
+        let mut projection =
+            json!({"runtime":{"nodes":[{"conversationId":"sync-batch","paused":true}]}});
+        service.enrich_workflow_awareness(&mut projection).unwrap();
+        let node = &projection["runtime"]["nodes"][0];
+        let waiting = storage
+            .is_sync_human_interaction_run_waiting(&owner.run_id)
+            .unwrap();
+        assert_eq!(node["waitingForInteraction"], waiting);
+        assert_eq!(
+            node["state"],
+            if waiting {
+                "waiting_interaction"
+            } else {
+                "stopped"
+            }
+        );
+        assert_eq!(node["hasPendingInteraction"], true);
+    }
+    connection
+        .execute(
+            "UPDATE human_interaction_suspensions SET status='waiting'",
+            [],
+        )
+        .unwrap();
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: "batch-approval".into(),
+            run_id: owner.run_id,
+            conversation_id: Some(owner.conversation_id),
+            assistant_message_id: Some(owner.assistant_message_id),
+            action_type: "tool_call".into(),
+            tool_name: "apply_patch".into(),
+            tool_call_id: Some("approval-call".into()),
+            status: "pending".into(),
+            target_status: None,
+            action_json: "{}".into(),
+            agent_input_json: "{}".into(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+    let mut projection = json!({"nodes":[{"conversationId":"sync-batch","paused":true}]});
+    service.enrich_workflow_awareness(&mut projection).unwrap();
+    assert_eq!(projection["nodes"][0]["state"], "waiting_approval");
+    assert_eq!(projection["nodes"][0]["waitingForInteraction"], true);
+}

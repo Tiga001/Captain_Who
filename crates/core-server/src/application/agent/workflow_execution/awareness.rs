@@ -61,6 +61,20 @@ impl AgentService {
             .keys()
             .cloned()
             .collect();
+        let fallback_runs = nodes
+            .iter()
+            .filter_map(|node| node.get("conversationId").and_then(Value::as_str))
+            .map(|conversation_id| {
+                let run_id = active_turns
+                    .get(conversation_id)
+                    .map(|turn| turn.run_id.clone())
+                    .or_else(|| resident_runs.get(conversation_id).cloned());
+                (conversation_id.to_owned(), run_id)
+            })
+            .collect();
+        let member_states = self
+            .storage
+            .load_workflow_member_runtime_states(&fallback_runs)?;
         for node in nodes {
             node["waitingForApproval"] = json!(false);
             node["waitingForInteraction"] = json!(false);
@@ -75,33 +89,15 @@ impl AgentService {
                 node["state"] = json!("unknown");
                 continue;
             };
-            if self
-                .storage
-                .load_conversation_meta(&conversation_id)?
-                .is_none()
-            {
+            let Some(member_state) = member_states.get(&conversation_id) else {
                 node["state"] = json!("unknown");
                 continue;
-            }
+            };
             node["bindingAvailable"] = json!(true);
-            let active_run = self
-                .storage
-                .get_in_progress_conversation_turn_identity(&conversation_id)?
-                .map(|turn| turn.run_id)
-                .or_else(|| {
-                    active_turns
-                        .get(&conversation_id)
-                        .map(|turn| turn.run_id.clone())
-                })
-                .or_else(|| resident_runs.get(&conversation_id).cloned());
+            let active_run = member_state.active_run_id.as_ref();
             let approval = approvals.contains(&conversation_id);
             let pending_interaction = interactions.contains(&conversation_id);
-            let interaction = active_run
-                .as_deref()
-                .map(|run_id| self.storage.is_sync_human_interaction_run_waiting(run_id))
-                .transpose()
-                .map_err(|error| error.to_string())?
-                .unwrap_or(false);
+            let interaction = member_state.waiting_for_interaction;
             node["waitingForApproval"] = json!(approval);
             node["waitingForInteraction"] = json!(interaction);
             node["hasPendingInteraction"] = json!(pending_interaction);
@@ -115,7 +111,6 @@ impl AgentService {
             } else if compacting.contains(&conversation_id) {
                 "compacting"
             } else if active_run
-                .as_ref()
                 .is_some_and(|run_id| resident_runs.get(&conversation_id) == Some(run_id))
             {
                 "running"
