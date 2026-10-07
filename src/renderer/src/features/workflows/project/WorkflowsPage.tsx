@@ -19,6 +19,7 @@ import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialo
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
+import { useAccountAuth } from '../../auth/AccountAuthContext'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatComposerDraft, ChatConversation } from '../../chat/chatTypes'
 import type { ConversationAttentionById } from '../../chat/useConversationAttention'
@@ -28,6 +29,7 @@ import {
   getCachedWorkflowPage,
   invalidateWorkflowPages,
   isCurrentWorkflowPage,
+  setWorkflowPageAuthScope,
   readWorkflowPage
 } from '../workflowPageCache'
 import { workflowErrorDetail, workflowUnavailableMemberModels } from '../workflowErrors'
@@ -99,7 +101,16 @@ function keepInstanceOrder(current: WorkflowInstance[], incoming: WorkflowInstan
   ]
 }
 
-export function WorkflowsPage({
+export function WorkflowsPage(props: WorkflowsPageProps) {
+  const auth = useAccountAuth()
+  const scope = auth ? `${auth.state.status}:${auth.state.profile?.userId ?? ''}` : 'local-host'
+  // Readable snapshots live longer than a navigation key, but never longer than their
+  // account session. Remount local editor/loading state as well as clearing the cache.
+  setWorkflowPageAuthScope(scope)
+  return <WorkflowPageContent key={scope} {...props} />
+}
+
+function WorkflowPageContent({
   foreground = true,
   conversations,
   conversationAttention,

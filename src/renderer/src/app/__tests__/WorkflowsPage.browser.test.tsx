@@ -27,6 +27,7 @@ import { invalidateWorkflowPages } from '../../features/workflows/workflowPageCa
 
 const service = vi.hoisted(() => ({
   request: vi.fn(),
+  account: 'account-a',
   language: 'zh-CN' as 'zh-CN' | 'en-US',
   runningIds: null as Set<string> | null,
   runtimeListeners: new Set<(snapshot: WorkflowRuntimeSnapshot) => void>()
@@ -70,7 +71,7 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
   })
 }))
 vi.mock('../../features/auth/AccountAuthContext', () => ({
-  useAccountAuth: () => ({ state: { profile: null } })
+  useAccountAuth: () => ({ state: { status: 'signedIn', profile: { userId: service.account } } })
 }))
 vi.mock('../../config/ModelSettingsProvider', () => ({
   useModelSettings: () => ({
@@ -134,6 +135,7 @@ const instance = (
 })
 
 beforeEach(async () => {
+  service.account = 'account-a'
   invalidateWorkflowPages()
   await page.viewport(1440, 900)
   const css = getFrontendCssVariables(undefined, classicDarkTheme)
@@ -387,6 +389,43 @@ function SidebarWorkflowHarness({
 }
 
 describe('organization sidebar adapter', () => {
+  it('restores the activity duration from the catalog after a board read that omits historical activity', async () => {
+    const full = {
+      ...instance('workflow-a', '交付看板', []),
+      activity: { startedAt: 1_000, completedAt: 4_000 }
+    }
+    service.request.mockImplementation(async (input: WorkflowRequest) => ({
+      records: [],
+      issues: [],
+      instances: input.operation === 'getInstance' ? [{ ...full, activity: undefined }] : [full]
+    }))
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByRole('heading', { name: '交付看板' })).toBeVisible()
+    await screen.getByRole('button', { name: '返回组织', exact: true }).click()
+    await expect.element(screen.getByText('已连续运行 3s')).toBeVisible()
+    expect(service.request.mock.calls.some(([input]) => input.operation === 'list')).toBe(true)
+  })
+
+  it('clears an already mounted board immediately on account change before the new read completes', async () => {
+    instances = [instance('workflow-a', '上个账号的组织', [])]
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByRole('heading', { name: '上个账号的组织' })).toBeVisible()
+    service.account = 'account-b'
+    let resolve!: (response: WorkflowResponse) => void
+    service.request.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        })
+    )
+    await screen.rerender(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect.element(screen.getByText('正在加载组织…')).toBeVisible()
+    expect(screen.container.querySelector('.workflow-monitor__canvas')).toBeNull()
+    expect(screen.getByRole('heading', { name: '上个账号的组织' }).query()).toBeNull()
+    resolve({ records: [], issues: [], instances: [instance('workflow-a', '重新验证的组织', [])] })
+    await expect.element(screen.getByRole('heading', { name: '重新验证的组织' })).toBeVisible()
+  })
+
   it('opens a single organization without loading templates and reuses its snapshot after external navigation', async () => {
     instances = [
       instance('workflow-a', '交付看板', [{ nodeId: 'analysis', conversationId: 'chat-a' }])

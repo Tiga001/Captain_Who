@@ -6,6 +6,8 @@ type Entry = { response: WorkflowResponse; expiresAt: number }
 const snapshots = new Map<string, Entry>()
 const pending = new Map<string, { generation: number; promise: Promise<WorkflowResponse> }>()
 let generation = 0
+let authScope: string | null = null
+let authGeneration = 0
 const keyFor = (instanceId: string | null) =>
   instanceId === null ? 'catalog' : `instance:${instanceId}`
 
@@ -30,6 +32,15 @@ export function invalidateWorkflowPages(): void {
   snapshots.clear()
 }
 
+/** Auth overlays retain the app tree; neither completed nor in-flight reads may cross sessions. */
+export function setWorkflowPageAuthScope(scope: string): void {
+  if (scope === authScope) return
+  authScope = scope
+  authGeneration += 1
+  invalidateWorkflowPages()
+  pending.clear()
+}
+
 /** A newer notification can arrive between a resolved read and its React continuation. */
 export function isCurrentWorkflowPage(
   instanceId: string | null,
@@ -50,11 +61,14 @@ export function readWorkflowPage(
   const cached = force ? null : getCachedWorkflowPage(instanceId)
   if (cached) return Promise.resolve(cached)
   const requestedGeneration = generation
+  const requestedAuthGeneration = authGeneration
   const promise = read(
     instanceId === null ? { operation: 'list' } : { operation: 'getInstance', instanceId }
   )
     .then(
       (response) => {
+        if (requestedAuthGeneration !== authGeneration)
+          throw new Error('Organization account session changed')
         // A mutation invalidated this flight. Never repaint a deleted/older organization;
         // join a fresh read before either the initial loader or background refresh resumes.
         if (requestedGeneration !== generation) return readWorkflowPage(instanceId, read, true)
@@ -64,6 +78,8 @@ export function readWorkflowPage(
         return response
       },
       (error: unknown) => {
+        if (requestedAuthGeneration !== authGeneration)
+          throw new Error('Organization account session changed')
         if (requestedGeneration !== generation) return readWorkflowPage(instanceId, read, true)
         throw error
       }

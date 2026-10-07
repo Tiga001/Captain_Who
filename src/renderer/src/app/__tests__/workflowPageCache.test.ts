@@ -4,6 +4,7 @@ import {
   getCachedWorkflowPage,
   invalidateWorkflowPages,
   isCurrentWorkflowPage,
+  setWorkflowPageAuthScope,
   readWorkflowPage
 } from '../../features/workflows/workflowPageCache'
 
@@ -62,6 +63,23 @@ describe('organization page snapshots', () => {
     await expect(opening).rejects.toBe(failure)
     expect(read).toHaveBeenCalledTimes(2)
     expect(getCachedWorkflowPage('organization')).toBeNull()
+  })
+
+  it('clears session snapshots and rejects an old-account flight without replaying it under a new account', async () => {
+    setWorkflowPageAuthScope('signedIn:account-a')
+    const read = vi.fn().mockResolvedValue(response())
+    await readWorkflowPage('warm', read)
+    const old = deferred()
+    read.mockReturnValueOnce(old.promise)
+    const inFlight = readWorkflowPage('loading', read)
+    const rejected = expect(inFlight).rejects.toThrow('account session changed')
+    setWorkflowPageAuthScope('signedOut:')
+    setWorkflowPageAuthScope('signedIn:account-b')
+    expect(getCachedWorkflowPage('warm')).toBeNull()
+    old.resolve(response())
+    await rejected
+    expect(getCachedWorkflowPage('loading')).toBeNull()
+    expect(read).toHaveBeenCalledTimes(2)
   })
 
   it('bounds warm snapshots and expires them without retaining a permanent catalog', async () => {
