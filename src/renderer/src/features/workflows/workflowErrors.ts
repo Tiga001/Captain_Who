@@ -16,6 +16,44 @@ export interface WorkflowUnavailableModel {
   memberNames: string[]
 }
 
+/** Explain known read failures without displaying backend payloads, paths, or stacks. */
+export function workflowLoadErrorMessage(error: unknown, language: string): string {
+  const record =
+    error && typeof error === 'object'
+      ? (error as { code?: unknown; message?: unknown; data?: { code?: unknown } })
+      : null
+  const message = typeof record?.message === 'string' ? record.message : ''
+  const t = (cn: string, en: string) => (language === 'zh-CN' ? cn : en)
+  if (
+    record?.code === -32601 ||
+    (record?.code === -32602 && /unknown variant `(?:getInstance|list)`/.test(message))
+  )
+    return t(
+      '后台服务无法识别组织读取请求，请重启应用后重试。',
+      'The background service does not recognize the organization request. Restart the app and retry.'
+    )
+  if (
+    record?.code === -32002 ||
+    record?.data?.code === 'outbound_overloaded' ||
+    (record?.code === -32001 && record.data?.code === 'overloaded')
+  )
+    return t(
+      '后台服务繁忙，暂时无法读取组织，请稍后重试。',
+      'The background service is busy. Please retry loading the organization shortly.'
+    )
+  if (/\b(?:timed out|timeout)\b/i.test(message))
+    return t(
+      '读取组织超时，请稍后重试。',
+      'Loading the organization timed out. Please retry shortly.'
+    )
+  if (/^core-server (?:exited|stopped|is not running|request admission is closed)\b/.test(message))
+    return t(
+      '后台服务已断开，暂时无法读取组织，请重试。',
+      'The background service disconnected. Please retry loading the organization.'
+    )
+  return t('组织加载失败，请重试。', 'Could not load organizations. Please retry.')
+}
+
 /** Read only the explicit public error contract; unrelated failures must stay generic. */
 export function workflowUnavailableMemberModels(error: unknown): WorkflowUnavailableModel[] | null {
   const isRecord = (value: unknown): value is Record<string, unknown> =>

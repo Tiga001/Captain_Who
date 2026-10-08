@@ -464,8 +464,39 @@ describe('organization sidebar adapter', () => {
     window.dispatchEvent(new Event('focus'))
     expect(service.request).toHaveBeenCalledTimes(1)
     reject(new Error('read failed'))
-    await expect.element(screen.getByText('组织已不可用')).toBeVisible()
+    await expect.element(screen.getByText('暂时无法读取组织')).toBeVisible()
+    expect(screen.getByText('组织已不可用').query()).toBeNull()
     await expect.element(screen.getByRole('button', { name: '重试', exact: true })).toBeVisible()
+  })
+
+  it('keeps a cached board on rejected revalidation and clears its load error after focus recovery', async () => {
+    instances = [
+      instance('workflow-a', '交付看板', [{ nodeId: 'analysis', conversationId: 'chat-a' }])
+    ]
+    const screen = await render(<SidebarWorkflowHarness instanceId="workflow-a" />)
+    await expect
+      .element(screen.getByRole('heading', { name: '交付看板', exact: true }))
+      .toBeVisible()
+    service.request.mockRejectedValueOnce(
+      new HostInvocationError({
+        code: -32602,
+        message: 'Invalid params: unknown variant `getInstance`, expected one of `list`, `save`',
+        data: { privateGraphData: 'do-not-display-payload' }
+      })
+    )
+    await screen.rerender(<SidebarWorkflowHarness instanceId="workflow-a" navigationId={2} />)
+    const dialog = screen.getByRole('alertdialog')
+    await expect.element(dialog).toHaveTextContent('后台服务无法识别组织读取请求')
+    expect(screen.container.querySelector('.workflow-monitor__canvas')).not.toBeNull()
+    expect(screen.getByText('组织已不可用').query()).toBeNull()
+    expect(dialog.element().textContent).not.toContain('getInstance')
+    expect(dialog.element().textContent).not.toContain('do-not-display-payload')
+    instances = [{ ...instances[0], name: '已恢复的看板', revision: 2 }]
+    window.dispatchEvent(new Event('focus'))
+    await expect
+      .element(screen.getByRole('heading', { name: '已恢复的看板', exact: true }))
+      .toBeVisible()
+    await expect.element(dialog).not.toBeInTheDocument()
   })
 
   it('retains the initial result when focus refresh overlaps its request', async () => {
@@ -843,6 +874,11 @@ describe('global organization management', () => {
       expect(onCommitted).not.toHaveBeenCalled()
       expect(onBeforeCommit).not.toHaveBeenCalled()
       await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+      // Reading a fresh snapshot must not dismiss an unrelated action failure.
+      const beforeRecovery = service.request.mock.calls.length
+      window.dispatchEvent(new Event('focus'))
+      await expect.poll(() => service.request.mock.calls.length).toBeGreaterThan(beforeRecovery)
+      await expect.element(dialog).toBeVisible()
       await page.getByRole('button', { name: zh ? '知道了' : 'Got it', exact: true }).click()
       expect(dialog.query()).toBeNull()
       // A later, unrelated failure must not inherit the specific model-error title or content.

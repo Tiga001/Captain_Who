@@ -163,6 +163,70 @@ mod tests {
     }
 
     #[test]
+    fn workflow_rpc_reads_one_board_through_the_json_request_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("single-board.sqlite");
+        let storage = StorageService::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for id in ["board", "other-board"] {
+            let definition = json!({
+                "schemaVersion":1,"id":id,"name":id,"description":"","background":"",
+                "nodes":[],"viewport":{"x":0,"y":0,"zoom":1}
+            });
+            connection.execute(
+                "INSERT INTO workflow_instances(instance_id,template_id,template_revision,name,color,revision,updated_at,needs_review,running,last_request_json,enabled,definition_json) VALUES(?1,'template',1,?1,'#123456',1,1,0,0,'{}',1,?2)",
+                rusqlite::params![id, definition.to_string()],
+            ).unwrap();
+        }
+        let query = json!({"operation":"getInstance","instanceId":"board"});
+        for params in [
+            query.clone(),
+            json!({"operation":"getInstance","instanceId":"board","includeActivity":false}),
+            json!({"operation":"getInstance","instanceId":"board","includeActivity":true}),
+        ] {
+            let response = call(&storage, params);
+            assert!(response.get("error").is_none(), "{response}");
+            let result = &response["result"];
+            let instances = result["instances"].as_array().unwrap();
+            assert_eq!(instances.len(), 1);
+            assert_eq!(instances[0]["id"], "board");
+            assert_eq!(instances[0]["definition"]["id"], "board");
+            assert_eq!(result["records"], json!([]));
+            assert_eq!(result["drafts"], json!([]));
+        }
+
+        // Keep the optimized board route independent of authoring and activity reads,
+        // exercising the same JSON entry as the sidebar instead of constructing an enum.
+        connection.execute_batch("DROP TABLE workflow_editing_drafts; DROP TABLE workflow_definitions; DROP TABLE workflow_mail_runs;").unwrap();
+        let response = call(&storage, query);
+        assert!(response.get("error").is_none(), "{response}");
+        assert!(response["result"]["instances"][0].get("activity").is_none());
+        let missing = call(
+            &storage,
+            json!({"operation":"getInstance","instanceId":"missing"}),
+        );
+        assert!(missing.get("error").is_none(), "{missing}");
+        assert_eq!(missing["result"]["instances"], json!([]));
+    }
+
+    #[test]
+    fn workflow_rpc_rejects_malformed_single_board_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("board-params.sqlite")).unwrap();
+        for params in [
+            json!({"operation":"getInstance"}),
+            json!({"operation":"getInstance","instanceId":42}),
+            json!({"operation":"getInstance","instanceId":""}),
+            json!({"operation":"getInstance","instanceId":"board","includeActivity":"false"}),
+            json!({"operation":"getInstance","instanceId":"board","includeActivity":null}),
+            json!({"operation":"getInstance","instanceId":"board","extra":true}),
+        ] {
+            let response = call(&storage, params.clone());
+            assert_eq!(response["error"]["code"], -32602, "{params}: {response}");
+        }
+    }
+
+    #[test]
     fn organization_enable_rpc_reports_model_details_from_execution_availability() {
         use mycopilot_core::storage::models::{ModelConfigRecord, ModelSettingsRecord};
         use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};

@@ -1,11 +1,44 @@
 import { describe, expect, it } from 'vitest'
 import {
   workflowErrorDetail,
+  workflowLoadErrorMessage,
   workflowOperationError,
   workflowUnavailableMemberModels
 } from '../../features/workflows/workflowErrors'
 
 describe('organization error diagnostics', () => {
+  it('explains unsupported board requests without leaking protocol or private error details', () => {
+    const error = {
+      code: -32602,
+      message: 'Invalid params: unknown variant `getInstance`, expected one of `list`, `save`',
+      data: { secret: 'private payload' },
+      stack: '/private/customer/project'
+    }
+    expect(workflowLoadErrorMessage(error, 'zh-CN')).toBe(
+      '后台服务无法识别组织读取请求，请重启应用后重试。'
+    )
+    expect(workflowLoadErrorMessage(error, 'en-US')).toContain('does not recognize')
+    expect(
+      workflowLoadErrorMessage({ ...error, message: 'private database failure' }, 'zh-CN')
+    ).toBe('组织加载失败，请重试。')
+  })
+
+  it('distinguishes busy, timed-out and disconnected reads from an unknown failure', () => {
+    expect(workflowLoadErrorMessage({ code: -32002 }, 'zh-CN')).toContain('后台服务繁忙')
+    expect(
+      workflowLoadErrorMessage({ code: -32001, data: { code: 'overloaded' } }, 'zh-CN')
+    ).toContain('后台服务繁忙')
+    expect(workflowLoadErrorMessage({ code: -32001 }, 'zh-CN')).toBe('组织加载失败，请重试。')
+    expect(workflowLoadErrorMessage(new Error('Request timed out'), 'zh-CN')).toContain(
+      '读取组织超时'
+    )
+    expect(
+      workflowLoadErrorMessage(new Error('core-server exited with code 1 and signal null'), 'zh-CN')
+    ).toContain('后台服务已断开')
+    for (const error of [null, undefined, { data: { message: 'private payload' } }])
+      expect(workflowLoadErrorMessage(error, 'zh-CN')).toBe('组织加载失败，请重试。')
+  })
+
   const modelError = (members: unknown[]) => ({
     message: 'organization_member_models_unavailable',
     code: -32602,

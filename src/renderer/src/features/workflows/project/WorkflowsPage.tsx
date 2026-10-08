@@ -32,7 +32,11 @@ import {
   setWorkflowPageAuthScope,
   readWorkflowPage
 } from '../workflowPageCache'
-import { workflowErrorDetail, workflowUnavailableMemberModels } from '../workflowErrors'
+import {
+  workflowErrorDetail,
+  workflowLoadErrorMessage,
+  workflowUnavailableMemberModels
+} from '../workflowErrors'
 import { WorkflowIssues } from '../WorkflowIssues'
 import { WorkflowGraphEditor } from '../WorkflowGraphEditor'
 import { useWorkflowHistory } from '../useWorkflowHistory'
@@ -151,6 +155,9 @@ function WorkflowPageContent({
   )
   const [loading, setLoading] = useState(!initialSnapshot)
   const [hasSnapshot, setHasSnapshot] = useState(!!initialSnapshot)
+  const [loadError, setLoadError] = useState<{ message: string; acknowledged: boolean } | null>(
+    null
+  )
   const [error, setErrorMessage] = useState('')
   const [errorKind, setErrorKind] = useState<'models_unavailable' | null>(null)
   const [errorAcknowledged, setErrorAcknowledged] = useState(false)
@@ -212,7 +219,7 @@ function WorkflowPageContent({
   const reload = useCallback(async () => {
     const generation = requestGeneration.current
     setLoading(true)
-    setError('')
+    setLoadError(null)
     try {
       // Cached content paints immediately, but closing a tab can miss structural
       // notifications. Always revalidate on navigation without blanking the board.
@@ -221,17 +228,14 @@ function WorkflowPageContent({
       setRecords(templates.records)
       setInstances((current) => keepInstanceOrder(current, templates.instances ?? []))
       setHasSnapshot(true)
-    } catch {
+      setLoadError(null)
+    } catch (error) {
       if (generation === requestGeneration.current)
-        setError(
-          language === 'zh-CN'
-            ? '组织加载失败，请重试。'
-            : 'Could not load organizations. Please retry.'
-        )
+        setLoadError({ message: workflowLoadErrorMessage(error, language), acknowledged: false })
     } finally {
       if (generation === requestGeneration.current) setLoading(false)
     }
-  }, [language, monitorId, setError, setLoading, setRecords, setInstances, setHasSnapshot])
+  }, [language, monitorId, setLoading, setRecords, setInstances, setHasSnapshot])
 
   useEffect(() => {
     void reload()
@@ -441,6 +445,7 @@ function WorkflowPageContent({
       setInstances((current) => keepInstanceOrder(current, templates.instances ?? []))
       setHasSnapshot(true)
       setLoading(false)
+      setLoadError(null)
       // Use the draft at response time so in-flight local edits survive the merge.
       const { draft, graph } = editorSnapshot.current
       if (!draft || (!draft.instance && !draft.record)) return 'applied'
@@ -847,25 +852,32 @@ function WorkflowPageContent({
     } else onClose?.()
   }
 
+  const showOperationError = !!error && !errorAcknowledged
+  const acknowledgeError = () => {
+    if (showOperationError) setErrorAcknowledged(true)
+    else setLoadError((current) => (current ? { ...current, acknowledged: true } : null))
+  }
   const errorDialog =
-    foreground && error && !errorAcknowledged ? (
+    foreground && (showOperationError || (loadError && !loadError.acknowledged)) ? (
       <ConfirmationDialog
         dialogRole="alertdialog"
         title={
-          errorKind === 'models_unavailable'
+          showOperationError && errorKind === 'models_unavailable'
             ? t('无法启用组织', 'Could not enable organization')
             : t('暂时无法完成操作', 'Could not complete this action')
         }
-        description={error}
+        description={showOperationError ? error : loadError!.message}
         descriptionClassName={
-          errorKind === 'models_unavailable' ? 'project-workflows__model-error' : undefined
+          showOperationError && errorKind === 'models_unavailable'
+            ? 'project-workflows__model-error'
+            : undefined
         }
         cancelLabel={t('关闭', 'Close')}
         confirmLabel={t('知道了', 'Got it')}
         confirmVariant="primary"
         showCancelButton={false}
-        onCancel={() => setErrorAcknowledged(true)}
-        onConfirm={() => setErrorAcknowledged(true)}
+        onCancel={acknowledgeError}
+        onConfirm={acknowledgeError}
       />
     ) : null
 
@@ -910,7 +922,9 @@ function WorkflowPageContent({
           <p>
             {loading
               ? t('正在加载组织…', 'Loading organizations…')
-              : t('组织已不可用', 'This organization or its template is unavailable')}
+              : loadError
+                ? t('暂时无法读取组织', 'Organizations could not be loaded')
+                : t('组织已不可用', 'This organization or its template is unavailable')}
           </p>
           {!loading && (
             <button className="workflow-button" type="button" onClick={() => void reload()}>
@@ -994,7 +1008,7 @@ function WorkflowPageContent({
           </div>
         </header>
       )}
-      {(pendingSync || (error && hasSnapshot && !draft)) && (
+      {(pendingSync || ((error || loadError) && hasSnapshot && !draft)) && (
         <div className="project-workflows__recovery">
           {pendingSync ? (
             <>

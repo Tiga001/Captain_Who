@@ -194,6 +194,7 @@ impl<'de> Deserialize<'de> for Request {
             value.get("operation").and_then(|op| op.as_str()),
             Some(
                 "listInstances"
+                    | "getInstance"
                     | "saveInstance"
                     | "deleteInstance"
                     | "setInstanceEnabled"
