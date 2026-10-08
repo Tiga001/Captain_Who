@@ -159,6 +159,7 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
     rejectAction: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.rejectAction, input),
     cancelAction: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.cancelAction, input),
     getUsageSummary: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getUsageSummary, input),
+    getUsageDashboard: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getUsageDashboard, input),
     getLocalTokenUsage: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.getLocalTokenUsage, input),
     clearUsageRecords: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.clearUsageRecords, input),

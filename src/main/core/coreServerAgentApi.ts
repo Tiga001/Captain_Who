@@ -75,6 +75,8 @@ import type {
   AgentUsageClearOutput,
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput,
+  AgentUsageDashboardInput,
+  AgentUsageDashboardOutput,
   CollaborationApprovalDecisionRequest,
   CollaborationApprovalDecisionResult,
   CollaborationApprovalList,
@@ -124,6 +126,9 @@ import {
   AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
   AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
   AGENT_GET_USAGE_SUMMARY_METHOD,
+  AGENT_GET_USAGE_DASHBOARD_METHOD,
+  parseAgentUsageDashboardInput,
+  parseAgentUsageDashboardOutput,
   AGENT_LIST_PENDING_ACTIONS_METHOD,
   AGENT_START_MANUAL_CONTEXT_COMPACTION_METHOD,
   AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD,
@@ -512,6 +517,13 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
       AGENT_GET_USAGE_SUMMARY_METHOD,
       input
     )
+  }
+
+  getUsageDashboard(input: AgentUsageDashboardInput): Promise<AgentUsageDashboardOutput> {
+    const request = parseAgentUsageDashboardInput(input)
+    return this.rpc
+      .request<unknown, AgentUsageDashboardInput>(AGENT_GET_USAGE_DASHBOARD_METHOD, request)
+      .then((value) => parseAgentUsageDashboardOutput(value, request.windows.length))
   }
 
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput> {

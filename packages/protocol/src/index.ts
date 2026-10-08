@@ -1,4 +1,5 @@
 export * from './agent'
+export * from './agentUsageDashboard'
 export * from './agentPromptPreferences'
 export * from './agentBackendState'
 export * from './agentContextMaterial'

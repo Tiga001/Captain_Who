@@ -93,6 +93,8 @@ import type {
   AgentUsageClearOutput,
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput,
+  AgentUsageDashboardInput,
+  AgentUsageDashboardOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
   AgentFolderReference,
@@ -736,6 +738,7 @@ export interface AgentHostApi {
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput>
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
+  getUsageDashboard(input: AgentUsageDashboardInput): Promise<AgentUsageDashboardOutput>
   getLocalTokenUsage(input: LocalTokenUsageSummaryInput): Promise<LocalTokenUsageSummaryOutput>
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
   readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage>

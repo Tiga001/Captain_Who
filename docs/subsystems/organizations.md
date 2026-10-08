@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 ---
 
 # 组织：邮件与分层协作
@@ -210,7 +210,7 @@ worker 由 bootstrap 显式启动并持有，构造服务不启动后台任务�
 
 ## 7. 持久化与版本边界
 
-当前 SQLite canonical schema 为 v70；definition schema v1、组织 revision 与成员 incarnation 是不同版本维度。
+当前 SQLite canonical schema 为 v71；definition schema v1、组织 revision 与成员 incarnation 是不同版本维度。
 
 - v64 建立独立 `workflow_mail_*` 信封、输入、收发操作回执、事件、Run 身份、来源及停止屏障；不转换旧图执行记录。
 - v65 将组织完整定义存入实例、解除对模板的外键依赖，保存独立成员身份及人员工具回执；精确 v64 升级不改写旧 Run 授权。

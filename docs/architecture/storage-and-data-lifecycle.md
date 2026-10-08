@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,11 +24,12 @@ last_verified: 2026-10-07
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v70**（SQLite `PRAGMA user_version = 70`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v71**（SQLite `PRAGMA user_version = 71`）：
 
-- `STORAGE_SCHEMA_VERSION = 70`；
+- `STORAGE_SCHEMA_VERSION = 71`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
+- v71 为计费账本建立按 UTC 小时、模型和历史名称划分的增量汇总；首次升级回填既有账单，后续由账单原事务维护，不修改正文、冻结价格或计费归属；
 - v70 增加组织恢复元数据投影与定向索引；迁移按全部已投递输入/事件回填每个组织与对话的最新事件序号，不读取或重写邮件正文。事件与输入的触发器在同一事务维护派生水位，保留已解绑/删除对话的邮件历史语义；低频删除或身份改写精确重算受影响对话，回滚同步撤销。该表不授予身份或权限；
 - v69 仅在消息的全文索引字段实际变化时重建 FTS；相同值 UPDATE 和纯展示写回不再重建索引。升级只替换触发器，不重写消息、历史、索引内容或修订水位；
 - v68 为 `agent_run_json` 增加独立展示水位和按消息更新序号；展示写回仅刷新原始快照，保留模型历史与计量结果。同内容 Trace/模型日志 UPDATE 不再推进历史版本；
@@ -45,7 +46,7 @@ last_verified: 2026-10-07
 - v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表，统计起始时间在创建 schema 时固定，不回填此前的观测；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 当前 v70 库须通过 exact fingerprint 和外键校验。exact v69 → v70 回填组织恢复水位并建立索引，不修改输入、事件和正文；exact v68 → v69 为 FTS 消息更新触发器增加实际值变化条件，不回填或重建索引；exact v67 → v68 分离消息展示水位与模型历史修订，跳过无变化的 Trace/模型日志更新，不改写消息正文或模型历史；exact v66 → v67 增加独立消息历史修订，不改写历史或原会话 revision；exact v65 → v66 原子删除旧执行表，不迁移旧工作流数据；exact v64 → v65 复制当前组织配置并解除模板依赖、增加成员身份与人员回执；exact v63 → v64 只新增独立邮箱表；exact v62 → v63 增加可空的长粘贴元数据；exact v61 → v62 只增加组织 pending sequence 部分索引；exact v60 → v61 保留全部历史，仅增加修订记录、触发器和摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为组织实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留全部历史，增加组织消息、输入、事件、来源与 Run 身份记录，并扩展 Trace 类型约束支持 workflow_delivery；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有组织并增加默认关闭的模板 enabled 历史字段（当前可用性已改为校验结果派生）；exact v53 → v54 增加组织定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68、v69、v70，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
+- 当前 v71 库须通过 exact fingerprint 和外键校验。exact v70 → v71 回填计费小时汇总并安装事务内增量维护；exact v69 → v70 回填组织恢复水位并建立索引，不修改输入、事件和正文；exact v68 → v69 为 FTS 消息更新触发器增加实际值变化条件，不回填或重建索引；exact v67 → v68 分离消息展示水位与模型历史修订，跳过无变化的 Trace/模型日志更新，不改写消息正文或模型历史；exact v66 → v67 增加独立消息历史修订，不改写历史或原会话 revision；exact v65 → v66 原子删除旧执行表，不迁移旧工作流数据；exact v64 → v65 复制当前组织配置并解除模板依赖、增加成员身份与人员回执；exact v63 → v64 只新增独立邮箱表；exact v62 → v63 增加可空的长粘贴元数据；exact v61 → v62 只增加组织 pending sequence 部分索引；exact v60 → v61 保留全部历史，仅增加修订记录、触发器和摘要索引；exact v59 → v60 保留全部历史，按既有 FTS position 回填普通历史顺序投影及索引，不重排历史、不重建正文；exact v58 → v59 保留历史，为组织实例增加可空的默认新建对话项目，项目删除时清空此选择；exact v57 → v58 保留全部历史，增加组织消息、输入、事件、来源与 Run 身份记录，并扩展 Trace 类型约束支持 workflow_delivery；exact v56 → v57 保留图定义与历史，增加默认开启的实例 enabled 字段及开启实例所绑定对话的归档保护；exact v55 → v56 保留图定义与全部历史，增加全局实例、绑定和独立编辑草稿；exact v54 → v55 保留所有组织并增加默认关闭的模板 enabled 历史字段（当前可用性已改为校验结果派生）；exact v53 → v54 增加组织定义表与索引；exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53、v54、v55、v56、v57、v58、v59、v60、v61、v62、v63、v64、v65、v66、v67、v68、v69、v70、v71，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 未知版、非空未版本化或结构被篡改的数据库也返回 `development_storage_schema_reset_required`，不修改源库或自动重置。
 
@@ -61,7 +62,19 @@ Renderer 消息 checkpoint 先完成 Run 身份校验、权威终态、Usage 和
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v70，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。当前可确认的配置保留来源为 exact 当前 v70：旧配置来源判定仍受 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49` 限制，与当前 v70 不匹配，因此不能承诺已登记旧版本可恢复。启动升级到当前 schema 与旧备份 reset 是不同路径，详见[恢复手册](../operations/recovery-runbook.md)。真源为 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs)；启动时不会自动执行该工具。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v71，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。当前可确认的配置保留来源为 exact 当前 v71：旧配置来源判定仍受 `RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION = 49` 限制，与当前 v71 不匹配，因此不能承诺已登记旧版本可恢复。启动升级到当前 schema 与旧备份 reset 是不同路径，详见[恢复手册](../operations/recovery-runbook.md)。真源为 [`storage-reset-dev.rs`](../../crates/core-server/src/bin/storage-reset-dev.rs)；启动时不会自动执行该工具。
+
+## 计费用量增量汇总
+
+普通 Run 账单和未清除的手动压缩账单是计费事实，小时汇总是可重建投影。写入、累计值替换和删除通过同一事务内的触发器维护，变更先扣除旧值再加新值，跨小时、跨模型或名称变化会迁移贡献；仅状态变化或相同数值不更新汇总。各可空字段保留非空贡献计数，区分未报告与准确的零；历史价格与估算费用不因当前模型配置变化而重算。
+
+批量 dashboard 在一个一致读取中取小时汇总、必要边界原始行、已删除账单日汇总和当前模型名称，随后在锁外同时组装全部窗口和总览。完整小时不重扫原始账单；不齐整小时的本地时区边界保留原始毫秒筛选。删除后的日汇总按 UTC 日锚点落入窗口，沿用既有信息精度，不推断已删除账单的小时。
+
+可复现基准：`cargo run --locked -p mycopilot-core --example benchmark_usage_dashboard`。它在内存数据库中通过正式触发器生成 1k/10k/100k 账单，对照旧接口逐桶读取与批量 dashboard，校验全部统计和模型结果并报告查询中位耗时；不打开用户数据库，也不包含 IPC、磁盘同步或其他智能体争锁，不能视为页面端到端延迟。
+
+2026-10-08 本地开发构建、8 个模型、5 次热查询样本：30 天视图在 10k 账单下由 104.9 ms 降至 16.4 ms，在 100k 账单下由 1082.5 ms 降至 16.3 ms；每次读取所需 RPC 由 31 次降为 1 次。这些结果仅用于上述固定场景的前后对照，实际页面耗时还取决于队列、磁盘与并发负载。
+
+删除聊天前仍将账单转入独立日汇总，级联删除同时撤销对应小时贡献；清空计费会删除普通账单并为手动压缩保留已清除幂等凭证，旧响应不能重新收费。本机 Token 统计是另一套独立统计，不随计费清空。新增诊断使用固定计费方法名，记录锁等待、读取、投影和 RPC 耗时，不记录正文或凭据。
 
 ## 本机 Token 统计
 

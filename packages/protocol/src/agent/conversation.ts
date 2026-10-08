@@ -186,6 +186,24 @@ export interface AgentUsageSummaryInput {
   to?: number
 }
 
+/** Inclusive Unix millisecond boundaries, supplied in display order. */
+export interface AgentUsageWindow {
+  from: number
+  to: number
+}
+
+export interface AgentUsageDashboardInput {
+  /** Between 1 and 31 contiguous windows covering at most 370 days. */
+  windows: AgentUsageWindow[]
+}
+
+export interface AgentUsageDashboardOutput {
+  /** Authoritative full-range aggregates from the same snapshot as the buckets. */
+  summary: AgentUsageSummaryOutput
+  /** One aggregate for each input window, in the same order. */
+  buckets: AgentUsageSummaryOutput[]
+}
+
 export interface AgentUsageModelSummary {
   modelId: string
   modelName: string

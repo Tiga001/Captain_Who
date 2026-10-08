@@ -435,6 +435,14 @@ impl AgentService {
         self.storage.get_usage_summary(input, now_ms())
     }
 
+    pub fn get_usage_dashboard(
+        &self,
+        input: &AgentUsageDashboardInput,
+    ) -> Result<AgentUsageDashboardOutput, String> {
+        let _timing = mycopilot_core::performance::Span::new("usage.dashboard", "handler");
+        self.storage.get_usage_dashboard(input)
+    }
+
     pub fn clear_usage_records(
         &self,
         input: &AgentUsageClearInput,

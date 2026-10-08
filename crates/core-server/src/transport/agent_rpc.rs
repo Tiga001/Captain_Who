@@ -256,6 +256,21 @@ pub(crate) fn handle_agent_usage_summary(
     }
 }
 
+pub(crate) fn handle_agent_usage_dashboard(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentUsageDashboardInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    match agent_service.get_usage_dashboard(&input) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
 pub(crate) fn handle_agent_clear_usage_records(
     agent_service: &AgentService,
     id: JsonRpcId,

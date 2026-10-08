@@ -9,6 +9,8 @@ const METHODS = new Set([
   'storage.saveChatMessageUiState',
   'storage.loadRunningConversationSummaries',
   'agent.listPendingActions',
+  'agent.getUsageSummary',
+  'agent.getUsageDashboard',
   'agent.cancelRun',
   'agent.workflows.request',
   'agent.event',

@@ -545,6 +545,7 @@ pub(super) fn is_blocking_read_method(method: &str) -> bool {
             | AGENT_COMMAND_SESSIONS_GET_METHOD
             | AGENT_LIST_PENDING_ACTIONS_METHOD
             | AGENT_GET_USAGE_SUMMARY_METHOD
+            | AGENT_GET_USAGE_DASHBOARD_METHOD
             | AGENT_GET_LOCAL_TOKEN_USAGE_METHOD
             | AGENT_READ_FILE_CHANGE_METHOD
             | AGENT_GET_FILE_CHANGE_DIFF_METHOD
@@ -636,6 +637,8 @@ mod tests {
         }
         for method in [
             mycopilot_protocol_rs::HUMAN_INTERACTION_GET_SETTINGS_METHOD,
+            mycopilot_protocol_rs::AGENT_GET_USAGE_SUMMARY_METHOD,
+            mycopilot_protocol_rs::AGENT_GET_USAGE_DASHBOARD_METHOD,
             mycopilot_protocol_rs::HUMAN_INTERACTION_LIST_REQUESTS_METHOD,
             mycopilot_protocol_rs::HUMAN_INTERACTION_GET_ATTENTION_METHOD,
             mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD,

@@ -78,6 +78,7 @@ export const HOST_CHANNELS = {
     getFileChangeHistoryDiff: 'host:agent.getFileChangeHistoryDiff',
     getProviderTransitionStatus: 'host:agent.getProviderTransitionStatus',
     getUsageSummary: 'host:agent.getUsageSummary',
+    getUsageDashboard: 'host:agent.getUsageDashboard',
     getLocalTokenUsage: 'host:agent.getLocalTokenUsage',
     listCommandSessions: 'host:agent.listCommandSessions',
     listPendingActions: 'host:agent.listPendingActions',

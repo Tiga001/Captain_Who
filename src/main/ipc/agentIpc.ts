@@ -214,6 +214,9 @@ export function registerAgentIpc(
   ipcMain.handle(HOST_CHANNELS.agent.getUsageSummary, (_event, input) =>
     coreServer.getUsageSummary(input)
   )
+  ipcMain.handle(HOST_CHANNELS.agent.getUsageDashboard, (_event, input) =>
+    coreServer.getUsageDashboard(input)
+  )
   ipcMain.handle(HOST_CHANNELS.agent.getLocalTokenUsage, (_event, input) =>
     coreServer.getLocalTokenUsage(input)
   )

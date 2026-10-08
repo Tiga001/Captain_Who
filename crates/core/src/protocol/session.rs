@@ -835,6 +835,28 @@ pub struct AgentUsageSummaryInput {
     pub to: Option<i64>,
 }
 
+/// Inclusive Unix millisecond boundaries. Storage validates ordered, contiguous safe integers.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentUsageWindow {
+    pub from: i64,
+    pub to: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentUsageDashboardInput {
+    pub windows: Vec<AgentUsageWindow>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsageDashboardOutput {
+    pub summary: AgentUsageSummaryOutput,
+    /// One aggregate per input window, preserving the request's order.
+    pub buckets: Vec<AgentUsageSummaryOutput>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageModelSummary {

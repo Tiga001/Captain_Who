@@ -1,0 +1,77 @@
+{
+  "input": {
+    "windows": [
+      { "from": 100, "to": 199 },
+      { "from": 200, "to": 299 }
+    ]
+  },
+  "output": {
+    "summary": {
+      "requestCount": 2,
+      "messageCount": 1,
+      "unpricedMessageCount": 1,
+      "inputTokens": 100,
+      "outputTokens": 30,
+      "cachedInputTokens": 20,
+      "estimatedCost": 0.000123,
+      "models": [
+        {
+          "modelId": "model-1",
+          "modelName": "Local model",
+          "isConfigured": true,
+          "requestCount": 2,
+          "messageCount": 1,
+          "unpricedMessageCount": 1,
+          "inputTokens": 100,
+          "outputTokens": 30,
+          "cachedInputTokens": 20,
+          "estimatedCost": 0.000123
+        }
+      ]
+    },
+    "buckets": [
+      {
+        "requestCount": 1,
+        "messageCount": 0,
+        "unpricedMessageCount": 0,
+        "inputTokens": 60,
+        "outputTokens": 10,
+        "cachedInputTokens": 20,
+        "estimatedCost": 0.000123,
+        "models": [
+          {
+            "modelId": "model-1",
+            "modelName": "Local model",
+            "isConfigured": true,
+            "requestCount": 1,
+            "messageCount": 0,
+            "unpricedMessageCount": 0,
+            "inputTokens": 60,
+            "outputTokens": 10,
+            "cachedInputTokens": 20,
+            "estimatedCost": 0.000123
+          }
+        ]
+      },
+      {
+        "requestCount": 1,
+        "messageCount": 1,
+        "unpricedMessageCount": 1,
+        "inputTokens": 40,
+        "outputTokens": 20,
+        "models": [
+          {
+            "modelId": "model-1",
+            "modelName": "Local model",
+            "isConfigured": true,
+            "requestCount": 1,
+            "messageCount": 1,
+            "unpricedMessageCount": 1,
+            "inputTokens": 40,
+            "outputTokens": 20
+          }
+        ]
+      }
+    ]
+  }
+}

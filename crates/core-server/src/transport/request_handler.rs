@@ -323,6 +323,9 @@ pub(crate) fn handle_request(
         AGENT_GET_USAGE_SUMMARY_METHOD => {
             handle_agent_usage_summary(agent_service, request.id, request.params)
         }
+        AGENT_GET_USAGE_DASHBOARD_METHOD => {
+            handle_agent_usage_dashboard(agent_service, request.id, request.params)
+        }
         AGENT_GET_LOCAL_TOKEN_USAGE_METHOD => {
             handle_agent_local_token_usage(agent_service, request.id, request.params)
         }

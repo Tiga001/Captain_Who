@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 70;
+pub const STORAGE_SCHEMA_VERSION: i32 = 71;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -35,8 +35,10 @@ const V68_SCHEMA_FINGERPRINT: &str =
 
 const V69_SCHEMA_FINGERPRINT: &str =
     "sha256:8532d89f095b602369e576f3541172a7b872b7e22619228865cc9cf85eb403d8";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V70_SCHEMA_FINGERPRINT: &str =
     "sha256:843221527806ceaf0563ede4973442c4040432cc9827639d0d411951ef66714b";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:ce54b37ebd2b7243acfdcc875db55cc3a673ed4bb0c4d3f587b72c4496f50054";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -58,6 +60,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v68 refreshes message presentation independently and ignores unchanged trace publications.
 /// v69 skips full-text index rewrites for unchanged message values, preserving existing history.
 /// v70 keeps organization recovery cursors as transaction-owned metadata, without reading bodies.
+/// v71 incrementally projects billing ledgers into exact hourly aggregates, with raw fallback.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -147,6 +150,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 69 {
         install_workflow_recovery_metadata_v69(connection)?;
+    }
+
+    if read_schema_version(connection)? == 70 {
+        install_billing_hourly_aggregates_v70(connection)?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -486,12 +493,24 @@ fn semantic_message_search_updates_schema() -> &'static str {
     &CANONICAL_SCHEMA[start..end]
 }
 fn workflow_recovery_metadata_schema() -> &'static str {
-    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+    let start = CANONICAL_SCHEMA
         .find("-- Durable organization recovery metadata, schema v70.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Incremental billing hour aggregates, schema v71.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+fn billing_hourly_aggregates_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Incremental billing hour aggregates, schema v71.")
         .unwrap()..]
 }
+fn canonical_schema_v70() -> String {
+    CANONICAL_SCHEMA.replace(billing_hourly_aggregates_schema(), "")
+}
 fn canonical_schema_v69() -> String {
-    CANONICAL_SCHEMA.replace(workflow_recovery_metadata_schema(), "")
+    canonical_schema_v70().replace(workflow_recovery_metadata_schema(), "")
 }
 fn canonical_schema_v68() -> String {
     canonical_schema_v69().replace(semantic_message_search_updates_schema(), "")
@@ -523,6 +542,14 @@ fn install_workflow_recovery_metadata_v69(connection: &Connection) -> rusqlite::
     validate_schema_fingerprint(&transaction, V69_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_recovery_metadata_schema())?;
     transaction.pragma_update(None, "user_version", 70)?;
+    validate_schema_fingerprint(&transaction, V70_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+fn install_billing_hourly_aggregates_v70(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V70_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(billing_hourly_aggregates_schema())?;
+    transaction.pragma_update(None, "user_version", 71)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
 }
@@ -4437,3 +4464,7 @@ mod message_search_tests;
 #[cfg(test)]
 #[path = "migrations_workflow_recovery_tests.rs"]
 mod workflow_recovery_tests;
+
+#[cfg(test)]
+#[path = "migrations_usage_dashboard_tests.rs"]
+mod usage_dashboard_tests;

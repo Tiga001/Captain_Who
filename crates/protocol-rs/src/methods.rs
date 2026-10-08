@@ -81,6 +81,7 @@ pub const AGENT_APPROVE_ACTION_METHOD: &str = "agent.approveAction";
 pub const AGENT_REJECT_ACTION_METHOD: &str = "agent.rejectAction";
 pub const AGENT_CANCEL_ACTION_METHOD: &str = "agent.cancelAction";
 pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
+pub const AGENT_GET_USAGE_DASHBOARD_METHOD: &str = "agent.getUsageDashboard";
 pub const AGENT_GET_LOCAL_TOKEN_USAGE_METHOD: &str = "agent.getLocalTokenUsage";
 pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
 pub const AGENT_READ_FILE_CHANGE_METHOD: &str = "agent.readFileChange";

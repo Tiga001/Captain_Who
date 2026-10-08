@@ -7,6 +7,16 @@ use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, O
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// Batched bounded calendar windows; retained here as the public storage query entry point.
+pub fn usage_dashboard(
+    connection: &Connection,
+    input: &crate::AgentUsageDashboardInput,
+) -> Result<crate::AgentUsageDashboardOutput, String> {
+    super::usage_dashboard_repository::validate(input)?;
+    let snapshot = super::usage_dashboard_repository::read_snapshot(connection, input)?;
+    super::usage_dashboard_repository::project(snapshot, &input.windows)
+}
+
 const DELETED_USAGE_ROLLUP_UPDATE_SQL: &str = "
     request_count = agent_deleted_usage_daily_rollups.request_count + excluded.request_count,
     message_count = agent_deleted_usage_daily_rollups.message_count + excluded.message_count,
@@ -350,6 +360,31 @@ pub fn usage_summary(
 }
 
 pub fn clear_usage_records(
+    connection: &Connection,
+    input: &AgentUsageClearInput,
+) -> rusqlite::Result<AgentUsageClearOutput> {
+    // A savepoint composes with conversation-deletion transactions and rolls back all three
+    // ledgers together if any later tombstone/rollup write fails.
+    connection.execute_batch("SAVEPOINT usage_billing_clear")?;
+    let result = clear_usage_records_inner(connection, input);
+    match result {
+        Ok(output) => match connection.execute_batch("RELEASE usage_billing_clear") {
+            Ok(()) => Ok(output),
+            Err(error) => {
+                let _ = connection
+                    .execute_batch("ROLLBACK TO usage_billing_clear; RELEASE usage_billing_clear");
+                Err(error)
+            }
+        },
+        Err(error) => {
+            let _ = connection
+                .execute_batch("ROLLBACK TO usage_billing_clear; RELEASE usage_billing_clear");
+            Err(error)
+        }
+    }
+}
+
+fn clear_usage_records_inner(
     connection: &Connection,
     input: &AgentUsageClearInput,
 ) -> rusqlite::Result<AgentUsageClearOutput> {

@@ -6,6 +6,33 @@ use crate::image_generation::{
 use serde_json::{json, Value};
 
 #[test]
+fn usage_dashboard_round_trips_the_cross_language_contract() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../packages/protocol/fixtures/usage-dashboard-v1.json"
+    ))
+    .unwrap();
+    let input: AgentUsageDashboardInput = serde_json::from_value(fixture["input"].clone()).unwrap();
+    let output: AgentUsageDashboardOutput =
+        serde_json::from_value(fixture["output"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(&input).unwrap(), fixture["input"]);
+    assert_eq!(serde_json::to_value(&output).unwrap(), fixture["output"]);
+    assert_eq!(output.buckets.len(), input.windows.len());
+    assert_eq!(output.summary.message_count, 1);
+    assert_eq!(output.summary.request_count, 2);
+    assert_eq!(output.buckets[0].request_count, 1);
+    assert_eq!(output.buckets[0].message_count, 0);
+    assert_eq!(output.buckets[1].message_count, 1);
+    assert!(output.buckets[1].estimated_cost.is_none());
+    for invalid in [
+        json!({"windows":[{"from":0.5,"to":1}]}),
+        json!({"windows":[{"from":0,"to":1,"timezone":"UTC"}]}),
+        json!({"windows":[{"from":0,"to":1}],"modelId":"model-1"}),
+    ] {
+        assert!(serde_json::from_value::<AgentUsageDashboardInput>(invalid).is_err());
+    }
+}
+
+#[test]
 fn builtin_capability_tool_identity_serializes_all_typed_routing_fields() {
     let identity = AgentToolIdentity::BuiltinCapability {
         capability_id: "browser_automation".into(),

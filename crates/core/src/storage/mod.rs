@@ -58,6 +58,7 @@ pub mod skill_enablement_repository;
 #[cfg(test)]
 pub(crate) mod trace_performance_metrics;
 pub mod turn_diff_repository;
+pub(crate) mod usage_dashboard_repository;
 pub mod usage_repository;
 pub mod workflow_execution_repository;
 pub mod workflow_repository;

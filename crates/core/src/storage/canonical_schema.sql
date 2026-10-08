@@ -7570,3 +7570,309 @@ BEGIN
     GROUP BY input.conversation_id
     ON CONFLICT(instance_id, conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence;
 END;
+
+-- Incremental billing hour aggregates, schema v71.
+-- A rebuildable projection; the original billing ledgers remain authoritative.
+-- Unsafe integer sums and severe floating-point cancellation retain a raw-hour fallback.
+CREATE TABLE agent_usage_hourly_rollups (
+    usage_hour INTEGER NOT NULL,
+    model_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    last_observed_at INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL CHECK (entry_count >= 0),
+    needs_raw INTEGER NOT NULL CHECK (needs_raw IN (0, 1)),
+    request_count ANY NOT NULL,
+    message_count ANY NOT NULL,
+    unpriced_message_count ANY NOT NULL,
+    input_tokens_sum ANY NOT NULL,
+    input_tokens_count INTEGER NOT NULL CHECK (input_tokens_count >= 0),
+    output_tokens_sum ANY NOT NULL,
+    output_tokens_count INTEGER NOT NULL CHECK (output_tokens_count >= 0),
+    output_thinking_tokens_sum ANY NOT NULL,
+    output_thinking_tokens_count INTEGER NOT NULL CHECK (output_thinking_tokens_count >= 0),
+    total_tokens_sum ANY NOT NULL,
+    total_tokens_count INTEGER NOT NULL CHECK (total_tokens_count >= 0),
+    cached_input_tokens_sum ANY NOT NULL,
+    cached_input_tokens_count INTEGER NOT NULL CHECK (cached_input_tokens_count >= 0),
+    cache_creation_input_tokens_sum ANY NOT NULL,
+    cache_creation_input_tokens_count INTEGER NOT NULL CHECK (cache_creation_input_tokens_count >= 0),
+    estimated_cost_sum ANY NOT NULL,
+    estimated_cost_count INTEGER NOT NULL CHECK (estimated_cost_count >= 0),
+    estimated_cost_nonzero_count INTEGER NOT NULL CHECK (estimated_cost_nonzero_count >= 0),
+    PRIMARY KEY (usage_hour, model_id, model_name)
+) STRICT;
+CREATE INDEX idx_usage_hourly_needs_raw
+ON agent_usage_hourly_rollups (usage_hour) WHERE needs_raw = 1;
+CREATE INDEX idx_agent_usage_hour_identity_time
+ON agent_usage_records ((created_at - ((created_at % 3600000 + 3600000) % 3600000)), model_id, model_name, created_at DESC);
+CREATE INDEX idx_manual_usage_hour_identity_time
+ON manual_context_compaction_usage_records ((created_at - ((created_at % 3600000 + 3600000) % 3600000)), model_id, model_name, created_at DESC) WHERE cleared_at IS NULL;
+INSERT INTO agent_usage_hourly_rollups (usage_hour, model_id, model_name, last_observed_at, entry_count, needs_raw, request_count, message_count, unpriced_message_count, input_tokens_sum, input_tokens_count, output_tokens_sum, output_tokens_count, output_thinking_tokens_sum, output_thinking_tokens_count, total_tokens_sum, total_tokens_count, cached_input_tokens_sum, cached_input_tokens_count, cache_creation_input_tokens_sum, cache_creation_input_tokens_count, estimated_cost_sum, estimated_cost_count, estimated_cost_nonzero_count)
+SELECT (created_at - ((created_at % 3600000 + 3600000) % 3600000)),
+       model_id,
+       model_name,
+       MAX(created_at),
+       COUNT(*),
+       CASE WHEN TOTAL(ABS(CAST(billable_request_count AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(input_tokens AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(output_tokens AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(output_thinking_tokens AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(total_tokens AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(cached_input_tokens AS REAL))) > 9007199254740991 OR TOTAL(ABS(CAST(cache_creation_input_tokens AS REAL))) > 9007199254740991 THEN 1 ELSE 0 END,
+       CASE WHEN TOTAL(ABS(CAST(billable_request_count AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(billable_request_count) AS INTEGER) ELSE TOTAL(billable_request_count) END,
+       SUM(message_count),
+       SUM(unpriced_message_count),
+       CASE WHEN TOTAL(ABS(CAST(input_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(input_tokens) AS INTEGER) ELSE TOTAL(input_tokens) END,
+       COUNT(input_tokens),
+       CASE WHEN TOTAL(ABS(CAST(output_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(output_tokens) AS INTEGER) ELSE TOTAL(output_tokens) END,
+       COUNT(output_tokens),
+       CASE WHEN TOTAL(ABS(CAST(output_thinking_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(output_thinking_tokens) AS INTEGER) ELSE TOTAL(output_thinking_tokens) END,
+       COUNT(output_thinking_tokens),
+       CASE WHEN TOTAL(ABS(CAST(total_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(total_tokens) AS INTEGER) ELSE TOTAL(total_tokens) END,
+       COUNT(total_tokens),
+       CASE WHEN TOTAL(ABS(CAST(cached_input_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(cached_input_tokens) AS INTEGER) ELSE TOTAL(cached_input_tokens) END,
+       COUNT(cached_input_tokens),
+       CASE WHEN TOTAL(ABS(CAST(cache_creation_input_tokens AS REAL))) <= 9007199254740991 THEN CAST(TOTAL(cache_creation_input_tokens) AS INTEGER) ELSE TOTAL(cache_creation_input_tokens) END,
+       COUNT(cache_creation_input_tokens),
+       TOTAL(estimated_cost),
+       COUNT(estimated_cost),
+       SUM(CASE WHEN estimated_cost <> 0 THEN 1 ELSE 0 END)
+FROM (
+    SELECT created_at, model_id, model_name, billable_request_count,
+           input_tokens, output_tokens, output_thinking_tokens, total_tokens, cached_input_tokens, cache_creation_input_tokens, estimated_cost,
+           1 AS message_count, CASE WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN 1 ELSE 0 END AS unpriced_message_count
+    FROM agent_usage_records
+    UNION ALL
+    SELECT created_at, model_id, model_name, billable_request_count,
+           input_tokens, output_tokens, output_thinking_tokens, total_tokens, cached_input_tokens, cache_creation_input_tokens, estimated_cost, 0, 0
+    FROM manual_context_compaction_usage_records WHERE cleared_at IS NULL
+) GROUP BY (created_at - ((created_at % 3600000 + 3600000) % 3600000)), model_id, model_name;
+CREATE TRIGGER agent_usage_hourly_insert
+AFTER INSERT ON agent_usage_records
+BEGIN
+    INSERT INTO agent_usage_hourly_rollups (usage_hour, model_id, model_name, last_observed_at, entry_count, needs_raw, request_count, message_count, unpriced_message_count, input_tokens_sum, input_tokens_count, output_tokens_sum, output_tokens_count, output_thinking_tokens_sum, output_thinking_tokens_count, total_tokens_sum, total_tokens_count, cached_input_tokens_sum, cached_input_tokens_count, cache_creation_input_tokens_sum, cache_creation_input_tokens_count, estimated_cost_sum, estimated_cost_count, estimated_cost_nonzero_count)
+    SELECT (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)), NEW.model_id, NEW.model_name, NEW.created_at, 1, 0, NEW.billable_request_count, 1, CASE WHEN NEW.estimated_cost IS NULL AND (NEW.input_tokens IS NOT NULL OR NEW.output_tokens IS NOT NULL) THEN 1 ELSE 0 END, COALESCE(NEW.input_tokens, 0), (NEW.input_tokens IS NOT NULL), COALESCE(NEW.output_tokens, 0), (NEW.output_tokens IS NOT NULL), COALESCE(NEW.output_thinking_tokens, 0), (NEW.output_thinking_tokens IS NOT NULL), COALESCE(NEW.total_tokens, 0), (NEW.total_tokens IS NOT NULL), COALESCE(NEW.cached_input_tokens, 0), (NEW.cached_input_tokens IS NOT NULL), COALESCE(NEW.cache_creation_input_tokens, 0), (NEW.cache_creation_input_tokens IS NOT NULL), COALESCE(NEW.estimated_cost, 0), (NEW.estimated_cost IS NOT NULL), (NEW.estimated_cost IS NOT NULL AND NEW.estimated_cost <> 0) WHERE 1
+    ON CONFLICT(usage_hour, model_id, model_name) DO UPDATE SET
+        last_observed_at = MAX(last_observed_at, excluded.last_observed_at),
+        entry_count = entry_count + 1,
+        needs_raw = needs_raw OR typeof(request_count + excluded.request_count) <> 'integer' OR typeof(message_count + excluded.message_count) <> 'integer' OR typeof(unpriced_message_count + excluded.unpriced_message_count) <> 'integer' OR typeof(input_tokens_sum + excluded.input_tokens_sum) <> 'integer' OR typeof(output_tokens_sum + excluded.output_tokens_sum) <> 'integer' OR typeof(output_thinking_tokens_sum + excluded.output_thinking_tokens_sum) <> 'integer' OR typeof(total_tokens_sum + excluded.total_tokens_sum) <> 'integer' OR typeof(cached_input_tokens_sum + excluded.cached_input_tokens_sum) <> 'integer' OR typeof(cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum) <> 'integer',
+        request_count = request_count + excluded.request_count,
+        message_count = message_count + excluded.message_count,
+        unpriced_message_count = unpriced_message_count + excluded.unpriced_message_count,
+        input_tokens_sum = input_tokens_sum + excluded.input_tokens_sum,
+        input_tokens_count = input_tokens_count + excluded.input_tokens_count,
+        output_tokens_sum = output_tokens_sum + excluded.output_tokens_sum,
+        output_tokens_count = output_tokens_count + excluded.output_tokens_count,
+        output_thinking_tokens_sum = output_thinking_tokens_sum + excluded.output_thinking_tokens_sum,
+        output_thinking_tokens_count = output_thinking_tokens_count + excluded.output_thinking_tokens_count,
+        total_tokens_sum = total_tokens_sum + excluded.total_tokens_sum,
+        total_tokens_count = total_tokens_count + excluded.total_tokens_count,
+        cached_input_tokens_sum = cached_input_tokens_sum + excluded.cached_input_tokens_sum,
+        cached_input_tokens_count = cached_input_tokens_count + excluded.cached_input_tokens_count,
+        cache_creation_input_tokens_sum = cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count + excluded.cache_creation_input_tokens_count,
+        estimated_cost_sum = estimated_cost_sum + excluded.estimated_cost_sum,
+        estimated_cost_count = estimated_cost_count + excluded.estimated_cost_count,
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count + excluded.estimated_cost_nonzero_count;
+END;
+CREATE TRIGGER agent_usage_hourly_update
+AFTER UPDATE OF created_at, model_id, model_name, billable_request_count, input_tokens, output_tokens, output_thinking_tokens, total_tokens, cached_input_tokens, cache_creation_input_tokens, estimated_cost ON agent_usage_records
+WHEN NEW.created_at IS NOT OLD.created_at OR NEW.model_id IS NOT OLD.model_id OR NEW.model_name IS NOT OLD.model_name OR NEW.billable_request_count IS NOT OLD.billable_request_count OR NEW.input_tokens IS NOT OLD.input_tokens OR NEW.output_tokens IS NOT OLD.output_tokens OR NEW.output_thinking_tokens IS NOT OLD.output_thinking_tokens OR NEW.total_tokens IS NOT OLD.total_tokens OR NEW.cached_input_tokens IS NOT OLD.cached_input_tokens OR NEW.cache_creation_input_tokens IS NOT OLD.cache_creation_input_tokens OR NEW.estimated_cost IS NOT OLD.estimated_cost
+BEGIN
+    UPDATE agent_usage_hourly_rollups SET
+        needs_raw = needs_raw OR (estimated_cost_nonzero_count > (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) AND OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0 AND ABS(estimated_cost_sum - OLD.estimated_cost) <= (ABS(estimated_cost_sum) + ABS(OLD.estimated_cost)) * 1e-12) OR typeof(request_count - OLD.billable_request_count) <> 'integer' OR typeof(input_tokens_sum - COALESCE(OLD.input_tokens, 0)) <> 'integer' OR typeof(output_tokens_sum - COALESCE(OLD.output_tokens, 0)) <> 'integer' OR typeof(output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0)) <> 'integer' OR typeof(total_tokens_sum - COALESCE(OLD.total_tokens, 0)) <> 'integer' OR typeof(cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0)) <> 'integer' OR typeof(cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0)) <> 'integer',
+        entry_count = entry_count - 1,
+        request_count = request_count - (OLD.billable_request_count),
+        message_count = message_count - (1),
+        unpriced_message_count = unpriced_message_count - (CASE WHEN OLD.estimated_cost IS NULL AND (OLD.input_tokens IS NOT NULL OR OLD.output_tokens IS NOT NULL) THEN 1 ELSE 0 END),
+        input_tokens_sum = CASE WHEN input_tokens_count - (OLD.input_tokens IS NOT NULL) = 0 THEN 0 ELSE input_tokens_sum - COALESCE(OLD.input_tokens, 0) END,
+        input_tokens_count = input_tokens_count - (OLD.input_tokens IS NOT NULL),
+        output_tokens_sum = CASE WHEN output_tokens_count - (OLD.output_tokens IS NOT NULL) = 0 THEN 0 ELSE output_tokens_sum - COALESCE(OLD.output_tokens, 0) END,
+        output_tokens_count = output_tokens_count - (OLD.output_tokens IS NOT NULL),
+        output_thinking_tokens_sum = CASE WHEN output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL) = 0 THEN 0 ELSE output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0) END,
+        output_thinking_tokens_count = output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL),
+        total_tokens_sum = CASE WHEN total_tokens_count - (OLD.total_tokens IS NOT NULL) = 0 THEN 0 ELSE total_tokens_sum - COALESCE(OLD.total_tokens, 0) END,
+        total_tokens_count = total_tokens_count - (OLD.total_tokens IS NOT NULL),
+        cached_input_tokens_sum = CASE WHEN cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0) END,
+        cached_input_tokens_count = cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL),
+        cache_creation_input_tokens_sum = CASE WHEN cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0) END,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL),
+        estimated_cost_sum = CASE WHEN estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) = 0 THEN 0.0 ELSE MAX(0.0, estimated_cost_sum - COALESCE(OLD.estimated_cost, 0)) END,
+        estimated_cost_count = estimated_cost_count - (OLD.estimated_cost IS NOT NULL),
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0)
+    WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name;
+    DELETE FROM agent_usage_hourly_rollups WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND entry_count = 0;
+    INSERT INTO agent_usage_hourly_rollups (usage_hour, model_id, model_name, last_observed_at, entry_count, needs_raw, request_count, message_count, unpriced_message_count, input_tokens_sum, input_tokens_count, output_tokens_sum, output_tokens_count, output_thinking_tokens_sum, output_thinking_tokens_count, total_tokens_sum, total_tokens_count, cached_input_tokens_sum, cached_input_tokens_count, cache_creation_input_tokens_sum, cache_creation_input_tokens_count, estimated_cost_sum, estimated_cost_count, estimated_cost_nonzero_count)
+    SELECT (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)), NEW.model_id, NEW.model_name, NEW.created_at, 1, 0, NEW.billable_request_count, 1, CASE WHEN NEW.estimated_cost IS NULL AND (NEW.input_tokens IS NOT NULL OR NEW.output_tokens IS NOT NULL) THEN 1 ELSE 0 END, COALESCE(NEW.input_tokens, 0), (NEW.input_tokens IS NOT NULL), COALESCE(NEW.output_tokens, 0), (NEW.output_tokens IS NOT NULL), COALESCE(NEW.output_thinking_tokens, 0), (NEW.output_thinking_tokens IS NOT NULL), COALESCE(NEW.total_tokens, 0), (NEW.total_tokens IS NOT NULL), COALESCE(NEW.cached_input_tokens, 0), (NEW.cached_input_tokens IS NOT NULL), COALESCE(NEW.cache_creation_input_tokens, 0), (NEW.cache_creation_input_tokens IS NOT NULL), COALESCE(NEW.estimated_cost, 0), (NEW.estimated_cost IS NOT NULL), (NEW.estimated_cost IS NOT NULL AND NEW.estimated_cost <> 0) WHERE 1
+    ON CONFLICT(usage_hour, model_id, model_name) DO UPDATE SET
+        last_observed_at = MAX(last_observed_at, excluded.last_observed_at),
+        entry_count = entry_count + 1,
+        needs_raw = needs_raw OR typeof(request_count + excluded.request_count) <> 'integer' OR typeof(message_count + excluded.message_count) <> 'integer' OR typeof(unpriced_message_count + excluded.unpriced_message_count) <> 'integer' OR typeof(input_tokens_sum + excluded.input_tokens_sum) <> 'integer' OR typeof(output_tokens_sum + excluded.output_tokens_sum) <> 'integer' OR typeof(output_thinking_tokens_sum + excluded.output_thinking_tokens_sum) <> 'integer' OR typeof(total_tokens_sum + excluded.total_tokens_sum) <> 'integer' OR typeof(cached_input_tokens_sum + excluded.cached_input_tokens_sum) <> 'integer' OR typeof(cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum) <> 'integer',
+        request_count = request_count + excluded.request_count,
+        message_count = message_count + excluded.message_count,
+        unpriced_message_count = unpriced_message_count + excluded.unpriced_message_count,
+        input_tokens_sum = input_tokens_sum + excluded.input_tokens_sum,
+        input_tokens_count = input_tokens_count + excluded.input_tokens_count,
+        output_tokens_sum = output_tokens_sum + excluded.output_tokens_sum,
+        output_tokens_count = output_tokens_count + excluded.output_tokens_count,
+        output_thinking_tokens_sum = output_thinking_tokens_sum + excluded.output_thinking_tokens_sum,
+        output_thinking_tokens_count = output_thinking_tokens_count + excluded.output_thinking_tokens_count,
+        total_tokens_sum = total_tokens_sum + excluded.total_tokens_sum,
+        total_tokens_count = total_tokens_count + excluded.total_tokens_count,
+        cached_input_tokens_sum = cached_input_tokens_sum + excluded.cached_input_tokens_sum,
+        cached_input_tokens_count = cached_input_tokens_count + excluded.cached_input_tokens_count,
+        cache_creation_input_tokens_sum = cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count + excluded.cache_creation_input_tokens_count,
+        estimated_cost_sum = estimated_cost_sum + excluded.estimated_cost_sum,
+        estimated_cost_count = estimated_cost_count + excluded.estimated_cost_count,
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count + excluded.estimated_cost_nonzero_count;
+    UPDATE agent_usage_hourly_rollups SET last_observed_at = (SELECT MAX(created_at) FROM (
+        SELECT created_at FROM (SELECT created_at FROM agent_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name ORDER BY created_at DESC LIMIT 1)
+        UNION ALL
+        SELECT created_at FROM (SELECT created_at FROM manual_context_compaction_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1)
+    )) WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND last_observed_at = OLD.created_at AND (NEW.created_at < OLD.created_at OR NEW.model_id IS NOT OLD.model_id OR NEW.model_name IS NOT OLD.model_name OR (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)) <> (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)));
+END;
+CREATE TRIGGER agent_usage_hourly_delete
+AFTER DELETE ON agent_usage_records
+BEGIN
+    UPDATE agent_usage_hourly_rollups SET
+        needs_raw = needs_raw OR (estimated_cost_nonzero_count > (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) AND OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0 AND ABS(estimated_cost_sum - OLD.estimated_cost) <= (ABS(estimated_cost_sum) + ABS(OLD.estimated_cost)) * 1e-12) OR typeof(request_count - OLD.billable_request_count) <> 'integer' OR typeof(input_tokens_sum - COALESCE(OLD.input_tokens, 0)) <> 'integer' OR typeof(output_tokens_sum - COALESCE(OLD.output_tokens, 0)) <> 'integer' OR typeof(output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0)) <> 'integer' OR typeof(total_tokens_sum - COALESCE(OLD.total_tokens, 0)) <> 'integer' OR typeof(cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0)) <> 'integer' OR typeof(cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0)) <> 'integer',
+        entry_count = entry_count - 1,
+        request_count = request_count - (OLD.billable_request_count),
+        message_count = message_count - (1),
+        unpriced_message_count = unpriced_message_count - (CASE WHEN OLD.estimated_cost IS NULL AND (OLD.input_tokens IS NOT NULL OR OLD.output_tokens IS NOT NULL) THEN 1 ELSE 0 END),
+        input_tokens_sum = CASE WHEN input_tokens_count - (OLD.input_tokens IS NOT NULL) = 0 THEN 0 ELSE input_tokens_sum - COALESCE(OLD.input_tokens, 0) END,
+        input_tokens_count = input_tokens_count - (OLD.input_tokens IS NOT NULL),
+        output_tokens_sum = CASE WHEN output_tokens_count - (OLD.output_tokens IS NOT NULL) = 0 THEN 0 ELSE output_tokens_sum - COALESCE(OLD.output_tokens, 0) END,
+        output_tokens_count = output_tokens_count - (OLD.output_tokens IS NOT NULL),
+        output_thinking_tokens_sum = CASE WHEN output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL) = 0 THEN 0 ELSE output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0) END,
+        output_thinking_tokens_count = output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL),
+        total_tokens_sum = CASE WHEN total_tokens_count - (OLD.total_tokens IS NOT NULL) = 0 THEN 0 ELSE total_tokens_sum - COALESCE(OLD.total_tokens, 0) END,
+        total_tokens_count = total_tokens_count - (OLD.total_tokens IS NOT NULL),
+        cached_input_tokens_sum = CASE WHEN cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0) END,
+        cached_input_tokens_count = cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL),
+        cache_creation_input_tokens_sum = CASE WHEN cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0) END,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL),
+        estimated_cost_sum = CASE WHEN estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) = 0 THEN 0.0 ELSE MAX(0.0, estimated_cost_sum - COALESCE(OLD.estimated_cost, 0)) END,
+        estimated_cost_count = estimated_cost_count - (OLD.estimated_cost IS NOT NULL),
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0)
+    WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name;
+    DELETE FROM agent_usage_hourly_rollups WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND entry_count = 0;
+    UPDATE agent_usage_hourly_rollups SET last_observed_at = (SELECT MAX(created_at) FROM (
+        SELECT created_at FROM (SELECT created_at FROM agent_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name ORDER BY created_at DESC LIMIT 1)
+        UNION ALL
+        SELECT created_at FROM (SELECT created_at FROM manual_context_compaction_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1)
+    )) WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND last_observed_at = OLD.created_at;
+END;
+CREATE TRIGGER manual_usage_hourly_insert
+AFTER INSERT ON manual_context_compaction_usage_records
+BEGIN
+    INSERT INTO agent_usage_hourly_rollups (usage_hour, model_id, model_name, last_observed_at, entry_count, needs_raw, request_count, message_count, unpriced_message_count, input_tokens_sum, input_tokens_count, output_tokens_sum, output_tokens_count, output_thinking_tokens_sum, output_thinking_tokens_count, total_tokens_sum, total_tokens_count, cached_input_tokens_sum, cached_input_tokens_count, cache_creation_input_tokens_sum, cache_creation_input_tokens_count, estimated_cost_sum, estimated_cost_count, estimated_cost_nonzero_count)
+    SELECT (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)), NEW.model_id, NEW.model_name, NEW.created_at, 1, 0, NEW.billable_request_count, 0, 0, COALESCE(NEW.input_tokens, 0), (NEW.input_tokens IS NOT NULL), COALESCE(NEW.output_tokens, 0), (NEW.output_tokens IS NOT NULL), COALESCE(NEW.output_thinking_tokens, 0), (NEW.output_thinking_tokens IS NOT NULL), COALESCE(NEW.total_tokens, 0), (NEW.total_tokens IS NOT NULL), COALESCE(NEW.cached_input_tokens, 0), (NEW.cached_input_tokens IS NOT NULL), COALESCE(NEW.cache_creation_input_tokens, 0), (NEW.cache_creation_input_tokens IS NOT NULL), COALESCE(NEW.estimated_cost, 0), (NEW.estimated_cost IS NOT NULL), (NEW.estimated_cost IS NOT NULL AND NEW.estimated_cost <> 0) WHERE NEW.cleared_at IS NULL
+    ON CONFLICT(usage_hour, model_id, model_name) DO UPDATE SET
+        last_observed_at = MAX(last_observed_at, excluded.last_observed_at),
+        entry_count = entry_count + 1,
+        needs_raw = needs_raw OR typeof(request_count + excluded.request_count) <> 'integer' OR typeof(message_count + excluded.message_count) <> 'integer' OR typeof(unpriced_message_count + excluded.unpriced_message_count) <> 'integer' OR typeof(input_tokens_sum + excluded.input_tokens_sum) <> 'integer' OR typeof(output_tokens_sum + excluded.output_tokens_sum) <> 'integer' OR typeof(output_thinking_tokens_sum + excluded.output_thinking_tokens_sum) <> 'integer' OR typeof(total_tokens_sum + excluded.total_tokens_sum) <> 'integer' OR typeof(cached_input_tokens_sum + excluded.cached_input_tokens_sum) <> 'integer' OR typeof(cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum) <> 'integer',
+        request_count = request_count + excluded.request_count,
+        message_count = message_count + excluded.message_count,
+        unpriced_message_count = unpriced_message_count + excluded.unpriced_message_count,
+        input_tokens_sum = input_tokens_sum + excluded.input_tokens_sum,
+        input_tokens_count = input_tokens_count + excluded.input_tokens_count,
+        output_tokens_sum = output_tokens_sum + excluded.output_tokens_sum,
+        output_tokens_count = output_tokens_count + excluded.output_tokens_count,
+        output_thinking_tokens_sum = output_thinking_tokens_sum + excluded.output_thinking_tokens_sum,
+        output_thinking_tokens_count = output_thinking_tokens_count + excluded.output_thinking_tokens_count,
+        total_tokens_sum = total_tokens_sum + excluded.total_tokens_sum,
+        total_tokens_count = total_tokens_count + excluded.total_tokens_count,
+        cached_input_tokens_sum = cached_input_tokens_sum + excluded.cached_input_tokens_sum,
+        cached_input_tokens_count = cached_input_tokens_count + excluded.cached_input_tokens_count,
+        cache_creation_input_tokens_sum = cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count + excluded.cache_creation_input_tokens_count,
+        estimated_cost_sum = estimated_cost_sum + excluded.estimated_cost_sum,
+        estimated_cost_count = estimated_cost_count + excluded.estimated_cost_count,
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count + excluded.estimated_cost_nonzero_count;
+END;
+CREATE TRIGGER manual_usage_hourly_update
+AFTER UPDATE OF created_at, model_id, model_name, billable_request_count, input_tokens, output_tokens, output_thinking_tokens, total_tokens, cached_input_tokens, cache_creation_input_tokens, estimated_cost, cleared_at ON manual_context_compaction_usage_records
+WHEN NEW.created_at IS NOT OLD.created_at OR NEW.model_id IS NOT OLD.model_id OR NEW.model_name IS NOT OLD.model_name OR NEW.billable_request_count IS NOT OLD.billable_request_count OR NEW.input_tokens IS NOT OLD.input_tokens OR NEW.output_tokens IS NOT OLD.output_tokens OR NEW.output_thinking_tokens IS NOT OLD.output_thinking_tokens OR NEW.total_tokens IS NOT OLD.total_tokens OR NEW.cached_input_tokens IS NOT OLD.cached_input_tokens OR NEW.cache_creation_input_tokens IS NOT OLD.cache_creation_input_tokens OR NEW.estimated_cost IS NOT OLD.estimated_cost OR NEW.cleared_at IS NOT OLD.cleared_at
+BEGIN
+    UPDATE agent_usage_hourly_rollups SET
+        needs_raw = needs_raw OR (estimated_cost_nonzero_count > (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) AND OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0 AND ABS(estimated_cost_sum - OLD.estimated_cost) <= (ABS(estimated_cost_sum) + ABS(OLD.estimated_cost)) * 1e-12) OR typeof(request_count - OLD.billable_request_count) <> 'integer' OR typeof(input_tokens_sum - COALESCE(OLD.input_tokens, 0)) <> 'integer' OR typeof(output_tokens_sum - COALESCE(OLD.output_tokens, 0)) <> 'integer' OR typeof(output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0)) <> 'integer' OR typeof(total_tokens_sum - COALESCE(OLD.total_tokens, 0)) <> 'integer' OR typeof(cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0)) <> 'integer' OR typeof(cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0)) <> 'integer',
+        entry_count = entry_count - 1,
+        request_count = request_count - (OLD.billable_request_count),
+        message_count = message_count - (0),
+        unpriced_message_count = unpriced_message_count - (0),
+        input_tokens_sum = CASE WHEN input_tokens_count - (OLD.input_tokens IS NOT NULL) = 0 THEN 0 ELSE input_tokens_sum - COALESCE(OLD.input_tokens, 0) END,
+        input_tokens_count = input_tokens_count - (OLD.input_tokens IS NOT NULL),
+        output_tokens_sum = CASE WHEN output_tokens_count - (OLD.output_tokens IS NOT NULL) = 0 THEN 0 ELSE output_tokens_sum - COALESCE(OLD.output_tokens, 0) END,
+        output_tokens_count = output_tokens_count - (OLD.output_tokens IS NOT NULL),
+        output_thinking_tokens_sum = CASE WHEN output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL) = 0 THEN 0 ELSE output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0) END,
+        output_thinking_tokens_count = output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL),
+        total_tokens_sum = CASE WHEN total_tokens_count - (OLD.total_tokens IS NOT NULL) = 0 THEN 0 ELSE total_tokens_sum - COALESCE(OLD.total_tokens, 0) END,
+        total_tokens_count = total_tokens_count - (OLD.total_tokens IS NOT NULL),
+        cached_input_tokens_sum = CASE WHEN cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0) END,
+        cached_input_tokens_count = cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL),
+        cache_creation_input_tokens_sum = CASE WHEN cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0) END,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL),
+        estimated_cost_sum = CASE WHEN estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) = 0 THEN 0.0 ELSE MAX(0.0, estimated_cost_sum - COALESCE(OLD.estimated_cost, 0)) END,
+        estimated_cost_count = estimated_cost_count - (OLD.estimated_cost IS NOT NULL),
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0)
+    WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND OLD.cleared_at IS NULL;
+    DELETE FROM agent_usage_hourly_rollups WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND entry_count = 0;
+    INSERT INTO agent_usage_hourly_rollups (usage_hour, model_id, model_name, last_observed_at, entry_count, needs_raw, request_count, message_count, unpriced_message_count, input_tokens_sum, input_tokens_count, output_tokens_sum, output_tokens_count, output_thinking_tokens_sum, output_thinking_tokens_count, total_tokens_sum, total_tokens_count, cached_input_tokens_sum, cached_input_tokens_count, cache_creation_input_tokens_sum, cache_creation_input_tokens_count, estimated_cost_sum, estimated_cost_count, estimated_cost_nonzero_count)
+    SELECT (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)), NEW.model_id, NEW.model_name, NEW.created_at, 1, 0, NEW.billable_request_count, 0, 0, COALESCE(NEW.input_tokens, 0), (NEW.input_tokens IS NOT NULL), COALESCE(NEW.output_tokens, 0), (NEW.output_tokens IS NOT NULL), COALESCE(NEW.output_thinking_tokens, 0), (NEW.output_thinking_tokens IS NOT NULL), COALESCE(NEW.total_tokens, 0), (NEW.total_tokens IS NOT NULL), COALESCE(NEW.cached_input_tokens, 0), (NEW.cached_input_tokens IS NOT NULL), COALESCE(NEW.cache_creation_input_tokens, 0), (NEW.cache_creation_input_tokens IS NOT NULL), COALESCE(NEW.estimated_cost, 0), (NEW.estimated_cost IS NOT NULL), (NEW.estimated_cost IS NOT NULL AND NEW.estimated_cost <> 0) WHERE NEW.cleared_at IS NULL
+    ON CONFLICT(usage_hour, model_id, model_name) DO UPDATE SET
+        last_observed_at = MAX(last_observed_at, excluded.last_observed_at),
+        entry_count = entry_count + 1,
+        needs_raw = needs_raw OR typeof(request_count + excluded.request_count) <> 'integer' OR typeof(message_count + excluded.message_count) <> 'integer' OR typeof(unpriced_message_count + excluded.unpriced_message_count) <> 'integer' OR typeof(input_tokens_sum + excluded.input_tokens_sum) <> 'integer' OR typeof(output_tokens_sum + excluded.output_tokens_sum) <> 'integer' OR typeof(output_thinking_tokens_sum + excluded.output_thinking_tokens_sum) <> 'integer' OR typeof(total_tokens_sum + excluded.total_tokens_sum) <> 'integer' OR typeof(cached_input_tokens_sum + excluded.cached_input_tokens_sum) <> 'integer' OR typeof(cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum) <> 'integer',
+        request_count = request_count + excluded.request_count,
+        message_count = message_count + excluded.message_count,
+        unpriced_message_count = unpriced_message_count + excluded.unpriced_message_count,
+        input_tokens_sum = input_tokens_sum + excluded.input_tokens_sum,
+        input_tokens_count = input_tokens_count + excluded.input_tokens_count,
+        output_tokens_sum = output_tokens_sum + excluded.output_tokens_sum,
+        output_tokens_count = output_tokens_count + excluded.output_tokens_count,
+        output_thinking_tokens_sum = output_thinking_tokens_sum + excluded.output_thinking_tokens_sum,
+        output_thinking_tokens_count = output_thinking_tokens_count + excluded.output_thinking_tokens_count,
+        total_tokens_sum = total_tokens_sum + excluded.total_tokens_sum,
+        total_tokens_count = total_tokens_count + excluded.total_tokens_count,
+        cached_input_tokens_sum = cached_input_tokens_sum + excluded.cached_input_tokens_sum,
+        cached_input_tokens_count = cached_input_tokens_count + excluded.cached_input_tokens_count,
+        cache_creation_input_tokens_sum = cache_creation_input_tokens_sum + excluded.cache_creation_input_tokens_sum,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count + excluded.cache_creation_input_tokens_count,
+        estimated_cost_sum = estimated_cost_sum + excluded.estimated_cost_sum,
+        estimated_cost_count = estimated_cost_count + excluded.estimated_cost_count,
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count + excluded.estimated_cost_nonzero_count;
+    UPDATE agent_usage_hourly_rollups SET last_observed_at = (SELECT MAX(created_at) FROM (
+        SELECT created_at FROM (SELECT created_at FROM agent_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name ORDER BY created_at DESC LIMIT 1)
+        UNION ALL
+        SELECT created_at FROM (SELECT created_at FROM manual_context_compaction_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1)
+    )) WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND last_observed_at = OLD.created_at AND OLD.cleared_at IS NULL AND (NEW.created_at < OLD.created_at OR NEW.model_id IS NOT OLD.model_id OR NEW.model_name IS NOT OLD.model_name OR (NEW.created_at - ((NEW.created_at % 3600000 + 3600000) % 3600000)) <> (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) OR NEW.cleared_at IS NOT NULL);
+END;
+CREATE TRIGGER manual_usage_hourly_delete
+AFTER DELETE ON manual_context_compaction_usage_records
+BEGIN
+    UPDATE agent_usage_hourly_rollups SET
+        needs_raw = needs_raw OR (estimated_cost_nonzero_count > (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) AND OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0 AND ABS(estimated_cost_sum - OLD.estimated_cost) <= (ABS(estimated_cost_sum) + ABS(OLD.estimated_cost)) * 1e-12) OR typeof(request_count - OLD.billable_request_count) <> 'integer' OR typeof(input_tokens_sum - COALESCE(OLD.input_tokens, 0)) <> 'integer' OR typeof(output_tokens_sum - COALESCE(OLD.output_tokens, 0)) <> 'integer' OR typeof(output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0)) <> 'integer' OR typeof(total_tokens_sum - COALESCE(OLD.total_tokens, 0)) <> 'integer' OR typeof(cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0)) <> 'integer' OR typeof(cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0)) <> 'integer',
+        entry_count = entry_count - 1,
+        request_count = request_count - (OLD.billable_request_count),
+        message_count = message_count - (0),
+        unpriced_message_count = unpriced_message_count - (0),
+        input_tokens_sum = CASE WHEN input_tokens_count - (OLD.input_tokens IS NOT NULL) = 0 THEN 0 ELSE input_tokens_sum - COALESCE(OLD.input_tokens, 0) END,
+        input_tokens_count = input_tokens_count - (OLD.input_tokens IS NOT NULL),
+        output_tokens_sum = CASE WHEN output_tokens_count - (OLD.output_tokens IS NOT NULL) = 0 THEN 0 ELSE output_tokens_sum - COALESCE(OLD.output_tokens, 0) END,
+        output_tokens_count = output_tokens_count - (OLD.output_tokens IS NOT NULL),
+        output_thinking_tokens_sum = CASE WHEN output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL) = 0 THEN 0 ELSE output_thinking_tokens_sum - COALESCE(OLD.output_thinking_tokens, 0) END,
+        output_thinking_tokens_count = output_thinking_tokens_count - (OLD.output_thinking_tokens IS NOT NULL),
+        total_tokens_sum = CASE WHEN total_tokens_count - (OLD.total_tokens IS NOT NULL) = 0 THEN 0 ELSE total_tokens_sum - COALESCE(OLD.total_tokens, 0) END,
+        total_tokens_count = total_tokens_count - (OLD.total_tokens IS NOT NULL),
+        cached_input_tokens_sum = CASE WHEN cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cached_input_tokens_sum - COALESCE(OLD.cached_input_tokens, 0) END,
+        cached_input_tokens_count = cached_input_tokens_count - (OLD.cached_input_tokens IS NOT NULL),
+        cache_creation_input_tokens_sum = CASE WHEN cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL) = 0 THEN 0 ELSE cache_creation_input_tokens_sum - COALESCE(OLD.cache_creation_input_tokens, 0) END,
+        cache_creation_input_tokens_count = cache_creation_input_tokens_count - (OLD.cache_creation_input_tokens IS NOT NULL),
+        estimated_cost_sum = CASE WHEN estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0) = 0 THEN 0.0 ELSE MAX(0.0, estimated_cost_sum - COALESCE(OLD.estimated_cost, 0)) END,
+        estimated_cost_count = estimated_cost_count - (OLD.estimated_cost IS NOT NULL),
+        estimated_cost_nonzero_count = estimated_cost_nonzero_count - (OLD.estimated_cost IS NOT NULL AND OLD.estimated_cost <> 0)
+    WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND OLD.cleared_at IS NULL;
+    DELETE FROM agent_usage_hourly_rollups WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND entry_count = 0;
+    UPDATE agent_usage_hourly_rollups SET last_observed_at = (SELECT MAX(created_at) FROM (
+        SELECT created_at FROM (SELECT created_at FROM agent_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name ORDER BY created_at DESC LIMIT 1)
+        UNION ALL
+        SELECT created_at FROM (SELECT created_at FROM manual_context_compaction_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1)
+    )) WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND last_observed_at = OLD.created_at AND OLD.cleared_at IS NULL;
+END;

@@ -68,6 +68,7 @@ const DO_NOT_COPY_TABLES: &[&str] = &[
     "notification_events",
     // The organization-wide activity stream stays with its source instance.
     "workflow_mail_events",
+    "workflow_mail_conversation_changes",
 ];
 
 const RUNTIME_ONLY_TABLES: &[&str] = &[

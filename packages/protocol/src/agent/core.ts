@@ -38,6 +38,7 @@ export const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
 export const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
 
 export const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
+export const AGENT_GET_USAGE_DASHBOARD_METHOD = 'agent.getUsageDashboard'
 
 export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
 

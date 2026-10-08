@@ -1554,6 +1554,20 @@ impl StorageService {
         usage_repository::usage_summary(&connection, input, now_ms).map_err(storage_error)
     }
 
+    pub fn get_usage_dashboard(
+        &self,
+        input: &crate::AgentUsageDashboardInput,
+    ) -> Result<crate::AgentUsageDashboardOutput, String> {
+        crate::storage::usage_dashboard_repository::validate(input)?;
+        let snapshot = {
+            let waiting = crate::performance::Span::new("usage.dashboard", "lock.wait");
+            let connection = self.state.connection()?;
+            drop(waiting);
+            crate::storage::usage_dashboard_repository::read_snapshot(&connection, input)?
+        };
+        crate::storage::usage_dashboard_repository::project(snapshot, &input.windows)
+    }
+
     pub fn get_local_token_usage(
         &self,
         input: &crate::LocalTokenUsageSummaryInput,

@@ -866,6 +866,20 @@ fn organization_edit_prose_does_not_visit_mail_history_and_removal_reads_only_li
         json!([{"action":"update_member","memberId":"target","task":"New task"}]),
     );
     c.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        // SQLite authorizes trigger reads at prepare time, even though this prose event has
+        // NULL input_id. The existing v70 trigger only resolves delivered-input metadata;
+        // direct mail reads and all history/body access remain forbidden below.
+        if context.accessor == Some("workflow_mail_change_event_insert")
+            && matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::Read {
+                    table_name: "workflow_mail_inputs",
+                    column_name: "input_id" | "instance_id" | "conversation_id" | "delivery_id",
+                }
+            )
+        {
+            return rusqlite::hooks::Authorization::Allow;
+        }
         if matches!(
             context.action,
             rusqlite::hooks::AuthAction::Read {

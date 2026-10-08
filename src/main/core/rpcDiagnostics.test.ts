@@ -9,6 +9,8 @@ describe('RPC scalar diagnostics', () => {
       diagnostics.record('response.parse', `private-path-secret-${i}`, 2, 20)
     }
     diagnostics.record('response.parse', 'storage.loadConversation', 10, 5000)
+    diagnostics.record('response', 'agent.getUsageSummary', 12)
+    diagnostics.record('response', 'agent.getUsageDashboard', 8, 1200)
     diagnostics.queues(5, 4096)
     diagnostics.queues(2, 64)
     diagnostics.flush()
@@ -25,7 +27,9 @@ describe('RPC scalar diagnostics', () => {
           bytes: 20000,
           maxBytes: 20
         },
-        'response.parse:storage.loadConversation': { count: 1, bytes: 5000 }
+        'response.parse:storage.loadConversation': { count: 1, bytes: 5000 },
+        'response:agent.getUsageSummary': { count: 1, totalMs: 12 },
+        'response:agent.getUsageDashboard': { count: 1, totalMs: 8, bytes: 1200 }
       }
     })
     expect(JSON.stringify(summary)).not.toContain('private-path-secret')
