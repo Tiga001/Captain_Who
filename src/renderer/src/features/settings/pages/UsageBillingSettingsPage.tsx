@@ -3,16 +3,27 @@ import {
   usageBillingSettingsNodes,
   USAGE_RANGE_OPTIONS
 } from './UsageBillingSettingsPage.definition'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
-import type { AgentUsageModelSummary, AgentUsageSummaryOutput } from '@mycopilot/protocol'
+import type {
+  AgentUsageDashboardOutput,
+  AgentUsageModelSummary,
+  AgentUsageSummaryOutput
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import type { ModelConfig } from '../../../config/modelConfig'
 import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
-import { clearAgentUsageRecords, getAgentUsageSummary } from '../../agent/agentClient'
+import { clearAgentUsageRecords, getAgentUsageDashboard } from '../../agent/agentClient'
+import {
+  usageDashboardCache,
+  usageDashboardKey,
+  UsageDashboardInvalidatedError,
+  USAGE_DASHBOARD_FRESH_MS
+} from '../../agent/usageDashboardCache'
+import { getUsageChartWindows, type UsageChartRange } from './usageChartWindows'
 import { formatCacheHitRate } from '../../agent/usagePresentation'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './UsageBillingSettingsPage.css'
@@ -22,7 +33,6 @@ interface UsageBillingSettingsPageProps {
   uiPreferences: UiPreferencesSnapshot
 }
 
-type UsageChartRange = 'last7Days' | 'last30Days' | 'lastYear'
 type UsageChartTokenKey =
   'uncachedInputTokens' | 'cachedInputTokens' | 'outputTokens' | 'outputThinkingTokens'
 
@@ -44,14 +54,11 @@ type UsageChartBucket = {
   summary: AgentUsageSummaryOutput
 }
 
-type UsageChartWindow = Omit<UsageChartBucket, 'summary'>
-
 type UsageValues = Partial<Record<UsageChartTokenKey, number>> & {
   estimatedCost?: number
   unpricedMessageCount?: number
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000
 const ALL_MODELS_KEY = '__all_models__'
 const USAGE_CHART_SERIES: UsageChartSeries[] = [
   {
@@ -152,84 +159,6 @@ function getModelLabel(
   return model.isConfigured ? label : `${label} (${deletedLabel})`
 }
 
-function getRangeDayCount(range: UsageChartRange): number {
-  return range === 'last7Days' ? 7 : 30
-}
-
-function startOfLocalDay(timestamp: number): number {
-  const date = new Date(timestamp)
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
-}
-
-function startOfLocalMonth(timestamp: number): number {
-  const date = new Date(timestamp)
-  return new Date(date.getFullYear(), date.getMonth(), 1).getTime()
-}
-
-function addLocalMonths(timestamp: number, monthDelta: number): number {
-  const date = new Date(timestamp)
-  return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1).getTime()
-}
-
-function getUsageChartWindows(range: UsageChartRange, language: string): UsageChartWindow[] {
-  if (range === 'lastYear') {
-    const currentMonthStart = startOfLocalMonth(Date.now())
-    const firstMonthStart = addLocalMonths(currentMonthStart, -11)
-
-    return Array.from({ length: 12 }, (_, index) => {
-      const from = addLocalMonths(firstMonthStart, index)
-      const nextMonth = addLocalMonths(from, 1)
-      const monthLabel = formatMonthLabel(from)
-      return {
-        from,
-        to: nextMonth - 1,
-        dateLabel: monthLabel,
-        fullDateLabel: monthLabel
-      }
-    })
-  }
-
-  const dayCount = getRangeDayCount(range)
-  const todayStart = startOfLocalDay(Date.now())
-  const firstDayStart = todayStart - (dayCount - 1) * DAY_MS
-  return Array.from({ length: dayCount }, (_, index) => {
-    const from = firstDayStart + index * DAY_MS
-    return {
-      from,
-      to: from + DAY_MS - 1,
-      dateLabel: formatDateLabel(from, language),
-      fullDateLabel: formatFullDateLabel(from, language)
-    }
-  })
-}
-
-function getChartRangeSummaryInput(buckets: Array<Pick<UsageChartBucket, 'from' | 'to'>>): {
-  range: 'custom'
-  from?: number
-  to?: number
-} {
-  const firstBucket = buckets[0]
-  const lastBucket = buckets[buckets.length - 1]
-  return { range: 'custom', from: firstBucket?.from, to: lastBucket?.to }
-}
-
-async function loadUsageChartBuckets(
-  range: UsageChartRange,
-  language: string
-): Promise<UsageChartBucket[]> {
-  const windows = getUsageChartWindows(range, language)
-  const summaries = await Promise.all(
-    windows.map((window) =>
-      getAgentUsageSummary({ range: 'custom', from: window.from, to: window.to })
-    )
-  )
-
-  return windows.map((window, index) => ({
-    ...window,
-    summary: summaries[index]
-  }))
-}
-
 function getNiceChartMax(value: number): number {
   if (value <= 0) return 0
   const magnitude = 10 ** Math.floor(Math.log10(value))
@@ -271,11 +200,46 @@ export function UsageBillingSettingsPage({
   }
   const { models } = useModelSettings()
   const [range, setRange] = useState<UsageChartRange>('last7Days')
-  const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null)
-  const [chartBuckets, setChartBuckets] = useState<UsageChartBucket[]>([])
+  const [refreshAt, setRefreshAt] = useState(Date.now)
+  const windows = useMemo(() => getUsageChartWindows(range, refreshAt), [range, refreshAt])
+  const requestKey = usageDashboardKey(windows)
+  const cached = usageDashboardCache.read(windows)
+  const [loaded, setLoaded] = useState<{
+    key: string
+    generation: number
+    data: AgentUsageDashboardOutput
+  } | null>(() =>
+    cached
+      ? { key: requestKey, generation: usageDashboardCache.generation, data: cached.data }
+      : null
+  )
+  const dashboard =
+    loaded?.key === requestKey && loaded.generation === usageDashboardCache.generation
+      ? loaded.data
+      : cached?.data
+  const summary = dashboard?.summary ?? null
+  const chartBuckets = useMemo<UsageChartBucket[]>(
+    () =>
+      dashboard
+        ? windows.map((window, index) => ({
+            ...window,
+            dateLabel:
+              range === 'lastYear'
+                ? formatMonthLabel(window.from)
+                : formatDateLabel(window.from, language),
+            fullDateLabel:
+              range === 'lastYear'
+                ? formatMonthLabel(window.from)
+                : formatFullDateLabel(window.from, language),
+            summary: dashboard.buckets[index]
+          }))
+        : [],
+    [dashboard, windows, range, language]
+  )
   const [selectedModelKey, setSelectedModelKey] = useState(ALL_MODELS_KEY)
   const [isModelMenuOpen, setModelMenuOpen] = useState(false)
-  const [isLoading, setIsLoading] = useState(true)
+  const [isLoading, setIsLoading] = useState(() => !cached)
+  const mounted = useRef(false)
   const [isClearing, setIsClearing] = useState(false)
   const [isClearDialogOpen, setClearDialogOpen] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
@@ -335,34 +299,70 @@ export function UsageBillingSettingsPage({
   const hasChartData = chartMaxValue > 0
 
   useEffect(() => {
-    let isCancelled = false
-
-    async function loadUsageData(): Promise<void> {
-      setIsLoading(true)
-      setErrorMessage('')
-      try {
-        const nextChartBuckets = await loadUsageChartBuckets(range, language)
-        const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets))
-        if (isCancelled) return
-        setSummary(nextSummary)
-        setChartBuckets(nextChartBuckets)
-      } catch (error) {
-        if (!isCancelled) {
-          setSummary(null)
-          setChartBuckets([])
-          setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.loadFailed'))
-        }
-      } finally {
-        if (!isCancelled) setIsLoading(false)
+    mounted.current = true
+    let timer: ReturnType<typeof setInterval> | undefined
+    const refreshVisible = (): void => {
+      if (document.visibilityState !== 'hidden') setRefreshAt(Date.now())
+    }
+    const updateVisibility = (): void => {
+      clearInterval(timer)
+      if (document.visibilityState !== 'hidden') {
+        refreshVisible()
+        timer = setInterval(refreshVisible, USAGE_DASHBOARD_FRESH_MS)
       }
     }
-
-    void loadUsageData()
-
+    updateVisibility()
+    window.addEventListener('focus', refreshVisible)
+    document.addEventListener('visibilitychange', updateVisibility)
     return () => {
-      isCancelled = true
+      mounted.current = false
+      clearInterval(timer)
+      window.removeEventListener('focus', refreshVisible)
+      document.removeEventListener('visibilitychange', updateVisibility)
     }
-  }, [language, range, t])
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    let attempt = 0
+    const loadUsageData = async (): Promise<void> => {
+      const currentAttempt = ++attempt
+      const cached = usageDashboardCache.read(windows)
+      setIsLoading(!cached)
+      setErrorMessage('')
+      if (document.visibilityState === 'hidden' || usageDashboardCache.isClearing) return
+      try {
+        const data = await usageDashboardCache.load(windows, () =>
+          getAgentUsageDashboard({ windows })
+        )
+        if (cancelled || currentAttempt !== attempt) return
+        setLoaded({ key: requestKey, generation: usageDashboardCache.generation, data })
+      } catch (error) {
+        if (
+          cancelled ||
+          currentAttempt !== attempt ||
+          error instanceof UsageDashboardInvalidatedError
+        )
+          return
+        // A failed background refresh keeps the last successful graph and its scroll position.
+        setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.loadFailed'))
+      } finally {
+        if (!cancelled && currentAttempt === attempt) setIsLoading(false)
+      }
+    }
+    const unsubscribe = usageDashboardCache.subscribe(() => {
+      ++attempt
+      setLoaded(null)
+      setIsLoading(true)
+      if (!usageDashboardCache.isClearing && document.visibilityState !== 'hidden')
+        void loadUsageData()
+    })
+    void loadUsageData()
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [requestKey, windows, refreshAt, t])
 
   const closeModelMenuOnBlur = (event: FocusEvent<HTMLDivElement>): void => {
     if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -376,18 +376,16 @@ export function UsageBillingSettingsPage({
     setStatusMessage('')
     try {
       const output = await clearAgentUsageRecords({})
+      if (!mounted.current) return
       setClearDialogOpen(false)
       setStatusMessage(
         `${t('usageBilling.clearCompleted')} ${formatCount(output.deletedRecords, language)}`
       )
-      const nextChartBuckets = await loadUsageChartBuckets(range, language)
-      const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets))
-      setSummary(nextSummary)
-      setChartBuckets(nextChartBuckets)
     } catch (error) {
-      setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.clearFailed'))
+      if (mounted.current)
+        setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.clearFailed'))
     } finally {
-      setIsClearing(false)
+      if (mounted.current) setIsClearing(false)
     }
   }
 

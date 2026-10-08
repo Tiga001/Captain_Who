@@ -34,11 +34,14 @@ import type {
   PendingAgentActionSnapshot,
   AgentUsageClearInput,
   AgentUsageClearOutput,
+  AgentUsageDashboardInput,
+  AgentUsageDashboardOutput,
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput
 } from '@mycopilot/protocol'
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import { hostClient } from '../../host/hostClient'
+import { usageDashboardCache } from './usageDashboardCache'
 
 export type StartConversationTurnInput = AgentConversationTurnInput
 export type StartConversationTurnOutput = AgentConversationTurnOutput
@@ -163,10 +166,21 @@ export async function getAgentUsageSummary(
   return hostClient.agent.getUsageSummary(input)
 }
 
+export async function getAgentUsageDashboard(
+  input: AgentUsageDashboardInput
+): Promise<AgentUsageDashboardOutput> {
+  return hostClient.agent.getUsageDashboard(input)
+}
+
 export async function clearAgentUsageRecords(
   input: AgentUsageClearInput = {}
 ): Promise<AgentUsageClearOutput> {
-  return hostClient.agent.clearUsageRecords(input)
+  const finishClear = usageDashboardCache.beginClear()
+  try {
+    return await hostClient.agent.clearUsageRecords(input)
+  } finally {
+    finishClear()
+  }
 }
 
 export function onAgentEvent(handler: (event: AgentEvent) => void): () => void {

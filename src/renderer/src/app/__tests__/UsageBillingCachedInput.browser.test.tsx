@@ -1,11 +1,17 @@
-import { useState } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, StrictMode, useState } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import type { AgentUsageDashboardInput, AgentUsageDashboardOutput } from '@mycopilot/protocol'
+import {
+  usageDashboardCache,
+  USAGE_DASHBOARD_FRESH_MS
+} from '../../features/agent/usageDashboardCache'
 import type { UiPreferencesSnapshot } from '../../features/storage/storageClient'
 
 const agentClient = vi.hoisted(() => ({
   clearUsageRecords: vi.fn(),
-  getUsageSummary: vi.fn()
+  getUsageSummary: vi.fn(),
+  getUsageDashboard: vi.fn()
 }))
 const frontendConfig = vi.hoisted(() => ({
   language: 'en-US',
@@ -35,8 +41,15 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../../features/agent/agentClient', () => ({
-  clearAgentUsageRecords: agentClient.clearUsageRecords,
-  getAgentUsageSummary: agentClient.getUsageSummary
+  clearAgentUsageRecords: async () => {
+    const finish = usageDashboardCache.beginClear()
+    try {
+      return await agentClient.clearUsageRecords()
+    } finally {
+      finish()
+    }
+  },
+  getAgentUsageDashboard: agentClient.getUsageDashboard
 }))
 
 vi.mock('../../config/ModelSettingsProvider', () => ({
@@ -72,10 +85,60 @@ const uiPreferences: UiPreferencesSnapshot = {
   updatedAt: 0
 }
 
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes
+    reject = no
+  })
+  return { promise, resolve, reject }
+}
+function dashboardFor(input: AgentUsageDashboardInput, count: number): AgentUsageDashboardOutput {
+  const summary = {
+    requestCount: count,
+    messageCount: count,
+    unpricedMessageCount: 0,
+    inputTokens: count * 100,
+    cachedInputTokens: count * 20,
+    outputTokens: count * 10,
+    models: []
+  }
+  return { summary, buckets: input.windows.map(() => summary) }
+}
+const billingPage = () => (
+  <UsageBillingSettingsPage onUiPreferencesChange={vi.fn()} uiPreferences={uiPreferences} />
+)
+const requestCount = () => document.querySelector('.usage-summary-card strong')?.textContent
+const advance = async (ms: number) => {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
+}
+
 describe('UsageBillingSettingsPage cached input', () => {
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(new Date(2026, 9, 8, 12))
     agentClient.clearUsageRecords.mockReset()
     agentClient.getUsageSummary.mockReset()
+    agentClient.getUsageDashboard.mockReset()
+    agentClient.getUsageDashboard.mockImplementation(
+      async ({ windows }: AgentUsageDashboardInput) => ({
+        summary: await agentClient.getUsageSummary({
+          from: windows[0].from,
+          to: windows.at(-1)!.to
+        }),
+        buckets: await Promise.all(windows.map((window) => agentClient.getUsageSummary(window)))
+      })
+    )
+    usageDashboardCache.invalidate()
+    frontendConfig.language = 'en-US'
     modelSettings.models = []
     frontendConfig.showCacheHitRate = false
     frontendConfig.setShowCacheHitRate.mockReset()
@@ -298,5 +361,147 @@ describe('UsageBillingSettingsPage cached input', () => {
     expect(document.querySelector('.usage-secondary-stat')?.textContent).toBe(
       'usageBilling.cacheHitRate—'
     )
+  })
+
+  it('loads each range with one batch and reuses pending and fresh reads across StrictMode remounts', async () => {
+    const pending = deferred<AgentUsageDashboardOutput>()
+    agentClient.getUsageDashboard.mockReturnValue(pending.promise)
+    const first = await render(<StrictMode>{billingPage()}</StrictMode>)
+    await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(1)
+    await first.unmount()
+    const second = await render(<StrictMode>{billingPage()}</StrictMode>)
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(1)
+    await act(async () =>
+      pending.resolve(dashboardFor(agentClient.getUsageDashboard.mock.calls[0][0], 7))
+    )
+    await expect.poll(requestCount).toBe('7')
+    await second.unmount()
+    const third = await render(billingPage())
+    expect(document.querySelector('.usage-chart-empty')).toBeNull()
+    expect(document.querySelectorAll('.usage-chart-day')).toHaveLength(7)
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(1)
+    frontendConfig.language = 'fr-FR'
+    await third.rerender(billingPage())
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(1)
+
+    agentClient.getUsageDashboard.mockImplementation(async (input: AgentUsageDashboardInput) =>
+      dashboardFor(input, input.windows.length)
+    )
+    await third.getByRole('button', { name: 'usageBilling.rangeLast30Days' }).click()
+    await expect.poll(requestCount).toBe('30')
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(2)
+    expect(agentClient.getUsageDashboard.mock.calls[1][0].windows).toHaveLength(30)
+    await third.getByRole('button', { name: 'usageBilling.rangeLastYear' }).click()
+    await expect.poll(requestCount).toBe('12')
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(3)
+    expect(agentClient.getUsageDashboard.mock.calls[2][0].windows).toHaveLength(12)
+  })
+
+  it('shows stale cached charts immediately and keeps their nodes and scroll when refresh fails', async () => {
+    agentClient.getUsageDashboard.mockImplementation(async (input: AgentUsageDashboardInput) =>
+      dashboardFor(input, 1)
+    )
+    const first = await render(billingPage())
+    await expect.poll(requestCount).toBe('1')
+    await first.unmount()
+    await advance(USAGE_DASHBOARD_FRESH_MS)
+    const pending = deferred<AgentUsageDashboardOutput>()
+    agentClient.getUsageDashboard.mockReturnValue(pending.promise)
+    await render(billingPage())
+    expect(document.querySelectorAll('.usage-chart-day')).toHaveLength(7)
+    expect(document.querySelector('.usage-chart-empty')).toBeNull()
+    const scroller = document.querySelector<HTMLElement>('.usage-chart-scroller')!
+    scroller.style.width = '100px'
+    scroller.scrollLeft = 40
+    const savedScroll = scroller.scrollLeft
+    expect(savedScroll).toBeGreaterThan(0)
+    await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(2)
+    await act(async () => pending.reject(new Error('temporary refresh failure')))
+    await expect
+      .poll(() => document.querySelector('.usage-error-message')?.textContent)
+      .toBeTruthy()
+    expect(document.querySelector('.usage-chart-scroller')).toBe(scroller)
+    expect(scroller.scrollLeft).toBe(savedScroll)
+    expect(requestCount()).toBe('1')
+    expect(document.querySelector('.usage-chart-empty')).toBeNull()
+  })
+
+  it.each(['success', 'error'])(
+    'ignores an obsolete range %s without replacing the new range',
+    async (outcome) => {
+      const old = deferred<AgentUsageDashboardOutput>()
+      agentClient.getUsageDashboard.mockImplementation((input: AgentUsageDashboardInput) =>
+        input.windows.length === 7 ? old.promise : Promise.resolve(dashboardFor(input, 30))
+      )
+      const view = await render(billingPage())
+      await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(1)
+      await view.getByRole('button', { name: 'usageBilling.rangeLast30Days' }).click()
+      await expect.poll(requestCount).toBe('30')
+      await act(async () => {
+        if (outcome === 'success')
+          old.resolve(dashboardFor(agentClient.getUsageDashboard.mock.calls[0][0], 99))
+        else old.reject(new Error('obsolete range failure'))
+      })
+      expect(requestCount()).toBe('30')
+      expect(document.querySelectorAll('.usage-chart-day')).toHaveLength(30)
+      expect(document.querySelector('.usage-error-message')).toBeNull()
+    }
+  )
+
+  it('fences an in-flight response during clear and shares the empty result with later mounts', async () => {
+    const old = deferred<AgentUsageDashboardOutput>()
+    const clearing = deferred<{ deletedRecords: number }>()
+    agentClient.getUsageDashboard
+      .mockReturnValueOnce(old.promise)
+      .mockImplementation(async (input: AgentUsageDashboardInput) => dashboardFor(input, 0))
+    agentClient.clearUsageRecords.mockReturnValue(clearing.promise)
+    const view = await render(billingPage())
+    await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(1)
+    await view.getByRole('button', { name: 'usageBilling.clear', exact: true }).click()
+    await view.getByRole('button', { name: 'usageBilling.clearConfirm' }).click()
+    expect(usageDashboardCache.isClearing).toBe(true)
+    await act(async () =>
+      old.resolve(dashboardFor(agentClient.getUsageDashboard.mock.calls[0][0], 99))
+    )
+    expect(requestCount()).not.toBe('99')
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(1)
+    await act(async () => clearing.resolve({ deletedRecords: 99 }))
+    await expect.poll(requestCount).toBe('0')
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(2)
+    await view.unmount()
+    await render(billingPage())
+    expect(requestCount()).toBe('0')
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes only while visible, rebuilds calendar windows after midnight and stops on unmount', async () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    agentClient.getUsageDashboard.mockImplementation(async (input: AgentUsageDashboardInput) =>
+      dashboardFor(input, 1)
+    )
+    const view = await render(billingPage())
+    await expect.poll(requestCount).toBe('1')
+    await advance(USAGE_DASHBOARD_FRESH_MS)
+    await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(2)
+    const firstFrom = agentClient.getUsageDashboard.mock.calls[0][0].windows[0].from
+    await act(async () => {
+      visibility.mockReturnValue('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await advance(24 * 60 * 60 * 1000)
+    await act(async () => window.dispatchEvent(new Event('focus')))
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      visibility.mockReturnValue('visible')
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    await expect.poll(() => agentClient.getUsageDashboard.mock.calls.length).toBe(3)
+    expect(agentClient.getUsageDashboard.mock.calls[2][0].windows[0].from).toBeGreaterThan(
+      firstFrom
+    )
+    await view.unmount()
+    await advance(USAGE_DASHBOARD_FRESH_MS * 2)
+    await act(async () => window.dispatchEvent(new Event('focus')))
+    expect(agentClient.getUsageDashboard).toHaveBeenCalledTimes(3)
   })
 })

@@ -98,7 +98,10 @@ vi.mock('../../storage/storageClient', async (importOriginal) => {
   }
 })
 vi.mock('../../agent/agentClient', () => ({
-  getAgentUsageSummary: vi.fn(async () => ({ models: [] })),
+  getAgentUsageDashboard: vi.fn(async ({ windows }) => ({
+    summary: { models: [] },
+    buckets: windows.map(() => ({ models: [] }))
+  })),
   clearAgentUsageRecords: vi.fn()
 }))
 
