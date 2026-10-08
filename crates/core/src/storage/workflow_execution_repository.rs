@@ -387,6 +387,7 @@ pub fn send(c: &mut Connection, request: &SendRequest) -> Result<SendReceipt, St
             content: assemble_message(
                 &snapshot(&graph, &target.id)?,
                 std::slice::from_ref(&message),
+                MailDeliveryContext::Pending,
             ),
             messages: vec![message.clone()],
             mail_status: MailStatus::Pending,
@@ -475,7 +476,13 @@ pub fn mutate(c: &mut Connection, request: &MutationRequest) -> Result<Value, St
                 } else if input.mail_status != MailStatus::Pending {
                     Err("Message is no longer pending")
                 } else {
-                    input.content = assemble_message(&owner, &input.messages);
+                    input.content = assemble_message(
+                        &owner,
+                        &input.messages,
+                        MailDeliveryContext::AcceptedInCurrentTurn {
+                            accepted_at: now_ms(),
+                        },
+                    );
                     input.execution_version = owner.execution_version.clone();
                     input.status = InputStatus::Claimed;
                     input.mail_status = MailStatus::Processing;

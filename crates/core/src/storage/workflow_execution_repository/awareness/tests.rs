@@ -18,6 +18,10 @@ fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monoto
     let inbox = mailbox_for_run(&c, &chat, "run-b", &MailboxQuery::default()).unwrap();
     assert_eq!(inbox["messages"][0]["content"], "also waiting");
     assert_eq!(inbox["messages"][0]["status"], "pending");
+    assert_eq!(
+        inbox["messages"][0]["deliveryStatus"],
+        "preview_only_not_accepted"
+    );
     assert_eq!(inbox["messages"][0]["bodyAvailable"], true);
     let before = awareness_for_run(&c, &chat, "run-b").unwrap();
     assert_eq!(before["mailbox"]["receivedCount"], 2);
@@ -39,6 +43,18 @@ fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monoto
         &[receipt.messages[0].id.clone()],
     );
     mutate(&mut c, &accept).unwrap();
+    let accepted = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            message_id: Some(receipt.messages[0].id.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(accepted["messages"][0]["status"], "processing");
+    assert!(accepted["messages"][0].get("deliveryStatus").is_none());
     prove(&c, &receipt.input_ids[0]);
     let complete = action(
         &c,
@@ -61,6 +77,65 @@ fn workflow_awareness_pending_preview_is_read_only_and_arrival_counts_are_monoto
         2
     );
 }
+
+#[test]
+fn workflow_awareness_reply_to_preview_keeps_original_pending() {
+    let mut c = fixture();
+    let receipt = send_mail(&mut c, "send", &[("b", "Please review")]);
+    start_run(&mut c, "b", "run-b");
+    let chat = conversation(&c, "b");
+    let query = MailboxQuery {
+        message_id: Some(receipt.messages[0].id.clone()),
+        ..Default::default()
+    };
+    let preview = mailbox_for_run(&c, &chat, "run-b", &query).unwrap();
+    let handling_rule = preview["handlingRule"].as_str().unwrap();
+    assert!(handling_rule.contains("previews only, not accepted by this turn"));
+    assert!(handling_rule.contains("use organization_accept to assign it to this turn"));
+    assert!(handling_rule.contains("does not accept or complete the original mail"));
+    let identity = snapshot_for_run(&c, &chat, "run-b").unwrap().unwrap();
+    send(
+        &mut c,
+        &SendRequest {
+            conversation_id: chat.clone(),
+            source_run_id: "run-b".into(),
+            tool_call_id: "reply-to-preview".into(),
+            execution_version: identity.execution_version,
+            messages: vec![SendOutput {
+                target_node_id: "a".into(),
+                message: "Review findings".into(),
+                reply_to_message_id: Some(receipt.messages[0].id.clone()),
+            }],
+            model_input: None,
+            recipient_versions: Default::default(),
+        },
+    )
+    .unwrap();
+    let after_reply = mailbox_for_run(&c, &chat, "run-b", &query).unwrap();
+    assert_eq!(after_reply["messages"][0]["status"], "pending");
+    assert_eq!(
+        after_reply["messages"][0]["deliveryStatus"],
+        "preview_only_not_accepted"
+    );
+    assert!(after_reply["messages"][0]["runId"].is_null());
+    assert!(after_reply["messages"][0]["deliveryId"].is_null());
+    assert!(eligible_pending_input(&c, &receipt.input_ids[0])
+        .unwrap()
+        .is_some());
+    let outbox = mailbox_for_run(
+        &c,
+        &chat,
+        "run-b",
+        &MailboxQuery {
+            direction: MailboxDirection::Outbox,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(outbox["messages"][0]["status"], "pending");
+    assert!(outbox["messages"][0].get("deliveryStatus").is_none());
+}
+
 #[test]
 fn workflow_awareness_mailbox_status_filter_pagination_and_body_budget_are_explicit() {
     let mut c = fixture();

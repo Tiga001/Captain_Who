@@ -470,7 +470,7 @@ impl AgentTool for WorkflowReadTool {
             ),
             WorkflowReadKind::Mailbox => (
                 "organization_get_mailbox",
-                "Read your inbox or outbox without changing mail status. Inbox overview returns pending/processing bodies, full-mailbox counts, and a separate compact history index without historical bodies. Use each history entry's bodyRetrieval (direction and messageId) to inspect that one letter in full. Pass nextCursor as cursor for active inbox mail or outbox pages, and history.nextCursor as historyCursor for inbox history; keep filters unchanged. Counts describe the whole selected mailbox, not just the returned page. status=pending checks new work.",
+                "Read your inbox or outbox without changing mail status. Pending inbox entries are previews only, not accepted by this turn. Before handling or replying to them, use organization_accept; otherwise they remain pending for automatic delivery in a future turn. Sending a reply does not accept or complete the original mail. Inbox overview returns pending/processing bodies, whole-mailbox counts, and a compact history index without historical bodies. Use a history entry's bodyRetrieval (direction and messageId) to read that letter. Pass nextCursor as cursor for active inbox/outbox pages, or history.nextCursor as historyCursor for inbox history; keep filters unchanged. status=pending checks new work.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -1336,6 +1336,12 @@ mod tests {
         let mut extension = WorkflowExtension::new(Some(host.clone()));
         extension.prepare_model_request().unwrap();
         let mailbox = tool(&extension, "organization_get_mailbox");
+        let description = mailbox.definition().description;
+        assert!(description.contains("previews only, not accepted by this turn"));
+        assert!(description.contains("use organization_accept; otherwise"));
+        assert!(
+            description.contains("Sending a reply does not accept or complete the original mail")
+        );
         assert!(mailbox.definition().input_schema["properties"]
             .get("historyCursor")
             .is_some());

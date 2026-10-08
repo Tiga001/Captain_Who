@@ -542,18 +542,34 @@ impl AgentService {
                 self.storage
                     .workflow_execution_bind_input(&workflow.id, &run_id, &user_message_id);
             match claim {
-                Ok(true) => prepare_reserved_workflow_turn_with_history(
-                    &self.storage,
-                    &self.skills,
-                    input,
-                    &run_id,
-                    previous_conversation.clone(),
-                    expected_revision,
-                    workflow,
-                    &execution_access_check,
-                    prepared_history.clone(),
-                )
-                .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
+                Ok(true) => self
+                    .storage
+                    .workflow_execution_load_input(&workflow.id)
+                    .map_err(AgentServiceError::from)
+                    .and_then(|bound| {
+                        let workflow = bound.ok_or_else(|| {
+                            AgentServiceError::from(
+                                "accepted organization input no longer exists".to_string(),
+                            )
+                        })?;
+                        // The claim freezes acceptance metadata. Persist that same envelope in
+                        // the chat projection, rather than the scheduler's pending preview.
+                        input.content = workflow.content.clone();
+                        prepare_reserved_workflow_turn_with_history(
+                            &self.storage,
+                            &self.skills,
+                            input,
+                            &run_id,
+                            previous_conversation.clone(),
+                            expected_revision,
+                            workflow,
+                            &execution_access_check,
+                            prepared_history.clone(),
+                        )
+                        .map(|prepared| {
+                            PreparedConversationTurnOutcome::Prepared(Box::new(prepared))
+                        })
+                    }),
                 Ok(false) => Err("organization input is no longer pending".to_string().into()),
                 Err(error) => Err(error.into()),
             }

@@ -130,6 +130,8 @@ last_verified: 2026-10-07
 5. 正常结束时，本轮已正式接收且仍 processing 的邮件自动结算为 processed。只有要提前结算某封并继续其他工作时才调用 `organization_complete({ messageIds })`；它不会领取 pending 邮件。
 6. 回到空闲仍有 pending 邮件时，再取最早一封启动下一轮；没有待办时保持空闲。
 
+正式投递的模型信封包含原始 `Sent at`、实际领取时的 `Accepted at`（均为带 `Z` 时区的 UTC 时间），以及 `Delivery method`：自动唤醒为 `automatic wake-up`，本轮主动领取为 `accepted during current turn`。领取事务将这些信息固定在持久化正文中；实时投递、聊天投影和历史重放复用该正文，不以查询、重试或重放时间覆盖它。尚未领取的信封只标 pending，不生成领取时间。
+
 审批等待、同步人工交互、运行中或并发名额不足均不视为可自动唤醒的空闲。模型、权限、配置或容量暂不可执行时由调度器退避重试，配置变更、容量释放及新信触发复查；调度器独立于前端页面。
 
 用户手动停止会留下停止屏障，后续邮件保持排队，不立即唤醒。用户在该对话手动发送新消息后恢复正常机制；读取邮箱、组织查询或 World State 更新不会解除暂停。组织停用与用户停止是不同控制，二者都不能被模型查询绕过。
@@ -140,6 +142,7 @@ last_verified: 2026-10-07
 
 `organization_get_mailbox` 只读自己的 `inbox` 或 `outbox`。查询、预览和翻页不领取、不完成、不重发邮件。
 
+- 收件箱中 `pending` 正文只是尚未接手的预览，条目的 `deliveryStatus` 为 `preview_only_not_accepted`。若要在本轮处理或回复，先调用 `organization_accept` 接手到本轮；否则原信仍保持 pending，之后可自动投递并唤醒新一轮。`organization_send` 回复不会自动领取或完成原信。
 - 收件箱总览仅返回 pending/processing 正文；历史使用单独精简索引，不混入历史长正文。
 - 待办及发件箱用 `nextCursor` → `cursor`；历史用 `history.nextCursor` → `historyCursor`，保持原过滤条件。
 - `counts` 是整个所选邮箱的真实状态数量，不受本页和状态筛选影响；默认每页 20、最多 50 条。
@@ -189,11 +192,11 @@ last_verified: 2026-10-07
 
 `agent.workflows.runtime.changed` 发布元数据摘要：`inputs`、`inputRuns` 为空，保留事件窗口、暂停对话和新鲜偏好修改，并附带 `summary`。显式 `runtimeSnapshot` 默认仍返回完整投影；传入 `summaryOnly: true` 使用与通知相同的摘要读取。两种读取均保留真实事件序号，摘要不是完整输入或 Run 列表，不能凭空数组推断没有邮件或活动。
 
-| 摘要字段 | 恢复语义 |
-| --- | --- |
-| `pendingByNode` | 当前成员绑定的真实 pending 邮件数，零值可省略；不从最近事件或有限输入窗口推算 |
+| 摘要字段              | 恢复语义                                                                                                             |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `pendingByNode`       | 当前成员绑定的真实 pending 邮件数，零值可省略；不从最近事件或有限输入窗口推算                                        |
 | `conversationChanges` | 曾正式绑定 delivery 的每个对话及其最新关联邮件事件序号，包含已解绑成员和迟到的 Run 完成事件；不按最近 512 条事件截断 |
-| `structureRevision` | 最新 `members_changed` 事件序号，触发组织结构重新读取；没有结构事件时为 0 |
+| `structureRevision`   | 最新 `members_changed` 事件序号，触发组织结构重新读取；没有结构事件时为 0                                            |
 
 `summary` 的恢复事实与 `afterSequence` 无关。在同一个 SQLite 读取事务内取得实例事件水位、摘要和暂停状态，避免组合出跨版本快照。`events` 包含游标之后最新 512 条事件，再补充每个当前成员的模型、权限字段各自最新历史失效事件，按序号去重排序。因此历史偏好事件可能早于请求游标；消费者按字段去重并复核当前草稿，不能把它们当作新鲜偏好值，也不能重新播放动画。临时连线只使用新游标之后的真实 sent/recalled 事件。
 

@@ -91,6 +91,90 @@ fn status(c: &Connection, receipt: &SendReceipt, index: usize) -> MailStatus {
 }
 
 #[test]
+fn workflow_execution_acceptance_metadata_is_frozen_across_retries_and_settlement() {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+    let timestamp = |content: &str, label: &str| {
+        let value = content
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .unwrap();
+        OffsetDateTime::parse(value, &Rfc3339)
+            .unwrap()
+            .unix_timestamp_nanos()
+            / 1_000_000
+    };
+    for automatic in [true, false] {
+        let mut c = fixture();
+        let receipt = send_mail(&mut c, "send", &[("b", "Review this report")]);
+        let input_id = &receipt.input_ids[0];
+        let pending = load_input(&c, input_id).unwrap().unwrap();
+        assert!(pending.content.contains("pending; not yet accepted"));
+        assert!(!pending.content.contains("Accepted at:"));
+        assert!(!pending.content.contains("Delivery method:"));
+        start_run(&mut c, "b", "run-b");
+        let mut accept = action(
+            &c,
+            "b",
+            "run-b",
+            "accept",
+            MutationAction::Accept,
+            &[receipt.messages[0].id.clone()],
+        );
+        let before = now_ms();
+        if automatic {
+            assert!(bind_input(&mut c, input_id, "run-b", "auto-delivery").unwrap());
+        } else {
+            assert_eq!(
+                mutate(&mut c, &accept).unwrap()["messages"][0]["success"],
+                true
+            );
+        }
+        let after = now_ms();
+        let accepted = load_input(&c, input_id).unwrap().unwrap();
+        assert_eq!(
+            timestamp(&accepted.content, "Sent at: "),
+            i128::from(receipt.messages[0].created_at)
+        );
+        let accepted_at = timestamp(&accepted.content, "Accepted at: ");
+        assert!((i128::from(before)..=i128::from(after)).contains(&accepted_at));
+        assert!(accepted.content.contains(if automatic {
+            "Delivery method: automatic wake-up"
+        } else {
+            "Delivery method: accepted during current turn"
+        }));
+
+        // Cross the clock's millisecond boundary so accidental reassembly cannot pass by luck.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        if automatic {
+            assert!(bind_input(&mut c, input_id, "run-b", "auto-delivery").unwrap());
+        }
+        // Both replaying the same call and a new accept call preserve the original envelope,
+        // including automatic wake-up provenance when the mail is already assigned to this run.
+        assert_eq!(
+            mutate(&mut c, &accept).unwrap()["messages"][0]["success"],
+            true
+        );
+        accept.tool_call_id = "accept-again".into();
+        assert_eq!(
+            mutate(&mut c, &accept).unwrap()["messages"][0]["success"],
+            true
+        );
+        assert_eq!(
+            load_input(&c, input_id).unwrap().unwrap().content,
+            accepted.content
+        );
+        prove(&c, input_id);
+        mark_applied(&mut c, input_id).unwrap();
+        settle_run(&c, "run-b", "completed").unwrap();
+        let completed = load_input(&c, input_id).unwrap().unwrap();
+        assert_eq!(completed.content, accepted.content);
+        assert_eq!(completed.mail_status, MailStatus::Processed);
+        assert!(eligible_pending_input(&c, input_id).unwrap().is_none());
+    }
+}
+
+#[test]
 fn workflow_execution_any_member_sends_atomically_and_retry_is_idempotent() {
     let mut c = fixture();
     let req = request(&c, "send", &[("b", "first"), ("c", "second")]);

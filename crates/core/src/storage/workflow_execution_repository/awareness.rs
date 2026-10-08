@@ -311,7 +311,7 @@ pub fn mailbox_for_run(
         "observedAt":now_ms(),"view":if focused {"message"} else {"overview"},
         "counts":counts,"countsScope":"entire_selected_mailbox",
         "messages":messages,"nextCursor":next,
-        "handlingRule":"Reading pending mail does not accept it. It remains eligible to wake a future turn; use organization_accept to handle it now. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."});
+        "handlingRule":"Pending inbox entries are previews only, not accepted by this turn. Reading or paging does not change mail status. Before handling or replying to pending inbox mail in this turn, use organization_accept to assign it to this turn. Otherwise it remains pending and eligible for automatic delivery in a future turn. Sending a reply with organization_send does not accept or complete the original mail. Only claimed mail assigned to this turn can be completed. Processed mail will not be delivered again."});
     if inbox && !focused {
         result["history"] = mailbox_history_page(&tx, &identity, conversation_id, query)?;
     }
@@ -445,6 +445,9 @@ fn mailbox_message_page(
         item["messageId"] = value!(message.id);
         item["sequence"] = value!(sequence);
         item["status"] = value!(status);
+        if inbox && status == "pending" {
+            item["deliveryStatus"] = value!("preview_only_not_accepted");
+        }
         item["inputId"] = value!(input_id);
         item["runId"] = value!(processing_run);
         item["runStatus"] = value!(run_status);

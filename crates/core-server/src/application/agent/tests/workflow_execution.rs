@@ -92,6 +92,46 @@ fn root_input(conversation_id: &str, content: &str) -> AgentConversationTurnInpu
     }
 }
 
+fn assert_mail_envelope(input: &mycopilot_core::workflow_execution::Input, method: &str) {
+    let timestamp = |prefix: &str| {
+        let value = input
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("mail envelope must include {prefix}"));
+        chrono::DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .timestamp_millis()
+    };
+    let sent_at = timestamp("Sent at: ");
+    let accepted_at = timestamp("Accepted at: ");
+    assert_eq!(sent_at, input.messages[0].created_at);
+    assert!(accepted_at >= sent_at);
+    assert!(input
+        .content
+        .lines()
+        .any(|line| line == format!("Delivery method: {method}")));
+    assert!(input
+        .content
+        .contains("Delivery status: already accepted and assigned to this turn."));
+}
+
+fn request_contains_exact_mail(request: &Value, content: &str) -> bool {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["role"] == "user"
+                && (message["content"].as_str() == Some(content)
+                    || message["content"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part["type"] == "text" && part["text"].as_str() == Some(content)
+                        })
+                    }))
+        })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_independent_roots() {
     let directory = tempdir().unwrap();
@@ -250,6 +290,11 @@ async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_in
     assert!(raw.contains("Review quality"));
     assert!(raw.contains("Organization mail"));
     assert!(raw.contains("organization.execution"));
+    assert_mail_envelope(&input, "automatic wake-up");
+    assert!(
+        request_contains_exact_mail(recipient, &input.content),
+        "automatic wake-up must sample the accepted durable envelope, not its pending preview"
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.unwrap();
@@ -284,10 +329,15 @@ async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_in
     );
     let chat = storage.load_conversation(&target).unwrap().unwrap();
     assert_eq!(chat.messages.iter().filter(|m| m.role == "user").count(), 1);
-    assert!(chat
-        .messages
-        .iter()
-        .any(|message| message.content.contains("Workflow artifact 51892")));
+    assert_eq!(
+        chat.messages
+            .iter()
+            .find(|message| message.role == "user")
+            .unwrap()
+            .content,
+        input.content,
+        "the startup chat projection must preserve the same accepted envelope as the model"
+    );
     let traces = storage.list_conversation_turn_traces(&target).unwrap();
     assert!(traces.iter().flat_map(|trace|&trace.items).any(|item|matches!(item,ConversationTurnTraceItem::WorkflowDelivery {input_id,..} if input_id==&input.id)));
     let mut history =
@@ -310,6 +360,16 @@ async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_in
             .any(|message| message.role == "user"
                 && message.content.contains("Workflow artifact 51892")),
         "UI projection must never replay as HumanText"
+    );
+    assert!(
+        history
+            .iter()
+            .filter_map(|message| message.conversation_turn_trace.as_ref())
+            .flat_map(|trace| &trace.items)
+            .any(|item| matches!(item,
+            ConversationTurnTraceItem::WorkflowDelivery { input_id, content, .. }
+                if input_id == &input.id && content == &input.content)),
+        "reconstructed history must retain the original acceptance time and delivery method"
     );
     scheduler.shutdown().await.unwrap();
     provider.abort();
@@ -370,6 +430,13 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
                         assert_eq!(mail["history"]["total"], 0);
                         assert_eq!(mail["messages"][0]["content"], "Accepted payload 42931");
                         assert_eq!(mail["messages"][0]["status"], "pending");
+                        assert_eq!(
+                            mail["messages"][0]["deliveryStatus"],
+                            "preview_only_not_accepted"
+                        );
+                        assert!(mail["handlingRule"].as_str().unwrap().contains(
+                            "Sending a reply with organization_send does not accept or complete the original mail."
+                        ));
                         Some((
                             "accept-pending",
                             "organization_accept",
@@ -584,6 +651,19 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
     while let Ok(request) = requests.try_recv() {
         samples.push(request);
     }
+    let input = storage
+        .workflow_execution_load_input(&after.inputs[0].id)
+        .unwrap()
+        .unwrap();
+    assert_mail_envelope(&input, "accepted during current turn");
+    let delivered_samples = samples
+        .iter()
+        .filter(|sample| request_contains_exact_mail(sample, &input.content))
+        .count();
+    assert_eq!(
+        delivered_samples, 4,
+        "every sampling after acceptance must retain the same durable envelope and timestamps"
+    );
     assert!(
         samples.iter().any(|sample| {
             let raw = sample.to_string();
@@ -593,6 +673,12 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
     );
     let traces = storage.list_conversation_turn_traces(&target).unwrap();
     assert_eq!(traces.len(), 1);
+    assert!(
+        traces[0].items.iter().any(|item| matches!(item,
+        ConversationTurnTraceItem::WorkflowDelivery { input_id, content, .. }
+            if input_id == &input.id && content == &input.content)),
+        "same-turn acceptance must preserve the exact model envelope for history replay"
+    );
     assert_eq!(
         traces[0]
             .items

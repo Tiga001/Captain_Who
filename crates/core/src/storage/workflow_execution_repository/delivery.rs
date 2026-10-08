@@ -137,7 +137,13 @@ pub fn bind_input_in_connection(
         run_id,
     )?
     .ok_or("Organization identity was not admitted for this run")?;
-    input.content = assemble_message(&owner, &input.messages);
+    input.content = assemble_message(
+        &owner,
+        &input.messages,
+        MailDeliveryContext::AutomaticWake {
+            accepted_at: now_ms(),
+        },
+    );
     input.execution_version = owner.execution_version;
     c.execute("INSERT INTO workflow_mail_message_origins(message_id,conversation_id,input_id) VALUES(?1,?2,?3)",params![delivery_id,input.conversation_id,input.id]).map_err(db)?;
     input.status = InputStatus::Claimed;

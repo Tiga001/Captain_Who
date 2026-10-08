@@ -127,7 +127,13 @@ pub fn organization_mail_model_projection(
                 }
             }
         }
+        // Mailbox queries need their preview/acceptance rule beside the result. Automatic
+        // World State still omits this policy; preserve it only on explicit mail tool results.
+        let handling_rule = value.get("handlingRule").cloned();
         *value = crate::world_state::workflow_projection::semantic_state(std::mem::take(value));
+        if let Some(rule) = handling_rule {
+            value["handlingRule"] = rule;
+        }
     }
     projected
 }
@@ -553,7 +559,8 @@ mod tests {
                 "instanceId":"internal-org", "workflowName":"Writing team", "direction":"inbox", "view":"overview",
                 "counts":{"total":24,"pending":2,"processing":1,"processed":18,"stopped":1,"failed":1,"recalled":1},
                 "countsScope":"entire_selected_mailbox",
-                "messages":[{"messageId":"pending-1","sourceNodeName":"Boss","status":"pending","content":"Please review","bodyAvailable":true}],
+                "handlingRule":"Pending inbox entries are previews only. Replying does not accept or complete them.",
+                "messages":[{"messageId":"pending-1","sourceNodeName":"Boss","status":"pending","deliveryStatus":"preview_only_not_accepted","content":"Please review","bodyAvailable":true}],
                 "nextCursor":10,
                 "history":{"total":21,"nextCursor":8,"messages":[{
                     "messageId":"history-1", "sourceNodeName":"Editor", "sourceConversationId":"internal-source",
@@ -567,6 +574,14 @@ mod tests {
         let projected = organization_mail_model_projection(&raw);
         let value = projected.result.as_ref().unwrap();
         assert_eq!(value["messages"][0]["content"], "Please review");
+        assert_eq!(
+            value["messages"][0]["deliveryStatus"],
+            "preview_only_not_accepted"
+        );
+        assert_eq!(
+            value["handlingRule"],
+            raw.result.as_ref().unwrap()["handlingRule"]
+        );
         assert_eq!(value["history"]["messages"][0]["from"], "Editor");
         assert_eq!(value["history"]["messages"][0]["messageId"], "history-1");
         assert_eq!(
