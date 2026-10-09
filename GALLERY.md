@@ -1,185 +1,128 @@
-# Captain Who: Screenshot Gallery
+# Captain Who: Scenario Gallery
 
-[Back to README](README.md)
+[English overview](README.md) · [简体中文](README.zh-CN.md)
 
-All 26 supplied images are listed in upload order, with short English captions. Screenshots retain their original interface language and have not been edited. Repeated uploads have separate entries but reuse the same image file.
+A closer look at research, writing, code review, browser interaction, and collaboration in Captain Who. Screenshots are examples of the interface, not evidence that a task or its results have been independently verified. Their language, model names, settings, and layout may differ from your installed version.
 
-## Batch 1
+Full-access modes shown here are not a recommendation; start with default permissions and review approvals. Displayed token counts, cache hit rates, and costs are example local statistics, not benchmarks or provider bills.
 
-### 01. 67346.PNG
+## Research a topic with parallel subagents
 
-![Captain Who in dark mode with a five-step presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
+![A presentation task with a five-step plan and four research subagents listed on the right.](assets/screenshots/parallel-research.png)
 
-_Track a presentation task while four research sub-agents work in parallel._
+The example presentation task divides research on university history, academic research, notable people, and rankings among four subagents. The panel lets you inspect their progress; the resulting claims still need source checks.
 
-### 02. 67350.PNG
+![A generated campus illustration in the conversation beside active and completed research subagents.](assets/screenshots/generated-artwork.png)
 
-![Chat showing generated campus illustrations beside lists of active and completed research sub-agents.](assets/screenshots/generated-artwork.png)
+The conversation shows an AI-generated campus illustration for the presentation, alongside subagent activity. This is generated artwork, not a photograph of a real campus or a verified architectural reference.
 
-_Generate presentation artwork while monitoring active and completed research sub-agents._
+[Research and writing tutorial](public-docs/user/tutorials/research-and-write.md) · [Multi-Agent tutorial](public-docs/user/tutorials/use-multiple-agents.md)
 
-### 03. 67351.PNG
+## Coordinate independent conversations in an organization
 
-![A Captain Who conversation introducing its capabilities, with a model selector and full-access indicator.](assets/screenshots/workspace-chat.png)
+![Independent member conversations on the left, an explanation of internal organization mail in the center, and the organization board on the right.](assets/screenshots/organization-research.png)
 
-_Chat in a project workspace with model and permission controls in the composer._
+The organization view brings member conversations and a shared board together. Members keep independent conversations and exchange tasks and results through internal mail; this is separate from a conversation's temporary subagent tree. The screenshot illustrates the interface and mail tools, not a completed research result.
 
-### 04. 67354.PNG
+**Development-version feature:** organization behavior documented here is verified in the current development code, not guaranteed in every website installer. Current organizations do not use fixed execution wires or input/output gates. See the [organization guide](public-docs/user/capabilities/organizations.md) and [two-member research tutorial](public-docs/user/tutorials/create-an-organization.md).
 
-![Light-mode workspace with a Python binary-search diff and an integrated terminal below.](assets/screenshots/code-review-terminal.png)
+## Review files and code beside the conversation
 
-_Review code changes beside the conversation and an integrated workspace terminal._
+![A project conversation beside a Python binary-search diff, with the integrated terminal below.](assets/screenshots/code-review-terminal.png)
 
-### 05. 67355.PNG
+Review a proposed code change while keeping the conversation and project terminal visible.
 
-![General settings showing default, full, and custom access controls, read/write scopes, and approval toggles.](assets/screenshots/permissions.png)
+![A Markdown document preview beside the conversation, with a response's token-usage popover open.](assets/screenshots/markdown-preview-tokens.png)
 
-_Configure workspace access and approval rules for file edits, commands, and built-in tools._
+Read a Markdown file alongside the discussion and inspect usage for an individual response. This is a Markdown preview; Word, Excel, and PowerPoint files cannot be previewed directly in the Files panel.
 
-### 06. 67356.PNG
+<details>
+<summary>More: project conversations and chat commands</summary>
 
-![Appearance settings with system, light, and dark options, a code-diff preview, and font and sidebar preferences.](assets/screenshots/appearance.png)
+![A project conversation with model and permission selectors in the composer.](assets/screenshots/workspace-chat.png)
 
-_Choose a theme and preview its code-diff styling._
+Choose the conversation's model and check its permission mode before starting a task.
 
-### 07. 67357.PNG
+![A slash-command menu showing model, context compaction, and conversation-management actions.](assets/screenshots/chat-commands.png)
 
-![Sub-agent settings showing an enabled visual-review specialist template with model and project assignments.](assets/screenshots/subagent-templates.png)
+Use `/` to access model selection, context compaction, and conversation actions.
 
-_Enable sub-agents and manage reusable specialist templates._
+</details>
 
-### 08. 67358.PNG
+## Inspect a webpage and hand control back when needed
 
-![Skills settings with an installation dialog offering GitHub and local-folder sources.](assets/screenshots/install-skills.png)
+![An English conversation beside the built-in browser with the Captain Who website's contact dialog open.](assets/screenshots/browser-inspection.png)
 
-_Install skills from GitHub or a local folder and manage built-in capabilities._
+Discuss the currently displayed webpage and its dialog without leaving the workspace.
 
-## Batch 2
+![A website sign-in page in the built-in browser beside a request for user assistance.](assets/screenshots/browser-login-handoff.jpg)
 
-### 09. 67363.PNG
+The assistant requests user action at a website sign-in page. Complete authentication yourself; do not put passwords or verification codes into the conversation.
 
-![Slash-command menu over a chat, with model, context compression, capabilities, pin, rename, archive, branch, and new-chat actions.](assets/screenshots/chat-commands.png)
+[Search and browser guide](public-docs/user/everyday-use/search-and-browser.md)
 
-_Use chat commands to switch models, compress context, and manage conversations._
+## Gather structured input
 
-### 10. d41fa0840a45066449f4c6fb6cace9e0.PNG
+![An interactive question card with two suggested choices and a custom-answer field.](assets/screenshots/interactive-questions.png)
 
-![Split view showing an MBTI Markdown document, a conversation, and a token-usage popover.](assets/screenshots/markdown-preview-tokens.png)
+An MBTI-style questionnaire demonstrates question cards with choices and custom answers. The example is an interface demonstration, not a validated psychological assessment.
 
-_Preview a Markdown document beside chat and inspect per-message token usage._
+## Configure the tools and boundaries for a task
 
-### 11. Eng-github-social-preview.jpg
+<details>
+<summary>Skills, local MCP servers, and subagent templates</summary>
 
-![English-language chat summarizing the Captain Who website beside the built-in browser and an open Contact us dialog.](assets/screenshots/browser-inspection-preview.jpg)
+![A Skill installation dialog offering GitHub and local-folder sources.](assets/screenshots/install-skills.png)
 
-_Inspect a webpage in the built-in browser without leaving the conversation._
+Install reusable task instructions and resources from GitHub or an authorized local folder. Review the source before installing.
 
-### 12. Eng.png
+![MCP settings listing local servers, with Filesystem ready and the other connections disabled.](assets/screenshots/mcp-servers.png)
 
-![English-language chat summarizing the Captain Who website beside the built-in browser and an open Contact us dialog.](assets/screenshots/browser-inspection.png)
+Check local MCP server status and enable the tools needed for a task. The current product supports local stdio servers; the listed examples do not imply support for every MCP transport or feature.
 
-_Inspect a webpage in the built-in browser without leaving the conversation._
+![Subagent settings showing an enabled visual-review specialist template with model and project assignments.](assets/screenshots/subagent-templates.png)
 
-### 13. Eng2.png
+Save a specialist role, choose its model, and assign the template to a project.
 
-![English-language chat beside a Paperwork Refinement workflow graph connecting a coordinator, two copy editors, and a reviewer.](assets/screenshots/visual-workflow.png)
+</details>
 
-_Inspect a visual workflow linking a coordinator, copy editors, and a reviewer._
+<details>
+<summary>Permissions and model API configuration</summary>
 
-### 14. IMG_9887.JPG
+![Permission settings with default, full-access, and custom modes, file scopes, and approval options.](assets/screenshots/permissions.png)
 
-![A chat requests user action beside a Zhejiang University sign-in page in the built-in browser.](assets/screenshots/browser-login-handoff.jpg)
+Review file-access scope and approval rules. Default permissions are the starting point; a full-access selection in an example does not make it appropriate for your task.
 
-_Pause browser automation for the user to complete a website sign-in._
+![Model settings with endpoint, context-window, pricing, and image-input fields, plus a masked API token.](assets/screenshots/model-configuration.png)
 
-## Batch 3
+Configure a model connection and the prices used for local estimates. The API token is masked in this example. Keep credentials in settings and out of shared screenshots or conversations.
 
-### 15. 67357(1).PNG
+</details>
 
-![Sub-agent settings showing an enabled visual-review specialist template with model and project assignments.](assets/screenshots/subagent-templates.png)
+<details>
+<summary>Usage estimates and appearance</summary>
 
-_Enable sub-agents and manage reusable specialist templates._
+![A seven-day usage dashboard with a model filter, token totals, cache statistics, and estimated costs.](assets/screenshots/usage-costs.png)
 
-Repeated upload of image 07.
+Inspect local usage by model and date. These values describe this example's activity; they are not performance guarantees or a substitute for your provider's bill.
 
-### 16. 67358(1).PNG
+![Appearance settings with theme choices, a code-diff preview, and font and sidebar preferences.](assets/screenshots/appearance.png)
 
-![Skills settings with an installation dialog offering GitHub and local-folder sources.](assets/screenshots/install-skills.png)
+Choose a theme and inspect its code-diff colors before adjusting other display preferences.
 
-_Install skills from GitHub or a local folder and manage built-in capabilities._
+</details>
 
-Repeated upload of image 08.
+[Capability limits](public-docs/user/reference/capability-limits.md) · [Safe agent usage](public-docs/user/best-practices/safe-agent-usage.md)
 
-### 17. 67359.PNG
+<details>
+<summary>Historical interface: the retired visual workflow</summary>
 
-![MCP settings listing six local servers, with Filesystem marked ready and the other five disabled.](assets/screenshots/mcp-servers.png)
+![A historical workflow canvas connecting a coordinator, two copy editors, and a reviewer.](assets/screenshots/visual-workflow.png)
 
-_Manage local MCP servers and see which integrations are ready._
+This early interface used connected workflow nodes. That workflow feature has been removed; this is not the current organization interface or its execution model. Current organizations use independent member conversations and internal mail, as shown above.
 
-### 18. 67360.PNG
+</details>
 
-![Usage dashboard with a seven-day chart, a model filter, token totals, cache-hit rate, and estimated cost.](assets/screenshots/usage-costs.png)
+---
 
-_Track token usage, cache hits, and estimated costs by model and time range._
-
-### 19. 67361.PNG
-
-![Model settings with provider/model fields, context size, pricing, an image-input toggle, endpoint URL, and a masked API token.](assets/screenshots/model-configuration.png)
-
-_Configure a model's endpoint, context window, token pricing, and image input._
-
-### 20. 67362.PNG
-
-![Chat showing the first of twelve MBTI-style questions with two choices and a custom-answer field.](assets/screenshots/interactive-questions.png)
-
-_Collect structured answers with an interactive, multi-step question card._
-
-## Batch 4
-
-### 21. 67346(1).PNG
-
-![Captain Who in dark mode with a five-step presentation plan and four active research sub-agents.](assets/screenshots/parallel-research.png)
-
-_Track a presentation task while four research sub-agents work in parallel._
-
-Repeated upload of image 01.
-
-### 22. 67350(1).PNG
-
-![Chat showing generated campus illustrations beside lists of active and completed research sub-agents.](assets/screenshots/generated-artwork.png)
-
-_Generate presentation artwork while monitoring active and completed research sub-agents._
-
-Repeated upload of image 02.
-
-### 23. 67351(1).PNG
-
-![A Captain Who conversation introducing its capabilities, with a model selector and full-access indicator.](assets/screenshots/workspace-chat.png)
-
-_Chat in a project workspace with model and permission controls in the composer._
-
-Repeated upload of image 03.
-
-### 24. 67354(1).PNG
-
-![Light-mode workspace with a Python binary-search diff and an integrated terminal below.](assets/screenshots/code-review-terminal.png)
-
-_Review code changes beside the conversation and an integrated workspace terminal._
-
-Repeated upload of image 04.
-
-### 25. 67355(1).PNG
-
-![General settings showing default, full, and custom access controls, read/write scopes, and approval toggles.](assets/screenshots/permissions.png)
-
-_Configure workspace access and approval rules for file edits, commands, and built-in tools._
-
-Repeated upload of image 05.
-
-### 26. 67356(1).PNG
-
-![Appearance settings with system, light, and dark options, a code-diff preview, and font and sidebar preferences.](assets/screenshots/appearance.png)
-
-_Choose a theme and preview its code-diff styling._
-
-Repeated upload of image 06.
+[Back to the English overview](README.md) · [返回中文介绍](README.zh-CN.md)

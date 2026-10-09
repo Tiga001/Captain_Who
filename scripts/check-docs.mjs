@@ -2,6 +2,12 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  localReference,
+  readmeParity,
+  readmeReferences,
+  readmeStructure
+} from './readme-checks.mjs'
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const docsRoot = path.join(repositoryRoot, 'docs')
@@ -78,14 +84,33 @@ function resolveMarkdownTarget(file, rawTarget) {
 }
 
 const documentationFiles = walkMarkdown(docsRoot).sort()
-const markdownFiles = [path.join(repositoryRoot, 'README.md'), ...documentationFiles]
+const rootDocuments = ['README.md', 'README.zh-CN.md', 'README.en.md', 'GALLERY.md'].map((file) =>
+  path.join(repositoryRoot, file)
+)
+const markdownFiles = [...rootDocuments.filter((file) => existsSync(file)), ...documentationFiles]
 const indexedTargets = new Set()
 const currentDocuments = []
 
 const rootReadme = path.join(repositoryRoot, 'README.md')
 const docsReadme = path.join(docsRoot, 'README.md')
-if (!readFileSync(rootReadme, 'utf8').includes('# Captain Who')) {
-  fail(rootReadme, 'missing canonical product heading “Captain Who”')
+for (const file of rootDocuments) {
+  if (!existsSync(file)) fail(file, 'missing root documentation file')
+}
+const fullReadmes = [rootReadme, path.join(repositoryRoot, 'README.zh-CN.md')]
+for (const file of fullReadmes.filter((file) => existsSync(file))) {
+  const h1s = readmeStructure(readFileSync(file, 'utf8')).headings.filter(
+    ({ depth }) => depth === 1
+  )
+  if (h1s.length !== 1 || h1s[0].text !== 'Captain Who') {
+    fail(file, 'expected one canonical product H1 heading “Captain Who” (Markdown or HTML)')
+  }
+}
+if (fullReadmes.every((file) => existsSync(file))) {
+  const [english, chinese] = fullReadmes.map((file) => ({
+    file,
+    markdown: readFileSync(file, 'utf8')
+  }))
+  for (const error of readmeParity(english, chinese, repositoryRoot)) fail(rootReadme, error)
 }
 if (!readFileSync(docsReadme, 'utf8').includes('# Captain Who 开发文档')) {
   fail(docsReadme, 'missing canonical development documentation heading “Captain Who 开发文档”')
@@ -112,10 +137,29 @@ for (const file of markdownFiles) {
   if (/\bmy(?:\s+)?copilot(?:\s+next)?\b/i.test(prose)) {
     fail(file, 'obsolete product name in prose; use “Captain Who”')
   }
-  for (const match of markdown.matchAll(/\]\(([^)]+)\)/g)) {
-    const target = resolveMarkdownTarget(file, match[1])
-    if (target && !existsSync(target)) fail(file, `local link does not exist: ${match[1]}`)
-    if (file === path.join(docsRoot, 'README.md') && target) indexedTargets.add(target)
+  if (rootDocuments.includes(file)) {
+    for (const { kind, target: rawTarget } of readmeReferences(readFileSync(file, 'utf8'))) {
+      let target
+      try {
+        target = localReference(file, rawTarget, repositoryRoot)
+      } catch {
+        fail(file, `link target is not valid percent-encoding: ${rawTarget}`)
+        continue
+      }
+      if (!target) continue
+      if (!existsSync(target.file)) {
+        fail(file, `local ${kind} does not exist: ${rawTarget}`)
+      } else if (target.fragment && /\.(?:md|html?|svg)$/i.test(target.file)) {
+        const { anchors } = readmeStructure(readFileSync(target.file, 'utf8'))
+        if (!anchors.has(target.fragment)) fail(file, `local fragment does not exist: ${rawTarget}`)
+      }
+    }
+  } else {
+    for (const match of markdown.matchAll(/\]\(([^)]+)\)/g)) {
+      const target = resolveMarkdownTarget(file, match[1])
+      if (target && !existsSync(target)) fail(file, `local link does not exist: ${match[1]}`)
+      if (file === path.join(docsRoot, 'README.md') && target) indexedTargets.add(target)
+    }
   }
 
   for (const match of markdown.matchAll(/`([^`\n]+)`/g)) {
