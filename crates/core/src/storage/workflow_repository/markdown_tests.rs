@@ -74,8 +74,8 @@ fn markdown_import_creates_only_fresh_templates_with_unbound_models() {
     }
     source.background = "共同背景第一段。\n\n共同背景第二段。".into();
     source.nodes[0].agent_mut().task = "核验 **证据**。\n\n保留来源和结论。".into();
-    let markdown = workflow_markdown::export(&source).unwrap();
-    assert!(markdown.starts_with("# 组织：Research organization\n"));
+    let markdown = workflow_markdown::export(&source, "zh-CN").unwrap();
+    assert!(markdown.starts_with("Language: 中文\n\n# 组织：Research organization\n"));
     assert!(markdown.contains("## 部门：Research / Review team\n"));
     for private_field in [
         "modelConfigId",
@@ -118,7 +118,7 @@ fn markdown_import_creates_only_fresh_templates_with_unbound_models() {
             portable_semantics(&source)
         );
         assert_eq!(
-            workflow_markdown::export(&imported.definition).unwrap(),
+            workflow_markdown::export(&imported.definition, "zh-CN").unwrap(),
             markdown
         );
         assert_eq!(
@@ -189,7 +189,9 @@ fn markdown_import_creates_only_fresh_templates_with_unbound_models() {
 fn markdown_import_accepts_handwritten_text_and_restores_department_paths() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
-    let markdown = r#"# 组织：研究团队
+    let markdown = r#"Language: 中文
+
+# 组织：研究团队
 
 ## 简介
 
@@ -325,6 +327,112 @@ fn markdown_import_accepts_handwritten_text_and_restores_department_paths() {
 }
 
 #[test]
+fn markdown_import_and_export_preserve_content_across_all_app_languages() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    let mut source = definition();
+    source.description = "Research 研究 — **shared evidence**.\n\nKeep both paragraphs.".into();
+    source.background = "## Existing background heading\n\nA literal field example:\n```md\n#### 职责\n- Rank: 9\n```\n".into();
+    source.nodes[0].agent_mut().receives = "Unchanged user content: α, 中文, 日本語.  \n".into();
+    source.nodes[0].agent_mut().task = "Verify **evidence**.\n\nDo not translate this task.".into();
+    source.nodes[0].agent_mut().delivers = "Reports at `results/report.md`.\n".into();
+    let original = workflow_markdown::export(&source, "zh-CN").unwrap();
+    let imported = request(
+        &mut connection,
+        Request::ImportTemplateMarkdown {
+            markdown: original.clone(),
+        },
+    )
+    .unwrap();
+    let imported_id = imported.imported_template_id.unwrap();
+
+    for (language, declared_language) in [
+        ("zh-CN", "中文"),
+        ("zh-TW", "繁體中文"),
+        ("en-US", "English"),
+        ("en-GB", "English (United Kingdom)"),
+        ("ko-KR", "한국어"),
+        ("ja-JP", "日本語"),
+        ("fr-FR", "Français"),
+        ("it-IT", "Italiano"),
+        ("ru-RU", "Русский"),
+    ] {
+        let exported = request(
+            &mut connection,
+            Request::ExportTemplateMarkdown {
+                id: imported_id.clone(),
+                expected_revision: 1,
+                language: language.into(),
+            },
+        )
+        .unwrap()
+        .exported_template
+        .unwrap()
+        .markdown;
+        assert_eq!(
+            exported.lines().next(),
+            Some(format!("Language: {declared_language}").as_str()),
+            "{language}"
+        );
+        let reimported = request(
+            &mut connection,
+            Request::ImportTemplateMarkdown {
+                markdown: exported.clone(),
+            },
+        )
+        .unwrap();
+        let reimported_id = reimported.imported_template_id.unwrap();
+        let reimported_definition = &reimported
+            .records
+            .iter()
+            .find(|record| record.definition.id == reimported_id)
+            .unwrap()
+            .definition;
+        assert_eq!(
+            portable_semantics(reimported_definition),
+            portable_semantics(&source),
+            "{language}"
+        );
+        for (output_language, expected_markdown) in
+            [(language, exported.as_str()), ("zh-CN", original.as_str())]
+        {
+            let actual = request(
+                &mut connection,
+                Request::ExportTemplateMarkdown {
+                    id: reimported_id.clone(),
+                    expected_revision: 1,
+                    language: output_language.into(),
+                },
+            )
+            .unwrap()
+            .exported_template
+            .unwrap()
+            .markdown;
+            assert_eq!(actual, expected_markdown, "{language} -> {output_language}");
+        }
+    }
+
+    let before = serde_json::to_value(request(&mut connection, Request::List).unwrap()).unwrap();
+    for language in ["", "unknown", "en", "en-US ", "中文"] {
+        assert!(matches!(
+            request(
+                &mut connection,
+                Request::ExportTemplateMarkdown {
+                    id: imported_id.clone(),
+                    expected_revision: 1,
+                    language: language.into(),
+                },
+            ),
+            Err(Error::Invalid(message)) if message == workflow_markdown::INVALID_FORMAT
+        ));
+    }
+    assert_eq!(
+        serde_json::to_value(request(&mut connection, Request::List).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn markdown_export_reads_published_revision_and_leaves_draft_and_database_unchanged() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
@@ -348,13 +456,14 @@ fn markdown_export_reads_published_revision_and_leaves_draft_and_database_unchan
         Request::ExportTemplateMarkdown {
             id: source.id.clone(),
             expected_revision: 1,
+            language: "zh-CN".into(),
         },
     )
     .unwrap();
     let exported = response.exported_template.unwrap();
     assert_eq!(
         exported.markdown,
-        workflow_markdown::export(&source).unwrap()
+        workflow_markdown::export(&source, "zh-CN").unwrap()
     );
     assert!(!exported.markdown.contains("Unpublished draft-only content"));
     let restored = workflow_markdown::import(&exported.markdown).unwrap();
@@ -370,7 +479,8 @@ fn markdown_export_reads_published_revision_and_leaves_draft_and_database_unchan
                 &mut connection,
                 Request::ExportTemplateMarkdown {
                     id: id.clone(),
-                    expected_revision
+                    expected_revision,
+                    language: "zh-CN".into(),
                 }
             ),
             Err(Error::Conflict(_))
@@ -382,8 +492,10 @@ fn markdown_export_reads_published_revision_and_leaves_draft_and_database_unchan
 fn markdown_import_is_atomic_on_invalid_format_and_projection_failure() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
-    let markdown = workflow_markdown::export(&definition()).unwrap();
+    let markdown = workflow_markdown::export(&definition(), "zh-CN").unwrap();
     for malformed in [
+        markdown.replacen("Language: 中文\n\n", "", 1),
+        markdown.replacen("Language: 中文", "Language: Unknown", 1),
         markdown.replacen("## 公共背景", "## 简介", 1),
         markdown.replacen("## 公共背景", "## 未知章节", 1),
         markdown.replacen("- 管理身份：组织管理员", "- 管理身份：超级管理员", 1),
@@ -440,7 +552,7 @@ fn markdown_import_rolls_back_when_catalog_limit_is_reached() {
         request(
             &mut connection,
             Request::ImportTemplateMarkdown {
-                markdown: workflow_markdown::export(&source).unwrap()
+                markdown: workflow_markdown::export(&source, "zh-CN").unwrap()
             }
         ),
         Err(Error::Invalid(_))
@@ -480,11 +592,12 @@ fn markdown_export_avoids_unrelated_catalog_activity_and_model_tables() {
         .workflow_request(Request::ExportTemplateMarkdown {
             id: source.id.clone(),
             expected_revision: 1,
+            language: "zh-CN".into(),
         })
         .unwrap();
     assert_eq!(
         response.exported_template.unwrap().markdown,
-        workflow_markdown::export(&source).unwrap()
+        workflow_markdown::export(&source, "zh-CN").unwrap()
     );
     assert!(response.records.is_empty());
     assert!(response.instances.is_empty());

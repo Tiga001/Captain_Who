@@ -119,7 +119,14 @@ fn reserved(line: &str) -> bool {
             return true;
         }
     }
-    matches!(line, RECEIVES | TASK | DELIVERS) || line.starts_with(RANK) || line.starts_with(ROLE)
+    // Recognize every supported vocabulary, including when the current document uses
+    // another language. This keeps a later locale switch reversible and rejects mixed
+    // structural fields instead of silently swallowing them into authored prose.
+    language::LANGUAGES.iter().any(|language| {
+        [language.receives, language.task, language.delivers].contains(&line)
+            || line.starts_with(language.rank)
+            || line.starts_with(language.role)
+    })
 }
 
 fn escapable(line: &str) -> bool {

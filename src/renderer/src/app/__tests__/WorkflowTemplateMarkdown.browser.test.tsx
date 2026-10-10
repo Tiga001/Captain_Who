@@ -1,7 +1,12 @@
 import { page, userEvent } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { WorkflowRecord, WorkflowRequest, WorkflowResponse } from '@mycopilot/protocol'
+import type {
+  WorkflowRecord,
+  WorkflowRequest,
+  WorkflowResponse,
+  WorkflowTemplateLanguage
+} from '@mycopilot/protocol'
 import { parseWorkflowDefinition } from '@mycopilot/protocol'
 import fixture from '../../../../../packages/protocol/fixtures/workflow-definition-v1.json'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
@@ -9,7 +14,12 @@ import { SettingsSearchNavigationProvider } from '../../features/settings/settin
 import '../../styles/global.css'
 import '../../features/settings/SettingsPage.css'
 
-const service = vi.hoisted(() => ({ request: vi.fn(), import: vi.fn(), export: vi.fn() }))
+const service = vi.hoisted(() => ({
+  request: vi.fn(),
+  import: vi.fn(),
+  export: vi.fn(),
+  language: 'zh-CN' as WorkflowTemplateLanguage
+}))
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
     agent: {
@@ -24,7 +34,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
   useModelSettings: () => ({ models: [], enabledModels: [] })
 }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ language: 'zh-CN', t: (key: string) => key })
+  useFrontendConfig: () => ({ language: service.language, t: (key: string) => key })
 }))
 const { WorkflowSettingsSection } = await import('../../features/workflows/WorkflowSettingsSection')
 
@@ -87,6 +97,7 @@ function view(target: 'workflows' | 'editor' = 'workflows', revision = 1) {
 }
 
 beforeEach(async () => {
+  service.language = 'zh-CN'
   const definition = parseWorkflowDefinition(fixture)
   definition.name = '发布验收'
   records = [{ definition, revision: 7, updatedAt: 1, enabled: true, issues: [] }]
@@ -137,7 +148,8 @@ describe('organization Markdown template transfer', () => {
       await exportButton.click()
       expect(service.export).toHaveBeenCalledWith({
         id: records[0].definition.id,
-        expectedRevision: 7
+        expectedRevision: 7,
+        language: 'zh-CN'
       })
       expect(changed).not.toHaveBeenCalled()
       expect(page.getByRole('dialog').query()).toBeNull()
@@ -157,6 +169,44 @@ describe('organization Markdown template transfer', () => {
     } finally {
       window.removeEventListener('captain:workflows-changed', changed)
     }
+  })
+
+  it('uses the current interface language on every export and leaves imported authored text intact', async () => {
+    const imported = arrangeImport()
+    const screen = await render(view())
+    await page.getByRole('button', { name: '导入模板', exact: true }).click()
+    await page
+      .getByRole('alertdialog', { name: '已保存为草稿', exact: true })
+      .getByRole('button', { name: '知道了', exact: true })
+      .click()
+    await page.getByRole('button', { name: '返回组织模板列表', exact: true }).click()
+    await page.getByRole('button', { name: '导出模板 导入的研究组织', exact: true }).click()
+    expect(service.export).toHaveBeenLastCalledWith({
+      id: imported.definition.id,
+      expectedRevision: 1,
+      language: 'zh-CN'
+    })
+    service.language = 'en-US'
+    await screen.rerender(view())
+    await page.getByRole('button', { name: 'Export template 导入的研究组织', exact: true }).click()
+    expect(service.export).toHaveBeenLastCalledWith({
+      id: imported.definition.id,
+      expectedRevision: 1,
+      language: 'en-US'
+    })
+    expect(records.find((record) => record.definition.id === imported.definition.id)).toEqual(
+      imported
+    )
+    expect(service.request.mock.calls.some(([request]) => request.operation === 'save')).toBe(false)
+    await page
+      .getByRole('button', { name: 'Edit organization template 导入的研究组织', exact: true })
+      .click()
+    await expect
+      .element(page.getByRole('textbox', { name: 'Organization background', exact: true }))
+      .toHaveValue(imported.definition.background)
+    await expect
+      .element(page.getByRole('textbox', { name: 'Short description', exact: true }))
+      .toHaveValue(imported.definition.description)
   })
 
   it('opens the imported pending template and retains its member configuration in the existing editor', async () => {

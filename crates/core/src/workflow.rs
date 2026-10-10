@@ -175,6 +175,7 @@ pub enum Request {
     ExportTemplateMarkdown {
         id: String,
         expected_revision: u64,
+        language: String,
     },
     Manage(crate::workflow_management::Request),
     SaveWithDraft {
@@ -225,6 +226,7 @@ impl<'de> Deserialize<'de> for Request {
                 id: String,
                 #[serde(rename = "expectedRevision")]
                 expected_revision: u64,
+                language: String,
             },
             Validate {
                 definition: Definition,
@@ -251,9 +253,11 @@ impl<'de> Deserialize<'de> for Request {
                 WireRequest::ExportTemplateMarkdown {
                     id,
                     expected_revision,
+                    language,
                 } => Self::ExportTemplateMarkdown {
                     id,
                     expected_revision,
+                    language,
                 },
                 WireRequest::Validate { definition } => Self::Validate { definition },
                 WireRequest::Save {

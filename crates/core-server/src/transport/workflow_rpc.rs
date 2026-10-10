@@ -44,8 +44,8 @@ mod tests {
             "../../../../packages/protocol/fixtures/organization-hierarchy-v1.json"
         ))
         .unwrap();
-        let markdown = mycopilot_core::workflow_markdown::export(&definition).unwrap();
-        assert!(markdown.starts_with("# 组织：Research organization\n"));
+        let markdown = mycopilot_core::workflow_markdown::export(&definition, "zh-CN").unwrap();
+        assert!(markdown.starts_with("Language: 中文\n\n# 组织：Research organization\n"));
         assert!(markdown.contains("## 部门：Research / Review team\n"));
         assert!(markdown.contains("### 成员：implement\n"));
         let imported = call(
@@ -79,17 +79,51 @@ mod tests {
         }
         let exported = call(
             &storage,
-            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":1}),
+            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":1,"language":"zh-CN"}),
         );
         assert_eq!(exported["result"]["exportedTemplate"]["markdown"], markdown);
         assert!(exported["result"].get("importedTemplateId").is_none());
+        let english_export = call(
+            &storage,
+            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":1,"language":"en-US"}),
+        );
+        let english_markdown = english_export["result"]["exportedTemplate"]["markdown"]
+            .as_str()
+            .unwrap();
+        assert!(english_markdown.starts_with("Language: English\n\n# Organization: "));
+        let reimported = call(
+            &storage,
+            json!({"operation":"importTemplateMarkdown", "markdown":english_markdown}),
+        );
+        let reimported_id = reimported["result"]["importedTemplateId"].as_str().unwrap();
+        assert_ne!(reimported_id, id);
+        for (language, expected_markdown) in
+            [("zh-CN", markdown.as_str()), ("en-US", english_markdown)]
+        {
+            let reexported = call(
+                &storage,
+                json!({"operation":"exportTemplateMarkdown", "id":reimported_id,"expectedRevision":1,"language":language}),
+            );
+            assert_eq!(
+                reexported["result"]["exportedTemplate"]["markdown"],
+                expected_markdown
+            );
+        }
         let conflict = call(
             &storage,
-            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":2}),
+            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":2,"language":"zh-CN"}),
         );
         assert_eq!(conflict["error"]["code"], -32009);
         for (input, code) in [
             ("invalid".to_owned(), "organization_template_invalid_format"),
+            (
+                markdown.replacen("Language: 中文\n\n", "", 1),
+                "organization_template_invalid_format",
+            ),
+            (
+                markdown.replacen("Language: 中文", "Language: Unknown", 1),
+                "organization_template_invalid_format",
+            ),
             (
                 markdown.replacen("## 公共背景", "## 简介", 1),
                 "organization_template_invalid_format",
@@ -114,12 +148,25 @@ mod tests {
             assert_eq!(result["error"]["code"], -32602);
             assert_eq!(result["error"]["message"], code);
         }
+        for language in ["", "unknown", "en", "中文"] {
+            let result = call(
+                &storage,
+                json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1,"language":language}),
+            );
+            assert_eq!(result["error"]["code"], -32602);
+            assert_eq!(
+                result["error"]["message"],
+                mycopilot_core::workflow_markdown::INVALID_FORMAT
+            );
+        }
         for params in [
             json!({"operation":"importTemplateMarkdown","markdown":42}),
             json!({"operation":"importTemplateMarkdown","markdown":markdown,"extra":true}),
             json!({"operation":"exportTemplateMarkdown","id":id}),
-            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1,"definition":definition}),
-            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":-1}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1,"language":42}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1,"language":"zh-CN","definition":definition}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":-1,"language":"zh-CN"}),
         ] {
             assert_eq!(call(&storage, params)["error"]["code"], -32602);
         }

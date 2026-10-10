@@ -104,13 +104,15 @@ pub fn request(
         Request::ExportTemplateMarkdown {
             id,
             expected_revision,
+            language,
         } => {
             let definition = management::template(&transaction, &id, expected_revision)?;
             if definition.id != id {
                 return Err(Error::Invalid("workflow_template_unavailable".into()));
             }
             response.exported_template = Some(crate::workflow::ExportedTemplate {
-                markdown: crate::workflow_markdown::export(&definition).map_err(Error::Invalid)?,
+                markdown: crate::workflow_markdown::export(&definition, &language)
+                    .map_err(Error::Invalid)?,
                 suggested_file_name: crate::workflow_markdown::suggested_file_name(
                     &definition.name,
                 ),

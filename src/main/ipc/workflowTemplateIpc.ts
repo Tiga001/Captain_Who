@@ -141,7 +141,7 @@ export function registerWorkflowTemplateIpc(
           !value ||
           typeof value !== 'object' ||
           Array.isArray(value) ||
-          Object.keys(value).some((key) => !['id', 'expectedRevision'].includes(key))
+          Object.keys(value).some((key) => !['id', 'expectedRevision', 'language'].includes(key))
         ) {
           throw fileError('invalid_request')
         }

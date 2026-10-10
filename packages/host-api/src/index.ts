@@ -647,6 +647,7 @@ export interface AgentHostApi {
   exportWorkflowTemplate(input: {
     id: string
     expectedRevision: number
+    language: import('@mycopilot/protocol').WorkflowTemplateLanguage
   }): Promise<HostInvocationResult<{ saved: boolean }>>
   onWorkflowRuntimeChanged(
     handler: (snapshot: import('@mycopilot/protocol').WorkflowRuntimeSnapshot) => void

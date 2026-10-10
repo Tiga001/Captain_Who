@@ -50,8 +50,8 @@ fn markdown_is_readable_and_round_trips_public_content_without_local_identifiers
     source.description = "Description\n\nsecond paragraph\n".into();
     source.background =
         "**Bold** and [link](https://example.test)\n\n- An ordinary list item\n".into();
-    let markdown = export(&source).unwrap();
-    assert!(markdown.starts_with("# 组织：Research organization\n\n## 简介\n\n"));
+    let markdown = export(&source, "zh-CN").unwrap();
+    assert!(markdown.starts_with("Language: 中文\n\n# 组织：Research organization\n\n## 简介\n\n"));
     assert!(markdown.contains("## 部门：Research / Review team\n"));
     for internal in [
         "private-model-configuration",
@@ -81,7 +81,7 @@ fn markdown_is_readable_and_round_trips_public_content_without_local_identifiers
         assert_eq!(agent.permission_mode, WorkflowPermissionMode::Default);
     }
     assert_eq!(portable(&actual), portable(&source));
-    assert_eq!(export(&actual).unwrap(), markdown);
+    assert_eq!(export(&actual, "zh-CN").unwrap(), markdown);
     assert!(!actual.validate(&HashSet::new()).unwrap().is_empty());
 }
 
@@ -120,7 +120,7 @@ fn markdown_order_is_hierarchical_then_rank_then_administrator_and_stable_for_ti
         node
     })
     .collect();
-    let markdown = export(&source).unwrap();
+    let markdown = export(&source, "zh-CN").unwrap();
     let expected_order = [
         "unassigned",
         "member-higher",
@@ -152,7 +152,7 @@ fn markdown_order_is_hierarchical_then_rank_then_administrator_and_stable_for_ti
         vec!["Research", "Review team"]
     );
     assert_eq!(portable(&source), portable(&restored));
-    assert_eq!(export(&restored).unwrap(), markdown);
+    assert_eq!(export(&restored, "zh-CN").unwrap(), markdown);
 }
 
 #[test]
@@ -175,10 +175,10 @@ fn markdown_prompts_preserve_exact_whitespace_inline_markup_and_structural_looka
             node.agent_mut().task = value.into();
             node.agent_mut().delivers = value.into();
         }
-        let markdown = export(&source).unwrap();
+        let markdown = export(&source, "zh-CN").unwrap();
         let restored = import(&markdown).unwrap_or_else(|error|panic!("{value:?}: {error}\n{markdown}"));
         assert_eq!(portable(&source), portable(&restored), "{value:?}");
-        assert_eq!(export(&restored).unwrap(), markdown, "{value:?}");
+        assert_eq!(export(&restored, "zh-CN").unwrap(), markdown, "{value:?}");
     }
 }
 
@@ -198,11 +198,11 @@ fn markdown_fences_protect_embedded_sections_and_unclosed_fences_round_trip() {
         for node in &mut source.nodes {
             node.agent_mut().task = value.into();
         }
-        let markdown = export(&source).unwrap();
+        let markdown = export(&source, "zh-CN").unwrap();
         let restored =
             import(&markdown).unwrap_or_else(|error| panic!("{value:?}: {error}\n{markdown}"));
         assert_eq!(portable(&source), portable(&restored), "{value:?}");
-        assert_eq!(export(&restored).unwrap(), markdown);
+        assert_eq!(export(&restored, "zh-CN").unwrap(), markdown);
     }
 }
 
@@ -212,17 +212,17 @@ fn markdown_names_use_standard_escapes_without_hidden_identity_metadata() {
     source.name = "组织 &amp; \"quotes\" *stars* \\path\nnext\rline".into();
     source.departments[0].name = "**Research** & development".into();
     source.nodes[0].name = "[CEO] \\literal & <name>\t\nnext".into();
-    let markdown = export(&source).unwrap();
+    let markdown = export(&source, "zh-CN").unwrap();
     assert!(markdown.contains("&amp;amp;"));
     assert!(markdown.contains("&#xA;"));
     let restored = import(&markdown).unwrap();
     assert_eq!(portable(&source), portable(&restored));
-    assert_eq!(export(&restored).unwrap(), markdown);
+    assert_eq!(export(&restored, "zh-CN").unwrap(), markdown);
 }
 
 #[test]
 fn markdown_rejects_missing_duplicate_or_unknown_structural_sections() {
-    let markdown = export(&definition()).unwrap();
+    let markdown = export(&definition(), "zh-CN").unwrap();
     for malformed in [
         markdown.replacen("## 公共背景", "## 未知章节", 1),
         markdown.replacen("## 公共背景", "## 简介", 1),
@@ -254,7 +254,7 @@ fn markdown_rejects_missing_duplicate_or_unknown_structural_sections() {
 
 #[test]
 fn markdown_rejects_ambiguous_department_paths_and_member_names() {
-    let markdown = export(&definition()).unwrap();
+    let markdown = export(&definition(), "zh-CN").unwrap();
     for malformed in [
         markdown.replacen(
             "## 部门：Research / Review team",
@@ -277,7 +277,7 @@ fn markdown_rejects_ambiguous_department_paths_and_member_names() {
 
 #[test]
 fn markdown_accepts_bom_crlf_and_hand_authored_empty_sections() {
-    let source = "# 组织：团队\n\n## 简介\n\n简介。\n\n## 公共背景\n\n背景。\n\n## 直属成员\n\n### 成员：审核员\n\n- 职级：8\n- 管理身份：普通成员\n\n#### 接收内容\n\n#### 职责\n\n完成审核。\n\n#### 交付要求\n\n报告。\n";
+    let source = "Language: 中文\n\n# 组织：团队\n\n## 简介\n\n简介。\n\n## 公共背景\n\n背景。\n\n## 直属成员\n\n### 成员：审核员\n\n- 职级：8\n- 管理身份：普通成员\n\n#### 接收内容\n\n#### 职责\n\n完成审核。\n\n#### 交付要求\n\n报告。\n";
     for markdown in [
         source.to_string(),
         format!("\u{feff}{}", source.replace('\n', "\r\n")),
@@ -296,7 +296,7 @@ fn markdown_accepts_bom_crlf_and_hand_authored_empty_sections() {
 fn markdown_enforces_limits_and_suggests_safe_filenames() {
     let mut source = definition();
     source.nodes[0].agent_mut().task = "x".repeat(128_001);
-    assert_eq!(export(&source).unwrap_err(), INVALID_FORMAT);
+    assert_eq!(export(&source, "zh-CN").unwrap_err(), INVALID_FORMAT);
     assert_eq!(
         import(&" ".repeat(MAX_MARKDOWN_BYTES + 1)).unwrap_err(),
         TOO_LARGE
@@ -312,8 +312,140 @@ fn markdown_enforces_limits_and_suggests_safe_filenames() {
 fn markdown_handles_many_unmatched_fences_without_rescanning_each_suffix() {
     let mut source = definition();
     source.background = "```x\n".repeat(20_000);
-    let markdown = export(&source).unwrap();
+    let markdown = export(&source, "zh-CN").unwrap();
     let restored = import(&markdown).unwrap();
     assert_eq!(restored.background, source.background);
-    assert_eq!(export(&restored).unwrap(), markdown);
+    assert_eq!(export(&restored, "zh-CN").unwrap(), markdown);
+}
+
+#[test]
+fn markdown_supports_every_registered_application_language() {
+    let registry = include_str!("../../../../src/shared/i18n/languageRegistry.ts");
+    let app_codes = registry
+        .lines()
+        .filter_map(|line| line.strip_prefix("  '"))
+        .filter_map(|line| line.strip_suffix("': {"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let document_codes = language::LANGUAGES
+        .iter()
+        .map(|language| language.code)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!app_codes.is_empty());
+    assert_eq!(document_codes, app_codes);
+    let names = language::LANGUAGES
+        .iter()
+        .map(|language| language.name)
+        .collect::<HashSet<_>>();
+    assert_eq!(names.len(), document_codes.len());
+}
+
+#[test]
+fn markdown_every_language_pair_preserves_all_authored_content_and_switches_back_exactly() {
+    let mut source = definition();
+    source.name = "Polymerization *Research* & 中文\nNotes".into();
+    source.departments[0].name = "Research & 科研".into();
+    source.departments[1].name = "Review [日本語]".into();
+    source.nodes[0].name = "Captain — 한국어 & <name>\t".into();
+    let mut direct_member = source.nodes[0].clone();
+    direct_member.id = "direct-member".into();
+    direct_member.name = "Direct member Русский".into();
+    direct_member.department_id = None;
+    source.nodes.push(direct_member);
+    let mut empty_department = source.departments[1].clone();
+    empty_department.id = "empty-department".into();
+    empty_department.name = "Empty Français".into();
+    source.departments.push(empty_department);
+    // Include every locale's reserved fields as literal prose, with existing escapes,
+    // fenced examples and headings. Changing the framing must not translate these.
+    let vocabularies = language::LANGUAGES
+        .iter()
+        .map(|language| {
+            format!(
+                "{}\n{}\n{}\n{}\n{}20\n{}{}\n\\{}\n\\\\{}\n```md\n{}\n{}\n```\n",
+                language.description,
+                language.receives,
+                language.task,
+                language.delivers,
+                language.rank,
+                language.role,
+                language.role_member,
+                language.task,
+                language.rank,
+                language.background,
+                language.delivers,
+            )
+        })
+        .collect::<String>();
+    let body = format!(
+        "\nAuthored text.\r\n**Bold** and [link](https://example.test/a).\n\n{vocabularies}\n~~~unclosed\n## Literal heading\n\n"
+    );
+    source.description = body.clone();
+    source.background = body.clone();
+    for (index, node) in source.nodes.iter_mut().enumerate() {
+        let agent = node.agent_mut();
+        agent.receives = format!("{index}\n{body}");
+        agent.task = body.clone();
+        agent.delivers = format!("{body}\0end\n");
+    }
+    let expected = portable(&source);
+    for from in language::LANGUAGES {
+        let original = export(&source, from.code).unwrap();
+        assert!(original.starts_with(&format!("Language: {}\n\n", from.name)));
+        let imported = import(&original).unwrap();
+        assert_eq!(portable(&imported), expected, "{} import", from.code);
+        assert_eq!(export(&imported, from.code).unwrap(), original);
+        for to in language::LANGUAGES {
+            let converted = export(&imported, to.code).unwrap();
+            let restored = import(&converted).unwrap_or_else(|error| {
+                panic!("{} -> {}: {error}\n{converted}", from.code, to.code)
+            });
+            assert_eq!(
+                portable(&restored),
+                expected,
+                "{} -> {}",
+                from.code,
+                to.code
+            );
+            assert_eq!(export(&restored, to.code).unwrap(), converted);
+            assert_eq!(export(&restored, from.code).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn markdown_language_declaration_is_required_first_and_selects_the_only_structural_vocabulary() {
+    let chinese = export(&definition(), "zh-CN").unwrap();
+    for valid in [
+        chinese.clone(),
+        chinese.replacen("Language: 中文", "Language：中文", 1),
+        format!("\u{feff}{}", chinese.replace('\n', "\r\n")),
+    ] {
+        assert_eq!(portable(&import(&valid).unwrap()), portable(&definition()));
+    }
+    for malformed in [
+        chinese.replacen("Language: 中文\n", "", 1),
+        chinese.replacen("Language: 中文", "Language: Klingon", 1),
+        chinese.replacen("Language: 中文", "Language: English", 1),
+        chinese.replacen("Language: 中文", "语言：中文", 1),
+        chinese.replacen("Language: 中文", "language: 中文", 1),
+        format!("\n{chinese}"),
+        format!("  {chinese}"),
+        chinese.replacen("## 简介", "## Description", 1),
+        chinese.replacen("#### 职责", "#### Responsibilities", 1),
+        chinese.replacen("- 职级：", "- Rank: ", 1),
+        chinese.replacen(
+            "- 管理身份：组织管理员",
+            "- 管理身份：Organization administrator",
+            1,
+        ),
+    ] {
+        assert_eq!(
+            import(&malformed).unwrap_err(),
+            INVALID_FORMAT,
+            "{malformed}"
+        );
+    }
+    for code in ["", "en", "en-AU", "English", "zh-CN\n"] {
+        assert_eq!(export(&definition(), code).unwrap_err(), INVALID_FORMAT);
+    }
 }

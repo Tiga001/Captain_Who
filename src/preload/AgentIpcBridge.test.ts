@@ -9,7 +9,7 @@ describe('native organization template IPC bridge', () => {
     ipc.invoke.mockResolvedValueOnce({ ok: true, value: null })
     await expect(bridge.importWorkflowTemplate()).resolves.toEqual({ ok: true, value: null })
     expect(ipc.invoke).toHaveBeenNthCalledWith(1, 'host:agent.workflows.importTemplate')
-    const input = { id: 'published-template', expectedRevision: 4 }
+    const input = { id: 'published-template', expectedRevision: 4, language: 'fr-FR' as const }
     ipc.invoke.mockResolvedValueOnce({ ok: true, value: { saved: false } })
     await expect(bridge.exportWorkflowTemplate(input)).resolves.toEqual({
       ok: true,

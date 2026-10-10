@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { AuthState } from '@mycopilot/host-api'
+import { WORKFLOW_TEMPLATE_LANGUAGES } from '@mycopilot/protocol'
+import { appLanguageOptions } from '../../config/languageRegistry'
 const host = vi.hoisted(() => ({
   request: vi.fn(),
   auth: vi.fn(),
@@ -63,7 +65,7 @@ it('keeps exports read-only whether using the native dialog or the raw request',
   const dispatchEvent = vi.fn()
   vi.stubGlobal('window', { dispatchEvent })
   await cache.readWorkflowPage('organization', requestWorkflows)
-  const input = { id: 'template', expectedRevision: 7 }
+  const input = { id: 'template', expectedRevision: 7, language: 'ja-JP' as const }
   await expect(exportWorkflowTemplate(input)).resolves.toEqual({ saved: true })
   expect(host.export).toHaveBeenCalledWith(input)
   host.export.mockResolvedValueOnce({ ok: true, value: { saved: false } })
@@ -71,6 +73,12 @@ it('keeps exports read-only whether using the native dialog or the raw request',
   await requestWorkflows({ operation: 'exportTemplateMarkdown', ...input })
   expect(cache.getCachedWorkflowPage('organization')).not.toBeNull()
   expect(dispatchEvent).not.toHaveBeenCalled()
+})
+
+it('supports exactly the languages offered by the application language registry', () => {
+  expect([...WORKFLOW_TEMPLATE_LANGUAGES].sort()).toEqual(
+    appLanguageOptions.map(({ value }) => value).sort()
+  )
 })
 
 it('preserves structured transfer errors without invalidating cached pages', async () => {

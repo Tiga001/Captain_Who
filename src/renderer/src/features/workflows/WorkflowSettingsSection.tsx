@@ -330,7 +330,8 @@ export function WorkflowSettingsSection({
     try {
       await exportWorkflowTemplate({
         id: record.definition.id,
-        expectedRevision: record.revision
+        expectedRevision: record.revision,
+        language
       })
     } catch (exportError) {
       await handleSaveError(exportError, 'export')

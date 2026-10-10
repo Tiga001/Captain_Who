@@ -7,24 +7,14 @@ use crate::workflow::{
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+mod language;
 mod layout;
 mod text;
+use language::Language;
 
 pub const MAX_MARKDOWN_BYTES: usize = 4 * 1024 * 1024;
 pub const INVALID_FORMAT: &str = "organization_template_invalid_format";
 pub const TOO_LARGE: &str = "organization_template_too_large";
-
-const ORGANIZATION: &str = "# 组织：";
-const DESCRIPTION: &str = "## 简介";
-const BACKGROUND: &str = "## 公共背景";
-const DIRECT: &str = "## 直属成员";
-const DEPARTMENT: &str = "## 部门：";
-const MEMBER: &str = "### 成员：";
-const RANK: &str = "- 职级：";
-const ROLE: &str = "- 管理身份：";
-const RECEIVES: &str = "#### 接收内容";
-const TASK: &str = "#### 职责";
-const DELIVERS: &str = "#### 交付要求";
 
 /// Parse a complete readable document before returning a new template. Local identities,
 /// credentials, model bindings, permissions and canvas geometry never come from the file.
@@ -32,16 +22,19 @@ pub fn import(markdown: &str) -> Result<Definition, String> {
     if markdown.len() > MAX_MARKDOWN_BYTES {
         return Err(TOO_LARGE.into());
     }
-    let mut cursor = text::Cursor::new(markdown.strip_prefix('\u{feff}').unwrap_or(markdown));
+    let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
+    let (declaration, content) = markdown.split_once('\n').ok_or(INVALID_FORMAT)?;
+    let language = language::from_declaration(declaration)?;
+    let mut cursor = text::Cursor::new(content);
     let name = cursor
         .next()
         .ok_or(INVALID_FORMAT)?
-        .strip_prefix(ORGANIZATION)
+        .strip_prefix(language.organization)
         .ok_or(INVALID_FORMAT)?;
     let name = text::decode_name(name);
-    cursor.expect(DESCRIPTION)?;
+    cursor.expect(language.description)?;
     let description = cursor.body();
-    cursor.expect(BACKGROUND)?;
+    cursor.expect(language.background)?;
     let background = cursor.body();
     let mut definition = Definition {
         schema_version: 1,
@@ -62,14 +55,14 @@ pub fn import(markdown: &str) -> Result<Definition, String> {
     let mut group_seen = false;
     let mut direct_seen = false;
     while let Some(line) = cursor.next() {
-        if line == DIRECT {
+        if line == language.direct {
             if direct_seen || !definition.departments.is_empty() || !definition.nodes.is_empty() {
                 return Err(INVALID_FORMAT.into());
             }
             direct_seen = true;
             group_seen = true;
             current_department = None;
-        } else if let Some(path) = line.strip_prefix(DEPARTMENT) {
+        } else if let Some(path) = line.strip_prefix(language.department) {
             let path: Vec<_> = path.split(" / ").map(text::decode_name).collect();
             if path
                 .iter()
@@ -104,7 +97,7 @@ pub fn import(markdown: &str) -> Result<Definition, String> {
             paths.insert(path, id.clone());
             current_department = Some(id);
             group_seen = true;
-        } else if let Some(name) = line.strip_prefix(MEMBER) {
+        } else if let Some(name) = line.strip_prefix(language.member) {
             if !group_seen {
                 return Err(INVALID_FORMAT.into());
             }
@@ -112,26 +105,29 @@ pub fn import(markdown: &str) -> Result<Definition, String> {
             let rank: u8 = cursor
                 .next()
                 .ok_or(INVALID_FORMAT)?
-                .strip_prefix(RANK)
+                .strip_prefix(language.rank)
                 .ok_or(INVALID_FORMAT)?
                 .parse()
                 .map_err(|_| INVALID_FORMAT)?;
             let role = cursor
                 .next()
                 .ok_or(INVALID_FORMAT)?
-                .strip_prefix(ROLE)
+                .strip_prefix(language.role)
                 .ok_or(INVALID_FORMAT)?;
-            let management_role = match role {
-                "普通成员" => ManagementRole::Member,
-                "组织管理员" => ManagementRole::OrganizationAdmin,
-                "部门管理员" => ManagementRole::DepartmentAdmin,
-                _ => return Err(INVALID_FORMAT.into()),
+            let management_role = if role == language.role_member {
+                ManagementRole::Member
+            } else if role == language.role_organization_admin {
+                ManagementRole::OrganizationAdmin
+            } else if role == language.role_department_admin {
+                ManagementRole::DepartmentAdmin
+            } else {
+                return Err(INVALID_FORMAT.into());
             };
-            cursor.expect(RECEIVES)?;
+            cursor.expect(language.receives)?;
             let receives = cursor.body();
-            cursor.expect(TASK)?;
+            cursor.expect(language.task)?;
             let task = cursor.body();
-            cursor.expect(DELIVERS)?;
+            cursor.expect(language.delivers)?;
             let delivers = cursor.body();
             definition.nodes.push(Node {
                 id: fresh_id(),
@@ -188,21 +184,28 @@ fn validate(definition: &Definition) -> Result<(), String> {
 
 /// Public information comes first, followed by direct members and a depth-first department
 /// tree. Members are sorted by rank descending, administrators first on ties, then original
-/// order. Identity, document metadata and local execution settings are never serialized.
-pub fn export(definition: &Definition) -> Result<String, String> {
+/// order. The chosen application language controls framing, never the authored content.
+/// Internal identities and local execution settings are never serialized.
+pub fn export(definition: &Definition, language: &str) -> Result<String, String> {
+    let language = language::for_code(language)?;
     validate(definition)?;
-    let mut markdown = format!("{ORGANIZATION}{}\n\n", text::encode_name(&definition.name));
-    text::write_body(&mut markdown, DESCRIPTION, &definition.description);
-    text::write_body(&mut markdown, BACKGROUND, &definition.background);
+    let mut markdown = format!(
+        "Language: {}\n\n{}{}\n\n",
+        language.name,
+        language.organization,
+        text::encode_name(&definition.name)
+    );
+    text::write_body(&mut markdown, language.description, &definition.description);
+    text::write_body(&mut markdown, language.background, &definition.background);
     if definition
         .nodes
         .iter()
         .any(|node| node.department_id.is_none())
     {
-        writeln!(markdown, "{DIRECT}\n").unwrap();
-        export_members(&mut markdown, definition, None);
+        writeln!(markdown, "{}\n", language.direct).unwrap();
+        export_members(&mut markdown, definition, None, language);
     }
-    export_departments(&mut markdown, definition, None, &[]);
+    export_departments(&mut markdown, definition, None, &[], language);
     if markdown.len() > MAX_MARKDOWN_BYTES {
         return Err(TOO_LARGE.into());
     }
@@ -214,6 +217,7 @@ fn export_departments(
     definition: &Definition,
     parent_id: Option<&str>,
     parent_path: &[&str],
+    language: &Language,
 ) {
     for department in definition
         .departments
@@ -224,19 +228,25 @@ fn export_departments(
         path.push(&department.name);
         writeln!(
             markdown,
-            "{DEPARTMENT}{}\n",
+            "{}{}\n",
+            language.department,
             path.iter()
                 .map(|name| text::encode_name(name))
                 .collect::<Vec<_>>()
                 .join(" / ")
         )
         .unwrap();
-        export_members(markdown, definition, Some(&department.id));
-        export_departments(markdown, definition, Some(&department.id), &path);
+        export_members(markdown, definition, Some(&department.id), language);
+        export_departments(markdown, definition, Some(&department.id), &path, language);
     }
 }
 
-fn export_members(markdown: &mut String, definition: &Definition, department_id: Option<&str>) {
+fn export_members(
+    markdown: &mut String,
+    definition: &Definition,
+    department_id: Option<&str>,
+    language: &Language,
+) {
     let mut members: Vec<_> = definition
         .nodes
         .iter()
@@ -250,21 +260,24 @@ fn export_members(markdown: &mut String, definition: &Definition, department_id:
     });
     for node in members {
         let role = match node.management_role {
-            ManagementRole::Member => "普通成员",
-            ManagementRole::OrganizationAdmin => "组织管理员",
-            ManagementRole::DepartmentAdmin => "部门管理员",
+            ManagementRole::Member => language.role_member,
+            ManagementRole::OrganizationAdmin => language.role_organization_admin,
+            ManagementRole::DepartmentAdmin => language.role_department_admin,
         };
         writeln!(
             markdown,
-            "{MEMBER}{}\n\n{RANK}{}\n{ROLE}{role}\n",
+            "{}{}\n\n{}{}\n{}{role}\n",
+            language.member,
             text::encode_name(&node.name),
-            node.rank
+            language.rank,
+            node.rank,
+            language.role
         )
         .unwrap();
         let NodeConfig::Agent(agent) = &node.config;
-        text::write_body(markdown, RECEIVES, &agent.receives);
-        text::write_body(markdown, TASK, &agent.task);
-        text::write_body(markdown, DELIVERS, &agent.delivers);
+        text::write_body(markdown, language.receives, &agent.receives);
+        text::write_body(markdown, language.task, &agent.task);
+        text::write_body(markdown, language.delivers, &agent.delivers);
     }
 }
 

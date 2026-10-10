@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IpcMainInvokeEvent } from 'electron'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
-import { WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES } from '@mycopilot/protocol'
+import {
+  WORKFLOW_TEMPLATE_LANGUAGES,
+  WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES
+} from '@mycopilot/protocol'
 import {
   registerWorkflowTemplateIpc,
   type WorkflowTemplateIpcDependencies
@@ -12,7 +15,9 @@ import {
 import type { TrustedIpcMain } from '../ipc/trustedIpc'
 
 const imported = { records: [], issues: [], importedTemplateId: 'new-template' }
-const markdown = `# 组织：研究组织
+const markdown = `Language: 中文
+
+# 组织：研究组织
 
 ## 简介
 研究问题并形成报告。
@@ -40,7 +45,7 @@ const exported = {
   issues: [],
   exportedTemplate: { markdown, suggestedFileName: 'team.md' }
 }
-const exportInput = { id: 'template', expectedRevision: 3 }
+const exportInput = { id: 'template', expectedRevision: 3, language: 'zh-CN' as const }
 const event = {} as IpcMainInvokeEvent
 
 function harness() {
@@ -236,9 +241,29 @@ describe('native organization template Markdown IPC', () => {
     expect(h.dependencies.selectExportPath).not.toHaveBeenCalled()
   })
 
+  it.each(WORKFLOW_TEMPLATE_LANGUAGES)(
+    'forwards the selected %s locale without substituting a host default',
+    async (language) => {
+      const h = harness()
+      h.core.requestWorkflows.mockResolvedValue(exported)
+      await expect(h.exportTemplate({ ...exportInput, language })).resolves.toEqual({
+        ok: true,
+        value: { saved: false }
+      })
+      expect(h.core.requestWorkflows).toHaveBeenCalledExactlyOnceWith({
+        operation: 'exportTemplateMarkdown',
+        ...exportInput,
+        language
+      })
+    }
+  )
+
   it.each([
     null,
     {},
+    { id: exportInput.id, expectedRevision: exportInput.expectedRevision },
+    { ...exportInput, language: 'es-ES' },
+    { ...exportInput, language: null },
     { ...exportInput, expectedRevision: 0 },
     { ...exportInput, expectedRevision: 1.5 },
     { ...exportInput, path: '/private/secret.md' },

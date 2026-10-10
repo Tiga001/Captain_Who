@@ -1,5 +1,9 @@
 import { unwrapHostInvocation, type AuthState } from '@mycopilot/host-api'
-import type { WorkflowRequest, WorkflowResponse } from '@mycopilot/protocol'
+import type {
+  WorkflowRequest,
+  WorkflowResponse,
+  WorkflowTemplateLanguage
+} from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 import { invalidateWorkflowPages, setWorkflowPageAuthScope } from './workflowPageCache'
 
@@ -83,6 +87,7 @@ export async function importWorkflowTemplate(): Promise<WorkflowResponse | null>
 export async function exportWorkflowTemplate(input: {
   id: string
   expectedRevision: number
+  language: WorkflowTemplateLanguage
 }): Promise<{ saved: boolean }> {
   return unwrapHostInvocation(await hostClient.agent.exportWorkflowTemplate(input))
 }

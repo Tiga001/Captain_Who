@@ -52,9 +52,27 @@ export interface WorkflowRecord {
   updatedAt: number
   issues: WorkflowIssue[]
 }
+/** Template field labels follow the UI locale; authored content is never translated. */
+export const WORKFLOW_TEMPLATE_LANGUAGES = [
+  'zh-CN',
+  'zh-TW',
+  'en-US',
+  'en-GB',
+  'ko-KR',
+  'ja-JP',
+  'fr-FR',
+  'it-IT',
+  'ru-RU'
+] as const
+export type WorkflowTemplateLanguage = (typeof WORKFLOW_TEMPLATE_LANGUAGES)[number]
 export type WorkflowRequest =
   | { operation: 'importTemplateMarkdown'; markdown: string }
-  | { operation: 'exportTemplateMarkdown'; id: string; expectedRevision: number }
+  | {
+      operation: 'exportTemplateMarkdown'
+      id: string
+      expectedRevision: number
+      language: WorkflowTemplateLanguage
+    }
   | {
       operation: 'runtimeSnapshot'
       instanceId: string
@@ -390,9 +408,16 @@ export function parseWorkflowRequest(value: unknown): WorkflowRequest {
     return { operation: op, markdown: templateMarkdown(item.markdown) }
   }
   if (op === 'exportTemplateMarkdown') {
-    const item = object(value, ['operation', 'id', 'expectedRevision'])
+    const item = object(value, ['operation', 'id', 'expectedRevision', 'language'])
     if (!text(item.id).trim()) throw new Error('Invalid organization template identifier')
-    return { operation: op, id: text(item.id), expectedRevision: integer(item.expectedRevision, 1) }
+    if (!WORKFLOW_TEMPLATE_LANGUAGES.includes(item.language as WorkflowTemplateLanguage))
+      throw new Error('Invalid organization template language')
+    return {
+      operation: op,
+      id: text(item.id),
+      expectedRevision: integer(item.expectedRevision, 1),
+      language: item.language as WorkflowTemplateLanguage
+    }
   }
   if (op === 'runtimeSnapshot') {
     const item = object(

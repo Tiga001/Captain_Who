@@ -4,6 +4,7 @@ import hierarchy from '../fixtures/organization-hierarchy-v1.json'
 import memberNames from '../fixtures/organization-member-names-v1.json'
 import {
   workflowMemberNameKey,
+  WORKFLOW_TEMPLATE_LANGUAGES,
   WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES,
   parseWorkflowDefinition,
   parseWorkflowNode,
@@ -12,7 +13,9 @@ import {
 } from './workflows'
 
 describe('organization Markdown transfer contract', () => {
-  const markdown = `# 组织：研究组织
+  const markdown = `Language: 中文
+
+# 组织：研究组织
 
 ## 简介
 研究问题并形成报告。
@@ -38,17 +41,37 @@ describe('organization Markdown transfer contract', () => {
   it('accepts bounded Markdown imports and revision-checked exports', () => {
     for (const request of [
       { operation: 'importTemplateMarkdown', markdown },
-      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 2 }
+      ...WORKFLOW_TEMPLATE_LANGUAGES.map((language) => ({
+        operation: 'exportTemplateMarkdown',
+        id: fixture.id,
+        expectedRevision: 2,
+        language
+      }))
     ])
       expect(parseWorkflowRequest(request)).toEqual(request)
     for (const request of [
       { operation: 'importTemplateMarkdown', markdown, activate: true },
       { operation: 'importTemplateMarkdown', path: '/tmp/org.md' },
-      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 0 },
+      {
+        operation: 'exportTemplateMarkdown',
+        id: fixture.id,
+        expectedRevision: 0,
+        language: 'en-US'
+      },
+      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 1 },
+      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 1, language: 'en' },
       {
         operation: 'exportTemplateMarkdown',
         id: fixture.id,
         expectedRevision: 1,
+        language: 'es-ES'
+      },
+      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 1, language: null },
+      {
+        operation: 'exportTemplateMarkdown',
+        id: fixture.id,
+        expectedRevision: 1,
+        language: 'zh-CN',
         path: '/tmp/org.md'
       }
     ])
