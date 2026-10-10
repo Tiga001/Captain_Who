@@ -16,6 +16,7 @@ use std::{
     str::FromStr,
 };
 
+pub(crate) mod subagent_projection;
 pub(crate) mod workflow_projection;
 mod workspace_projection;
 pub use workspace_projection::{
@@ -697,6 +698,24 @@ impl WorldStateSnapshot {
         })
     }
 
+    /// Exact caller-only organization view from before subagent availability was scoped.
+    /// Retained ledgers can outlive both display upgrades; this view is validation-only.
+    pub(crate) fn legacy_subagent_model_projection_for_validation(
+        &self,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<WorldStateModelRecord, WorldStateError> {
+        self.validate()?;
+        validate_snapshot_lifetime(self, expected_lifetime)?;
+        Ok(WorldStateModelRecord::Full {
+            schema_version: self.schema_version,
+            lifetime: expected_lifetime,
+            sections: legacy_subagent_model_section_map(self)
+                .into_iter()
+                .map(|(id, value)| WorldStateModelSection { id, value })
+                .collect(),
+        })
+    }
+
     /// Starts a new cache/compaction epoch without changing the exact state revision.
     pub fn rebase(
         &self,
@@ -948,6 +967,14 @@ impl WorldStateDiff {
         expected_lifetime: WorldStateLifetime,
     ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
         self.project_model_changes(base, expected_lifetime, directory_model_section_map)
+    }
+
+    pub(crate) fn legacy_subagent_model_projection_against_for_validation(
+        &self,
+        base: &WorldStateSnapshot,
+        expected_lifetime: WorldStateLifetime,
+    ) -> Result<Option<WorldStateModelRecord>, WorldStateError> {
+        self.project_model_changes(base, expected_lifetime, legacy_subagent_model_section_map)
     }
 
     fn project_model_changes(
@@ -1616,6 +1643,22 @@ fn stored_model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStat
 }
 
 fn model_section_map(snapshot: &WorldStateSnapshot) -> BTreeMap<WorldStateSectionId, Value> {
+    legacy_subagent_model_section_map(snapshot)
+        .into_iter()
+        .map(|(id, projection)| {
+            let projection = if id.as_str() == "agent.collaboration" {
+                subagent_projection::for_model(&projection)
+            } else {
+                projection
+            };
+            (id, projection)
+        })
+        .collect()
+}
+
+fn legacy_subagent_model_section_map(
+    snapshot: &WorldStateSnapshot,
+) -> BTreeMap<WorldStateSectionId, Value> {
     snapshot
         .sections
         .iter()

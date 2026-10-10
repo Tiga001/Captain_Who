@@ -39,7 +39,7 @@ async fn respond(stream: &mut tokio::net::TcpStream, delta: Value, reason: &str)
     stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {content}\n\ndata: {end}\n\ndata: [DONE]\n\n").as_bytes()).await.unwrap();
 }
 
-fn workflow_fixture(storage: &StorageService) -> (String, String) {
+pub(super) fn workflow_fixture(storage: &StorageService) -> (String, String) {
     let agent = |id: &str| json!({"kind":"agent","id":id,"name":if id == "a" { "Boss" } else { "人事负责人" },"x":0,"y":0,"permissionMode":"default","modelConfigId":"model-1","receives":"Receive artifacts","task":"Review quality","delivers":"Review report"});
     let definition = json!({"schemaVersion":1,"id":"template","name":"Template","description":"","background":"Workflow shared background 38276","nodes":[agent("a"),agent("b")],"viewport":{"x":0,"y":0,"zoom":1}});
     let saved = storage

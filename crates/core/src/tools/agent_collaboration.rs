@@ -133,7 +133,7 @@ impl AgentTool for AgentCollaborationTool {
         let (name, description, input_schema) = match self.kind {
             AgentCollaborationToolKind::Spawn => (
                 "spawn_agent",
-                "Create one direct persistent child Agent and queue its initial task. Collaboration is enabled: delegation is pre-authorized and parallel-by-default is the expected operating style. Before acting, scan the task once: keep the immediate critical-path step local, and delegate well-bounded sidecar work by default — reuse an existing suitable child via followup_task instead of spawning a duplicate. Spawn when a subtask can proceed independently without blocking you: parallel investigation of different modules, independent verification or review, read-only audits, multi-module changes with disjoint write scopes, long-running commands (builds, tests, monitoring), multi-source retrieval or comparison, and alternative solution proposals. Keep single-step or tightly coupled work local, but do not skip parallelizable parts merely because the task feels small; for splittable medium-or-larger tasks keep at least two children running in parallel. Design each subtask as concrete and self-contained with the expected deliverable and evidence; for edits, assign disjoint files or modules and tell the child it is not alone in the shared workspace and must not revert other agents' edits. After spawning, continue meaningful non-overlapping work instead of waiting; use wait_agent only when the critical path is actually blocked. Review, verify and integrate child results — never concatenate them blindly. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
+                "Create one direct persistent child Agent and queue its initial task. Subagent tools are enabled for this logical Run within the current task tree: delegation is pre-authorized and parallel-by-default is the expected operating style. Before acting, scan the task once: keep the immediate critical-path step local, and delegate well-bounded sidecar work by default — reuse an existing suitable child via followup_task instead of spawning a duplicate. Spawn when a subtask can proceed independently without blocking you: parallel investigation of different modules, independent verification or review, read-only audits, multi-module changes with disjoint write scopes, long-running commands (builds, tests, monitoring), multi-source retrieval or comparison, and alternative solution proposals. Keep single-step or tightly coupled work local, but do not skip parallelizable parts merely because the task feels small; for splittable medium-or-larger tasks keep at least two children running in parallel. Design each subtask as concrete and self-contained with the expected deliverable and evidence; for edits, assign disjoint files or modules and tell the child it is not alone in the shared workspace and must not revert other agents' edits. After spawning, continue meaningful non-overlapping work instead of waiting; use wait_agent only when the critical path is actually blocked. Review, verify and integrate child results — never concatenate them blindly. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -697,11 +697,15 @@ mod tests {
     }
 
     #[test]
-    fn spawn_description_states_when_to_delegate() {
+    fn spawn_description_scopes_enabled_subagents_and_states_when_to_delegate() {
         let spawn = AgentCollaborationTool::new(AgentCollaborationToolKind::Spawn).definition();
         assert!(spawn
             .description
             .contains("Create one direct persistent child Agent and queue its initial task."));
+        assert!(spawn.description.contains(
+            "Subagent tools are enabled for this logical Run within the current task tree"
+        ));
+        assert!(!spawn.description.contains("Collaboration is enabled"));
         assert!(spawn.description.contains(
             "delegation is pre-authorized and parallel-by-default is the expected operating style"
         ));

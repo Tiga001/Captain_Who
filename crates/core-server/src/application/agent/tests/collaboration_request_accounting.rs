@@ -17,6 +17,14 @@ const COLLABORATION_TOOLS: [&str; 6] = [
     "wait_agent",
     "interrupt_agent",
 ];
+const ORGANIZATION_MAIL_TOOLS: [&str; 6] = [
+    "organization_send",
+    "organization_get_state",
+    "organization_get_mailbox",
+    "organization_accept",
+    "organization_complete",
+    "organization_recall",
+];
 
 struct PausedRequest {
     body: Value,
@@ -114,6 +122,7 @@ async fn next_request(requests: &mut mpsc::UnboundedReceiver<PausedRequest>) -> 
 
 struct Fixture {
     directory: tempfile::TempDir,
+    conversation_id: String,
     storage: Arc<StorageService>,
     service: AgentService,
     permissions: AgentPermissions,
@@ -143,10 +152,30 @@ impl Fixture {
         let service = AgentService::new_authorized_for_test(storage.clone());
         Self {
             directory,
+            conversation_id: CONVERSATION.into(),
             storage,
             service,
             permissions: AgentPermissions::default(),
         }
+    }
+
+    fn with_organization(mut self, enabled: bool) -> Self {
+        let (_, member) = super::workflow_execution::workflow_fixture(&self.storage);
+        self.conversation_id = member;
+        if !enabled {
+            self.storage
+                .workflow_request(
+                    serde_json::from_value(json!({
+                        "operation": "setInstanceEnabled",
+                        "id": "instance",
+                        "enabled": false,
+                        "expectedRevision": 1
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        self
     }
 
     fn start(
@@ -157,7 +186,7 @@ impl Fixture {
         crate::transport::OutboundReceiver,
     ) {
         let mut input = super::provider_profiles::turn_input("model-1");
-        input.conversation_id = Some(CONVERSATION.into());
+        input.conversation_id = Some(self.conversation_id.clone());
         input.user_message_id = Some(format!("accounting-user-{index}"));
         input.assistant_message_id = Some(format!("accounting-assistant-{index}"));
         input.content = format!("ACCOUNTING_USER_{index}");
@@ -175,7 +204,7 @@ impl Fixture {
     fn preview(&self) -> AgentContextWindowSnapshot {
         self.service
             .get_context_window_snapshot(AgentContextWindowSnapshotInput {
-                conversation_id: Some(CONVERSATION.into()),
+                conversation_id: Some(self.conversation_id.clone()),
                 project_id: None,
                 model_id: "model-1".into(),
                 max_tokens: Some(MAX_TOKENS),
@@ -195,7 +224,7 @@ impl Fixture {
         )
         .unwrap();
         let mut observations = mycopilot_core::storage::model_request_observation_repository::list_observations_for_conversation(
-            &connection, CONVERSATION,
+            &connection, &self.conversation_id,
         ).unwrap();
         observations.sort_by_key(|observation| observation.request_index);
         observations
@@ -258,7 +287,7 @@ impl Fixture {
             );
         }
         self.service
-            .invalidate_conversation_context_state(CONVERSATION);
+            .invalidate_conversation_context_state(&self.conversation_id);
         assert_eq!(
             self.preview(),
             terminal,
@@ -341,7 +370,7 @@ fn assert_collaboration_wire(request: &Value, enabled: bool) {
     }
     let text = message_texts(request).join("\n");
     assert_eq!(
-        text.matches("## Agent 协作").count(),
+        text.matches("## 子智能体协作（当前任务树）").count(),
         usize::from(enabled),
         "collaboration rules must occur exactly once when enabled"
     );
@@ -355,6 +384,7 @@ fn assert_collaboration_wire(request: &Value, enabled: bool) {
         usize::from(enabled),
         "collaboration directory must follow the same policy as schemas"
     );
+    assert_capability_boundary(&text);
     if enabled {
         let directory = collaboration_directory(request);
         assert!(
@@ -368,7 +398,22 @@ fn assert_collaboration_wire(request: &Value, enabled: bool) {
     }
 }
 
-fn assert_collaboration_world_state(request: &Value, enabled: bool) {
+pub(super) fn assert_capability_boundary(text: &str) {
+    for marker in [
+        "subagentToolsAvailable=false",
+        "effectiveScope=current_run",
+        "organization.execution.management.available=false",
+        "organization_edit",
+        "organization_*",
+    ] {
+        assert!(
+            text.contains(marker),
+            "the permanent capability boundary must survive disabled subagents: {marker}"
+        );
+    }
+}
+
+fn world_state_section(request: &Value, section_id: &str) -> Value {
     let mut adopted = None;
     for text in message_texts(request) {
         if !text.contains("<backend_world_state_record>") {
@@ -379,29 +424,60 @@ fn assert_collaboration_world_state(request: &Value, enabled: bool) {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         {
             for section in record["sections"].as_array().into_iter().flatten() {
-                if section["id"] == "agent.collaboration" {
+                if section["id"] == section_id {
                     adopted = Some(section["value"].clone());
                 }
             }
             for change in record["changes"].as_array().into_iter().flatten() {
-                if change["sectionId"] == "agent.collaboration" {
+                if change["sectionId"] == section_id {
                     adopted = Some(change["value"].clone());
                 }
             }
         }
     }
-    let adopted =
-        adopted.expect("wire World State must explicitly describe collaboration availability");
-    assert_eq!(adopted["enabled"], enabled);
-    assert_eq!(adopted["available"], enabled);
+    adopted.unwrap_or_else(|| panic!("wire World State must explicitly describe {section_id}"))
+}
+
+pub(super) fn assert_collaboration_world_state(request: &Value, enabled: bool) {
+    let adopted = world_state_section(request, "agent.collaboration");
+    assert_eq!(adopted["subagentToolsAvailable"], enabled);
+    assert_eq!(adopted["effectiveScope"], "current_run");
+    assert!(adopted.get("enabled").is_none());
+    assert!(adopted.get("available").is_none());
     assert_eq!(
         adopted["reason"],
         if enabled {
-            "available"
+            "subagents_available"
         } else {
-            "disabled_by_user"
+            "subagents_disabled_for_this_run"
         }
     );
+}
+
+fn assert_organization_wire(request: &Value, enabled: bool) {
+    let tools = request["tools"].as_array().unwrap();
+    for name in ORGANIZATION_MAIL_TOOLS {
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["function"]["name"] == name)
+                .count(),
+            usize::from(enabled),
+            "organization schemas must follow organization availability independently: {name}"
+        );
+    }
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool["function"]["name"] == "organization_edit"),
+        "an ordinary member can send mail but cannot edit the organization"
+    );
+    let organization = world_state_section(request, "organization.execution");
+    assert_eq!(organization["available"], enabled);
+    if enabled {
+        assert_eq!(organization["management"]["available"], false);
+        assert_eq!(organization["management"]["scope"], "none");
+    }
 }
 
 fn assert_estimate(preview: &AgentContextWindowSnapshot, sent: &ModelRequestEstimate) {
@@ -469,6 +545,76 @@ async fn real_root_requests_and_staged_previews_count_enabled_and_disabled_colla
             previous_terminal = Some(terminal);
         }
         server.await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_and_organization_switches_control_independent_provider_capabilities() {
+    for subagents_enabled in [false, true] {
+        for organization_enabled in [false, true] {
+            let mut responses = Vec::new();
+            if organization_enabled {
+                responses.push((
+                    json!({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "capability-boundary-send",
+                            "type": "function",
+                            "function": {
+                                "name": "organization_send",
+                                "arguments": json!({
+                                    "messages": [{
+                                        "to": "Boss",
+                                        "message": "Ordinary member delivery with independent subagent policy"
+                                    }]
+                                }).to_string()
+                            }
+                        }]
+                    }),
+                    "tool_calls",
+                ));
+            }
+            responses.push((
+                json!({"role": "assistant", "content": "CAPABILITY_BOUNDARY_COMPLETE"}),
+                "stop",
+            ));
+            let request_count = responses.len();
+            let (url, mut requests, server) = provider(responses).await;
+            let fixture =
+                Fixture::new(&url, subagents_enabled).with_organization(organization_enabled);
+            let (turn, mut events) = fixture.start(0);
+            for _ in 0..request_count {
+                let captured = next_request(&mut requests).await;
+                assert_collaboration_wire(&captured.body, subagents_enabled);
+                assert_organization_wire(&captured.body, organization_enabled);
+                captured.release.send(()).unwrap();
+            }
+            fixture.finish(&turn.run_id, &mut events).await;
+            if organization_enabled {
+                let runtime = fixture
+                    .storage
+                    .workflow_execution_runtime("instance")
+                    .unwrap();
+                assert_eq!(
+                    runtime.inputs.len(),
+                    1,
+                    "ordinary member mail must execute regardless of the subagent switch"
+                );
+                let delivery = fixture
+                    .storage
+                    .workflow_execution_load_input(&runtime.inputs[0].id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(delivery.node_id, "a");
+                assert_eq!(delivery.messages[0].source_node_id, "b");
+                assert_eq!(
+                    delivery.messages[0].content,
+                    "Ordinary member delivery with independent subagent policy"
+                );
+            }
+            server.await.unwrap();
+        }
     }
 }
 

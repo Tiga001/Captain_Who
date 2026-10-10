@@ -492,7 +492,7 @@ pub(crate) fn project_conversation_world_state_records(
 }
 
 /// The only consumer of this stored-text view is exact checkpoint/context validation before
-/// replacing the workflow metadata display projection. It must never feed a model request.
+/// replacing the model display projection. It must never feed a model request.
 pub(crate) fn stored_world_state_projections_for_validation(
     records: &[AnchoredWorldStateRecord],
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
@@ -507,11 +507,20 @@ pub(crate) fn directory_world_state_projections_for_validation(
     project_world_state_records(records, WorldStateDisplay::OrganizationDirectory)
 }
 
+/// Exact prior caller-only organization view with the original subagent field names.
+/// This preserves checkpoint compatibility across successive display-only upgrades.
+pub(crate) fn legacy_subagent_world_state_projections_for_validation(
+    records: &[AnchoredWorldStateRecord],
+) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    project_world_state_records(records, WorldStateDisplay::LegacySubagent)
+}
+
 #[derive(Clone, Copy)]
 enum WorldStateDisplay {
     Current,
     Stored,
     OrganizationDirectory,
+    LegacySubagent,
 }
 
 fn project_world_state_records(
@@ -539,6 +548,8 @@ fn project_world_state_records(
         WorldStateDisplay::OrganizationDirectory => {
             snapshot.directory_model_projection_for_validation(WorldStateLifetime::Conversation)
         }
+        WorldStateDisplay::LegacySubagent => snapshot
+            .legacy_subagent_model_projection_for_validation(WorldStateLifetime::Conversation),
         WorldStateDisplay::Current => snapshot.model_projection(WorldStateLifetime::Conversation),
     }
     .map_err(world_state_assembly_error)?;
@@ -568,6 +579,11 @@ fn project_world_state_records(
             ),
             WorldStateDisplay::OrganizationDirectory => diff
                 .directory_model_projection_against_for_validation(
+                    reducer.snapshot(),
+                    WorldStateLifetime::Conversation,
+                ),
+            WorldStateDisplay::LegacySubagent => diff
+                .legacy_subagent_model_projection_against_for_validation(
                     reducer.snapshot(),
                     WorldStateLifetime::Conversation,
                 ),

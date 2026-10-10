@@ -244,6 +244,7 @@ fn set_collaboration_enabled(storage: &StorageService, enabled: bool) {
 }
 
 fn assert_collaboration_request(request: &Value, enabled: bool, profile: AgentContextProfile) {
+    super::collaboration_request_accounting::assert_collaboration_world_state(request, enabled);
     let tools = request["tools"].as_array().unwrap();
     for name in AGENT_COLLABORATION_TOOL_NAMES {
         assert_eq!(
@@ -270,12 +271,7 @@ fn assert_collaboration_request(request: &Value, enabled: bool, profile: AgentCo
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(text.contains("<agent_collaboration_directory>"), enabled);
-    if !enabled {
-        assert!(
-            text.contains("disabled_by_user"),
-            "the disabled capability must retain its World State explanation"
-        );
-    }
+    super::collaboration_request_accounting::assert_capability_boundary(&text);
 }
 
 #[tokio::test]

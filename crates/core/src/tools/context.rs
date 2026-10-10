@@ -794,7 +794,7 @@ impl ToolExecutionContext {
         let services = self.agent_collaboration.clone().ok_or_else(|| {
             AgentError::structured(
                 "agent.collaboration.unavailable",
-                "当前 Host 未启用 Agent 协作能力。",
+                "当前逻辑 Run 未提供当前任务树的子智能体执行服务。",
                 serde_json::json!({
                     "type": "agent_collaboration",
                     "category": "unavailable",

@@ -131,12 +131,12 @@ impl RuntimeExtension for AgentCollaborationExtension {
         } else {
             "available"
         };
-        let projection = json!({
+        let mut state = json!({
             "enabled": enabled,
             "available": self.available(),
             "reason": reason,
         });
-        let mut state = projection.clone();
+        let projection = crate::world_state::subagent_projection::for_model(&state);
         state["policyRevision"] = self.request.as_ref().map(|policy| policy.revision).into();
         Ok(vec![WorldStateSectionEnvelope::model_visible(
             WorldStateSectionId::extension(AGENT_COLLABORATION_EXTENSION_ID)
@@ -285,6 +285,14 @@ mod tests {
             let section = &extension.conversation_world_state_sections().unwrap()[0];
             assert_eq!(section.state["enabled"], true);
             assert_eq!(section.state["available"], true);
+            assert_eq!(
+                section.model_projection,
+                Some(json!({
+                    "subagentToolsAvailable": true,
+                    "effectiveScope": "current_run",
+                    "reason": "subagents_available",
+                }))
+            );
             assert!(extension
                 .request_context(&ModelRequestContext {
                     purpose: ModelRequestPurpose::ContextCompaction
@@ -296,6 +304,10 @@ mod tests {
             // A settings change cannot revoke a logical run that was already admitted.
             extension.prepare_model_request().unwrap();
             assert_eq!(tool_set(&extension).revision(), enabled.revision());
+            assert_eq!(
+                extension.conversation_world_state_sections().unwrap()[0].model_projection,
+                section.model_projection
+            );
             assert_eq!(source.reads.load(Ordering::SeqCst), 1);
             let mut next_run = AgentCollaborationExtension::new(Some(services), Some(source));
             next_run.prepare_model_request().unwrap();
@@ -314,6 +326,14 @@ mod tests {
             assert_eq!(
                 next_run.conversation_world_state_sections().unwrap()[0].state["enabled"],
                 false
+            );
+            assert_eq!(
+                next_run.conversation_world_state_sections().unwrap()[0].model_projection,
+                Some(json!({
+                    "subagentToolsAvailable": false,
+                    "effectiveScope": "current_run",
+                    "reason": "subagents_disabled_for_this_run",
+                }))
             );
             assert_eq!(enabled.stable_revision(), disabled.stable_revision());
             assert!(matches!(
@@ -335,6 +355,10 @@ mod tests {
         resumed.restore_state(1, checkpoint.clone()).unwrap();
         assert!(!resumed.available());
         resumed.prepare_model_request().unwrap();
+        assert_eq!(
+            resumed.conversation_world_state_sections().unwrap()[0].model_projection,
+            original.conversation_world_state_sections().unwrap()[0].model_projection
+        );
         tool_set(&resumed)
             .restore_frozen_checkpoint(&original_tool_set)
             .unwrap();
@@ -372,6 +396,14 @@ mod tests {
             unavailable.conversation_world_state_sections().unwrap()[0].state["reason"],
             "host_unavailable"
         );
+        assert_eq!(
+            unavailable.conversation_world_state_sections().unwrap()[0].model_projection,
+            Some(json!({
+                "subagentToolsAvailable": false,
+                "effectiveScope": "current_run",
+                "reason": "subagent_host_unavailable",
+            }))
+        );
         assert!(unavailable
             .request_context(&ModelRequestContext::agent_work())
             .unwrap()
@@ -388,6 +420,14 @@ mod tests {
         assert_eq!(section.state["available"], false);
         assert_eq!(section.state["reason"], "disabled_by_user");
         assert_eq!(section.state["policyRevision"], 1);
+        assert_eq!(
+            section.model_projection,
+            Some(json!({
+                "subagentToolsAvailable": false,
+                "effectiveScope": "current_run",
+                "reason": "subagents_disabled_for_this_run",
+            }))
+        );
         let snapshot = extension.snapshot_state().unwrap();
         assert_eq!(snapshot["policy"]["enabled"], false);
         let mut resumed = AgentCollaborationExtension::new(None, Some(policy));

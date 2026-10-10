@@ -716,7 +716,10 @@ async fn disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human
             );
             let messages = request["messages"].to_string();
             assert!(!messages.contains("<agent_collaboration_directory>"));
-            assert!(messages.contains("disabled_by_user"));
+            super::collaboration_request_accounting::assert_collaboration_world_state(
+                request, false,
+            );
+            super::collaboration_request_accounting::assert_capability_boundary(&messages);
         }
         let settled = questions(&storage);
         assert_eq!(settled.len(), 2);

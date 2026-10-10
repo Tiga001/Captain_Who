@@ -579,7 +579,7 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
     };
     let collaboration = final_wire
         .iter()
-        .position(|text| text.starts_with("## Agent 协作"))
+        .position(|text| text.starts_with("## 子智能体协作（当前任务树）"))
         .unwrap();
     let capability_guide = final_wire
         .iter()

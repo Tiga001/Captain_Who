@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-10
 ---
 
 # Multi-Agent 当前架构
@@ -129,7 +129,9 @@ Harness 的根 Agent 指引在协作开启时默认主动并行：先区分自�
 
 设置的子 Agent 页面提供全局能力开关，默认开启。每个根 Turn 在原子 admission 中冻结设置，Spawn、Followup 和子任务结果所产生的 Wake 在同一事务内继承来源 Run 的策略。已启动的任务树完成本轮协作；后续新根 Turn 使用更新后的设置。`agent_collaboration_run_policies` 和 `agent_collaboration_wake_policies` 是不可改写的 Host 记录，随所属历史删除，Fork 不复制其执行授权。
 
-同一策略同时决定六个 Schema、完整协作规则与可用模型/模板目录是否进入请求；规则与目录由扩展以 RequestOnly 方式贡献。Conversation World State 的 `agent.collaboration` 始终记录 enabled、available 和不可用原因，关闭时也保留明确状态。审批恢复验证 Host 的运行策略与 checkpoint 一致，不重新采用全局开关。空闲圆环预览新一轮策略，运行中预览使用本轮策略；其 Schema、提示词和状态计量与真实请求及自动压缩报告共用 Rust Core 投影。
+同一策略同时决定六个 Schema、子 Agent 协作规则与可用模型/模板目录是否进入请求；规则与目录由扩展以 RequestOnly 方式贡献，标题明确限定为当前任务树的子 Agent 协作。Conversation World State 的内部 section ID 仍为 `agent.collaboration`，Host 状态继续记录 `enabled`、`available`、`reason`；面向模型只投影 `subagentToolsAvailable`、`effectiveScope: "current_run"` 和 `reason`，原因分别为 `subagents_available`、`subagents_disabled_for_this_run`、`subagent_host_unavailable`。关闭时也保留明确的本轮子 Agent 状态，不把全局设置当作运行中的即时状态。审批恢复验证 Host 的运行策略与 checkpoint 一致，不重新采用全局开关。空闲圆环预览新一轮策略，运行中预览使用本轮策略；其 Schema、提示词和状态计量与真实请求及自动压缩报告共用 Rust Core 投影。
+
+full/minimal 常驻提示词均解释能力边界，即使子 Agent 关闭也保留：`subagentToolsAvailable=false` 只表示本轮任务树的子 Agent 工具不可用，不关闭独立的 `organization_*` 能力；`organization.execution.management.available=false` 只限制 `organization_edit`，不表示组织邮件不可用。实际调用以本次原生 Schema 和各能力域的最新状态为准，不从单个关闭状态推断所有协作不可用。组织能力另见[组织邮件网络](../subsystems/organizations.md)。
 
 Host 服务装配也遵守本轮冻结策略：关闭时不创建协作执行服务或冻结模型/模板目录，但保留关闭策略与 `disabled_by_user` 状态，以及人机交互和消息投递所需的后台根身份。Rust Core 在运行与预览入口使用同一次策略快照筛选服务，所有工具共用的检查点路径（人工审批、文件/MCP 自动执行前冻结、同步人机交互等待）只记录实际启用的协作授权。恢复时仍严格校验工具集合、协作授权和 Host 冻结策略一致，不能通过关闭开关绕过校验，也不能影响其他工具正常执行。
 
