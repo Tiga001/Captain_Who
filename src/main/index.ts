@@ -662,6 +662,23 @@ async function initializeApplication(): Promise<void> {
     () => {
       coreServer.start()
       return executionAccess.sync()
+    },
+    () => {
+      const auth = accountAuth
+      if (!auth) throw new Error('ACCOUNT_LOGIN_REQUIRED')
+      auth.assertCanStartTurn()
+      const userId = auth.getState().profile?.userId
+      let current = true
+      const dispose = auth.subscribe((state) => {
+        if (state.status !== 'signedIn' || state.profile?.userId !== userId) current = false
+      })
+      return {
+        assertCurrent: () => {
+          if (!current || accountAuth !== auth) throw new Error('ACCOUNT_LOGIN_REQUIRED')
+          auth.assertCanStartTurn()
+        },
+        dispose
+      }
     }
   )
   ipcMain.handle(HOST_CHANNELS.app.takeDockOpenConversation, (event) => {

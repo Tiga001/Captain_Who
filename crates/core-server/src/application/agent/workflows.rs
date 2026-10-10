@@ -11,6 +11,7 @@ impl AgentService {
             &request,
             Request::Save { .. }
                 | Request::SaveWithDraft { .. }
+                | Request::ImportTemplateMarkdown { .. }
                 | Request::Delete { .. }
                 | Request::Manage(
                     ManagementRequest::SaveInstance { .. }

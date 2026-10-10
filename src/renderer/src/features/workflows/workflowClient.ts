@@ -1,4 +1,4 @@
-import { unwrapHostInvocation } from '@mycopilot/host-api'
+import { unwrapHostInvocation, type AuthState } from '@mycopilot/host-api'
 import type { WorkflowRequest, WorkflowResponse } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 import { invalidateWorkflowPages, setWorkflowPageAuthScope } from './workflowPageCache'
@@ -6,24 +6,28 @@ import { invalidateWorkflowPages, setWorkflowPageAuthScope } from './workflowPag
 let watchingAuth = false
 let watchingRuntime = false
 let recoveryAuthScope: string | null = null
+let recoveryAuthRevision = -1
 let recoveryEpoch = 0
 const pendingRecoveryReads = new Map<
   string,
   { instanceId: string | null; promise: Promise<WorkflowResponse> }
 >()
+function acceptWorkflowAuthState(state: AuthState): void {
+  if (state.revision < recoveryAuthRevision) return
+  recoveryAuthRevision = state.revision
+  const scope = `${state.status}:${state.profile?.userId ?? ''}`
+  setWorkflowPageAuthScope(scope)
+  if (scope !== recoveryAuthScope) {
+    recoveryAuthScope = scope
+    recoveryEpoch += 1
+    pendingRecoveryReads.clear()
+  }
+}
 function watchWorkflowAuth(): void {
   if (!watchingAuth && hostClient.auth?.onStateChanged) {
     watchingAuth = true
     // Keep the memory cache scoped even when its last sidebar tab has been closed.
-    hostClient.auth.onStateChanged((state) => {
-      const scope = `${state.status}:${state.profile?.userId ?? ''}`
-      setWorkflowPageAuthScope(scope)
-      if (scope !== recoveryAuthScope) {
-        recoveryAuthScope = scope
-        recoveryEpoch += 1
-        pendingRecoveryReads.clear()
-      }
-    })
+    hostClient.auth.onStateChanged(acceptWorkflowAuthState)
   }
   if (!watchingRuntime && hostClient.agent.onWorkflowRuntimeChanged) {
     watchingRuntime = true
@@ -43,15 +47,44 @@ async function performRequest(input: WorkflowRequest, epoch?: number): Promise<W
     throw new Error('Organization account session changed')
   if (
     typeof window !== 'undefined' &&
-    !['list', 'listInstances', 'getInstance', 'validate', 'runtimeSnapshot'].includes(
-      input.operation
-    )
+    ![
+      'list',
+      'listInstances',
+      'getInstance',
+      'validate',
+      'runtimeSnapshot',
+      'exportTemplateMarkdown'
+    ].includes(input.operation)
   ) {
-    pendingRecoveryReads.clear()
-    invalidateWorkflowPages()
-    window.dispatchEvent(new Event('captain:workflows-changed'))
+    notifyWorkflowMutation()
   }
   return response
+}
+
+function notifyWorkflowMutation(): void {
+  pendingRecoveryReads.clear()
+  invalidateWorkflowPages()
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('captain:workflows-changed'))
+}
+
+export async function importWorkflowTemplate(): Promise<WorkflowResponse | null> {
+  watchWorkflowAuth()
+  if (recoveryAuthScope === null && hostClient.auth?.getState) {
+    // Use revisions to order this snapshot against events delivered while it is pending.
+    acceptWorkflowAuthState(await hostClient.auth.getState())
+  }
+  const epoch = recoveryEpoch
+  const response = unwrapHostInvocation(await hostClient.agent.importWorkflowTemplate())
+  if (epoch !== recoveryEpoch) throw new Error('Organization account session changed')
+  if (response) notifyWorkflowMutation()
+  return response
+}
+
+export async function exportWorkflowTemplate(input: {
+  id: string
+  expectedRevision: number
+}): Promise<{ saved: boolean }> {
+  return unwrapHostInvocation(await hostClient.agent.exportWorkflowTemplate(input))
 }
 
 export function requestWorkflows(input: WorkflowRequest): Promise<WorkflowResponse> {

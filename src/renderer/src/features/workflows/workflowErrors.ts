@@ -1,4 +1,4 @@
-export type WorkflowErrorOperation = 'load' | 'save' | 'delete' | 'duplicate'
+export type WorkflowErrorOperation = 'load' | 'save' | 'delete' | 'duplicate' | 'import' | 'export'
 
 export interface WorkflowOperationError {
   operation: WorkflowErrorOperation
@@ -8,6 +8,9 @@ export interface WorkflowOperationError {
     | 'duplicate_member_name'
     | 'duplicate_department_name'
     | 'department_name_separator'
+    | 'format'
+    | 'too_large'
+    | 'file'
 }
 
 export interface WorkflowUnavailableModel {
@@ -105,6 +108,19 @@ export function workflowOperationError(
   error: unknown,
   operation: WorkflowErrorOperation
 ): WorkflowOperationError {
+  if (operation === 'import' || operation === 'export') {
+    const record =
+      error && typeof error === 'object'
+        ? (error as { message?: unknown; data?: { code?: unknown } })
+        : null
+    const code = record?.data?.code ?? record?.message
+    if (operation === 'import') {
+      if (code === 'organization_template_invalid_format') return { operation, kind: 'format' }
+      if (code === 'organization_template_too_large') return { operation, kind: 'too_large' }
+      if (code === 'organization_template_read_failed') return { operation, kind: 'file' }
+    } else if (code === 'organization_template_write_failed') return { operation, kind: 'file' }
+    return { operation, kind: 'unavailable' }
+  }
   const detail = workflowErrorDetail(error)
   if (detail.includes('organization_duplicate_member_name'))
     return { operation, kind: 'duplicate_member_name' }

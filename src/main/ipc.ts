@@ -22,6 +22,10 @@ import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { ReadToolFileSource } from './workspaceFiles/ReadToolFileSource'
 import { registerAgentIpc } from './ipc/agentIpc'
+import {
+  registerWorkflowTemplateIpc,
+  type WorkflowTemplateSession
+} from './ipc/workflowTemplateIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerNotificationIpc } from './ipc/notificationIpc'
 import { registerHumanInteractionIpc } from './ipc/humanInteractionIpc'
@@ -268,7 +272,10 @@ export function registerHostIpc(
   assertCanStartTurn: () => void = () => {
     throw new Error('ACCOUNT_LOGIN_REQUIRED')
   },
-  syncExecutionAccess?: () => Promise<void>
+  syncExecutionAccess?: () => Promise<void>,
+  beginWorkflowTemplateSession: () => WorkflowTemplateSession = () => {
+    throw new Error('ACCOUNT_LOGIN_REQUIRED')
+  }
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge(coreServer)
   const readToolFiles = new ReadToolFileSource(coreServer)
@@ -290,6 +297,35 @@ export function registerHostIpc(
     assertCanStartTurn()
   }
   registerAgentIpc(ipcMain, coreServer, prepareNewTurn)
+  registerWorkflowTemplateIpc(ipcMain, coreServer, {
+    selectImportPath: async (event) => {
+      const result = await showOpenDialog(event, {
+        title: 'Import organization template',
+        properties: ['openFile'],
+        filters: [{ name: 'Markdown', extensions: ['md'] }]
+      })
+      return result.canceled || !result.filePaths[0] ? null : result.filePaths[0]
+    },
+    selectExportPath: async (event, suggestedFileName) => {
+      const result = await showSaveDialog(event, {
+        title: 'Export organization template',
+        defaultPath: suggestedFileName,
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+        filters: [{ name: 'Markdown', extensions: ['md'] }]
+      })
+      return result.canceled || !result.filePath ? null : result.filePath
+    },
+    beginSession: (event) => {
+      const session = beginWorkflowTemplateSession()
+      return {
+        assertCurrent: () => {
+          session.assertCurrent()
+          if (!isTrustedRenderer(event)) throw new Error('ACCOUNT_LOGIN_REQUIRED')
+        },
+        dispose: () => session.dispose()
+      }
+    }
+  })
   const disposeHumanInteractionIpc = registerHumanInteractionIpc(
     ipcMain,
     coreServer,

@@ -37,6 +37,95 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn workflow_rpc_imports_and_exports_portable_templates_and_exposes_error_codes() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("markdown.sqlite")).unwrap();
+        let definition: mycopilot_core::workflow::Definition = serde_json::from_str(include_str!(
+            "../../../../packages/protocol/fixtures/organization-hierarchy-v1.json"
+        ))
+        .unwrap();
+        let markdown = mycopilot_core::workflow_markdown::export(&definition).unwrap();
+        assert!(markdown.starts_with("# 组织：Research organization\n"));
+        assert!(markdown.contains("## 部门：Research / Review team\n"));
+        assert!(markdown.contains("### 成员：implement\n"));
+        let imported = call(
+            &storage,
+            json!({"operation":"importTemplateMarkdown", "markdown":markdown}),
+        );
+        assert!(imported.get("error").is_none(), "{imported}");
+        let id = imported["result"]["importedTemplateId"].as_str().unwrap();
+        assert_ne!(id, definition.id);
+        assert_eq!(imported["result"]["records"][0]["definition"]["id"], id);
+        assert_eq!(imported["result"]["instances"], json!([]));
+        let imported_definition = &imported["result"]["records"][0]["definition"];
+        assert_eq!(imported_definition["name"], definition.name);
+        assert_eq!(imported_definition["description"], definition.description);
+        assert_eq!(imported_definition["background"], definition.background);
+        let mut identities = std::collections::HashSet::new();
+        for member in imported_definition["nodes"].as_array().unwrap() {
+            let member_id = member["id"].as_str().unwrap();
+            assert!(identities.insert(member_id));
+            assert!(!definition.nodes.iter().any(|node| node.id == member_id));
+            assert!(member["modelConfigId"].is_null());
+            assert_eq!(member["permissionMode"], "default");
+        }
+        for department in imported_definition["departments"].as_array().unwrap() {
+            let department_id = department["id"].as_str().unwrap();
+            assert!(identities.insert(department_id));
+            assert!(!definition
+                .departments
+                .iter()
+                .any(|source| source.id == department_id));
+        }
+        let exported = call(
+            &storage,
+            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":1}),
+        );
+        assert_eq!(exported["result"]["exportedTemplate"]["markdown"], markdown);
+        assert!(exported["result"].get("importedTemplateId").is_none());
+        let conflict = call(
+            &storage,
+            json!({"operation":"exportTemplateMarkdown", "id":id,"expectedRevision":2}),
+        );
+        assert_eq!(conflict["error"]["code"], -32009);
+        for (input, code) in [
+            ("invalid".to_owned(), "organization_template_invalid_format"),
+            (
+                markdown.replacen("## 公共背景", "## 简介", 1),
+                "organization_template_invalid_format",
+            ),
+            (
+                markdown.replacen("## 公共背景", "## 未知章节", 1),
+                "organization_template_invalid_format",
+            ),
+            (
+                markdown.replacen("- 管理身份：组织管理员", "- 管理身份：超级管理员", 1),
+                "organization_template_invalid_format",
+            ),
+            (
+                " ".repeat(mycopilot_core::workflow_markdown::MAX_MARKDOWN_BYTES + 1),
+                "organization_template_too_large",
+            ),
+        ] {
+            let result = call(
+                &storage,
+                json!({"operation":"importTemplateMarkdown", "markdown":input}),
+            );
+            assert_eq!(result["error"]["code"], -32602);
+            assert_eq!(result["error"]["message"], code);
+        }
+        for params in [
+            json!({"operation":"importTemplateMarkdown","markdown":42}),
+            json!({"operation":"importTemplateMarkdown","markdown":markdown,"extra":true}),
+            json!({"operation":"exportTemplateMarkdown","id":id}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":1,"definition":definition}),
+            json!({"operation":"exportTemplateMarkdown","id":id,"expectedRevision":-1}),
+        ] {
+            assert_eq!(call(&storage, params)["error"]["code"], -32602);
+        }
+    }
+
+    #[test]
     fn workflow_runtime_parameters_and_message_origins_reject_spoofed_authority() {
         assert!(serde_json::from_value::<RuntimeRequest>(
             json!({"operation":"runtimeSnapshot", "instanceId":"i", "afterSequence":20})

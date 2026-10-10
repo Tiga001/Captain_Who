@@ -7,6 +7,34 @@ import {
 } from '../../features/workflows/workflowErrors'
 
 describe('organization error diagnostics', () => {
+  it.each([
+    ['organization_template_invalid_format', 'format'],
+    ['organization_template_too_large', 'too_large'],
+    ['organization_template_read_failed', 'file']
+  ])('classifies the public import error %s', (code, kind) => {
+    expect(workflowOperationError({ message: code, data: { code } }, 'import')).toEqual({
+      operation: 'import',
+      kind
+    })
+    expect(workflowOperationError(new Error(code), 'import')).toEqual({ operation: 'import', kind })
+  })
+
+  it('distinguishes export writes from unrelated transfer failures without guessing from private text', () => {
+    expect(
+      workflowOperationError(new Error('organization_template_write_failed'), 'export')
+    ).toEqual({ operation: 'export', kind: 'file' })
+    for (const message of [
+      'organization_template_dialog_failed',
+      '/private/organization_template_invalid_format.md',
+      'storage_unavailable'
+    ]) {
+      expect(workflowOperationError(new Error(message), 'import')).toEqual({
+        operation: 'import',
+        kind: 'unavailable'
+      })
+    }
+  })
+
   it('explains unsupported board requests without leaking protocol or private error details', () => {
     const error = {
       code: -32602,

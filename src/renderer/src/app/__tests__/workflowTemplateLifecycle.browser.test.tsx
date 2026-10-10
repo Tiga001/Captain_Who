@@ -24,7 +24,11 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'zh-CN', t: (key: string) => key })
 }))
-vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
+vi.mock('../../features/workflows/workflowClient', () => ({
+  requestWorkflows: service.request,
+  importWorkflowTemplate: vi.fn(),
+  exportWorkflowTemplate: vi.fn()
+}))
 const { WorkflowSettingsSection } = await import('../../features/workflows/WorkflowSettingsSection')
 
 let records: WorkflowRecord[]

@@ -83,7 +83,10 @@ pub fn request(
     }
     let transaction = connection
         .transaction_with_behavior(
-            if matches!(request, Request::List | Request::Validate { .. }) {
+            if matches!(
+                request,
+                Request::List | Request::Validate { .. } | Request::ExportTemplateMarkdown { .. }
+            ) {
                 TransactionBehavior::Deferred
             } else {
                 TransactionBehavior::Immediate
@@ -93,6 +96,28 @@ pub fn request(
     let mut response = Response::default();
     match request {
         Request::List => {}
+        Request::ImportTemplateMarkdown { markdown } => {
+            let definition = crate::workflow_markdown::import(&markdown).map_err(Error::Invalid)?;
+            management::publish(&transaction, &definition, 0, None, available_models)?;
+            response.imported_template_id = Some(definition.id);
+        }
+        Request::ExportTemplateMarkdown {
+            id,
+            expected_revision,
+        } => {
+            let definition = management::template(&transaction, &id, expected_revision)?;
+            if definition.id != id {
+                return Err(Error::Invalid("workflow_template_unavailable".into()));
+            }
+            response.exported_template = Some(crate::workflow::ExportedTemplate {
+                markdown: crate::workflow_markdown::export(&definition).map_err(Error::Invalid)?,
+                suggested_file_name: crate::workflow_markdown::suggested_file_name(
+                    &definition.name,
+                ),
+            });
+            transaction.commit().map_err(storage_error)?;
+            return Ok(response);
+        }
         Request::Validate { definition } => {
             response.issues = definition
                 .validate(available_models)
@@ -416,3 +441,6 @@ mod management_tests;
 
 #[cfg(test)]
 mod hierarchy_tests;
+
+#[cfg(test)]
+mod markdown_tests;

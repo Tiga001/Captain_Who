@@ -4,7 +4,7 @@ import type { RefObject } from 'react'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { workflowIssueText, type WorkflowText } from './workflowText'
 
-/** Displays only the validation result returned by an explicit save. */
+/** Displays the validation result returned by an explicit template save or import. */
 export function WorkflowIssues({
   graph,
   issues,

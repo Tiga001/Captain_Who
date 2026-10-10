@@ -2,6 +2,32 @@ import type { IpcRenderer } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 import { createAgentIpcBridge } from './AgentIpcBridge'
 
+describe('native organization template IPC bridge', () => {
+  it('uses dedicated channels and preserves cancellation and structured failures', async () => {
+    const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
+    const bridge = createAgentIpcBridge(ipc as unknown as IpcRenderer)
+    ipc.invoke.mockResolvedValueOnce({ ok: true, value: null })
+    await expect(bridge.importWorkflowTemplate()).resolves.toEqual({ ok: true, value: null })
+    expect(ipc.invoke).toHaveBeenNthCalledWith(1, 'host:agent.workflows.importTemplate')
+    const input = { id: 'published-template', expectedRevision: 4 }
+    ipc.invoke.mockResolvedValueOnce({ ok: true, value: { saved: false } })
+    await expect(bridge.exportWorkflowTemplate(input)).resolves.toEqual({
+      ok: true,
+      value: { saved: false }
+    })
+    expect(ipc.invoke).toHaveBeenNthCalledWith(2, 'host:agent.workflows.exportTemplate', input)
+    const failure = {
+      ok: false,
+      error: {
+        message: 'organization_template_too_large',
+        data: { code: 'organization_template_too_large' }
+      }
+    }
+    ipc.invoke.mockResolvedValueOnce(failure)
+    await expect(bridge.importWorkflowTemplate()).resolves.toEqual(failure)
+  })
+})
+
 describe('shared organization runtime IPC', () => {
   it('strictly parses once for all subscribers and detaches only after the final unsubscribe', () => {
     const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }

@@ -40,7 +40,11 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
       })[key] ?? '当前位置'
   })
 }))
-vi.mock('../../features/workflows/workflowClient', () => ({ requestWorkflows: service.request }))
+vi.mock('../../features/workflows/workflowClient', () => ({
+  requestWorkflows: service.request,
+  importWorkflowTemplate: vi.fn(),
+  exportWorkflowTemplate: vi.fn()
+}))
 const { WorkflowSettingsSection } = await import('../../features/workflows/WorkflowSettingsSection')
 
 function WorkflowTestShell() {

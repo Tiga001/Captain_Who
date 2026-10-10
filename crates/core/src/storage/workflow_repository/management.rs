@@ -157,7 +157,7 @@ pub(super) fn publish(
     Ok(())
 }
 
-fn template(c: &Connection, id: &str, expected: u64) -> Result<Definition, Error> {
+pub(super) fn template(c: &Connection, id: &str, expected: u64) -> Result<Definition, Error> {
     validate_id(id)?;
     revision_to_sql(expected)?;
     let row: Option<(String, u64)> = c

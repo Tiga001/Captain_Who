@@ -9,7 +9,7 @@ impl StorageService {
             Request::Manage(
                 crate::workflow_management::Request::ListInstances {}
                     | crate::workflow_management::Request::GetInstance { .. }
-            )
+            ) | Request::ExportTemplateMarkdown { .. }
         ) {
             let mut connection = self.state.connection().map_err(Error::Storage)?;
             return workflow_repository::request(&mut connection, request, &Default::default());

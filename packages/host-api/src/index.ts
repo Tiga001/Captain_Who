@@ -641,6 +641,13 @@ export interface WorkspaceFilesHostApi {
 
 export interface AgentHostApi {
   requestWorkflows(input: WorkflowRequest): Promise<HostInvocationResult<WorkflowResponse>>
+  /** Imports one UTF-8 Markdown template selected in a native file dialog. */
+  importWorkflowTemplate(): Promise<HostInvocationResult<WorkflowResponse | null>>
+  /** Exports an authoritative published revision to a native-dialog destination. */
+  exportWorkflowTemplate(input: {
+    id: string
+    expectedRevision: number
+  }): Promise<HostInvocationResult<{ saved: boolean }>>
   onWorkflowRuntimeChanged(
     handler: (snapshot: import('@mycopilot/protocol').WorkflowRuntimeSnapshot) => void
   ): () => void

@@ -78,6 +78,9 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
     listCollaborationEvents: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationListEvents, input),
     requestWorkflows: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.workflows, input),
+    importWorkflowTemplate: () => ipcRenderer.invoke(HOST_CHANNELS.agent.workflowTemplateImport),
+    exportWorkflowTemplate: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.workflowTemplateExport, input),
     onWorkflowRuntimeChanged: (handler) => {
       const subscriber: typeof handler = (snapshot) => handler(snapshot)
       if (!runtimeSubscribers.size)

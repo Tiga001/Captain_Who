@@ -169,6 +169,13 @@ pub struct Record {
 #[derive(Debug)]
 pub enum Request {
     List,
+    ImportTemplateMarkdown {
+        markdown: String,
+    },
+    ExportTemplateMarkdown {
+        id: String,
+        expected_revision: u64,
+    },
     Manage(crate::workflow_management::Request),
     SaveWithDraft {
         definition: Definition,
@@ -211,6 +218,14 @@ impl<'de> Deserialize<'de> for Request {
         #[serde(tag = "operation", rename_all = "camelCase", deny_unknown_fields)]
         enum WireRequest {
             List {},
+            ImportTemplateMarkdown {
+                markdown: String,
+            },
+            ExportTemplateMarkdown {
+                id: String,
+                #[serde(rename = "expectedRevision")]
+                expected_revision: u64,
+            },
             Validate {
                 definition: Definition,
             },
@@ -230,6 +245,16 @@ impl<'de> Deserialize<'de> for Request {
         Ok(
             match serde_json::from_value::<WireRequest>(value).map_err(serde::de::Error::custom)? {
                 WireRequest::List {} => Self::List,
+                WireRequest::ImportTemplateMarkdown { markdown } => {
+                    Self::ImportTemplateMarkdown { markdown }
+                }
+                WireRequest::ExportTemplateMarkdown {
+                    id,
+                    expected_revision,
+                } => Self::ExportTemplateMarkdown {
+                    id,
+                    expected_revision,
+                },
                 WireRequest::Validate { definition } => Self::Validate { definition },
                 WireRequest::Save {
                     definition,
@@ -287,6 +312,16 @@ pub struct Response {
     pub invalid_records: Vec<InvalidRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invalid_drafts: Vec<crate::workflow_management::InvalidEditingDraft>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_template_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exported_template: Option<ExportedTemplate>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedTemplate {
+    pub markdown: String,
+    pub suggested_file_name: String,
 }
 fn issue(out: &mut Vec<Issue>, code: &str, subject: &str) {
     out.push(Issue {

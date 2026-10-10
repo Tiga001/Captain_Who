@@ -4,11 +4,113 @@ import hierarchy from '../fixtures/organization-hierarchy-v1.json'
 import memberNames from '../fixtures/organization-member-names-v1.json'
 import {
   workflowMemberNameKey,
+  WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES,
   parseWorkflowDefinition,
   parseWorkflowNode,
   parseWorkflowRequest,
   parseWorkflowResponse
 } from './workflows'
+
+describe('organization Markdown transfer contract', () => {
+  const markdown = `# 组织：研究组织
+
+## 简介
+研究问题并形成报告。
+
+## 公共背景
+结论需要有来源支撑。
+
+## 直属成员
+
+### 成员：负责人
+- 职级：90
+- 管理身份：组织管理员
+
+#### 接收内容
+研究目标。
+
+#### 职责
+安排研究并审核结论。
+
+#### 交付要求
+提交经过审核的研究报告。
+`
+  it('accepts bounded Markdown imports and revision-checked exports', () => {
+    for (const request of [
+      { operation: 'importTemplateMarkdown', markdown },
+      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 2 }
+    ])
+      expect(parseWorkflowRequest(request)).toEqual(request)
+    for (const request of [
+      { operation: 'importTemplateMarkdown', markdown, activate: true },
+      { operation: 'importTemplateMarkdown', path: '/tmp/org.md' },
+      { operation: 'exportTemplateMarkdown', id: fixture.id, expectedRevision: 0 },
+      {
+        operation: 'exportTemplateMarkdown',
+        id: fixture.id,
+        expectedRevision: 1,
+        path: '/tmp/org.md'
+      }
+    ])
+      expect(() => parseWorkflowRequest(request)).toThrow()
+    const atByteLimit =
+      markdown +
+      'a'.repeat(
+        WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES - new TextEncoder().encode(markdown).byteLength
+      )
+    expect(
+      parseWorkflowRequest({ operation: 'importTemplateMarkdown', markdown: atByteLimit })
+    ).toEqual({
+      operation: 'importTemplateMarkdown',
+      markdown: atByteLimit
+    })
+    expect(() =>
+      parseWorkflowRequest({
+        operation: 'importTemplateMarkdown',
+        markdown: '中'.repeat(Math.floor(WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES / 3) + 1)
+      })
+    ).toThrow('organization_template_too_large')
+  })
+
+  it('validates imported identity and confines exported filenames to Markdown basenames', () => {
+    const response = {
+      records: [{ definition: fixture, enabled: false, revision: 1, updatedAt: 42, issues: [] }],
+      issues: [],
+      importedTemplateId: fixture.id
+    }
+    expect(parseWorkflowResponse(response)).toEqual(response)
+    expect(() => parseWorkflowResponse({ ...response, importedTemplateId: 'missing' })).toThrow()
+    const exported = {
+      records: [],
+      issues: [],
+      exportedTemplate: {
+        markdown,
+        suggestedFileName: '研究组织.organization.md'
+      }
+    }
+    expect(parseWorkflowResponse(exported)).toEqual(exported)
+    for (const suggestedFileName of ['../org.md', '/org.md', 'C:\\org.md', 'org.txt', 'org\n.md']) {
+      expect(() =>
+        parseWorkflowResponse({
+          ...exported,
+          exportedTemplate: {
+            ...exported.exportedTemplate,
+            suggestedFileName
+          }
+        })
+      ).toThrow()
+    }
+    expect(() =>
+      parseWorkflowResponse({
+        ...exported,
+        exportedTemplate: {
+          ...exported.exportedTemplate,
+          modelConfigId: 'private-local-model'
+        }
+      })
+    ).toThrow()
+  })
+})
 
 describe('organization hierarchy authoring contract', () => {
   it('accepts targeted board reads and validates optional activity enrichment', () => {

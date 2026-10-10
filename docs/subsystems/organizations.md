@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-08
+last_verified: 2026-10-10
 ---
 
 # 组织：邮件与分层协作
@@ -44,6 +44,18 @@ last_verified: 2026-10-08
 模型与权限是成员默认值。首次绑定或明确修改这些字段时更新后续输入配置；只改职责、职级或布局，不覆盖用户在对话中另选的模型和权限。运行中 Turn 的配置已冻结，手动排队输入保留提交时配置。
 
 停用组织阻止新的发送和投递，不取消已运行的 Turn。同一成员身份的待处理邮件保留；重新启用须通过实例定义、模型、完整绑定、对话状态和颜色检查。启用实例独占颜色且其对话不能归档。移除组织保留对话，当前实现拒绝移除被判定为运行中的实例。
+
+### 模板 Markdown 导入与导出
+
+组织模板列表的「导入组织模板」通过系统文件选择器读取 `.md`，模板卡片的导出按钮通过系统保存窗口导出该模板已保存的版本。导入完整校验成功后创建新的模板，进入现有编辑器；不覆盖同名模板，不创建对话，也不自动激活。文件错误或版本冲突不留下部分模板。
+
+文件是普通 Markdown 组织说明书，以 `# 组织：名称` 开始，随后是 `## 简介`、`## 公共背景` 和自然段正文。直属成员放在 `## 直属成员` 下；部门标题使用完整路径，例如 `## 部门：研发部 / 方法组`，父部门先于子部门。每位成员以 `### 成员：姓名` 开始，列出「职级」和「管理身份」，再用 `#### 接收内容`、`#### 职责`、`#### 交付要求` 分别承载正文。管理身份使用「普通成员」「组织管理员」「部门管理员」。没有 YAML、JSON、格式版本、内部 ID、坐标、视口或隐藏配置副本。
+
+导出按部门树顺序组织，同组成员按职级从高到低、同职级管理员优先排列。导入以文档顺序建立成员和部门，重新生成全部内部 ID，并自动布局；不保留旧画布位置。固定标题和必要字段供解析器识别，正文仍可使用普通 Markdown。正文中与模板结构重名的标题由导出器用 Markdown 转义保留，代码块中的标题保持为正文。导入器校验结构、名称、部门路径、职级和管理身份；文件里的说明只保存为成员配置，不在导入过程中执行。
+
+可移植内容包括公共说明、成员职责、接收与交付要求、职级、管理身份和部门层级。文件不携带本地模型配置 ID、API 凭据或执行权限；导入成员的模型为空，权限为默认值，用户在原有编辑器中配置。项目路径、对话绑定、邮件、运行记录及已激活实例也不随模板迁移。Markdown 上限为 4 MiB，解析后的定义仍遵守原有 2,000,000 字节及成员、部门数量限制。旧 YAML 模板格式不再作为导入格式。
+
+协议入口是 `importTemplateMarkdown` / `exportTemplateMarkdown`；本地文件访问由 Host 的专用导入/导出接口完成，Renderer 不传任意文件路径。Rust `workflow_markdown` 负责格式与解析，模板仓库负责事务和 revision 校验。
 
 ## 3. 部门、职级与管理权限
 
@@ -154,6 +166,8 @@ last_verified: 2026-10-08
 ## 5. 查询、上下文与信任边界
 
 普通成员挂载六个工具：`organization_send`、`organization_get_state`、`organization_get_mailbox`、`organization_accept`、`organization_complete`、`organization_recall`；管理员再挂载独立 `organization.management` 能力控制的 `organization_edit`。
+
+组织能力独立于当前任务树的子 Agent 能力。`agent.collaboration` 面向模型的 `subagentToolsAvailable=false` 不关闭 `organization_*`；该状态采用当前逻辑 Run 的子 Agent 策略，设置变更从下一根 Turn 生效。`organization.execution.management.available=false` 只限制 `organization_edit`，不表示组织邮件不可用。full/minimal 常驻提示词均保留这一边界；每个能力域以本次原生工具 Schema 和各自最新状态为准。
 
 仅已准入、当前资格有效且组织开启的独立根 Run 获得这些工具。下一次采样刷新能力，每次实际执行仍重新校验；历史、checkpoint、子 Agent 或分叉不能自授成员身份。组织 revision 与成员 incarnation 分离，其他成员变化不使本人 Run 自动失效，而本人移除/改绑后旧 Run 永不恢复该身份。
 

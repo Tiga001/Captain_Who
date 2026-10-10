@@ -3,13 +3,15 @@ import {
   ArrowLeft,
   ChevronRight,
   Copy,
+  Download,
   Network,
   Pencil,
   Plus,
   Redo2,
   RefreshCw,
   Trash2,
-  Undo2
+  Undo2,
+  Upload
 } from 'lucide-react'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
@@ -23,7 +25,7 @@ import type {
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { Tooltip } from '../../components/overlay/Tooltip'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
-import { requestWorkflows } from './workflowClient'
+import { exportWorkflowTemplate, importWorkflowTemplate, requestWorkflows } from './workflowClient'
 import {
   workflowOperationError,
   type WorkflowErrorOperation,
@@ -146,14 +148,19 @@ export function WorkflowSettingsSection({
     },
     [change]
   )
-  const open = (record?: WorkflowRecord) => {
+  const open = (
+    record?: WorkflowRecord,
+    options?: { storedDrafts?: WorkflowEditingDraft[]; showIssues?: boolean }
+  ) => {
     if (draft && ((!record && revision === 0) || record?.definition.id === draft.id)) {
       setEditorHidden(false)
       return
     }
     const perform = () => {
       const storedDraft = record
-        ? editingDrafts.find((item) => item.definition.id === record.definition.id)
+        ? (options?.storedDrafts ?? editingDrafts).find(
+            (item) => item.definition.id === record.definition.id
+          )
         : undefined
       const definition = record
         ? structuredClone(storedDraft?.definition ?? record.definition)
@@ -168,7 +175,7 @@ export function WorkflowSettingsSection({
       }
       setConflict(false)
       setEditorHidden(false)
-      setSaveIssues(null)
+      setSaveIssues(options?.showIssues && record?.issues.length ? record : null)
       setTab('details')
     }
     if (dirty) {
@@ -296,6 +303,41 @@ export function WorkflowSettingsSection({
       setMutationBusy(false)
     }
   }
+  const importTemplate = async () => {
+    if (busyRef.current) return
+    setMutationBusy(true)
+    setError(null)
+    try {
+      const response = await importWorkflowTemplate()
+      if (!response) return
+      acceptResponse(response)
+      setLoadFailure(false)
+      const imported = response.records.find(
+        (record) => record.definition.id === response.importedTemplateId
+      )
+      if (!imported) throw new Error('Imported organization is missing from response')
+      open(imported, { storedDrafts: response.drafts ?? [], showIssues: true })
+    } catch (importError) {
+      await handleSaveError(importError, 'import')
+    } finally {
+      setMutationBusy(false)
+    }
+  }
+  const exportTemplate = async (record: WorkflowRecord) => {
+    if (busyRef.current) return
+    setMutationBusy(true)
+    setError(null)
+    try {
+      await exportWorkflowTemplate({
+        id: record.definition.id,
+        expectedRevision: record.revision
+      })
+    } catch (exportError) {
+      await handleSaveError(exportError, 'export')
+    } finally {
+      setMutationBusy(false)
+    }
+  }
   const shortcutActions = useRef({ save, undo, redo, editing, busy, modal: false })
   useLayoutEffect(() => {
     shortcutActions.current = {
@@ -347,25 +389,41 @@ export function WorkflowSettingsSection({
           ? 'departmentNameSeparator'
           : null
   const configurationError = error?.operation === 'save' && error.kind === 'configuration'
+  const transferError =
+    error?.operation === 'import'
+      ? error.kind === 'format'
+        ? 'importFormat'
+        : error.kind === 'too_large'
+          ? 'importSize'
+          : error.kind === 'file'
+            ? 'importFile'
+            : null
+      : error?.operation === 'export' && error.kind === 'file'
+        ? 'exportFile'
+        : null
   const errorMessage = error ? (
     <ConfirmationDialog
       title={text(
-        nameError
-          ? `${nameError}Title`
-          : configurationError
-            ? 'configurationErrorTitle'
-            : `${error.operation}ErrorTitle`
+        transferError
+          ? `${transferError}ErrorTitle`
+          : nameError
+            ? `${nameError}Title`
+            : configurationError
+              ? 'configurationErrorTitle'
+              : `${error.operation}ErrorTitle`
       )}
       description={text(
         conflict
           ? editing
             ? 'conflict'
             : 'conflictReload'
-          : nameError
-            ? `${nameError}Hint`
-            : configurationError
-              ? 'configurationErrorHint'
-              : `${error.operation}ErrorHint`
+          : transferError
+            ? `${transferError}ErrorHint`
+            : nameError
+              ? `${nameError}Hint`
+              : configurationError
+                ? 'configurationErrorHint'
+                : `${error.operation}ErrorHint`
       )}
       dialogRole="alertdialog"
       cancelLabel={text('close')}
@@ -620,6 +678,15 @@ export function WorkflowSettingsSection({
                     </button>
                   ) : null}
                   <button
+                    className="workflow-button"
+                    type="button"
+                    onClick={() => void importTemplate()}
+                    disabled={loading || busy}
+                  >
+                    <Upload aria-hidden="true" />
+                    {text('import')}
+                  </button>
+                  <button
                     ref={createButtonRef}
                     className="workflow-button workflows-settings__create"
                     type="button"
@@ -673,6 +740,17 @@ export function WorkflowSettingsSection({
                         onClick={() => void duplicate(record)}
                       >
                         <Copy aria-hidden="true" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip content={text('export')} preferredPlacement="top">
+                      <button
+                        className="workflow-button"
+                        type="button"
+                        aria-label={`${text('export')} ${record.definition.name}`}
+                        disabled={loading || busy}
+                        onClick={() => void exportTemplate(record)}
+                      >
+                        <Download aria-hidden="true" />
                       </button>
                     </Tooltip>
                     <button

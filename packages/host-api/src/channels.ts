@@ -61,6 +61,8 @@ export const HOST_CHANNELS = {
     collaborationTemplateCreate: 'host:agent.collaboration.templates.create',
     collaborationTemplateDelete: 'host:agent.collaboration.templates.delete',
     workflows: 'host:agent.workflows.request',
+    workflowTemplateImport: 'host:agent.workflows.importTemplate',
+    workflowTemplateExport: 'host:agent.workflows.exportTemplate',
     workflowRuntimeChanged: 'host:agent.workflows.runtime.changed',
     collaborationTemplateList: 'host:agent.collaboration.templates.list',
     collaborationTemplateSetEnabled: 'host:agent.collaboration.templates.setEnabled',

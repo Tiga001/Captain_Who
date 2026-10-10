@@ -53,6 +53,8 @@ export interface WorkflowRecord {
   issues: WorkflowIssue[]
 }
 export type WorkflowRequest =
+  | { operation: 'importTemplateMarkdown'; markdown: string }
+  | { operation: 'exportTemplateMarkdown'; id: string; expectedRevision: number }
   | {
       operation: 'runtimeSnapshot'
       instanceId: string
@@ -142,6 +144,8 @@ export interface WorkflowInvalidDraft extends WorkflowInvalidRecord {
   baseRevision: number
 }
 export interface WorkflowResponse {
+  importedTemplateId?: string
+  exportedTemplate?: { markdown: string; suggestedFileName: string }
   runtime?: WorkflowRuntimeSnapshot
   records: WorkflowRecord[]
   issues: WorkflowIssue[]
@@ -152,6 +156,7 @@ export interface WorkflowResponse {
   affectedConversationIds?: string[]
 }
 export const WORKFLOW_REQUEST_METHOD = 'agent.workflows.request'
+export const WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES = 4 * 1024 * 1024
 
 function object(
   value: unknown,
@@ -380,6 +385,15 @@ function validateWorkflowDepartments(definition: WorkflowDefinition): void {
 
 export function parseWorkflowRequest(value: unknown): WorkflowRequest {
   const op = (value as { operation?: unknown } | null)?.operation
+  if (op === 'importTemplateMarkdown') {
+    const item = object(value, ['operation', 'markdown'])
+    return { operation: op, markdown: templateMarkdown(item.markdown) }
+  }
+  if (op === 'exportTemplateMarkdown') {
+    const item = object(value, ['operation', 'id', 'expectedRevision'])
+    if (!text(item.id).trim()) throw new Error('Invalid organization template identifier')
+    return { operation: op, id: text(item.id), expectedRevision: integer(item.expectedRevision, 1) }
+  }
   if (op === 'runtimeSnapshot') {
     const item = object(
       value,
@@ -551,6 +565,12 @@ function issues(value: unknown): WorkflowIssue[] {
     2048
   )
 }
+function templateMarkdown(value: unknown): string {
+  const markdown = text(value)
+  if (new TextEncoder().encode(markdown).length > WORKFLOW_TEMPLATE_MARKDOWN_MAX_BYTES)
+    throw new Error('organization_template_too_large')
+  return markdown
+}
 export function parseWorkflowResponse(value: unknown): WorkflowResponse {
   const data = object(
     value,
@@ -562,9 +582,20 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
       'invalidRecords',
       'invalidDrafts',
       'affectedConversationIds',
-      'runtime'
+      'runtime',
+      'importedTemplateId',
+      'exportedTemplate'
     ],
-    ['instances', 'drafts', 'invalidRecords', 'invalidDrafts', 'affectedConversationIds', 'runtime']
+    [
+      'instances',
+      'drafts',
+      'invalidRecords',
+      'invalidDrafts',
+      'affectedConversationIds',
+      'runtime',
+      'importedTemplateId',
+      'exportedTemplate'
+    ]
   )
   const records = array(
     data.records,
@@ -612,8 +643,29 @@ export function parseWorkflowResponse(value: unknown): WorkflowResponse {
     new Set(invalidDrafts.map((draft) => draft.id)).size !== invalidDrafts.length
   )
     throw new Error('Duplicate invalid organization drafts')
+  const importedTemplateId =
+    data.importedTemplateId === undefined ? undefined : text(data.importedTemplateId)
+  if (
+    importedTemplateId !== undefined &&
+    !records.some((record) => record.definition.id === importedTemplateId)
+  )
+    throw new Error('Imported organization template is missing from response')
+  let exportedTemplate: WorkflowResponse['exportedTemplate']
+  if (data.exportedTemplate !== undefined) {
+    const item = object(data.exportedTemplate, ['markdown', 'suggestedFileName'])
+    const suggestedFileName = text(item.suggestedFileName)
+    if (
+      !suggestedFileName.endsWith('.md') ||
+      /[/\\\p{Cc}]/u.test(suggestedFileName) ||
+      suggestedFileName.length > 240
+    )
+      throw new Error('Invalid organization template filename')
+    exportedTemplate = { markdown: templateMarkdown(item.markdown), suggestedFileName }
+  }
   return {
     records,
+    ...(importedTemplateId !== undefined ? { importedTemplateId } : {}),
+    ...(exportedTemplate !== undefined ? { exportedTemplate } : {}),
     ...(data.runtime !== undefined ? { runtime: parseWorkflowRuntimeSnapshot(data.runtime) } : {}),
     issues: issues(data.issues),
     ...(invalidRecords ? { invalidRecords } : {}),
