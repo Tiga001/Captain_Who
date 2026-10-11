@@ -1,0 +1,121 @@
+# 第五轮 Host 窄读取与展示恢复审计
+
+本记录覆盖 transport 代理负责的第五轮修改，待 root 统一归档。使用合成数据和临时隔离数据库；没有真实模型调用、外发消息或真实用户库。生产 Rust 由 root 统一构建；本代理未运行 Cargo、提交或 push。
+
+## 链路与证据范围
+
+第一轮/第四轮矩阵的计时边界是 Core Server 入口到回执，不包含真实 Electron Host 管道，因此不能据此证明 Host JSON-RPC 是首要瓶颈。本次源码审计也没有发现必须扩大传输队列、添加缓存或并行大响应的独立证据。
+
+`QueuedConversationReads` 原有逻辑保留：全量 `loadConversation`、`loadConversations` 和 observer history 同时至多一个活动读取；仅尚未开始的相同请求合并，活动读取期间的新请求形成新尾随快照；高优先 observer 最多连续超越四次。`jsonRpcClient.ts` 和 `queuedConversationReads.ts` 均无修改。
+
+原 Host 内部 `ReadToolFileSource.resolveReadToolFile` 为打开一个读取结果文件，调用 `loadConversation`、跨进程接收全部消息，然后解析选中 assistant 的整个 `agentRunJson`。这条路径只需要 conversation/project、assistant/run、精确 call、typed identity 和结果路径。其他全历史读取用于用户显示、仍走原队列。
+
+新增 `storage.loadReadToolFileContext({ conversationId, assistantMessageId, callId })` 是一对一替换，单次仍为 **一个 RPC**，不宣称减少 RPC 数。改进来自返回和解析内容减少，以及不必排在 Host 其他全历史响应后。Core 仍需要投影选中 Run 的 Trace，不能宣称消除了全部 Trace 投影 CPU。
+
+## 所有权、顺序和兼容
+
+- Core 用一个读取事务获取 conversation metadata、选中 assistant 消息、同范围 Trace/Guidance/工具证据；所有字段来自同一个 SQLite 快照。没有缓存，没有两个快照拼接。
+- server 沿用全历史读取的 `authorize_user_conversation_write` 授权入口，并使用与 `storage.loadConversation` 相同的 Conversation 资源范围和 Read lane；已知同范围写/读顺序保持，未知仍保守。
+- Core 只返回一个 call 的字符串字段，省略消息正文、其他消息、其他工具和通用结果正文。身份字段缺失与显式损坏/null 严格区分：legacy 缺失仍兼容，损坏显式身份仍由 Host 拒绝。
+- Core 复用原 history projection 的 Trace 优先及 legacy 合并规则，同时应用原 active/root/workflow 消息可见性过滤。Renderer 不再保存 run JSON 时，已有 Trace 仍能提供读取证明。
+- Host 保留 conversation/project/assistant 精确匹配、同 run 或精确 observer live proof、builtin identity、精确 path 比较、附件归属及 frozen workspace/path 最终校验。响应本身不授予文件访问权限。
+- 没有消息时仍允许原有精确 live observer fallback；删除后的新查询返回 null。旧 pinned read 可以读到删除前的完整快照，不能拼接删除后 metadata。
+
+## Trace 截断与展示恢复补充
+
+Trace 是有界历史；单靠它不能恢复原展示全部网页来源、完整摘要输入或读取缩略图。`runtime_checkpoint_web_read` 只接收 RendererSafeAgentEvent，ToolCall 必须有严格 builtin/toolName 身份，结果必须匹配已有可信 call。
+
+保存的内容是现有 web/read 展示算法消费的白名单输入；网页保留完整 sources/answer/content，避免重新实现 `webFetchPresentation.ts` 的 Markdown AST 算法。读取活动精确保留 path、文件名、类型、状态、mime、错误和现有 512 KiB 以内合法缩略图；不保存完整图像或读取正文。`ReadToolActivity` 额外使用的目录错误 code 和生成图 artifact receipt 已保留。完整文件仍通过原授权路径按需打开。
+
+`fullDataUrl` 在原 `activityFromResult` 中恒为 undefined，原 normalize 也移除 image fullDataUrl；这次不持久化它没有降低原恢复行为。
+
+Core history 对带 Core checkpoint 的 web/read 内容再核对精确 Trace builtin call/result，approvalStatus 来自 Trace。未提交结果不恢复为 completed。Trace 原有 metadata 作为基础，再叠加完整展示字段；不会因较窄 checkpoint 丢掉 Trace 的正常 metadata。数据库补丁按 id 合并、Core provenance 恢复证明和 Runtime 集成由 root/access 负责；Renderer 所有状态的活动重建由 preparing 负责。
+
+FileChange 审批 API 在 Runtime emitter 外结算，因此另外加入同快照恢复 overlay：一次查询公开 metadata，绑定 conversation/assistant/run/原 builtin apply_patch call，按 transactionId 更新状态/统计。不会读取 draft/base 正文、修改执行或授予权限。每条消息只解析/编码一次 run JSON。Skill installation overlay 由 preparing 实现，本代理负责 history 接线。
+
+## 文件归属
+
+| 范围 | 文件 |
+| --- | --- |
+| Host API/文件打开 | `src/main/core/coreServerStorageApi.ts`; `src/main/workspaceFiles/ReadToolFileSource.ts` |
+| Host 单测/诊断 | `src/main/core/coreServer.conversationReads.test.ts`; `src/main/workspaceFiles/ReadToolFileSource.test.ts`; `src/main/core/rpcDiagnostics.ts`（新增静态方法标签） |
+| TS 协议 | `packages/protocol/src/storageReadToolFileContext.ts`; 同名 `.test.ts`; `packages/protocol/src/index.ts` |
+| Rust DTO/方法 | `crates/protocol-rs/src/storage.rs`; `crates/protocol-rs/src/methods.rs` |
+| server 路由/范围 | `crates/core-server/src/transport/request_handler.rs`; `bounded_dispatch.rs`; `request_loop.rs` 测试断言; `transport/tests/collaboration_authorization.rs`; `application/agent/rpc_resources.rs` |
+| Core 窄读取 | `crates/core/src/storage/service/read_tool_file_context.rs`; `read_tool_file_context/tests.rs`（service.rs 注册由 root 添加） |
+| 安全展示输入 | `crates/core-server/src/application/agent/runtime_checkpoint_web_read.rs`（Runtime 调用和初始身份过滤由 root 集成） |
+| Core 同快照恢复 | `crates/core/src/storage/service/conversations/history_projection.rs`（窄读取 wrapper、web/read Trace 绑定、skill/FileChange 接线）；`conversations/file_change_projection.rs`; `conversations.rs` 一行 module 注册 |
+| 真实 Electron 夹具 | `src/main/core/fixtures/readToolContext.electron.ts`; `src/main/core/readToolContext.electron.test.ts` |
+| Core 空正文边界 | `crates/core/src/storage/service/messages.rs`; `tests/core_checkpoint_content.rs`; `tests/mod.rs` 一行测试注册 |
+
+## 已执行验证
+
+2026-10-11 21:22，当前工作区五套单测 **54/54 通过**，耗时 863 ms：
+
+```sh
+pnpm exec vitest run --project unit src/main/core/coreServer.conversationReads.test.ts src/main/workspaceFiles/ReadToolFileSource.test.ts packages/protocol/src/storageReadToolFileContext.test.ts src/main/core/rpcDiagnostics.test.ts src/main/core/jsonRpcClient.environment.test.ts
+```
+
+`pnpm typecheck:node`、所有所属 TS 的 targeted eslint/Prettier、所属 Rust rustfmt 和 `git diff --check` 已通过。
+
+最终日志补录于 2026-10-11 21:46：上述五套单测重跑 **54/54 通过**（834 ms），`pnpm typecheck:node` 与 12 个所属/关联 TS 文件的 targeted ESLint 均 exit 0。日志分别为本目录 `host-unit-final.log`、`host-typecheck-node-final.log`、`host-eslint-final.log`；ESLint 成功无输出，日志为空。完整实际命令和三个进程的 exit code 记录在 `host-checks-final.json`。本次未执行 Electron 性能夹具，也未运行 Cargo。
+
+Rust 由 root 集中验证，所属过滤器为：
+
+```text
+read_tool_file_context::tests                         4
+checkpoint_web_read_tests                            1
+runtime_checkpoint_web_read::tests                   4
+file_change_projection::tests                        2
+core_checkpoint_content                             2
+application::agent::rpc_resources
+transport::tests::collaboration_authorization
+storage_reads_use_the_non_blocking_dispatch_path
+```
+
+第一轮 narrow 与 FileChange 各一个交错测试触发 `storage_nested_execution_forbidden`：测试错误地在同线程持有 read lease 再请求 writer。已将并发更新/删除改成独立 scoped thread，生产实现不变。其后 root 报告 Core 完整 1211 项通过，统一 Rust 日志由 root 归档。
+
+取消终态和 waiting-for-approval 回写原本可以携带空正文，曾依赖 Renderer 后续补写；Core 接管后可能覆盖已经 ACK 的检查点正文。`messages.rs` 仅为 cancelled + 空正文（且 terminal Trace 精确匹配）以及验证通过的 waiting publication + 空正文，读取同一事务的 exact conversation/assistant/run 合法 Core checkpoint 正文。terminal 的有效正文在 exact-replay 比较之前确定。legacy 空写、非空输出及 completed 空正文语义不变，model context 不从展示正文补造。两项真实磁盘重开测试覆盖上述正反例，纳入 root 的完整 Core 验证。
+
+## Electron 测量计划及边界
+
+```sh
+CAPTAIN_CORE_TEST_BINARY=<root 构建的生产二进制绝对路径> CAPTAIN_HOST_READ_REPORT=.cache/backend-concurrency/round5-validation-20261011/host-read-metrics.json pnpm exec vitest run --project electron-fixtures src/main/core/readToolContext.electron.test.ts
+```
+
+夹具创建独立临时 Electron profile/Core 数据目录，256 条合成消息，使用真实 `CoreJsonRpcClient` stdin/stdout/JSON 编解码。先验证全量和窄查询返回相同 proof，再分别执行 20 次顺序读取，验证 20/20 成功、各 pendingPeak=1、窄返回字节小于全量的 1/100，以及删除后 null。最后正常关闭 Core、清理临时文件。
+
+报告记录 request serialization/response parse 同步壁钟时间与 UTF-8 字节，并单独记录阶段 Host `process.cpuUsage` user/system 微秒；两者不能混称。所有 CPU/耗时数值仅为此合成顺序读取样本，不代表饱和负载、Renderer paint、全链路 SLO、持久磁盘故障或整体 Host 传输瓶颈。
+
+## Electron 实际结果
+
+2026-10-11 21:51:18 在 root 暂停其他测试/构建/矩阵的窗口执行，单测 **1/1 通过，exit 0，3.09 s**。实际命令：
+
+```sh
+CAPTAIN_CORE_TEST_BINARY=/tmp/captain-backend-baseline-20261011-target/release/core-server CAPTAIN_HOST_READ_REPORT=.cache/backend-concurrency/round5-validation-20261011/host-read-results.json pnpm exec vitest run --project electron-fixtures src/main/core/readToolContext.electron.test.ts > .cache/backend-concurrency/round5-validation-20261011/host-read-results.log 2>&1
+```
+
+生产二进制 SHA-256：`a6aad0535f71a12adea82d6362aee39c7d79bc838ffd9afcf5747dffe510c164`。root 确认生产源码与最终一致；二进制生成后仅修改测试夹具。
+
+256 条合成消息、各 20 次顺序请求，文件读取 proof 等价、删除后 null 均通过。以下均是 **20 次合计**，预热/准备/删除不计入：
+
+| 指标 | 全量 loadConversation | 窄 loadReadToolFileContext |
+| --- | ---: | ---: |
+| RPC offered / completed | 20 / 20 | 20 / 20 |
+| pendingPeak | 1 | 1 |
+| 请求 UTF-8 字节 | 2,035 | 3,200 |
+| 响应 UTF-8 字节 | 34,694,335 | 5,500 |
+| Host 请求序列化同步壁钟 ms | 0.040420 | 0.022790 |
+| Host 响应 JSON parse 同步壁钟 ms | 13.937832 | 0.031915 |
+| Host 请求到响应壁钟 ms | 85.533879 | 6.399163 |
+| Host CPU user μs | 47,316 | 1,149 |
+| Host CPU system μs | 10,475 | 618 |
+
+请求参数更明确，故窄查询请求字节增加；**RPC 数量没有减少**。响应内容减少，Host 解析和进程 CPU 在本样本中下降。测试仅跑一轮、固定先全量后窄读取、没有并发饱和或 Renderer；不能把此微基准外推为总体瓶颈归因或全链路 SLO 达标。
+
+首跑在 Core 启动前因夹具 ESM 打包遇到真实 Host 的 `__dirname` 而失败；仅把测试 bundle 的 format/后缀改为 CJS，生产 Host 源码未改。初跑日志保留为 `host-read-initial-fixture-failure.log`，成功结果见 `host-read-results.json` 和 `host-read-results.log`。成功后所有测试进程已退出，本代理停止测量，将窗口交还 root。
+
+
+## Final production-source rerun
+
+After the Skill admission fix, the isolated Electron fixture was rerun with no other test or compilation workload. Final receipt: 2026-10-11T14:10:51 UTC, exit 0, production SHA `5d86b4e72e26ea35ad35a5ba685513370d3447b48a20cc6776948bdd119d4cc0`. This rerun supersedes the earlier timing sample above. Final response bytes 34,694,335 → 5,500; request bytes 2,035 → 3,200; 20 successful calls each; proofEqual and deletionObserved true. Response aggregate total 89.440876 → 6.319750 ms; parse total 13.985290 → 0.033081 ms; Host CPU user+system 53,619 → 1,355 microseconds. Same one-sample sequential/read-only scope and limitations.

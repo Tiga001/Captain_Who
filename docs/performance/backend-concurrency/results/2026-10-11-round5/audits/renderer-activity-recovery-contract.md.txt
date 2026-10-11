@@ -1,0 +1,36 @@
+# Renderer activity recovery contract
+
+## Web/read: reuse normalization; do not translate presentation algorithms to Rust
+
+`features/chat/agentWebSearch.ts`:
+- ToolCall `web_search` / `web_fetch` creates callId/kind/query/provider=tavily/status=running/sources=[]/responseTime=null/updatedAt.
+- ToolResult success reads query/url/requestedUrl, provider, answer/content/rawContent, results, title, favicon, responseTime,truncated. HTTP(S) URLs are normalized and deduplicated, score-sorted, display/domain/snippet fields derived. web_fetch additionally calls `webFetchPresentation.ts` to generate title/summary/quality; preserve this exact algorithm.
+- failure preserves prior sources/answer/summary metadata, sets error; pending tool without result settles only when Run terminal.
+
+`features/chat/agentReadActivities.ts`:
+- Tools read_file/read_image/read_word/read_presentation/read_spreadsheet map to file/image/word/presentation/spreadsheet. Path from call.args.path/filePath and result.path; fileName/extension computed consistently.
+- Results preserve optional MIME and bounded image thumbnail only: data:image/(png|jpeg|gif|webp);base64, maximum 512KiB, valid base64 pattern. Never derive original fullDataUrl from raw model image payload.
+- Latest matching callId result authoritative; running call without result changes to completed/failed/cancelled only at terminal.
+
+`agentEventReducer.ts::settleAgentRunToolActivities` always runs both normalizers from durable toolCalls/toolResults and then terminal settlement when applicable. Current `storageConversationMapping.ts::mapMessageFromStorage` invokes this only for terminal runs. Expanding it to nonterminal statuses permits waiting/running recovery with existing algorithms and no UI change. Tests must verify safe source/thumbnail metadata, absence of full image data, no duplicated activities, and suspended status stays suspended.
+
+## File changes
+
+`agentEventReducer.ts::file_change_updated`: exact safe AgentFileChangeSnapshot upsert by transactionId. This snapshot is the required durable presentation input; no inline diff or temporary preview needed.
+`approvalState.ts::updateFileChangeFromToolResult`: applies apply_patch result only to an existing snapshot with same transactionId; status whitelist applied/already_applied/conflict/rejected/failed/outcome_unknown/aborted/expired; numeric additions/deletions/lineCount/byteCount replace when present; statsFinal=true, updatedAt.
+`updateFileChangeApprovalStatus`: only ordinary transaction-backed approval inlineDiff==null updates/creates snapshot; statuses required=>waiting_approval, rejected=>rejected, otherwise applying. Root should prefer authoritative FileChangeUpdated/store snapshot rather than create a synthetic empty conversationId snapshot.
+
+## Skill installation
+
+`agentEventReducerFileSkill.ts::mergeSkillInstallationApprovals`: for action.type=skill_installation, store `{action: action.installation, status: existingStatus ?? 'waiting_for_approval'}` keyed by installation.id. Preserve exact safe request shape `schemaVersion,id,installRef,preview,approvalStatus,expiresAt`. Preview contains name/description/sourceSummary/resolvedRevision/fileCount/totalBytes/resourceSummary/containsScripts/warnings/compatibility/operation/impact; validators in `persistedAgentRunApprovalValidators.ts::isSkillInstallationRequest` are strict.
+
+`applySkillInstallationDecision`: approved=>installation.approvalStatus=approved + installing; rejected=>rejected + rejected.
+`applySkillInstallationExecution`: exact execution.actionId; rejected status=>rejected; missing toolResult=>approved installing, all other statuses failed; toolResult.ok=false=>uncertain if result.commitMayHaveSucceeded true or lowercase result.code contains uncertain, otherwise failed; successful result.status=alreadyInstalled=>already_installed, else installed.
+
+`actionProjection.ts::getActionToolCall`: id=installation.id; tool=skills_commit_install; args={installRef}; no preview. Thus durable toolcall/result alone cannot reconstruct full installation preview/history once pending approval disappears. `history_projection.rs` currently has no skillInstallations branch and pending-action overlay only rebuilds MCP. Root must checkpoint safe approval installation action before publication and checkpoint settlement status as part of authoritative result before Renderer write removal. Merely persisting AgentEvent::ToolResult without the original safe action does not satisfy restore parity.
+
+Could reuse Renderer reducer for reading if Core persists action+state, but do not infer approval accepted from missing pending action or request completion. Durable rejection/cancellation and lost ACK must restore exact same installation id/status.
+
+## Explicit skills
+
+`explicitSkillSelections` = array of exactly `{id,revision}`; no name/source. `activatedSkills` = `{id,name,revision,source:{kind,id}}`. First trusted user admission may map selected activation list to explicit id/revision if that list only contains user selections. Resume must preserve an existing explicit field, including empty array. Legacy resume with missing explicit field cannot promote model-activated skills into user selections.

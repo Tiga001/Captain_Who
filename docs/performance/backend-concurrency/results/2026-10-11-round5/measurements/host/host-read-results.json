@@ -1,0 +1,663 @@
+{
+  "iterations": 20,
+  "messages": 256,
+  "proofEqual": true,
+  "deletionObserved": true,
+  "fullMetrics": [
+    {
+      "windowMs": 89.80470800000012,
+      "pendingPeak": 1,
+      "stdinBytesPeak": 0,
+      "clock": "host.performance.now",
+      "percentileKind": "fixed_bucket_upper_bound",
+      "bucketUpperBoundsMs": [
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000,
+        32000,
+        64000,
+        128000,
+        256000,
+        512000,
+        1024000
+      ],
+      "pendingCurrent": 0,
+      "stdinBytesCurrent": 0,
+      "oldestPendingMsPeak": 5.798167000000376,
+      "outcomes": {
+        "offered:storage.loadConversation": 20,
+        "completed:storage.loadConversation": 20
+      },
+      "traces": [
+        {
+          "rpcId": 5,
+          "method": "storage.loadConversation",
+          "elapsedMs": 5.02770799999962,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 6,
+          "method": "storage.loadConversation",
+          "elapsedMs": 5.802584000000024,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 7,
+          "method": "storage.loadConversation",
+          "elapsedMs": 4.2356249999998,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 8,
+          "method": "storage.loadConversation",
+          "elapsedMs": 4.088666999999987,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 9,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.9194159999997282,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 10,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.9128340000002026,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 11,
+          "method": "storage.loadConversation",
+          "elapsedMs": 4.70699999999988,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 12,
+          "method": "storage.loadConversation",
+          "elapsedMs": 4.372957999999926,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 13,
+          "method": "storage.loadConversation",
+          "elapsedMs": 4.265707999999904,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 14,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.7309589999999844,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 15,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.9112089999998716,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 16,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.684124999999767,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 17,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.628457999999682,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 18,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.5760409999998046,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 19,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.6032500000001164,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 20,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.5047080000003916,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 21,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.594250000000102,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 22,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.4816659999996773,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 23,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.5747080000001006,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 24,
+          "method": "storage.loadConversation",
+          "elapsedMs": 3.4297499999997854,
+          "outcome": "completed"
+        }
+      ],
+      "omittedTraces": 0,
+      "samples": {
+        "request.serialize:storage.loadConversation": {
+          "count": 20,
+          "totalMs": 0.041121999999177206,
+          "maxMs": 0.004249999999956344,
+          "p50UpperMs": 0.05,
+          "p95UpperMs": 0.05,
+          "p99UpperMs": 0.05,
+          "overflowCount": 0,
+          "bucketCounts": [
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 2035,
+          "maxBytes": 102
+        },
+        "request.stdin_written:storage.loadConversation": {
+          "count": 20,
+          "totalMs": 0.2957509999996546,
+          "maxMs": 0.033417000000099506,
+          "p50UpperMs": 0.05,
+          "p95UpperMs": 0.05,
+          "p99UpperMs": 0.05,
+          "overflowCount": 0,
+          "bucketCounts": [
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 0,
+          "maxBytes": 0
+        },
+        "response.parse:storage.loadConversation": {
+          "count": 20,
+          "totalMs": 13.985290000000077,
+          "maxMs": 1.059374999999818,
+          "p50UpperMs": 1,
+          "p95UpperMs": 1,
+          "p99UpperMs": 2,
+          "overflowCount": 0,
+          "bucketCounts": [
+            0,
+            0,
+            0,
+            0,
+            19,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 34694335,
+          "maxBytes": 1734717
+        },
+        "response:storage.loadConversation": {
+          "count": 20,
+          "totalMs": 89.44087599999875,
+          "maxMs": 6.27145900000005,
+          "p50UpperMs": 8,
+          "p95UpperMs": 8,
+          "p99UpperMs": 8,
+          "overflowCount": 0,
+          "bucketCounts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            17,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 0,
+          "maxBytes": 0
+        }
+      }
+    }
+  ],
+  "narrowMetrics": [
+    {
+      "windowMs": 6.437750000000051,
+      "pendingPeak": 1,
+      "stdinBytesPeak": 0,
+      "clock": "host.performance.now",
+      "percentileKind": "fixed_bucket_upper_bound",
+      "bucketUpperBoundsMs": [
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000,
+        32000,
+        64000,
+        128000,
+        256000,
+        512000,
+        1024000
+      ],
+      "pendingCurrent": 0,
+      "stdinBytesCurrent": 0,
+      "oldestPendingMsPeak": 0.3857919999995829,
+      "outcomes": {
+        "offered:storage.loadReadToolFileContext": 20,
+        "completed:storage.loadReadToolFileContext": 20
+      },
+      "traces": [
+        {
+          "rpcId": 25,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3548749999999927,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 26,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3447500000002037,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 27,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.30570899999975154,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 28,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3209999999999127,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 29,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3307089999998425,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 30,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3040000000000873,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 31,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.29187499999989086,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 32,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3168749999999818,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 33,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.33116700000027777,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 34,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.297458000000006,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 35,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3156659999999647,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 36,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.29283299999997325,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 37,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3863329999999223,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 38,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.2874170000000049,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 39,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.28987499999993815,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 40,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.2874170000000049,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 41,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.3095410000000811,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 42,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.2987910000001648,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 43,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.2859590000002754,
+          "outcome": "completed"
+        },
+        {
+          "rpcId": 44,
+          "method": "storage.loadReadToolFileContext",
+          "elapsedMs": 0.33462499999996,
+          "outcome": "completed"
+        }
+      ],
+      "omittedTraces": 0,
+      "samples": {
+        "request.serialize:storage.loadReadToolFileContext": {
+          "count": 20,
+          "totalMs": 0.022001999999702093,
+          "maxMs": 0.002457999999933236,
+          "p50UpperMs": 0.05,
+          "p95UpperMs": 0.05,
+          "p99UpperMs": 0.05,
+          "overflowCount": 0,
+          "bucketCounts": [
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 3200,
+          "maxBytes": 160
+        },
+        "request.stdin_written:storage.loadReadToolFileContext": {
+          "count": 20,
+          "totalMs": 0.11683399999992616,
+          "maxMs": 0.01412499999969441,
+          "p50UpperMs": 0.05,
+          "p95UpperMs": 0.05,
+          "p99UpperMs": 0.05,
+          "overflowCount": 0,
+          "bucketCounts": [
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 0,
+          "maxBytes": 0
+        },
+        "response.parse:storage.loadReadToolFileContext": {
+          "count": 20,
+          "totalMs": 0.03308100000049308,
+          "maxMs": 0.0036660000000665605,
+          "p50UpperMs": 0.05,
+          "p95UpperMs": 0.05,
+          "p99UpperMs": 0.05,
+          "overflowCount": 0,
+          "bucketCounts": [
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 5500,
+          "maxBytes": 275
+        },
+        "response:storage.loadReadToolFileContext": {
+          "count": 20,
+          "totalMs": 6.319749999999658,
+          "maxMs": 0.38783299999977316,
+          "p50UpperMs": 0.5,
+          "p95UpperMs": 0.5,
+          "p99UpperMs": 0.5,
+          "overflowCount": 0,
+          "bucketCounts": [
+            0,
+            0,
+            0,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "bytes": 0,
+          "maxBytes": 0
+        }
+      }
+    }
+  ],
+  "fullHostCpuMicros": {
+    "user": 41377,
+    "system": 12242
+  },
+  "narrowHostCpuMicros": {
+    "user": 924,
+    "system": 431
+  },
+  "scope": "Real Electron Host/Core pipe; sequential synthetic reads, no model, no file access, no UI paint or saturation claim"
+}

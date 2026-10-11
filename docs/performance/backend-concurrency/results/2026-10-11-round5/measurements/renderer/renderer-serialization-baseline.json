@@ -1,0 +1,76 @@
+{
+  "at": "2026-10-11T12:58:10.956Z",
+  "node": "v22.23.1",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M4",
+  "warmup": 20,
+  "caveats": [
+    "Advisory Node/Vite SSR microbenchmark; not real browser IPC/paint latency.",
+    "Other build/test work may run concurrently; timing is not an isolated performance gate.",
+    "Envelope is illustrative JSON-RPC shape and excludes Host protocol validation; UTF-8 byte counts and fixture hashes are deterministic.",
+    "No actual Host, model, database or external messages were invoked."
+  ],
+  "cases": [
+    {
+      "name": "short",
+      "rows": 1,
+      "samples": 1000,
+      "projectionUtf8Bytes": 1248,
+      "illustrativeEnvelopeUtf8Bytes": 4571,
+      "sha256": "b50561cbea7c578f9c5ce95bfa53949d9813d3d341db28329c01257e5e01cffe",
+      "mapping": {
+        "medianMs": 0.010167000000024018,
+        "p95Ms": 0.014750000000049113,
+        "maxMs": 0.7562920000000304,
+        "totalMs": 11.70351000000187
+      },
+      "illustrativeEnvelope": {
+        "medianMs": 0.005083000000013271,
+        "p95Ms": 0.0062079999999014035,
+        "maxMs": 0.5543749999999363,
+        "totalMs": 5.774158999999372
+      }
+    },
+    {
+      "name": "medium",
+      "rows": 100,
+      "samples": 300,
+      "projectionUtf8Bytes": 48455,
+      "illustrativeEnvelopeUtf8Bytes": 53164,
+      "sha256": "8cfa09cafb5def7bd20bb2d1668cf81763f1cd6a396fee497ec78cefa64a8ad9",
+      "mapping": {
+        "medianMs": 0.14279099999998834,
+        "p95Ms": 0.1882909999999356,
+        "maxMs": 0.47645799999986593,
+        "totalMs": 45.447377999998594
+      },
+      "illustrativeEnvelope": {
+        "medianMs": 0.060541999999941254,
+        "p95Ms": 0.06637499999999363,
+        "maxMs": 0.5460419999999431,
+        "totalMs": 20.333007000000862
+      }
+    },
+    {
+      "name": "long_trace",
+      "rows": 1000,
+      "samples": 60,
+      "projectionUtf8Bytes": 877755,
+      "illustrativeEnvelopeUtf8Bytes": 895064,
+      "sha256": "d1ee91c0673373e90b63b01f8828bd46faeec42549ba37ad1cbf3099a28b871a",
+      "mapping": {
+        "medianMs": 2.3550840000000335,
+        "p95Ms": 2.6123329999998077,
+        "maxMs": 5.447125000000142,
+        "totalMs": 143.15737899999954
+      },
+      "illustrativeEnvelope": {
+        "medianMs": 1.0247090000000298,
+        "p95Ms": 1.1349589999999807,
+        "maxMs": 1.2346249999998236,
+        "totalMs": 62.10520599999927
+      }
+    }
+  ]
+}

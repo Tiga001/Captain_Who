@@ -1,0 +1,21 @@
+{
+  "cwd": "/Users/shenhuajiao/mycopilot-next",
+  "argv": [
+    "pnpm",
+    "exec",
+    "vitest",
+    "run",
+    "--project",
+    "browser",
+    "src/renderer/src/features/agentCollaboration/__tests__/useCollaborationApprovals.browser.test.tsx",
+    "src/renderer/src/features/agentCollaboration/__tests__/CollaborationStoreHook.browser.test.tsx",
+    "src/renderer/src/features/chat/__tests__/ObserverConversationHook.browser.test.tsx"
+  ],
+  "command": "pnpm exec vitest run --project browser src/renderer/src/features/agentCollaboration/__tests__/useCollaborationApprovals.browser.test.tsx src/renderer/src/features/agentCollaboration/__tests__/CollaborationStoreHook.browser.test.tsx src/renderer/src/features/chat/__tests__/ObserverConversationHook.browser.test.tsx",
+  "started_at_utc": "2026-10-11T13:48:20.120112+00:00",
+  "completed_at_utc": "2026-10-11T13:48:24.931412+00:00",
+  "duration_seconds": 4.811278708,
+  "exit_code": 0,
+  "log": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round5-validation-20261011/refresh-browser-final.log",
+  "log_sha256": "dca04fd70bc4c151d471817a941781348e076719fe79294d13a6bdc3bc706d24"
+}

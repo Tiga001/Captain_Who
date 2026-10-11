@@ -1,0 +1,200 @@
+{
+  "round": 5,
+  "status": "implementation_and_round_validation_complete",
+  "start_commit": "df3e6f04ee1a8f14c8447b34841c76e50409ccbf",
+  "implementation_commit": "e7237ce5216b27201022c7625cd236f2eb78f8c6",
+  "run_id": "round5-full-20261011-r1",
+  "run_status": "completed",
+  "source_changed_during_run": false,
+  "source": {
+    "head": "e7237ce5216b27201022c7625cd236f2eb78f8c6",
+    "source_manifest_sha256": "a533e79cbd155d3d6ab94ec52fb8c5933d573774c295e196a0cdff38ebdac205",
+    "tracked_diff_sha256": "e02fea1ed258f22323ba93723f5d36969584cb82d18679c1d8abad8f11e44704"
+  },
+  "benchmark_binary": {
+    "path": "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-f7a97b10b9960ccf",
+    "sha256": "d9ab78afc2f4c1e56d386dcd8b71583736f416dc78661574f90d625122cfb2e9",
+    "size_bytes": 89519136,
+    "source": "provided"
+  },
+  "machine": {
+    "platform": "darwin",
+    "release": "25.5.0",
+    "architecture": "arm64",
+    "cpu_model": "Apple M4",
+    "logical_cpus": 10,
+    "total_ram_bytes": 17179869184
+  },
+  "run": {
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-f7a97b10b9960ccf",
+      "application::agent::tests::backend_concurrency_baseline::backend_concurrency_disk_baseline",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "signal": null,
+    "spawn_error": null,
+    "duration_ms": 200685.149541,
+    "resource_sampling": {
+      "withThreads": false,
+      "macThreads": true,
+      "interval_ms": 1000,
+      "scope": "test executable only; excludes runner/cargo and subprocesses",
+      "thread_count": "macOS ps -M thread rows; raw user/command fields discarded",
+      "rss": "ps rss KiB converted to bytes; low-frequency samples, not an exact peak"
+    },
+    "sampling_error": null
+  },
+  "results": {
+    "cases": 36,
+    "invalidLines": 0,
+    "integrityFailures": [],
+    "missing": false
+  },
+  "comparison_acceptance": "internally_consistent_evidence",
+  "comparison_violations": [],
+  "outcome_changes_requiring_interpretation": [],
+  "correctness": {
+    "suite_count": 43,
+    "unique_passed_tests": 1732,
+    "passed_executions": 1739,
+    "failed_executions": 0,
+    "ignored_executions": 1,
+    "ignored_tests": [
+      "storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery"
+    ]
+  },
+  "host_receipt": {
+    "binary": "/tmp/captain-backend-baseline-20261011-target/release/core-server",
+    "binary_sha256": "5d86b4e72e26ea35ad35a5ba685513370d3447b48a20cc6776948bdd119d4cc0",
+    "exit_code": 0,
+    "tests_passed": 1,
+    "duration_seconds": 4.207,
+    "results": "host-read-results.json",
+    "log": "host-read-results.log",
+    "initial_fixture_failure_log": "host-read-initial-fixture-failure.log",
+    "command": "CAPTAIN_CORE_TEST_BINARY=/tmp/captain-backend-baseline-20261011-target/release/core-server CAPTAIN_HOST_READ_REPORT=.cache/backend-concurrency/round5-validation-20261011/host-read-results.json pnpm exec vitest run --project electron-fixtures src/main/core/readToolContext.electron.test.ts",
+    "boundary": "Isolated Electron profile/Core data; 256 synthetic messages; one sequential sample, warmup then 20 full reads then 20 narrow reads; no model/provider/network operation, no real user data, no UI paint or saturation claim.",
+    "fixture_repair": "Bundled as CJS to support production Host __dirname. No production Host behavior changed. First attempt failed before starting Core.",
+    "started_at_utc": "2026-10-11T14:10:51.414151+00:00"
+  },
+  "boundary": "Microseconds; Core intake only, no renderer click latency. Exact success-only RPC quantiles and all-response counts remain separate; n=1 is one observation. Stage p95_upper_us is a histogram bucket bound. Fixed-rate completion/s is not maximum throughput. RSS/threads are sampled process-only peaks. A finite owner/slow-tool fixture cannot prove absence of sustained starvation or unobserved quota overflow.",
+  "limitations": [
+    "Round six soak, disk-full and full native UI end-to-end gates remain.",
+    "One full matrix per revision is not statistical significance or maximum throughput.",
+    "Core adds necessary headless persistence absent in the earlier no-Renderer baseline.",
+    "Writer reservation bytes are estimated logical payload budgets, not physical SQLite/disk bytes.",
+    "300ms checkpoint scheduling is not a hard bound under writer congestion or failure.",
+    "Done retains authoritative full-history read; selected synchronous barriers remain.",
+    "50-way send p95, steady p95, CPU, DB waits and estimated writer payload increased; no all-stack performance pass is claimed."
+  ],
+  "before": {
+    "directory": "/Users/shenhuajiao/mycopilot-next/docs/performance/backend-concurrency/results/2026-10-11-round4",
+    "cases_sha256": "811cea0dde514b826006abdec823f4c6d23cc570be38ea9536dfc4e5a9883c6e",
+    "source": {
+      "head": "e787b88d045549ea5d204f5c01f77f391b7cfc49",
+      "source_manifest_sha256": "158a6aec7a960ab3524a125fd118a2a5cffe62de7ba73bb99799816a39a12c0d",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "run_duration_ms": 200244.196333,
+    "resource_sample_count": 200,
+    "totals": {
+      "rpc": {
+        "offered": 1608,
+        "dispatch_admitted": 1572,
+        "success_response": 1572,
+        "rejected_or_error": 36,
+        "no_response": 0,
+        "busy_or_capacity_rejections": 36
+      },
+      "root_terminal_statuses": {
+        "Completed": 1316,
+        "Cancelled": 104
+      },
+      "child_terminal_statuses": {
+        "Completed": 158
+      },
+      "accepted_root_starts": 1420,
+      "reopened_root_turns": 1420,
+      "reopened_child_turns": 158,
+      "cpu_seconds": 76.01878400000001,
+      "sampled_rss_peak_bytes": 337543168,
+      "sampled_thread_peak": 42,
+      "post_reopen_in_progress": 0,
+      "pre_close_in_progress": 18,
+      "not_drained_before_cleanup": [
+        "approval-u50-r50-h0-s0",
+        "stop-u50-r50-h0-s0"
+      ]
+    },
+    "integrity_violations": [],
+    "database_aggregates": {
+      "sqlite.hold.seconds": 23.958009999999994,
+      "sqlite.read_hold.seconds": 21.206857,
+      "sqlite.read_wait.seconds": 9.832516,
+      "sqlite.wait.seconds": 0.001304,
+      "storage.queue_wait.seconds": 83.345337,
+      "writer_reservation_estimated_bytes": 895711966,
+      "writer_reservation_count": 74981,
+      "storage.worker_wait.seconds": 0.262523,
+      "instrumented_db_wait_seconds": 93.44168,
+      "connection_occupancy_seconds": 45.164866999999994
+    }
+  },
+  "after": {
+    "directory": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round5-full-20261011-r1",
+    "cases_sha256": "df34989725e017c7e283c4e366c88105a00c8b010ee88a40297c458e4cc04946",
+    "source": {
+      "head": "e7237ce5216b27201022c7625cd236f2eb78f8c6",
+      "source_manifest_sha256": "a533e79cbd155d3d6ab94ec52fb8c5933d573774c295e196a0cdff38ebdac205",
+      "tracked_diff_sha256": "e02fea1ed258f22323ba93723f5d36969584cb82d18679c1d8abad8f11e44704"
+    },
+    "run_duration_ms": 200685.149541,
+    "resource_sample_count": 201,
+    "totals": {
+      "rpc": {
+        "offered": 1608,
+        "dispatch_admitted": 1572,
+        "success_response": 1572,
+        "rejected_or_error": 36,
+        "no_response": 0,
+        "busy_or_capacity_rejections": 36
+      },
+      "root_terminal_statuses": {
+        "Completed": 1316,
+        "Cancelled": 104
+      },
+      "child_terminal_statuses": {
+        "Completed": 158
+      },
+      "accepted_root_starts": 1420,
+      "reopened_root_turns": 1420,
+      "reopened_child_turns": 158,
+      "cpu_seconds": 92.60574899999997,
+      "sampled_rss_peak_bytes": 348356608,
+      "sampled_thread_peak": 43,
+      "post_reopen_in_progress": 0,
+      "pre_close_in_progress": 18,
+      "not_drained_before_cleanup": [
+        "approval-u50-r50-h0-s0",
+        "stop-u50-r50-h0-s0"
+      ]
+    },
+    "integrity_violations": [],
+    "database_aggregates": {
+      "sqlite.hold.seconds": 26.695057,
+      "sqlite.read_hold.seconds": 31.828360000000004,
+      "sqlite.read_wait.seconds": 23.100183,
+      "sqlite.wait.seconds": 0.001311,
+      "storage.queue_wait.seconds": 87.74130400000001,
+      "writer_reservation_estimated_bytes": 1394852570,
+      "writer_reservation_count": 78756,
+      "storage.worker_wait.seconds": 0.16614,
+      "instrumented_db_wait_seconds": 111.00893800000001,
+      "connection_occupancy_seconds": 58.523417
+    }
+  }
+}

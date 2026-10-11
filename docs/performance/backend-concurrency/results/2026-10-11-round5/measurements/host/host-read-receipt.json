@@ -1,0 +1,14 @@
+{
+  "binary": "/tmp/captain-backend-baseline-20261011-target/release/core-server",
+  "binary_sha256": "5d86b4e72e26ea35ad35a5ba685513370d3447b48a20cc6776948bdd119d4cc0",
+  "exit_code": 0,
+  "tests_passed": 1,
+  "duration_seconds": 4.207,
+  "results": "host-read-results.json",
+  "log": "host-read-results.log",
+  "initial_fixture_failure_log": "host-read-initial-fixture-failure.log",
+  "command": "CAPTAIN_CORE_TEST_BINARY=/tmp/captain-backend-baseline-20261011-target/release/core-server CAPTAIN_HOST_READ_REPORT=.cache/backend-concurrency/round5-validation-20261011/host-read-results.json pnpm exec vitest run --project electron-fixtures src/main/core/readToolContext.electron.test.ts",
+  "boundary": "Isolated Electron profile/Core data; 256 synthetic messages; one sequential sample, warmup then 20 full reads then 20 narrow reads; no model/provider/network operation, no real user data, no UI paint or saturation claim.",
+  "fixture_repair": "Bundled as CJS to support production Host __dirname. No production Host behavior changed. First attempt failed before starting Core.",
+  "started_at_utc": "2026-10-11T14:10:51.414151+00:00"
+}

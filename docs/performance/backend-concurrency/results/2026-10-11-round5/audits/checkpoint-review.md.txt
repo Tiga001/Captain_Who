@@ -1,0 +1,100 @@
+# Round 5 checkpoint ownership review
+
+Reviewed 2026-10-11 against the shared working tree based on `df3e6f04`. This is a source review and test inventory, not a successful final build claim. Cargo is run centrally by the root agent. The two newly added human-input tests and the failure tests still require that final execution gate.
+
+## Assessment
+
+The ownership design is consistent: Runtime generates presentation updates; Core owns their durable checkpoint; Trace/pending/action audit/usage remain separate authorities; Renderer retains live presentation and independent UI state. The new marker is a revision/ownership marker, not a credential or a hash of every history response. History rebuilding legitimately changes display JSON while preserving the stored marker.
+
+The ownership document correctly distinguishes 300 ms scheduling from a hard durability deadline, acknowledges synchronous callback barriers, and does not attribute collaboration refresh savings to nonexistent per-token tree RPCs. It must not be treated as evidence that every described boundary has already passed the final tests.
+
+## Source-backed correctness
+
+- `storage/service/runtime_checkpoints.rs` checks the exact Conversation/assistant/Run and InProgress Trace inside the writer transaction. New segments receive a new UUID; stale generations, terminal/deleted/rewritten rows retire. Storage computes the request fingerprint. An exact retry replays; changed bytes at the same sequence and sequence gaps fail. The immutable unacknowledged request is retried before the next coalesced update.
+- `agent/runtime_checkpoint.rs` holds one latest presentation and one pending request, and allows at most the previous retry plus one current write per flush. The timer uses the existing maintenance executor. Confirmed file-change entries are removed from memory only if the current item still equals the confirmed item. Changed tool results remain until their own confirmation. No normal single-result tool path losing a concurrent update was found in this review.
+- Collection patches are additive by identity. Empty `readActivities`, `fileChanges`, `skillInstallations`, `toolCalls` and `toolResults` do not delete old rows. Only unanchored stream timeline entries are intentionally replaced. Read paths may resolve from relative to absolute; stable read identity is callId/tool/kind. Settled activity cannot regress to pending, and older timestamped activity cannot replace a newer item.
+- Checkpoint patches cannot modify top-level run status, usage or approvals. State patches are clamped to the stored owner/status. `chat_repository.rs` protects Core-owned content/run through message-state save, full conversation save and upsert. UI state remains independently writable. Full save returns actual committed protected messages through an in-transaction readback.
+- Canonical lifecycle projection permits the complete deferred display schema only for a valid Core marker. Legacy data keeps its stricter identity validation. History then binds checkpoint web/read display to durable builtin Trace identity and result status; richer web payloads and thumbnails cannot grant execution/file access.
+- Pending results still use existing audited settlement transactions. `pending_action_store/audit_and_transitions.rs` commits audit/target/paired ToolResult before publication. `file_change_projection.rs` selects public snapshots bound to exact builtin apply_patch Trace calls. `skill_installation_projection.rs` restores preview/status from exact pending/audit owner identity, including results occurring outside a running checkpoint segment. Renderer decision ACK overlays no longer need to save those authoritative fields.
+
+## Important findings and repair gates
+
+### 1. Human-input publication order required a production correction
+
+At initial review, `StoredBlockingHumanInput::suspend` admitted the synchronous request, wrote `content: String::new()`, and emitted `HUMAN_INTERACTION_REQUEST_CHANGED` before returning. Runtime emitted WaitingForUserInput only afterward (`core/runtime/driver.rs`), so the new State-event checkpoint barrier ran after the question had already become visible. `human_interaction_repository/sync.rs` also wrote that empty content over the current message. Therefore the document's statement that waiting input is published only after the presentation barrier was not yet true.
+
+The root agent has now implemented and this reviewer has read the corrected boundary in the Host suspension method: use the exact segment's checkpoint slot; after per-Run publication/token validation, flush before durable question admission; pass current checkpoint content into admission; restore staged usage on pre-admission failure. Successful admission marks usage staged and seals the retiring checkpoint before notification. The late State callback barrier has been removed. The same seal after successful pending-action storage prevents a later State/Done display failure from overturning an already-public waiting decision. The final integration tests remain required.
+
+New `runtime_checkpoint_human_tests.rs` supplies two real temporary-disk/loopback tests for this gate:
+
+1. No Renderer consumes events. Pause on a real request_user_input, release the worker, reopen Storage and AgentService, retain narration and Core marker, submit the original question twice with the same submission ID, and resume exactly once under the original Run/assistant/call identity. Final usage must be 24 tokens / two provider requests, with only the original user/assistant pair.
+2. A SQL trigger rejects only checkpoint revision advances. The actual human ToolCall is reached, but no request or suspension row and no request-changed notification may appear. The run settles failed; usage equals the controlled provider requests. This test permits the existing failed-tool recovery response, but no unbounded provider loop.
+
+Async human input does not pause the Runtime and uses the preexisting independent admission/response protocol. It must not be described as having the same synchronous waiting barrier. This review did not add a new async checkpoint interaction test.
+
+### 2. Checkpoint errors must preserve already-consumed usage and partial content
+
+The first implementation replaced the original Runtime result with a fresh persistence error, dropping usage/Trace/partial text. Its approval barrier also ran before waiting-segment usage staging. Root moved staging ahead of the approval barrier and added `segment_checkpoint_error` to carry original usage/Trace/partial text while avoiding double counting staged usage.
+
+The waiting-output special case remains a required test gate: the Runtime intentionally returns an empty `AgentChatOutput.content` for WaitingForApproval and WaitingForUserInput. Root has implemented fallback to the checkpoint's current content, plus a narrowly scoped terminal-error persistence path preserving nonempty partial content for `pending_action_persistence_failed`. The error itself remains recorded. This reviewer has read that implementation; centralized execution must still establish the expected outcome.
+
+`runtime_checkpoint_failure_tests.rs` exercises ordinary completion and RequireApproval with a checkpoint-only SQL failure. Expected results: terminal failed, 28 tokens / one billable request, original response preserved, no failed checkpoint acknowledged, no public pending action, no command execution. Until these pass, the ownership document's usage and pending-publication claims remain implementation requirements, not validated outcomes.
+
+### 3. Legitimate failed read display must not poison the pending request
+
+The mapper and existing Renderer permit read activity with `path: ""` when tool arguments are missing or invalid. The old storage/TS presentation validators rejected that shape. In the new immutable retry design this would pin a permanently invalid pending checkpoint and block subsequent good text.
+
+Rust and TS now accept empty display paths; execution/file authorization is unchanged. The new Core test stores a failed empty-path read with a matching Trace identity, then advances the same generation to a second text checkpoint and reloads it. Preparing owns the matching TS parse/recovery fixture. This repair should be included in final Core and renderer validation.
+
+## Recovery and double-write review
+
+- Startup restores/reconciles command sessions and pending actions before orphan Trace reconciliation. Resumable pending actions and waiting/claimed human suspensions exempt their exact Run from generic orphan failure. Ordinary orphaned InProgress traces can become failed/cancelled, never completed. This behavior is consistent with the document.
+- Runtime checkpoints do not resume sampling or recreate pending actions. They do not replace the persisted resume envelope or provider continuation vault. New segments only acquire a generation during actual preparation after token validation.
+- The foreground terminal reconciler loads authoritative history, merges independent live command-session view, and does not enqueue full message saves for a Core marker or an accepted exact Run binding. Legacy messages retain the old save path. Storage provides a second defense if an already-queued old save arrives late.
+- A history response can have reconstructed Trace/web/read/skill/file arrays whose bytes differ from the committed patch fingerprint. The implementation correctly compares the stored marker and immutable checkpoint request, rather than attempting to validate history response bytes against that fingerprint.
+- The child test shares the production Runtime checkpoint path and has no observer. It proves the intended ownership route only after the centralized test run passes; it does not establish all combinations of child pending action, reconnect, shutdown and startup recovery.
+
+## Remaining limits and claims to avoid
+
+- A storage outage delays durability beyond 300 ms. A permanently invalid or oversized patch cannot heal merely by retrying identical bytes. The pending request remains retained, and the final barrier must surface the failure without discarding usage or claiming success. This review fixed a concrete empty-path mismatch; it is not a proof that every possible malformed/oversized tool display has been exercised.
+- Changed-item patches reduce Runtime serialization and queue amplification, but storage still reads, validates and serializes the merged agentRun JSON. This is not a fully incremental per-field SQL store, a constant-cost history checkpoint, or a zero-copy implementation.
+- An existing hard executor byte limit still applies. No queue/thread/business concurrency limit was increased. Large legal combinations of display fields versus maintenance reservation limits need explicit measurements before making an unrestricted-size claim.
+- Synchronous approval/human barriers still wait for the single writer under per-Run guards. There is no global registry lock added by this checkpoint path, but the system is not wholly asynchronous.
+- A successful waiting handoff seals the old segment before its subsequent Waiting State/Done events. Root has now moved the normal waiting finish reason ahead of that seal: Runtime supplies the internal `ApprovalRequired.segment_finish_reason` (`serde(skip)`) or `AgentUserInputSuspension.finish_reason`; Host sets it before the successful checkpoint barrier. The human restart test now asserts `finishReason: "tool_calls"`. `None` remains an omitted update, not deletion of an inherited finish reason; this is also the current ordinary Done-mapper behavior. Business status/usage/question/pending authority still belongs to the handoff transaction.
+- File/skill pending-result recovery is source-backed and has targeted projection tests; all action kinds across lost ACK + restart + no Renderer have not been newly repeated in one round-5 matrix. Keep the established pending-action/usage regression suite in the final gate.
+- Core and Renderer intentionally share some display schema constraints, not execution authority. Do not state that all web/read presentation is recoverable from bounded Trace alone: richer safe checkpoint inputs are necessary.
+- Collaboration benchmark CPU figures in `collaboration-refresh-results.json` are synthetic Node fixture CPU, not browser/Core end-to-end CPU. Browser assertions prove request count/peak and final projection equality. Tree reads for 100 durable events remain 100; the reduced approval reads come from narrowing invalidation to the ten approval events. Reconnect hydration intentionally causes one approval repair even if sequence is unchanged.
+
+## Validation inventory
+
+Previously executed frontend gates: 31 collaboration unit tests, 41 related browser tests, four before/after browser refresh fixtures, targeted lint and web typecheck. These are historical results from their recorded source state; final root validation is authoritative after later shared changes.
+
+The 31-test unit group and 41-test browser group were re-executed against the frozen working tree on 2026-10-11, 13:48:17–13:48:24 UTC. Both passed all three selected files with exit code 0. Raw evidence is `refresh-unit-final.log` and `refresh-browser-final.log`; adjacent JSON files include exact argv/command, cwd, UTC timestamps, duration, exit code and log SHA-256. No source changes, Cargo runs or remaining selected Vitest process accompanied the rerun. These are correctness timings, not performance matrix measurements.
+
+Current source includes 14 Core runtime-checkpoint tests, ordinary stream/process-crash tests, two child tests, two persistence-failure tests, and two human-input tests. This reviewer ran rustfmt and diff checks only for the new Rust files, and did not run Cargo. Final build/test output must determine acceptance. No production data, actual provider billing, or outside communications are involved in these fixtures.
+
+## Final frozen-source follow-up
+
+The follow-up source review confirmed both normal waiting paths deliver `Some(finishReason)` before flushing and sealing. The field is internal and does not alter public ApprovalRequired JSON. `seal_waiting` changes only the old checkpoint object's in-memory retired flag; it does not write a terminal status, alter Trace authority or claim execution completion.
+
+Both initial-run launch and action continuation pass partial text to the changed failure persistence helper only for `pending_action_persistence_failed`. Other errors retain their former persistence path, while the diagnostic remains present even when checkpoint-failure text is preserved. The empty-output cancellation fallback reads a fully shape-validated Core-owned projection from the same transaction, checks the run ID, and is invoked only for matching Cancelled Trace/conversation/assistant identity. Nonempty output, ordinary successful empty output and legacy messages do not use that cancellation fallback. Existing child Wake fencing and terminal CAS still execute afterward. Waiting-for-approval content preservation is separately guarded by exact InProgress Trace and still-pending action identity.
+
+No further source-level blocker was identified in these follow-up paths. This is not a replacement for the final failure, cancellation, waiting/reopen and pending-action regression results.
+
+
+## Final admission audit
+
+Removing the Renderer accepted-save exposed an additional interval for explicit Skill selections: successful admission to Runtime scheduling and the first checkpoint. The safe initial assistant projection now includes explicit id/revision, activated summaries and activation revision in the original admission transaction. It has no authority marker or private instructions. Two real-disk tests inspect the raw row before any Runtime/loader overlay, reopen it, retain it through begin/canonical failed reconciliation, and verify final-admission fence rollback. The final regression runner includes the complete skills suite. Existing legacy Skill fixtures now explicitly inject InMemoryCredentialStore; assertions and production credential guard are unchanged.
+
+Model ID already belongs to admission. Full ordinary-root runtime provider/permission configuration was also memory-only before this change; a crash without valid pending/suspension retires the orphan, and does not select a new current configuration to resume it. Pending/human resume retains the existing frozen resume input. Presentation is never the permission/model authority.
+
+No reachable late old fullsave route was found in the current Renderer/IPC: accepted marks the exact Core-owned tuple before replay; optimistic successful pairs are not enqueued; local failure upsert is insert-only. The internal StorageService full-save method itself has no marker protection until begin, so this is a call-path claim, not a promise that arbitrary future internal callers are safe.
+
+
+## Final Stop audit
+
+Ordinary Stop records tree-stop facts and signals the exact token; it does not directly terminalize an active root. Events enter the coalescer before notification. runtime_segment stops/joins its timer and awaits final flush before launch persists a cancelled terminal. Core apply does not reject a still-InProgress owner merely because the cancel token/stop fact is set. Thus an ordinary completed cancellation includes the latest coalescer, including a delta before the first 300 ms tick. The cancel RPC itself remains a signal ACK, not durable body/terminal confirmation. The prior Renderer Stop also invoked its flush without awaiting it. Startup/no-owner/forced-shutdown paths can preserve only confirmed data; child observers were never authoritative writers.
+
+## Final regression acceptance
+
+43 release filters: 1,732 unique tests / 1,739 passed executions, zero failed; one existing ignored. Final server test binary d9ab78afc2f4c1e56d386dcd8b71583736f416dc78661574f90d625122cfb2e9. The obsolete global admission-lock recovery fixture was corrected to hold the actual recovery worker; all original ordering/capacity assertions remain, and the new deterministic barrier passed 20 additional repeats. This fixture-only repair did not change production recovery ordering.

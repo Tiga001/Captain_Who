@@ -1,0 +1,25 @@
+{
+  "recorded_at": "2026-10-11 13:47:02 UTC",
+  "working_directory": "/Users/shenhuajiao/mycopilot-next",
+  "checks": [
+    {
+      "command": "pnpm exec vitest run --project unit src/main/core/coreServer.conversationReads.test.ts src/main/workspaceFiles/ReadToolFileSource.test.ts packages/protocol/src/storageReadToolFileContext.test.ts src/main/core/rpcDiagnostics.test.ts src/main/core/jsonRpcClient.environment.test.ts",
+      "log": ".cache/backend-concurrency/round5-validation-20261011/host-unit-final.log",
+      "exit_code": 0,
+      "suites_passed": 5,
+      "tests_passed": 54,
+      "duration_ms": 834
+    },
+    {
+      "command": "pnpm typecheck:node",
+      "log": ".cache/backend-concurrency/round5-validation-20261011/host-typecheck-node-final.log",
+      "exit_code": 0
+    },
+    {
+      "command": "pnpm exec eslint src/main/core/coreServerStorageApi.ts src/main/core/coreServer.conversationReads.test.ts src/main/core/rpcDiagnostics.ts src/main/core/rpcDiagnostics.test.ts src/main/core/jsonRpcClient.environment.test.ts src/main/workspaceFiles/ReadToolFileSource.ts src/main/workspaceFiles/ReadToolFileSource.test.ts packages/protocol/src/storageReadToolFileContext.ts packages/protocol/src/storageReadToolFileContext.test.ts packages/protocol/src/index.ts src/main/core/fixtures/readToolContext.electron.ts src/main/core/readToolContext.electron.test.ts",
+      "log": ".cache/backend-concurrency/round5-validation-20261011/host-eslint-final.log",
+      "exit_code": 0
+    }
+  ],
+  "notes": "Each process completed with exit code 0. ESLint emitted no output on success. No Electron performance fixture or Cargo invocation was run."
+}

@@ -1,0 +1,64 @@
+# Round 5 Renderer / recovery handoff
+
+Status: implementation complete and frozen. Final accepted browser, unit, web typecheck and owned-source ESLint evidence passed. All data are temporary/fake; no real user database, paid model, external messages, application restart or Cargo invocation by this worker. No commit/push. This document is a cache-only evidence draft.
+
+## Ownership and exact boundaries
+
+- Successful start/rewrite/continue admission, including exact-pair readback after a lost start ACK, records Core ownership before buffered event replay. Ownership registry compares conversation ID, assistant message ID and run ID; pruning happens at ownership changes, not on each 80ms stream update.
+- A loaded valid `coreCheckpoint` marks an existing Core projection. A `started` event upgrades a legacy run because Core installs its checkpoint generation before publishing Started. A successful authoritative approve/reject/cancel ACK upgrades only the originally bound message/run; negative or lost ACK does not upgrade and leaves the original action retryable.
+- Core-owned runtime events still use the same Renderer reducers and 80ms delta UI batching. They no longer enqueue full assistant-state immediate saves or 300ms checkpoints. Event-derived updatedAt still updates local presentation; event-derived full metadata writes are omitted. Independent unread/UI metadata, user drafts, unaccepted local input and queue edits remain.
+- Approval/Stop `flushRunMessagePersistence` synchronously applies buffered local text, then returns immediately for a Core-owned exact message. The diagnostics label `preflush` remains for compatibility, but it no longer drains a persistence queue for that path. Legacy records retain their prior single-message flush before decisions.
+- Done still reads and merges the authoritative conversation to recover complete bounded-buffer-overflow traces and preserve newer live managed-command state. Core-owned terminal messages are not written back and have no Renderer write fence. The next queued send still waits for this read and any legacy writes. This remaining full read is an explicit limitation, not removed or bypassed by a new bulk queue/DTO.
+- A failed project deletion no longer writes a guessed cancelled state over any bound run. Its existing local presentation remains; only unbound local attempts may be saved through that fallback.
+- The persistence entry point independently refuses to enqueue a loaded Core checkpoint as a full message save; favorite/UI state uses its separate queue and still saves.
+
+## Failure, retry and quit semantics
+
+`PersistenceDrain` preserves metadata/UI latest payloads and FIFO insert payloads after a rejected write. Explicit flush rejects rather than falsely acknowledging success; later enqueue or explicit flush can retry. The message queue retains the failed identity unless a newer accepted payload supersedes it. No automatic infinite failure loop was added. Background errors remain logged once by their adapter; explicit action/quit boundaries retain the rejection.
+
+Quit seals/flushed message state and drains metadata, insert and UI queues, including a UI-only session or work enqueued while the quit barrier is active. Any relevant failure rejects the quit confirmation and keeps the pending payload. No capacity, quota or queue-size changes were made.
+
+## Send / preflight counts
+
+The current provider path already issues one preflight per actual send. It is retained, including Core's final permission/configuration/history-revision admission validation. No cross-revision cache was added. Core admission already atomically owns the conversation metadata and initial user/assistant pair; its duplicate optimistic Renderer metadata enqueue was removed. Explicit refusal recreates the local empty conversation metadata, and an uncertain local failure already queues metadata before its insert-only pair fallback.
+
+The existing browser fixture uses 9 message deltas at 80ms each followed by Done. Before the ownership cutover, it asserted 2 checkpoint full saves plus 1 terminal full save after resetting the acceptance write counter; acceptance itself had 1 full save (4 total). The accepted implementation asserts 0 full-message save calls through acceptance, streaming and Done, 0 event metadata and 0 pair upserts, while preserving 1 preflight and 1 start RPC. This is an observed deterministic mocked-bridge call-count comparison, not a real Host/SQLite latency result. No claim is made that every application path has zero serialization; drafts, local inputs, legacy saves and terminal reads still serialize.
+
+The cache `renderer-serialization-baseline.json` uses the real safe persisted-run serializer with identical synthetic fixtures on Node/Vite SSR. A 1000-row trace is 877755 projection UTF-8 bytes (895064 in an illustrative envelope); safe mapping median 2.355084ms and p95 2.612333ms over 60 samples. Those advisory timings ran with potentially concurrent builds; the envelope is illustrative and excludes actual Host validation. They demonstrate avoided full-projection cost, not end-to-end latency or CPU/RSS improvement.
+
+Sidebar rename uses its existing direct metadata call outside this hook's queue. Neither the old nor the retained send flush fences that direct call; this round did not alter the business path.
+
+## Recovery fields
+
+The strict TS persisted projection whitelist retains `coreCheckpoint: { generation, sequence, fingerprint }` with UUID, nonnegative safe integer and lowercase 64-hex validation. Legacy projections without a marker remain accepted.
+
+The real storage conversation mapper normalizes web/read activities for all six run statuses using the existing display reducers; only terminal statuses settle pending activity. Safe raw web/read ToolCall/ToolResult inputs and exact read thumbnails are retained by Core's separate projection work. Failed reads with an empty display path remain valid; this affects no file source authority.
+
+Skill installation recovery is shared in `core/storage/service/conversations/skill_installation_projection.rs`: runtime approval/done/tool-result events produce only safe action/status records; history rebuild joins terminal-inclusive pending actions to the same conversation/message/run trace and audit receipt using the caller's existing Connection. It does not repeat an external action, copy raw result bodies, open another connection, or write history. Approval states without a valid completion receipt remain uncertain rather than inventing success. Root owns the Rust compilation and final execution evidence.
+
+## Tests and evidence
+
+- `renderer-authority-accepted.log`: final source 183/183 browser tests passed, including AppShell recovery (173), persistence queue (7) and protected action logging (3).
+- `renderer-authority-unit-fixed.log`: 43/43 tests passed (activity mapper, marker contract, checkpoint queue and pending-action ACK semantics).
+- `renderer-authority-typecheck-accepted.log`: final web tsc passed.
+- `renderer-authority-lint-accepted.log`: owned-source ESLint passed.
+- `renderer-recovery-unit-fixed.log`: earlier broader web/read recovery group 38/38 passed.
+- Earlier `authority-first/second`, initial marker/path fixture failures and initial lint logs are diagnostic only. Old test expectations required Renderer writes; the replacement tests require the same UI recovery with no writes. The final metadata dedup fix removes a duplicate local-failure enqueue, not an error propagation path. The empty-path fixture initially passed a JSON string to the object parser; it now calls the correct parser shape and the actual mapper.
+
+Repro commands:
+
+```sh
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx src/renderer/src/app/__tests__/useConversationPersistence.browser.test.tsx src/renderer/src/app/__tests__/McpActionDecisionSafety.browser.test.tsx
+pnpm exec vitest run --project unit src/renderer/src/features/chat/__tests__/storageConversationActivityRecovery.test.ts src/renderer/src/features/chat/__tests__/persistedAgentRunProjectionContract.test.ts src/renderer/src/app/__tests__/chatMessagePersistence.test.ts src/renderer/src/app/__tests__/pendingActionDecision.test.ts
+pnpm exec tsc --noEmit -p tsconfig.web.json --composite false
+```
+
+No UI text, style, layout, entry point, external model, paid quota, business authorization or queue limit was changed. Test harness buttons are test-only.
+
+## Storage query-count regression follow-up
+
+The full Rust storage suite reported detail SELECT count 15→17 and workflow Trace body count 1→2. The unconditional FileChange overlay was the avoidable query: its SQL already requires an exact builtin `apply_patch` call in the same durable trace. `history_projection.rs` now reuses the trace bodies already loaded on the caller's read connection and invokes that helper only when a selected assistant has that exact builtin source. The helper still performs its call/run identity proof in SQL, and relevant FileChange recovery remains in the same SQLite snapshot. No auxiliary cache, connection or additional Trace read was introduced.
+
+Skill installation recovery retains one batched pending-action/audit query whenever trace headers exist. Absence of a Skill ToolCall is not proof of absence: external approval API completion can persist only pending/audit evidence. The explicit detail bound is therefore 16 SELECTs, and the independent equality between 1 and 12 assistant histories remains enforced. Added assertions require exactly one Skill overlay query, zero FileChange queries for ordinary history and exactly one Trace body read. The workflow invariant remains `[1,1,1]`, unchanged.
+
+A new real-disk service fixture `conversation_file_change_overlay_query_requires_a_builtin_patch_in_loaded_trace` inserts a durable FileChange and verifies three cases: builtin apply_patch issues exactly one overlay query and restores applied status/statistics without private bodies; another builtin and a same-named runtime extension issue no query and add no overlay. Formatting and diff whitespace checks passed. This worker did not run Cargo; parent must compile and execute the three affected filters before accepting this follow-up.

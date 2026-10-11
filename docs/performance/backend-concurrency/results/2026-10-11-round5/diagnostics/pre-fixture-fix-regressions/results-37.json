@@ -1,0 +1,18 @@
+[
+  {
+    "index": 37,
+    "kind": "server",
+    "filter": "runtime_checkpoint",
+    "returncode": 0,
+    "duration_s": 4.156,
+    "log": "37-runtime_checkpoint.log",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "66d4e39edb516d5e17ae17ce9a8c5cc02b70e844b242691d3fbab2aaf56fca95"
+  }
+]

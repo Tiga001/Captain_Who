@@ -1,0 +1,88 @@
+{
+  "binary": "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-f7a97b10b9960ccf",
+  "sha256": "d9ab78afc2f4c1e56d386dcd8b71583736f416dc78661574f90d625122cfb2e9",
+  "test": "application::agent::turn_executor::runtime_isolation_tests::receipt_recovery_wait_does_not_occupy_completion_worker",
+  "iterations": [
+    {
+      "iteration": 1,
+      "exit_code": 0
+    },
+    {
+      "iteration": 2,
+      "exit_code": 0
+    },
+    {
+      "iteration": 3,
+      "exit_code": 0
+    },
+    {
+      "iteration": 4,
+      "exit_code": 0
+    },
+    {
+      "iteration": 5,
+      "exit_code": 0
+    },
+    {
+      "iteration": 6,
+      "exit_code": 0
+    },
+    {
+      "iteration": 7,
+      "exit_code": 0
+    },
+    {
+      "iteration": 8,
+      "exit_code": 0
+    },
+    {
+      "iteration": 9,
+      "exit_code": 0
+    },
+    {
+      "iteration": 10,
+      "exit_code": 0
+    },
+    {
+      "iteration": 11,
+      "exit_code": 0
+    },
+    {
+      "iteration": 12,
+      "exit_code": 0
+    },
+    {
+      "iteration": 13,
+      "exit_code": 0
+    },
+    {
+      "iteration": 14,
+      "exit_code": 0
+    },
+    {
+      "iteration": 15,
+      "exit_code": 0
+    },
+    {
+      "iteration": 16,
+      "exit_code": 0
+    },
+    {
+      "iteration": 17,
+      "exit_code": 0
+    },
+    {
+      "iteration": 18,
+      "exit_code": 0
+    },
+    {
+      "iteration": 19,
+      "exit_code": 0
+    },
+    {
+      "iteration": 20,
+      "exit_code": 0
+    }
+  ],
+  "purpose": "Deterministic worker gate replaces an obsolete global-lock timing assumption; repeats follow the single final regression suite and are not added to unique test counts."
+}

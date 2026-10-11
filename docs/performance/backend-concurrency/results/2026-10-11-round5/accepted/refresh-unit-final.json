@@ -1,0 +1,21 @@
+{
+  "cwd": "/Users/shenhuajiao/mycopilot-next",
+  "argv": [
+    "pnpm",
+    "exec",
+    "vitest",
+    "run",
+    "--project",
+    "unit",
+    "src/renderer/src/features/agentCollaboration/collaborationStore.test.ts",
+    "src/renderer/src/features/agentCollaboration/collaborationStoreCache.test.ts",
+    "src/renderer/src/features/agentCollaboration/trailingRefresh.test.ts"
+  ],
+  "command": "pnpm exec vitest run --project unit src/renderer/src/features/agentCollaboration/collaborationStore.test.ts src/renderer/src/features/agentCollaboration/collaborationStoreCache.test.ts src/renderer/src/features/agentCollaboration/trailingRefresh.test.ts",
+  "started_at_utc": "2026-10-11T13:48:17.533178+00:00",
+  "completed_at_utc": "2026-10-11T13:48:20.119525+00:00",
+  "duration_seconds": 2.5859319579999998,
+  "exit_code": 0,
+  "log": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round5-validation-20261011/refresh-unit-final.log",
+  "log_sha256": "699ac11ef2b51cc9b5f5a2112bc3448e20b9fd1adb6326b52b7795412bee6a62"
+}

@@ -70,32 +70,34 @@ fixture 和测试为准。
 
 ## 开发、发布与运维
 
-| 文档                                                                                   | 内容                                            |
-| -------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| [开发环境与启动](development/getting-started.md)                                       | 前置依赖、安装、开发启动和常用命令              |
-| [仓库结构](development/repository-layout.md)                                           | 目录职责和依赖规则                              |
-| [设置与配置](development/settings-and-configuration.md)                                | 配置范围、持久化、CAS 和敏感值                  |
-| [测试体系](development/testing.md)                                                     | 单元、集成、浏览器、压力和发布测试              |
-| [构建与发布](development/build-and-release.md)                                         | 平台构建、签名、产物验证和发布清单              |
-| [运行时组件](development/runtime-components.md)                                        | Office、Artifact、Managed Playwright 等冻结组件 |
-| [故障排查](development/troubleshooting.md)                                             | 启动、存储、MCP、浏览器、Office 和打包问题      |
-| [术语表](development/glossary.md)                                                      | 进程、Agent、工具、数据与测试术语               |
-| [文档维护规范](development/documentation-guide.md)                                     | 文档分类、元数据、评审触发器和完成标准          |
-| [多智能体发布门禁](operations/multi-agent-release-gate.md)                             | 确定性压力与恢复门禁                            |
-| [后端并发性能基线](performance/backend-concurrency/PROGRESS.md)                        | 六轮后端优化的基线、契约、测量与交付记录        |
-| [后端性能结果](performance/backend-concurrency/results.md)                             | 实测数据、原始结果与已知限制                    |
-| [并发与存储契约](performance/backend-concurrency/architecture-contracts.md)            | 资源归属、原子性、恢复及迁移边界                |
-| [并发性能验收](performance/backend-concurrency/acceptance.md)                          | 性能目标、竞态回归与比较方法                    |
-| [Host 与 Renderer 测量](performance/backend-concurrency/host-renderer-measurement.md)  | 诊断入口、请求关联及计时口径                    |
-| [阻塞隔离与生命周期](performance/backend-concurrency/round2-blocking-lifecycle.md)     | 第二轮有界执行器、租约与关机边界                |
-| [第二轮后端性能结果](performance/backend-concurrency/round2-results.md)                | 阻塞隔离前后实测、正确性验证与迁移边界          |
-| [存储执行架构](performance/backend-concurrency/round3-storage-execution.md)            | 第三轮提交可见性、写通道、读池与 WAL 管理       |
-| [同步存储迁移库存](performance/backend-concurrency/round3-legacy-storage-inventory.md) | 剩余兼容入口、读取解码与后续迁移边界            |
-| [第三轮后端性能结果](performance/backend-concurrency/round3-results.md)                | 存储迁移实测、正确性验证、资源成本与第四轮门禁  |
-| [第四轮资源调度契约](performance/backend-concurrency/round4-resource-scheduling.md)    | Preparing、按资源排序、恢复、权限与删除边界     |
-| [第四轮后端性能结果](performance/backend-concurrency/round4-results.md)                | 资源排序实测、正确性验证、回退与第五轮门禁      |
-| [恢复 Runbook](operations/recovery-runbook.md)                                         | 数据、Agent、命令、MCP 与运行时恢复             |
-| [威胁模型](security/threat-model.md)                                                   | 信任边界、受保护资产和残余风险                  |
+| 文档                                                                                    | 内容                                            |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [开发环境与启动](development/getting-started.md)                                        | 前置依赖、安装、开发启动和常用命令              |
+| [仓库结构](development/repository-layout.md)                                            | 目录职责和依赖规则                              |
+| [设置与配置](development/settings-and-configuration.md)                                 | 配置范围、持久化、CAS 和敏感值                  |
+| [测试体系](development/testing.md)                                                      | 单元、集成、浏览器、压力和发布测试              |
+| [构建与发布](development/build-and-release.md)                                          | 平台构建、签名、产物验证和发布清单              |
+| [运行时组件](development/runtime-components.md)                                         | Office、Artifact、Managed Playwright 等冻结组件 |
+| [故障排查](development/troubleshooting.md)                                              | 启动、存储、MCP、浏览器、Office 和打包问题      |
+| [术语表](development/glossary.md)                                                       | 进程、Agent、工具、数据与测试术语               |
+| [文档维护规范](development/documentation-guide.md)                                      | 文档分类、元数据、评审触发器和完成标准          |
+| [多智能体发布门禁](operations/multi-agent-release-gate.md)                              | 确定性压力与恢复门禁                            |
+| [后端并发性能基线](performance/backend-concurrency/PROGRESS.md)                         | 六轮后端优化的基线、契约、测量与交付记录        |
+| [后端性能结果](performance/backend-concurrency/results.md)                              | 实测数据、原始结果与已知限制                    |
+| [并发与存储契约](performance/backend-concurrency/architecture-contracts.md)             | 资源归属、原子性、恢复及迁移边界                |
+| [并发性能验收](performance/backend-concurrency/acceptance.md)                           | 性能目标、竞态回归与比较方法                    |
+| [Host 与 Renderer 测量](performance/backend-concurrency/host-renderer-measurement.md)   | 诊断入口、请求关联及计时口径                    |
+| [阻塞隔离与生命周期](performance/backend-concurrency/round2-blocking-lifecycle.md)      | 第二轮有界执行器、租约与关机边界                |
+| [第二轮后端性能结果](performance/backend-concurrency/round2-results.md)                 | 阻塞隔离前后实测、正确性验证与迁移边界          |
+| [存储执行架构](performance/backend-concurrency/round3-storage-execution.md)             | 第三轮提交可见性、写通道、读池与 WAL 管理       |
+| [同步存储迁移库存](performance/backend-concurrency/round3-legacy-storage-inventory.md)  | 剩余兼容入口、读取解码与后续迁移边界            |
+| [第三轮后端性能结果](performance/backend-concurrency/round3-results.md)                 | 存储迁移实测、正确性验证、资源成本与第四轮门禁  |
+| [第四轮资源调度契约](performance/backend-concurrency/round4-resource-scheduling.md)     | Preparing、按资源排序、恢复、权限与删除边界     |
+| [第四轮后端性能结果](performance/backend-concurrency/round4-results.md)                 | 资源排序实测、正确性验证、回退与第五轮门禁      |
+| [运行持久化与前端责任](performance/backend-concurrency/round5-persistence-ownership.md) | 第五轮检查点、所有权、恢复与调用链契约          |
+| [第五轮后端性能结果](performance/backend-concurrency/round5-results.md)                 | 持久化责任、跨层调用实测、恢复验证与第六轮门禁  |
+| [恢复 Runbook](operations/recovery-runbook.md)                                          | 数据、Agent、命令、MCP 与运行时恢复             |
+| [威胁模型](security/threat-model.md)                                                    | 信任边界、受保护资产和残余风险                  |
 
 ## 决策与历史
 

@@ -1,0 +1,78 @@
+# 第五轮 Renderer 保存/发送/审批链审计
+
+基线：df3e6f04ee1a8f14c8447b34841c76e50409ccbf。只读审计于 2026-10-11；下文调用数为源码及已有测试断言推导，尚非本轮实测。未连接真实用户库、模型或运行中软件。
+
+## 当前所有权与必要边界
+
+| 路径/数据 | 当前实现 | 第五轮可改条件 |
+|---|---|---|
+| 普通 turn 初始用户/assistant 对 | Core start/continue/rewrite 原子接纳；Renderer 只先建乐观内存对并保存 metadata，接受后仍全量写一次 assistant | Core 接纳返回和重启恢复包含完整 Renderer 需要的 run 投影后去掉接受后重复写 |
+| 流式正文/stream checkpoint | Renderer 80ms 展示合并；300ms 固定窗口写整个 content/status/agentRunJson | Core 有相同正文/previousContent reset 恢复、300ms 固定窗口和等待/终态屏障；不能仅依赖终态 Trace |
+| 普通审批 | flush delta + flush 单消息 -> 1 decision RPC -> ACK 后 reducer + 全消息保存 + metadata | Core pending/decision/result 均 durable；旧 Renderer 写不可覆盖新 Core revision；只有之后去掉 preflush 和结果写回 |
+| 子观察/子审批 | readonly observer snapshot + 内存 overlay；decision ACK 或 durable event/list 恢复 | 不能泛称与普通链相同；依赖 Core observer/pending authority，由 access_lifecycle 审核 |
+| Done 终态 | Core 已原子落盘，Renderer loadConversation 回读 Trace 全量，再把合并后的消息写回并 flush，防止更早 Renderer snapshot 覆盖 | 去掉所有普通 run 写回并有 Core 旧写围栏后才能去掉此写后 fence；保留权威读取/内存合并 |
+| commandSession | Core Session 独立权威，Renderer list/get 回读；终态及 missing/outcome_unknown 会再写 run | 若 Core 查询投影完备可停掉重复投影写；仍保留本地 overlay 和诊断 |
+| metadata/UI/draft | 标题、收藏、折叠、排序/未读、draft、归档等用户状态 | 继续单独持久化；不随着 run 写回一刀切移除 |
+| 未接纳/不确定的本地失败 pair | 明确拒绝回滚；未知接纳查精确消息 ID，不重新 start；本地可见失败 pair 才允许 upsert | 保留现语义。ACK 丢失不等于未提交，不能提前成功或重发新 turn |
+
+主要源码：useConversationPersistence.ts、chatMessagePersistence.ts、useAgentRunLifecycle.ts、useRequestAssistantResponse.ts、useAppShellMessageSubmission.ts、useAgentActionDecisionHandlers.ts、pendingActionDecision.ts。
+
+## Core 无 Renderer 保存的字段核对
+
+`features/storage/persistedAgentRun.ts` 严格 `hasExactKeys`；`chatTypes.ts` 的 ChatAgentRunView 是实际消费模型。新 owner marker 必须同步 TS 和 Rust validator，且不允许 legacy/untrusted JSON 自称 Core 权威。
+
+Core Trace/history_projection 可重建：toolCalls/toolResults、带 traceSequence 的 narration/error/context_compaction/guidance/workflow Timeline、activatedSkills/skillActivationRevision；Session/MCP/协作有独立 durable store/投影。但 history_projection 对既有 JSON 的保留不等于从零恢复保证。
+
+当前 Renderer 生成而 Core history_projection 并不从 Trace 主动构建的重点：
+
+- content、messageStreamCheckpoints[streamId].previousContent，以及 reset/commit 时对正文/Timeline 的撤销和提交。
+- toolDefinitions、toolSetRevision（Started/ToolSetChanged）；todo（TodoUpdated）；state（State）。
+- startedAt、firstResponseAt、lastResponseAt、completedAt（现部分是 Renderer 接收时刻，Core 时间会有不同但应保持定义/显示行为）。
+- explicitSkillSelections（接受输入时的显式 skills，不得混成 model 动态 activatedSkills）。
+- webSearchActivities/readActivities（ToolCall/ToolResult 的展示投影）；fileChanges（FileChangeUpdated/ToolResult）；skillInstallations（审批历史）。
+- usage/finishReason、安全 interruption/error/userInterrupted，须覆盖运行中、等待和终态，而不只终态 Done。
+
+不可持久化：fileChangePreviews、commandOutputPreviews、llmRetry、modelActivity、modelActivityAttempts、finalAnswerReady；protected MCP/capability/browser/file approval payload 仍从权威 pending store 回读。持久 projection 只能保存安全摘要和既有 schema 字段，不能把 runtime event 任意 JSON 化塞入历史。
+
+## flush、失败与 ACK 丢失
+
+现 queue 在调用 save 前删除 pending，catch 只 onError/console.error，flush 随后成功 resolve。metadata/upsert/UI queue 也删除后吞异常。因此现 preflush 等待不构成真正 durable ACK。UI Promise.allSettled 同样不传播失败。beforeunload/pagehide 只是 fire-and-forget，无法承诺退出落盘。
+
+独立可修：失败保留最新 payload；显式 flush 拒绝；后台 failure 有 rejection handler；不能失败时无限重试。下一次明确 flush 或新 snapshot 可尝试重写同一消息身份，失败期间后来的 snapshot 不被旧失败 payload 覆盖。不同 conversation/message 不互相阻塞。若上次写已提交但 ACK 丢失，重复必须仍是同一 message identity 的幂等保存；Core owner/revision fence 必须阻止旧快照倒写。
+
+ordinary decision 的 applyAuthoritativePendingActionDecision 只在 accepted ACK 后改 UI；拒绝/负 ACK/缺 runId 保留卡片便于重试。网络异常不证明 Core 未执行；必须保留原 run/action identity，不能另造 action。现无自动新 action 重试。
+
+## provider preflight 审计
+
+既有 conversation 每次显式 send：先等 metadata，1 次 requestProviderTransition(forSend=true)，ready/same_protocol 跳过 transition handshake，随后 1 次 start。新 conversation 直接 start。继续/队列发送在 settlement 和 message/meta flush 后也各做一次 preflight。useProviderTransition 内 request 与 retry 两个静态调用点不等于一次发送重复两次。已有测试 preflights=2 对应 starts=2；active_run block 等下一次 Done 而非定时轮询。不能缓存跨 history revision/model/account 的 ready 结果，也不能去掉 Core 实际 admission 校验。若要合并 RPC 应由 Core admission 提供同语义、同错误/确认分支的接口，当前不能盲删。
+
+## 当前计数与对比基准设计
+
+已有 chatMessagePersistence 单测：9 次 80ms schedule（720ms）+最终 flush => 3 次 save，内容分别为 content-240、content-560、content-640。AppShell 集成流测试：开始后清零，9 个80ms delta => 2 次 full-save；Done+回读/fence 后总 3 次（不含接受阶段初始保存）。普通审批上界路径为 preflush 0/1+ 当前 in-flight，decision 1，成功后 state 1 和 metadata 1；合并具体次数取决于排队，必须实际采样。
+
+每次 full save：safe projection 复制/过滤 -> JSON.stringify(agentRun) -> JSON.parse + 全 validator -> Host envelope serialization。正文与增长的 Trace JSON 每个 checkpoint 都重复传输。保留真实 mapping 函数，以同一 fake run/trace 固定数据比较：
+
+1. 小正文短流、长正文连续流、长 Trace +短delta、普通审批前后、等待human、stop、terminal、断连ACK丢失+reload、两会话交错。
+2. fake Host spy 记录 saveChatMessageState/saveConversationMeta/upsert/UI/list/load/start/preflight/decision 各次数；记录完整序列以证明等待边界未提前。
+3. 包含 agentRunJson 与 envelope 的 UTF-8 bytes 分别统计，不能把 encoded 字符数称为字节。对同 payload 调真实 stringifyPersistedAgentRun，用 performance.now 多批采样并报告 warmup/样本数/机器环境；Renderer mapper CPU 与 Host envelope CPU 分开，mock RTT 不当真实 UI 延迟。
+4. before/after相同事件、最终正文、Trace条数、审批状态、输出 bytes 语义校验；新持久化减少 IPC 不能用减少事件/Trace/工具结果取得。
+5. 新字段 marker roundtrip、legacy无marker、非法marker拒绝；Core owner marker不会让observer快照误走普通持久化。
+
+本轮尚未运行新的 Renderer 测试/基准。接下来先修独立 queue failure 语义和回归，权威写回切换等待 root 的无前端保存恢复测试契约。
+
+## 已实现的独立修正（尚未切换 run 持久化权威）
+
+- message、metadata、FIFO upsert 和 UI-state 队列失败保留 pending；显式 flush 拒绝，无后台无限重试。新 payload 保留 latest，upsert 保持 FIFO；后台异常仍在原日志通道记录。退出 handshake 同时等待所有队列，UI-only failure 也不能提前 ACK。
+- coreCheckpoint TS 严格 optional shape/roundtrip。Core marker 只是 opaque 身份，加载视图可能叠加 Trace/活动投影，不能把 loaded JSON 序列化结果当作原 checkpoint fingerprint。
+- storageConversationMapping 对 running/waiting/terminal 均复用既有 web/read normalizer，结果/缩略图/URL排序语义与实时 reducer 一致；不会把重建视图再次写入存储。
+- submitMessageToConversation 不再无条件写 optimistic metadata。Core 已有 admission 事务创建/更新 metadata；明确拒绝和本地未接纳失败仍保存 metadata 以恢复空壳/草稿或失败 pair。原有 pending queue flush、单次 provider preflight、Core admission/revision/权限校验保持。
+
+口径纠正：sidebar rename 的 patchConversation 直接调用 metadata save，不走本 hook 的 pending queue；原有 preflush 也不等这一类直接写。不可声称本次保留的 flush 覆盖所有用户 metadata 操作。本轮不顺便改变该行为。
+
+验证日志：renderer-recovery-unit-fixed.log（38/38）、renderer-persistence-regression.log（163 AppShell + 4 queue =167/167，发生在 metadata 去重之前）、renderer-quit-browser.log（6/6，含新增 quit 两项）、renderer-lint-fixed.log与renderer-typecheck-fixed.log（通过）。metadata去重目标和最终测试另见 renderer-metadata-dedup-*，早期新增测试误用直接rename来制造pending queue，已纠正测试条件；原163项当次全部通过。
+
+Node/Vite SSR 序列化 microbenchmark已写 renderer-serialization-baseline.mjs/json/log。真实safe mapper对1000行fake Trace产877755 UTF-8 bytes；示例RPC envelope895064 bytes；只供成本归因/固定数据量基线，不是实际浏览器UI、IPC或完整系统性能结论。
+
+## Final authority cutover (after Core proof)
+
+Parent confirmed the real Runtime no-notification-consumer and SIGKILL/reopen checkpoint proof before Renderer authority changed. Accepted start/rewrite/continue + marker reload + Started + successful decisions now bind Core ownership to exact conversation/message/run. Core-owned events no longer write full assistant state or event metadata; local delta UI and terminal authoritative read/merge remain. Legacy negative/lost decision ACK preserves legacy ownership; success upgrades. Final details and measured call-count limits: `renderer-round5-handoff.md`. Final browser 183/183, unit 43/43, web tsc and owned-source ESLint passed.
