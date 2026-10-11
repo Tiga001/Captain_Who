@@ -21,6 +21,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
+// Fixed for every case. The shared test model's 128k window triggers automatic compaction for
+// this 128-pair history after production output/safety reserves and fixed tools are included.
+// Compaction is a separate workload; never let its provider calls contaminate these timings.
+const FIXTURE_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Work {
@@ -72,6 +77,8 @@ struct Events {
     terminal: BTreeMap<String, Value>,
     command_started_us: BTreeMap<String, u64>,
     command_exited_us: BTreeMap<String, u64>,
+    context_peak_by_run: BTreeMap<String, Value>,
+    context_compaction_events: usize,
     provider_first_us: BTreeMap<String, u64>,
     provider_requests: usize,
     provider_request_bytes: usize,
@@ -476,7 +483,20 @@ async fn run_case(case: Case) -> Value {
         provider(case.clone(), events.clone(), epoch).await;
     let mut settings = test_model_settings();
     settings.api_url = url;
+    for model in &mut settings.models {
+        model.context_window_tokens = Some(FIXTURE_CONTEXT_WINDOW_TOKENS);
+    }
     storage.save_model_settings(settings).unwrap();
+    let fixture_context_window_tokens = storage
+        .load_model_settings()
+        .unwrap()
+        .unwrap()
+        .models
+        .iter()
+        .find(|model| model.id == "model-1")
+        .unwrap()
+        .effective_context_window_tokens();
+    assert_eq!(fixture_context_window_tokens, FIXTURE_CONTEXT_WINDOW_TOKENS);
     let startup = Instant::now();
     let service = AgentService::new_authorized_for_test(storage.clone());
     let service_startup_us = us(startup.elapsed());
@@ -517,6 +537,24 @@ async fn run_case(case: Case) -> Value {
                             .entry(run.into())
                             .or_insert_with(|| us(epoch.elapsed()));
                     }
+                    if event["type"] == "context_window_updated" {
+                        let snapshot = &event["snapshot"];
+                        let peak = state
+                            .context_peak_by_run
+                            .entry(run.into())
+                            .or_insert_with(|| snapshot.clone());
+                        if snapshot["inputTokens"].as_u64().unwrap_or(0)
+                            > peak["inputTokens"].as_u64().unwrap_or(0)
+                        {
+                            *peak = snapshot.clone();
+                        }
+                    }
+                }
+                if matches!(
+                    event["type"].as_str(),
+                    Some("context_compaction_started" | "context_compaction_finished")
+                ) {
+                    state.context_compaction_events += 1;
                 }
                 if event["type"] == "done"
                     && matches!(
@@ -945,6 +983,7 @@ async fn run_case(case: Case) -> Value {
         "build_profile":if cfg!(debug_assertions){"debug"}else{"release"},
         "runtime_workers":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),
         "fixture_provider_threads":1,"logical_turn_limit":50,"fixed_wave_interval_ms":2_000,
+        "fixture_context_window_tokens":fixture_context_window_tokens,
         "provider_delay_ms":50,"provider_output_bytes":"Baseline complete. ".len()+"output ".len()*32,
         "database_open_us":database_open_us,"service_startup_us":service_startup_us,"sqlite":sqlite});
     let lifecycle = json!({"measured_us":measured_us,"root_starts_durably_accepted":starts.len(),
@@ -1142,6 +1181,13 @@ fn backend_concurrency_disk_baseline() {
             || result["raw"]["errors"]
                 .as_array()
                 .is_some_and(|errors| !errors.is_empty())
+            || result["raw"]["context_compaction_events"] != 0
+            || result["raw"]["provider_first_us"].get("unknown").is_some()
+            || result["raw"]["context_peak_by_run"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|snapshot| snapshot["contextWindowTokens"] != FIXTURE_CONTEXT_WINDOW_TOKENS)
             || (result["case"]["work"] == "tree"
                 && (result["recovered_child_turns"].as_u64().unwrap_or(0)
                     != result["case"]["units"].as_u64().unwrap()
