@@ -1,0 +1,10 @@
+
+running 6 tests
+test application::agent::execution_access::tests::execution_access_defaults_denied_and_all_reasons_have_stable_codes ... ok
+test application::agent::execution_access::tests::execution_access_delay_does_not_extend_a_received_lease ... ok
+test application::agent::execution_access::tests::execution_access_expires_at_wall_or_monotonic_deadline ... ok
+test application::agent::execution_access::tests::execution_access_fences_both_revision_and_account_epoch ... ok
+test application::agent::execution_access::tests::execution_access_rejects_clock_jumps_permanently_for_same_revision ... ok
+test application::agent::execution_access::tests::execution_access_restart_does_not_restore_previous_in_memory_grant ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1116 filtered out; finished in 0.06s

@@ -1,0 +1,14 @@
+
+running 10 tests
+test storage::models::model_connection_tests::cached_input_price_inherits_input_price_until_explicitly_configured ... ok
+test storage::models::model_connection_tests::complete_model_connection_overrides_the_global_pair ... ok
+test storage::models::model_connection_tests::configured_context_window_overrides_the_backend_default ... ok
+test storage::models::model_connection_tests::development_or_test_support_allows_only_explicit_loopback_http ... ok
+test storage::models::model_connection_tests::display_label_uses_the_unique_display_name_without_exposing_the_internal_id ... ok
+test storage::models::model_connection_tests::omitted_context_window_uses_the_backend_default ... ok
+test storage::models::model_connection_tests::partial_model_connection_never_mixes_with_global_settings ... ok
+test storage::models::model_connection_tests::provider_urls_enforce_utf8_byte_limit_and_reject_control_characters ... ok
+test storage::models::model_connection_tests::provider_urls_reject_unsafe_authority_and_url_components ... ok
+test storage::models::model_connection_tests::two_blank_model_values_inherit_the_global_pair ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 3327 filtered out; finished in 0.00s

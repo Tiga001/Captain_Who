@@ -1,0 +1,28 @@
+
+running 24 tests
+test transport::bounded_dispatch::approval_tests::approval_admission_is_bounded_independent_of_cancel_and_shutdown_drains_it ... ok
+test transport::bounded_dispatch::approval_tests::approval_bypasses_unrelated_scoped_writes_but_waits_for_its_own_snapshot ... ok
+test transport::bounded_dispatch::approval_tests::approval_priority_uses_an_explicit_scoped_write_allowlist ... ok
+test transport::bounded_dispatch::approval_tests::approval_respects_global_mutations_even_when_the_dto_contains_an_owner ... ok
+test transport::bounded_dispatch::approval_tests::different_run_ids_in_one_conversation_share_the_priority_fence ... ok
+test transport::bounded_dispatch::approval_tests::later_writes_and_reads_wait_for_the_approval_acknowledgement ... ok
+test transport::bounded_dispatch::approval_tests::priority_decisions_preserve_run_and_conversation_alias_order_in_both_directions ... ok
+test transport::bounded_dispatch::approval_tests::unknown_approval_owner_falls_back_to_the_admission_time_write_fence ... ok
+test transport::bounded_dispatch::benchmarks::approval_dispatch_latency_benchmark ... ok
+test transport::bounded_dispatch::benchmarks::rpc_dispatch_latency_benchmark ... ok
+test transport::bounded_dispatch::tests::cancel_waits_for_same_owner_admission_and_later_writes_wait_for_cancel ... ok
+test transport::bounded_dispatch::tests::control_capacity_counts_waiting_and_running_requests ... ok
+test transport::bounded_dispatch::tests::mutation_order_and_read_after_write_hold_across_owner_keys ... ok
+test transport::bounded_dispatch::tests::operations_are_classified_without_promoting_writes_to_reads ... ok
+test transport::bounded_dispatch::tests::run_attachment_file_resolution_is_a_read ... ok
+test transport::bounded_dispatch::tests::run_to_conversation_alias_preserves_submission_before_cancel_without_blocking_other_runs ... ok
+test transport::bounded_dispatch::tests::saturated_reads_and_unrelated_writes_do_not_block_control_admission ... ok
+test transport::bounded_dispatch::tests::shared_database_lock_remains_visible_after_control_dispatch ... ok
+test transport::bounded_dispatch::tests::shutdown_does_not_start_handlers_still_queued_in_the_shared_blocking_pool ... ok
+test transport::bounded_dispatch::tests::shutdown_drains_started_owner_resolution_and_skips_waiting_resolvers_and_handlers ... ok
+test transport::bounded_dispatch::tests::shutdown_joins_running_mutation_and_responds_to_every_cancelled_queue_entry ... ok
+test transport::bounded_dispatch::tests::single_owner_mutation_dtos_keep_their_class_and_ordering_identity ... ok
+test transport::bounded_dispatch::tests::waiting_owner_control_does_not_block_another_owner_or_lose_write_fences ... ok
+test transport::bounded_dispatch::tests::worker_failure_keeps_original_id_and_releases_ordering_fences ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 1098 filtered out; finished in 0.03s

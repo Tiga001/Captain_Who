@@ -1,0 +1,122 @@
+[
+  {
+    "name": "core-performance",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/mycopilot_core-0b5932cd02e8a78b",
+      "performance::",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3331 filtered out; finished in 0.01s"
+    ]
+  },
+  {
+    "name": "core-notifications",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/mycopilot_core-0b5932cd02e8a78b",
+      "storage::service::tests::notifications::",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3331 filtered out; finished in 0.43s"
+    ]
+  },
+  {
+    "name": "core-trace",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/mycopilot_core-0b5932cd02e8a78b",
+      "trace_publication",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 3312 filtered out; finished in 1.40s"
+    ]
+  },
+  {
+    "name": "server-dispatch",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "transport::bounded_dispatch",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 1098 filtered out; finished in 0.03s"
+    ]
+  },
+  {
+    "name": "server-occupancy",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "application::agent::turn_executor::occupancy_tests::",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1118 filtered out; finished in 0.37s"
+    ]
+  },
+  {
+    "name": "server-access",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "application::agent::execution_access::tests::",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1116 filtered out; finished in 0.06s"
+    ]
+  },
+  {
+    "name": "server-commit-expiry",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1121 filtered out; finished in 0.07s"
+    ]
+  },
+  {
+    "name": "server-revoke",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1121 filtered out; finished in 0.08s"
+    ]
+  },
+  {
+    "name": "server-baseline-unit",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-a5ca48c145d29d84",
+      "backend_baseline_",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1119 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "core-model-connections",
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/mycopilot_core-0b5932cd02e8a78b",
+      "storage::models::model_connection_tests::",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "summary": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 3327 filtered out; finished in 0.00s"
+    ]
+  }
+]

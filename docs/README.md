@@ -82,6 +82,11 @@ fixture 和测试为准。
 | [术语表](development/glossary.md)                          | 进程、Agent、工具、数据与测试术语               |
 | [文档维护规范](development/documentation-guide.md)         | 文档分类、元数据、评审触发器和完成标准          |
 | [多智能体发布门禁](operations/multi-agent-release-gate.md) | 确定性压力与恢复门禁                            |
+| [后端并发性能基线](performance/backend-concurrency/PROGRESS.md) | 六轮后端优化的基线、契约、测量与交付记录 |
+| [后端性能结果](performance/backend-concurrency/results.md) | 实测数据、原始结果与已知限制 |
+| [并发与存储契约](performance/backend-concurrency/architecture-contracts.md) | 资源归属、原子性、恢复及迁移边界 |
+| [并发性能验收](performance/backend-concurrency/acceptance.md) | 性能目标、竞态回归与比较方法 |
+| [Host 与 Renderer 测量](performance/backend-concurrency/host-renderer-measurement.md) | 诊断入口、请求关联及计时口径 |
 | [恢复 Runbook](operations/recovery-runbook.md)             | 数据、Agent、命令、MCP 与运行时恢复             |
 | [威胁模型](security/threat-model.md)                       | 信任边界、受保护资产和残余风险                  |
 

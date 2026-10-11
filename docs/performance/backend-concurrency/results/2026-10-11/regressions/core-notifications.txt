@@ -1,0 +1,10 @@
+
+running 6 tests
+test storage::service::tests::notifications::command_approval_notification_failure_rolls_back_dispatch_authority ... ok
+test storage::service::tests::notifications::command_approval_preserves_checkpoint_and_claims_exact_identity_once ... ok
+test storage::service::tests::notifications::concurrent_command_approval_grants_dispatch_once_and_respects_tree_stop ... ok
+test storage::service::tests::notifications::deleting_a_conversation_resolves_its_notification_without_deleting_history ... ok
+test storage::service::tests::notifications::invalid_approval_notification_rolls_back_the_pending_action ... ok
+test storage::service::tests::notifications::invalid_notification_rolls_back_the_terminal_message_and_trace ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3331 filtered out; finished in 0.43s

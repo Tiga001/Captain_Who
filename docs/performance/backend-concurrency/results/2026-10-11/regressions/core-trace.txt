@@ -1,0 +1,29 @@
+
+running 25 tests
+test context::state::trace_publication_tests::closed_publication_without_model_coverage_does_not_mutate_cached_frame ... ok
+test context::state::trace_publication_tests::generic_narration_absorption_replays_only_the_tail_without_cold_rebuild ... ok
+test context::state::trace_publication_tests::incremental_publication_frame_matches_cold_rebuild_at_every_closed_boundary ... ok
+test context::state::trace_publication_tests::narration_rewind_never_discards_a_separately_appended_user_message ... ok
+test context::state::trace_publication_tests::narration_rewind_preserves_world_state_observation_metadata ... ok
+test context::state::trace_publication_tests::publication_host_render_work_scales_with_new_payload_including_generic_narration ... ok
+test context::state::trace_publication_tests::publication_narration_absorption_rebuilds_instead_of_skipping_a_tool_call ... ok
+test context::state::trace_publication_tests::publication_wrong_identity_run_and_reset_cursor_require_cold_rebuild ... ok
+test storage::migrations::trace_publication_tests::upgrades_v60_without_rewriting_history_and_tracks_semantic_journal_mutations ... ok
+test storage::migrations::trace_publication_tests::v61_upgrade_failure_keeps_exact_v60_catalog_and_rows ... ok
+test storage::service::trace_publication::external_tests::external_header_change_revokes_cursor_and_rebuilds_the_durable_prefix ... ok
+test storage::service::trace_publication::external_tests::external_publication_timestamp_and_identical_items_preserve_trusted_cursor ... ok
+test storage::service::trace_publication::external_tests::external_terminal_commit_fences_a_waiting_publication ... ok
+test storage::service::trace_publication::external_tests::external_trace_and_model_corruption_are_not_hidden_by_a_hot_cursor ... ok
+test storage::service::trace_publication::external_tests::rolled_back_external_changes_preserve_the_committed_revision ... ok
+test storage::service::trace_publication::tests::benchmark::trace_publication_growth_benchmark ... ok
+test storage::service::trace_publication::tests::changed_guidance_journal_cannot_bypass_the_original_replay_checks ... ok
+test storage::service::trace_publication::tests::commit_ack_loss_and_reopened_database_rebuild_without_duplicate_items ... ok
+test storage::service::trace_publication::tests::concurrent_terminal_commit_never_reopens_a_settled_turn ... ok
+test storage::service::trace_publication::tests::invalid_hot_suffix_consumes_validation_state_and_corrupt_model_forces_cold_failure ... ok
+test storage::service::trace_publication::tests::phase_a_restores_each_journal_once_and_phase_b_restores_neither ... ok
+test storage::service::trace_publication::tests::rollback_mid_append_drops_cursor_and_retries_from_the_durable_prefix ... ok
+test storage::service::trace_publication::tests::tampered_prefix_and_old_cursor_are_fully_revalidated ... ok
+test storage::service::trace_publication::tests::terminal_settlement_and_owner_changes_revoke_append_authority ... ok
+test storage::service::trace_publication::tests::trusted_suffix_reads_no_historical_payload_and_duplicate_is_a_noop ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 3312 filtered out; finished in 1.40s
