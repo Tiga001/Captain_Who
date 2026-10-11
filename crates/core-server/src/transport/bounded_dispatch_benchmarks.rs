@@ -171,3 +171,150 @@ async fn rpc_dispatch_latency_benchmark() {
         std::fs::write(path, csv).unwrap();
     }
 }
+
+// This benchmark isolates admission/dispatch contention, not the production approval handler
+// or Renderer. All state is synthetic and the SQLite connection exists only for this sample.
+async fn approval_backlog_sample(background_agents: usize, improved: bool) -> Sample {
+    let (outbound, mut responses) = crate::transport::outbound_channel();
+    let rpc = RpcRequestDispatcher::new(outbound);
+    let database = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+    database
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE decisions (id INTEGER PRIMARY KEY, status TEXT NOT NULL);
+         INSERT INTO decisions VALUES (1, 'pending');",
+        )
+        .unwrap();
+    let (started, ready) = oneshot::channel();
+    rpc.try_submit(
+        RpcDispatchClass::Write,
+        JsonRpcId::Number(1),
+        Some("conversation:background-0".into()),
+        move || {
+            started.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            response_success(JsonRpcId::Number(1), true)
+        },
+    )
+    .unwrap();
+    ready.await.unwrap();
+    for agent in 1..background_agents {
+        let id = (agent + 1) as i64;
+        rpc.try_submit(
+            RpcDispatchClass::Write,
+            JsonRpcId::Number(id),
+            Some(format!("conversation:background-{agent}")),
+            move || {
+                std::thread::sleep(Duration::from_millis(2));
+                response_success(JsonRpcId::Number(id), true)
+            },
+        )
+        .unwrap();
+    }
+    let request: JsonRpcRequest = serde_json::from_value(json!({
+        "jsonrpc": "2.0", "id": 1000,
+        "method": AGENT_APPROVE_ACTION_METHOD,
+        "params": {"runId": "synthetic-approval", "actionId": "synthetic-action"}
+    }))
+    .unwrap();
+    let class = if improved {
+        rpc_dispatch_class(&request)
+    } else {
+        RpcDispatchClass::Write
+    };
+    let (sample_tx, sample_rx) = oneshot::channel();
+    let arrived = Instant::now();
+    let decision_database = Arc::clone(&database);
+    rpc.try_submit(
+        class,
+        request.id.clone(),
+        rpc_ordering_key(&request),
+        move || {
+            let started = Instant::now();
+            let connection = decision_database.lock().unwrap();
+            let acquired = Instant::now();
+            assert_eq!(connection.execute(
+            "UPDATE decisions SET status = 'approved' WHERE id = 1 AND status = 'pending'", [],
+        ).unwrap(), 1);
+            let completed = Instant::now();
+            sample_tx
+                .send(Sample {
+                    queue_ms: milliseconds(started.duration_since(arrived)),
+                    handler_ms: milliseconds(completed.duration_since(started)),
+                    db_lock_ms: milliseconds(acquired.duration_since(started)),
+                    total_ms: milliseconds(completed.duration_since(arrived)),
+                })
+                .unwrap();
+            response_success(JsonRpcId::Number(1000), true)
+        },
+    )
+    .unwrap();
+    let sample = sample_rx.await.unwrap();
+    rpc.shutdown().await.unwrap();
+    let mut ids = Vec::new();
+    while let Some(response) = responses.recv().await {
+        assert!(response.get("error").is_none());
+        ids.push(response["id"].as_i64().unwrap());
+    }
+    ids.sort();
+    let expected = (1..=background_agents as i64)
+        .chain([1000])
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected);
+    assert_eq!(
+        database
+            .lock()
+            .unwrap()
+            .query_row("SELECT status FROM decisions WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            },)
+            .unwrap(),
+        "approved"
+    );
+    sample
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_dispatch_latency_benchmark() {
+    let Ok(path) = std::env::var("RPC_APPROVAL_BENCH_OUTPUT") else {
+        return;
+    };
+    let mut csv = String::from(
+        "background_agents,implementation,sample,queue_ms,handler_ms,db_lock_ms,total_ms\n",
+    );
+    for agents in [8, 16, 32] {
+        for improved in [false, true] {
+            let implementation = if improved {
+                "priority"
+            } else {
+                "serialized_write_reference"
+            };
+            let mut samples = Vec::new();
+            for number in 0..23 {
+                let sample = approval_backlog_sample(agents, improved).await;
+                if number < 3 {
+                    continue;
+                }
+                csv.push_str(&format!(
+                    "{agents},{implementation},{},{:.6},{:.6},{:.6},{:.6}\n",
+                    number - 3,
+                    sample.queue_ms,
+                    sample.handler_ms,
+                    sample.db_lock_ms,
+                    sample.total_ms
+                ));
+                samples.push(sample.total_ms);
+            }
+            println!(
+                "{}",
+                json!({
+                    "scenario": "approval_unrelated_write_backlog", "background_agents": agents,
+                    "implementation": implementation, "samples": samples.len(),
+                    "total_ms": {"p50": percentile(samples.clone(), 0.5), "p95": percentile(samples, 0.95)}
+                })
+            );
+        }
+    }
+    std::fs::write(path, csv).unwrap();
+}

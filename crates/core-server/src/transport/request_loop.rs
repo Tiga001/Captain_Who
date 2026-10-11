@@ -727,25 +727,28 @@ where
         }
         let class = rpc_dispatch_class(&request);
         let ordering_key = bounded_dispatch::rpc_ordering_key(&request);
-        let owner_resolver: Option<bounded_dispatch::RpcOwnerResolver> =
-            if class == bounded_dispatch::RpcDispatchClass::Control {
-                request
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("runId"))
-                    .and_then(Value::as_str)
-                    .map(|run_id| {
-                        let run_id = run_id.to_string();
-                        let owner_service = agent_service.clone();
-                        Box::new(move || {
-                            owner_service
-                                .conversation_id_for_run(&run_id)
-                                .map(|conversation| format!("conversation:{conversation}"))
-                        }) as bounded_dispatch::RpcOwnerResolver
-                    })
-            } else {
-                None
-            };
+        let owner_resolver: Option<bounded_dispatch::RpcOwnerResolver> = if matches!(
+            class,
+            bounded_dispatch::RpcDispatchClass::Control
+                | bounded_dispatch::RpcDispatchClass::Approval
+        ) {
+            request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("runId"))
+                .and_then(Value::as_str)
+                .map(|run_id| {
+                    let run_id = run_id.to_string();
+                    let owner_service = agent_service.clone();
+                    Box::new(move || {
+                        owner_service
+                            .conversation_id_for_run(&run_id)
+                            .map(|conversation| format!("conversation:{conversation}"))
+                    }) as bounded_dispatch::RpcOwnerResolver
+                })
+        } else {
+            None
+        };
         let request_storage = Arc::clone(&storage);
         let request_service = agent_service.clone();
         let request_notifications = outbound.clone();
@@ -757,6 +760,9 @@ where
             "storage.saveChatMessageState" => "saveChatMessageState",
             "agent.listPendingActions" => "listPendingActions",
             "agent.cancelRun" => "cancelRun",
+            "agent.approveAction" => "approveAction",
+            "agent.rejectAction" => "rejectAction",
+            "agent.collaboration.approvals.decide" => "collaborationApprovalDecision",
             "agent.workflows.request" => match request
                 .params
                 .as_ref()
@@ -772,11 +778,13 @@ where
         };
         let diagnostic_admitted =
             mycopilot_core::performance::enabled().then(std::time::Instant::now);
-        if let Err(response) = rpc.try_submit_with_owner_resolution(
+        let global_fence = bounded_dispatch::rpc_has_global_mutation_fence(&request);
+        if let Err(response) = rpc.try_submit_ordered(
             class,
             request.id.clone(),
             ordering_key,
             owner_resolver,
+            global_fence,
             move || {
                 if let Some(admitted) = diagnostic_admitted {
                     mycopilot_core::performance::record(

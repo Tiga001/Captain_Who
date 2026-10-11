@@ -110,17 +110,24 @@ request loop 当前按风险与阻塞特征分流：
 | 普通查询 RPC           |              4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、组织只读、Automation/Notification 查询；阻塞处理离开接收循环 |
 | 普通修改 RPC           |              1 并发，运行与排队合计 64 项 | FIFO 执行，包含附件导入和组织/交互修改；保留业务准入锁、CAS 与幂等                       |
 | 停止/取消 RPC          |              2 并发，运行与排队合计 32 项 | 独立控制队列；仅相同 owner 的先前修改构成顺序依赖，等待依赖不占执行许可                  |
+| 普通批准/拒绝 RPC      |              2 并发，运行与排队合计 32 项 | 独立审批队列；可越过无关会话的明确局部存档，保留同 owner 和全局修改顺序                  |
 | Conversation fork      |                       运行与排队合计 4 项 | 单 worker 执行完整事务；关停拒绝未开始项并等待已开始项完成                               |
 | Git/Skill/图片配置写入 |                           各自 dispatcher | 显式队列和独立 shutdown                                                                  |
 | 普通响应/notification  | 8 MiB 正文 + 1 MiB 控制预留，最多 8192 帧 | 单 FIFO、相邻正文合并、就绪批量写入；大非正文帧独立单 lease                              |
 
 新增方法不能默认落入“普通快速请求”。应先判断它是否阻塞、是否持有大对象、是否可产生副作用，以及谁在 shutdown 时负责已接受任务。
 
-Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversationReads.ts) 在普通 RPC 准入前串行发送完整聊天读取（单会话、批量及 observer），避免多个大历史响应同时占满输出预算。只合并尚在排队的同身份请求；读取已经开始后收到的新请求保留一次后续读取，不复用旧快照，不跨请求缓存正文。Observer key 包含 root 与目标 conversation。轻量查询、写入和取消沿用原路径，不进入这个队列；失败释放读取槽并原样返回错误，不自动重试写入。Core Server 的并发、队列容量和输出字节预算均保持不变。
+Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversationReads.ts) 在普通 RPC 准入前串行发送完整聊天读取（单会话、批量及 observer），避免多个大历史响应同时占满输出预算。只合并尚在排队的同身份请求；读取已经开始后收到的新请求保留一次后续读取，不复用旧快照，不跨请求缓存正文。Observer key 包含 root 与目标 conversation。轻量查询、写入和取消沿用原路径，不进入这个队列；失败释放读取槽并原样返回错误，不自动重试写入。该读取层不调整 Core Server 各通道的并发、队列容量或输出字节预算。
 
 组织按具体 `operation` 分类；未知操作保守进入修改队列，再由原 handler 拒绝非法输入。普通查询等待此前已接收修改完成，后续修改也等待此前控制操作完成，避免读取越过既有写入；响应仍通过 request ID 关联，不能依赖跨请求完成顺序。控制操作使用的 run/conversation key 只用于排队，不构成授权，最终仍经过原身份和终态校验。若此前存在按 conversation 排队的修改，按 run 取消会在有界阻塞工作池中解析其 conversation，并仅等待准入时捕获的对应依赖；解析也可能读取 SQLite，不能放回 stdin 循环。跨实例修改仍由领域准入锁、CAS 与终态校验裁决，不凭请求文本猜测多会话授权。共享数据库锁、对话准入锁仍可能造成等待，应与队列耗时分开测量。
 
 队列以非等待准入保持 stdin 可读；过载返回 `rpc_dispatch_error/overloaded`，未开始即关停返回 `shutting_down`，不静默丢弃。`core.ping` 与受管反向桥完成仍走快速路径。停止请求不排在无关慢修改之后，但同一业务对象的必要顺序仍保留。输出准入独立按字节和帧数限制；不在 Runtime 回调或持业务锁时阻塞等待 stdout。
+
+`agent.approveAction` 与 `agent.rejectAction` 使用审批队列，不占用停止队列的执行许可。仅明确列出的单会话消息状态、UI 状态、消息插入、会话元信息和草稿存档可以被其他会话的审批越过；未知方法、开始/重写/删除、配置变更及跨 root/child 的投影审批仍形成全局修改屏障。run 与 conversation 的别名在有界工作池解析，并在等待前发布；同一任务的批准、拒绝和停止保持准入顺序。无法确认 owner 时保守等待，不依赖客户端提供的 key 授权。共享 SQLite 锁和必需的同任务写入仍可能延迟审批。
+
+审批依赖检查通过现有 run 索引仅取当前 run/conversation/assistant 中相关未结束调用的 ID，不读取其他任务的恢复快照；同一次检查只读取一次权威 trace，仍验证结果发生在后继调用之前。普通命令的 pending→approved 只原子更新状态并结算通知，保留原冻结快照字节，继续检查 owner、调用身份、目标终态和持久停止记录。其他会改变恢复内容的路径保留原持久化流程。删除生命周期和 pending registry 锁继续保护执行准入；优化没有移除这些锁或缩短持久化保证。
+
+World State 同步与恢复复用一次当前格式投影，用 origin 索引匹配已有记录；只有 ledger 所属记录实际不匹配时，才按需生成旧显示格式作精确校验。当前 Run 的独立快照不会触发 Conversation 旧格式回放。缺失、重复、伪造内容、scope 和观察状态检查仍保留。本次后端优化不修改 Renderer 的提交前存档等待或审批卡片行为。
 
 普通输出由 `outbound.rs` 拥有序列化后的行：8 MiB 正文预算，另为响应和非正文事件预留 1 MiB / 64 帧，总帧上限 8192。普通、单份 childEvent 及旧 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；childEvent 与旧 observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
 
@@ -131,6 +138,8 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 出站容量失败会额外输出一次固定分类的诊断，区分总帧、正文帧、总字节、正文预算和超大响应 lease 冲突，并记录触发帧大小及当时队列占用。诊断不包含正文、路径、请求 ID 或凭据；错误码、FIFO 和关停语义不变。
 
 受控性能排查可在启动应用前设置 `CAPTAIN_PERFORMANCE_DIAGNOSTICS=1`，Host 将其继承给 Core Server。默认关闭；启用后 Core Server 每 30 秒及 writer 退出时聚合输出 `core_performance`，Main 在有活动的 30 秒窗口及连接结算时输出 `[core-performance]`。指标包括固定操作分类的请求排队/处理耗时、SQLite 锁等待/持锁耗时、会话消息读取与解码/时间线投影耗时、Agent 各通知路线的序列化字节和时间、发送等待与 write/flush 耗时，以及 Main 的请求体积、响应解析、通知分发、pending 和 stdin backlog 峰值。累计值和最大值不代表延迟分位数；消息读取与解码仍是组合计时。Rust Core 指标注册表最多 128 项，Main 只接受固定方法分类；不保存逐事件样本，不在业务锁内输出日志。聚合日志仍写 stderr，启用诊断时需要正常消费日志。MCP 原始协议日志仍被屏蔽，`RUST_LOG` 不能打开它。
+
+审批新增固定的 Core Server 操作分类和 `approval` 阶段计时：决策总耗时、生命周期/registry 锁等待、registry 持锁、前置依赖检查、provider 校验及命令提交。独立队列基准：`RPC_APPROVAL_BENCH_OUTPUT=/tmp/approval-dispatch.csv cargo test --locked -p mycopilot-core-server --bin core-server approval_dispatch_latency_benchmark -- --nocapture`。以 8/16/32 个模拟后台写入者对比原串行写入与审批通道，使用内存 SQLite 的单次状态更新，不运行命令、模型或用户组织。报告 20 次热样本的中位数及 P95，验证每个请求恰有一份响应；结果只说明调度开销，不代表完整审批 handler、真实磁盘或前端点击延迟。
 
 组织与子 Agent 混合基线：`CORE_MIXED_BENCH_OUTPUT=/tmp/core-mixed.json cargo test --locked -p mycopilot-core-server --bin core-server transport::outbound::workload_tests -- --nocapture`。使用独立内存管道，组合 1/16/50 个子 Agent、128/512/1024 封无正文邮件元数据、256 KiB 历史响应和控制响应；正常及人为延迟的接收端分别测量。每组对比完整信封与运行摘要，同一组的子事件、历史响应、控制响应及待收邮件事实完全相同。报告实际使用的字节/帧预算、固定类别的输入字节、实际输出字节、队列峰值、序列化耗时、控制响应投递 p95 和是否超载。接收器验证每个子流的逐项序号，不访问用户数据库或调用模型。它是有限、合成的传输压力测试，不代表真实 RPC 执行、Renderer 延迟或无限慢客户端的容量保证；普通单元测试另验证邮件快照累积触发的字节限制和摘要计数等价。修改协议后须保持同一负载及原队列上限比较，不能把更少业务事件或更大的预算当作性能收益。
 

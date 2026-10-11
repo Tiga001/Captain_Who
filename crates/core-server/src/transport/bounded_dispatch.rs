@@ -10,18 +10,26 @@ const READ_CONCURRENCY: usize = 4;
 const READ_CAPACITY: usize = 64;
 const WRITE_CAPACITY: usize = 64;
 const CONTROL_CAPACITY: usize = 32;
+const APPROVAL_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RpcDispatchClass {
     Read,
     Write,
     Control,
+    Approval,
 }
 
 /// Unknown operations conservatively remain writes. Never infer read-only from a method prefix:
 /// workflow mutations and attachment imports share namespaces with actual reads.
 pub(crate) fn rpc_dispatch_class(request: &JsonRpcRequest) -> RpcDispatchClass {
     use mycopilot_protocol_rs::*;
+    if matches!(
+        request.method.as_str(),
+        AGENT_APPROVE_ACTION_METHOD | AGENT_REJECT_ACTION_METHOD
+    ) {
+        return RpcDispatchClass::Approval;
+    }
     if request.method == "agent.workflows.request" {
         return match request
             .params
@@ -73,6 +81,20 @@ pub(crate) fn rpc_dispatch_class(request: &JsonRpcRequest) -> RpcDispatchClass {
     }
 }
 
+/// Only audited single-conversation mutations may be bypassed by another conversation's
+/// approval. A conversationId on an arbitrary DTO does not prove that its effects are local.
+pub(crate) fn rpc_has_global_mutation_fence(request: &JsonRpcRequest) -> bool {
+    !matches!(
+        request.method.as_str(),
+        STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD
+            | STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD
+            | STORAGE_UPSERT_CHAT_MESSAGES_METHOD
+            | STORAGE_SAVE_CONVERSATION_META_METHOD
+            | STORAGE_SAVE_COMPOSER_DRAFT_METHOD
+            | STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD
+    ) || !rpc_ordering_key(request).is_some_and(|owner| owner.starts_with("conversation:"))
+}
+
 /// These are sequencing hints, not authority. Handlers still resolve/validate every owner. Run
 /// cancellation cannot refer to a not-yet-admitted new turn: its runId is issued by the handler.
 pub(crate) fn rpc_ordering_key(request: &JsonRpcRequest) -> Option<String> {
@@ -111,12 +133,30 @@ struct OwnerResolution {
     resolve: RpcOwnerResolver,
     // Admission-time snapshot: later writes must never become dependencies of an earlier cancel.
     candidates: HashMap<String, Completion>,
+    published: watch::Sender<ResolvedOwner>,
+    unresolved_fence: Option<Completion>,
+}
+
+#[derive(Clone)]
+enum ResolvedOwner {
+    Pending,
+    Unknown,
+    Known(String),
+}
+
+#[derive(Clone)]
+struct PriorityFence {
+    owner: Option<String>,
+    alias: Option<watch::Receiver<ResolvedOwner>>,
+    completion: Completion,
 }
 
 #[derive(Default)]
 struct MutationOrder {
     last_write: Option<Completion>,
+    last_global_write: Option<Completion>,
     controls: Vec<Completion>,
+    priority_owners: Vec<PriorityFence>,
     owners: HashMap<String, Completion>,
 }
 
@@ -125,6 +165,8 @@ struct RpcJob {
     task: Box<dyn FnOnce() -> Value + Send>,
     admitted_at: std::time::Instant,
     dependencies: Vec<Completion>,
+    owner: Option<String>,
+    priority_dependencies: Vec<PriorityFence>,
     owner_resolution: Option<OwnerResolution>,
     completion: Option<watch::Sender<bool>>,
     _permit: OwnedSemaphorePermit,
@@ -147,7 +189,10 @@ impl Lane {
         let admission = Arc::new(Semaphore::new(capacity));
         let (sender, mut receiver) = mpsc::channel::<RpcJob>(capacity);
         let execution = Arc::new(Semaphore::new(concurrency));
-        let task_capacity = if class == RpcDispatchClass::Control {
+        let task_capacity = if matches!(
+            class,
+            RpcDispatchClass::Control | RpcDispatchClass::Approval
+        ) {
             capacity
         } else {
             concurrency
@@ -201,9 +246,13 @@ async fn execute_job(
     execution: Arc<Semaphore>,
 ) {
     let mut resolution_error = None;
+    let mut resolved_owner = None;
+    let needs_alias = job.owner_resolution.is_some();
     let resolution_started = std::time::Instant::now();
-    if !stopping.load(Ordering::Acquire) {
-        if let Some(resolution) = job.owner_resolution.take() {
+    if let Some(resolution) = job.owner_resolution.take() {
+        let published = resolution.published;
+        let unresolved_fence = resolution.unresolved_fence;
+        if !stopping.load(Ordering::Acquire) {
             // Resolving a run's conversation can touch the existing in-memory/DB locks. It
             // therefore runs off stdin and under the same bounded blocking concurrency.
             let _execution = execution
@@ -226,6 +275,7 @@ async fn execute_job(
                         if let Some(dependency) = resolution.candidates.get(&owner) {
                             job.dependencies.push(dependency.clone());
                         }
+                        resolved_owner = Some(owner);
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -239,8 +289,27 @@ async fn execute_job(
             }
             // Release before waiting on owner work so an unrelated ready control can execute.
         }
+        let _ = published.send(match &resolved_owner {
+            Some(owner) => ResolvedOwner::Known(owner.clone()),
+            None => ResolvedOwner::Unknown,
+        });
+        if resolved_owner.is_none() {
+            job.dependencies.extend(unresolved_fence);
+        }
     }
     let owner_resolution_us = resolution_started.elapsed().as_micros() as u64;
+    for previous in job.priority_dependencies {
+        if priority_owners_overlap(
+            job.owner.as_deref(),
+            resolved_owner.as_deref(),
+            needs_alias && resolved_owner.is_none(),
+            previous.clone(),
+        )
+        .await
+        {
+            job.dependencies.push(previous.completion);
+        }
+    }
     for dependency in &mut job.dependencies {
         while !*dependency.borrow_and_update() {
             if dependency.changed().await.is_err() {
@@ -285,6 +354,7 @@ async fn execute_job(
         RpcDispatchClass::Read => "read",
         RpcDispatchClass::Write => "write",
         RpcDispatchClass::Control => "control",
+        RpcDispatchClass::Approval => "approval",
     };
     mycopilot_core::performance::record(
         "rpc.queue",
@@ -310,6 +380,38 @@ async fn execute_job(
     }
 }
 
+/// Alias resolution is published before waiting for predecessors. Thus a later request can
+/// compare owners without waiting for unrelated execution, and two aliases can never deadlock.
+async fn priority_owners_overlap(
+    owner: Option<&str>,
+    alias: Option<&str>,
+    alias_unknown: bool,
+    mut previous: PriorityFence,
+) -> bool {
+    let (Some(owner), Some(previous_owner)) = (owner, previous.owner.as_deref()) else {
+        return true;
+    };
+    if owner == previous_owner || alias == Some(previous_owner) || alias_unknown {
+        return true;
+    }
+    let Some(previous_alias) = previous.alias.as_mut() else {
+        return false;
+    };
+    loop {
+        match previous_alias.borrow_and_update().clone() {
+            ResolvedOwner::Known(previous_alias) => {
+                return previous_alias == owner || alias == Some(previous_alias.as_str());
+            }
+            ResolvedOwner::Unknown => return true,
+            ResolvedOwner::Pending => {}
+        }
+        if previous_alias.changed().await.is_err() {
+            // Failed resolution must never make an older mutation invisible.
+            return true;
+        }
+    }
+}
+
 /// Owned by one request loop. Every accepted request has a bounded queue slot and exactly one
 /// response attempt before shutdown returns. EOF drains accepted work; explicit shutdown rejects
 /// queued work and joins running handlers. It never advertises cancellation as rollback.
@@ -317,6 +419,7 @@ pub(crate) struct RpcRequestDispatcher {
     read: Lane,
     write: Lane,
     control: Lane,
+    approval: Lane,
     stopping: Arc<AtomicBool>,
     order: Mutex<MutationOrder>,
     artifact_tasks: Mutex<JoinSet<()>>,
@@ -361,6 +464,13 @@ impl RpcRequestDispatcher {
                 control_capacity,
                 2,
                 Arc::clone(&stopping),
+                outbound.clone(),
+            ),
+            approval: Lane::new(
+                RpcDispatchClass::Approval,
+                APPROVAL_CAPACITY,
+                2,
+                Arc::clone(&stopping),
                 outbound,
             ),
             stopping,
@@ -383,12 +493,29 @@ impl RpcRequestDispatcher {
         self.try_submit_with_owner_resolution(class, request_id, owner, None, task)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_submit_with_owner_resolution<F>(
         &self,
         class: RpcDispatchClass,
         request_id: JsonRpcId,
         owner: Option<String>,
         owner_resolver: Option<RpcOwnerResolver>,
+        task: F,
+    ) -> Result<(), Value>
+    where
+        F: FnOnce() -> Value + Send + 'static,
+    {
+        let global_fence = owner.is_none();
+        self.try_submit_ordered(class, request_id, owner, owner_resolver, global_fence, task)
+    }
+
+    pub(crate) fn try_submit_ordered<F>(
+        &self,
+        class: RpcDispatchClass,
+        request_id: JsonRpcId,
+        owner: Option<String>,
+        owner_resolver: Option<RpcOwnerResolver>,
+        global_fence: bool,
         task: F,
     ) -> Result<(), Value>
     where
@@ -401,6 +528,7 @@ impl RpcRequestDispatcher {
             RpcDispatchClass::Read => &self.read,
             RpcDispatchClass::Write => &self.write,
             RpcDispatchClass::Control => &self.control,
+            RpcDispatchClass::Approval => &self.approval,
         };
         let permit = Arc::clone(&lane.admission)
             .try_acquire_owned()
@@ -415,12 +543,29 @@ impl RpcRequestDispatcher {
         order
             .controls
             .retain(|completion| !*completion.borrow() && completion.has_changed().is_ok());
+        order
+            .priority_owners
+            .retain(|fence| !*fence.completion.borrow() && fence.completion.has_changed().is_ok());
+        let is_priority = matches!(
+            class,
+            RpcDispatchClass::Control | RpcDispatchClass::Approval
+        );
+        let global_dependency = if class == RpcDispatchClass::Approval {
+            if owner.is_none() {
+                order.last_write.as_ref()
+            } else {
+                order.last_global_write.as_ref()
+            }
+        } else {
+            None
+        };
         let dependencies = match class {
-            RpcDispatchClass::Control => owner
+            RpcDispatchClass::Control | RpcDispatchClass::Approval => owner
                 .as_ref()
                 .and_then(|owner| order.owners.get(owner))
-                .cloned()
                 .into_iter()
+                .chain(global_dependency)
+                .cloned()
                 .collect(),
             _ => order
                 .last_write
@@ -429,18 +574,30 @@ impl RpcRequestDispatcher {
                 .cloned()
                 .collect(),
         };
-        let owner_resolution = owner_resolver.and_then(|resolve| {
+        let mut published_alias = None;
+        let owner_resolution = owner_resolver.map(|resolve| {
             let candidates = order
                 .owners
                 .iter()
                 .filter(|(owner, _)| owner.starts_with("conversation:"))
                 .map(|(owner, completion)| (owner.clone(), completion.clone()))
                 .collect::<HashMap<_, _>>();
-            (!candidates.is_empty()).then_some(OwnerResolution {
+            let (published, receiver) = watch::channel(ResolvedOwner::Pending);
+            published_alias = Some(receiver);
+            OwnerResolution {
                 resolve,
                 candidates,
-            })
+                published,
+                unresolved_fence: (class == RpcDispatchClass::Approval)
+                    .then(|| order.last_write.clone())
+                    .flatten(),
+            }
         });
+        let priority_dependencies = if is_priority {
+            order.priority_owners.clone()
+        } else {
+            Vec::new()
+        };
         let (completion, receiver) = if class != RpcDispatchClass::Read {
             let (sender, receiver) = watch::channel(false);
             (Some(sender), Some(receiver))
@@ -453,6 +610,8 @@ impl RpcRequestDispatcher {
                 task: Box::new(task),
                 admitted_at: std::time::Instant::now(),
                 dependencies,
+                owner: owner.clone(),
+                priority_dependencies,
                 owner_resolution,
                 completion,
                 _permit: permit,
@@ -465,8 +624,20 @@ impl RpcRequestDispatcher {
             })?;
         if let Some(receiver) = receiver {
             match class {
-                RpcDispatchClass::Write => order.last_write = Some(receiver.clone()),
-                RpcDispatchClass::Control => order.controls.push(receiver.clone()),
+                RpcDispatchClass::Write => {
+                    order.last_write = Some(receiver.clone());
+                    if global_fence {
+                        order.last_global_write = Some(receiver.clone());
+                    }
+                }
+                RpcDispatchClass::Control | RpcDispatchClass::Approval => {
+                    order.controls.push(receiver.clone());
+                    order.priority_owners.push(PriorityFence {
+                        owner: owner.clone(),
+                        alias: published_alias,
+                        completion: receiver.clone(),
+                    });
+                }
                 RpcDispatchClass::Read => unreachable!(),
             }
             if let Some(owner) = owner {
@@ -495,15 +666,17 @@ impl RpcRequestDispatcher {
         self.read.admission.close();
         self.write.admission.close();
         self.control.admission.close();
+        self.approval.admission.close();
     }
 
     pub(crate) async fn shutdown(self) -> io::Result<()> {
         // Do not cancel queued requests on EOF. The explicit shutdown boundary calls
         // begin_shutdown itself; transport failure/EOF still drains everything already accepted.
-        let (read, write, control) = tokio::join!(
+        let (read, write, control, approval) = tokio::join!(
             self.read.shutdown(),
             self.write.shutdown(),
-            self.control.shutdown()
+            self.control.shutdown(),
+            self.approval.shutdown()
         );
         let mut artifacts = self
             .artifact_tasks
@@ -517,7 +690,10 @@ impl RpcRequestDispatcher {
                 )));
             }
         }
-        read.and(write).and(control).and(artifact_result)
+        read.and(write)
+            .and(control)
+            .and(approval)
+            .and(artifact_result)
     }
 }
 
@@ -1068,13 +1244,13 @@ mod tests {
             (
                 AGENT_APPROVE_ACTION_METHOD,
                 json!({"runId":"r", "actionId":"a"}),
-                RpcDispatchClass::Write,
+                RpcDispatchClass::Approval,
                 "run:r",
             ),
             (
                 AGENT_REJECT_ACTION_METHOD,
                 json!({"runId":"r", "actionId":"a"}),
-                RpcDispatchClass::Write,
+                RpcDispatchClass::Approval,
                 "run:r",
             ),
             (
@@ -1319,6 +1495,10 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "bounded_dispatch_approval_tests.rs"]
+mod approval_tests;
 
 #[cfg(test)]
 #[path = "bounded_dispatch_benchmarks.rs"]
