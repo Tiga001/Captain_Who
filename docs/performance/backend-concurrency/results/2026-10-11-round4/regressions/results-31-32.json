@@ -1,0 +1,34 @@
+[
+  {
+    "index": 31,
+    "kind": "core",
+    "filter": "storage::",
+    "returncode": 0,
+    "duration_s": 330.174,
+    "log": "31-storage-.log",
+    "counts": [
+      "ok",
+      "1176",
+      "0",
+      "1"
+    ],
+    "binary": "mycopilot_core-7748a31bd053ad1f",
+    "sha256": "9b2666924fad9695ceed221bd7c49c2acfc1430bb777f74cb410283849af5bbc"
+  },
+  {
+    "index": 32,
+    "kind": "core",
+    "filter": "performance::",
+    "returncode": 0,
+    "duration_s": 1.313,
+    "log": "32-performance-.log",
+    "counts": [
+      "ok",
+      "7",
+      "0",
+      "0"
+    ],
+    "binary": "mycopilot_core-7748a31bd053ad1f",
+    "sha256": "9b2666924fad9695ceed221bd7c49c2acfc1430bb777f74cb410283849af5bbc"
+  }
+]

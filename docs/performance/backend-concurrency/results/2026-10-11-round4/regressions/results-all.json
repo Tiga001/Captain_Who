@@ -1,0 +1,562 @@
+[
+  {
+    "index": 34,
+    "kind": "server",
+    "filter": "transport::tests::request_loop",
+    "returncode": 0,
+    "duration_s": 5.38,
+    "log": "34-transport-tests-request_loop.log",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 8,
+    "kind": "server",
+    "filter": "transport::bounded_dispatch",
+    "returncode": 0,
+    "duration_s": 0.484,
+    "log": "08-transport-bounded_dispatch.log",
+    "counts": [
+      "ok",
+      "37",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 7,
+    "kind": "server",
+    "filter": "application::agent::rpc_resources",
+    "returncode": 0,
+    "duration_s": 0.537,
+    "log": "07-application-agent-rpc_resources.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 33,
+    "kind": "server",
+    "filter": "application::agent::tests::mcp_approval_",
+    "returncode": 0,
+    "duration_s": 5.225,
+    "log": "33-application-agent-tests-mcp_approval_.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 35,
+    "kind": "server",
+    "filter": "transport::request_loop",
+    "returncode": 0,
+    "duration_s": 0.013,
+    "log": "35-transport-request_loop.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 36,
+    "kind": "server",
+    "filter": "workflow_execution",
+    "returncode": 0,
+    "duration_s": 3.358,
+    "log": "36-workflow_execution.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 0,
+    "kind": "server",
+    "filter": "resource_preparation_tests",
+    "returncode": 0,
+    "duration_s": 1.291,
+    "log": "00-resource_preparation_tests.log",
+    "counts": [
+      "ok",
+      "12",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 1,
+    "kind": "server",
+    "filter": "keyed_admission::tests",
+    "returncode": 0,
+    "duration_s": 0.013,
+    "log": "01-keyed_admission-tests.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 2,
+    "kind": "server",
+    "filter": "preparing::tests",
+    "returncode": 0,
+    "duration_s": 0.085,
+    "log": "02-preparing-tests.log",
+    "counts": [
+      "ok",
+      "7",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 3,
+    "kind": "server",
+    "filter": "application::agent::execution_access::tests",
+    "returncode": 0,
+    "duration_s": 0.26,
+    "log": "03-application-agent-execution_access-tests.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 4,
+    "kind": "server",
+    "filter": "preparing_deletion_tests",
+    "returncode": 0,
+    "duration_s": 0.709,
+    "log": "04-preparing_deletion_tests.log",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 5,
+    "kind": "server",
+    "filter": "scoped_deletion_tests",
+    "returncode": 0,
+    "duration_s": 0.013,
+    "log": "05-scoped_deletion_tests.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 6,
+    "kind": "server",
+    "filter": "fair_preparation_tests",
+    "returncode": 0,
+    "duration_s": 0.202,
+    "log": "06-fair_preparation_tests.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 9,
+    "kind": "server",
+    "filter": "application::blocking_executor",
+    "returncode": 0,
+    "duration_s": 0.085,
+    "log": "09-application-blocking_executor.log",
+    "counts": [
+      "ok",
+      "11",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 10,
+    "kind": "server",
+    "filter": "application::agent_dispatcher::tests",
+    "returncode": 0,
+    "duration_s": 0.778,
+    "log": "10-application-agent_dispatcher-tests.log",
+    "counts": [
+      "ok",
+      "30",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 11,
+    "kind": "server",
+    "filter": "runtime_isolation_tests",
+    "returncode": 0,
+    "duration_s": 3.053,
+    "log": "11-runtime_isolation_tests.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 12,
+    "kind": "server",
+    "filter": "workflow_scheduler::tests",
+    "returncode": 0,
+    "duration_s": 0.27,
+    "log": "12-workflow_scheduler-tests.log",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 13,
+    "kind": "server",
+    "filter": "terminal_persistence_retry_tests",
+    "returncode": 0,
+    "duration_s": 0.37,
+    "log": "13-terminal_persistence_retry_tests.log",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 14,
+    "kind": "server",
+    "filter": "execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding",
+    "returncode": 0,
+    "duration_s": 0.091,
+    "log": "14-execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 15,
+    "kind": "server",
+    "filter": "permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission",
+    "returncode": 0,
+    "duration_s": 0.147,
+    "log": "15-permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 16,
+    "kind": "server",
+    "filter": "wake_execution_fence::tests",
+    "returncode": 0,
+    "duration_s": 0.007,
+    "log": "16-wake_execution_fence-tests.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 17,
+    "kind": "server",
+    "filter": "trusted_terminal_fence_refusal_preserves_shared_usage_accumulator",
+    "returncode": 0,
+    "duration_s": 0.08,
+    "log": "17-trusted_terminal_fence_refusal_preserves_shared_usage_accumulator.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 18,
+    "kind": "server",
+    "filter": "application::agent::tests::cancellation",
+    "returncode": 0,
+    "duration_s": 1.045,
+    "log": "18-application-agent-tests-cancellation.log",
+    "counts": [
+      "ok",
+      "9",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 19,
+    "kind": "server",
+    "filter": "application::agent::tests::human_input",
+    "returncode": 0,
+    "duration_s": 18.347,
+    "log": "19-application-agent-tests-human_input.log",
+    "counts": [
+      "ok",
+      "45",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 20,
+    "kind": "server",
+    "filter": "application::agent::tests::collaboration_harness",
+    "returncode": 0,
+    "duration_s": 3.15,
+    "log": "20-application-agent-tests-collaboration_harness.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 21,
+    "kind": "server",
+    "filter": "destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion",
+    "returncode": 0,
+    "duration_s": 0.361,
+    "log": "21-destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 22,
+    "kind": "server",
+    "filter": "project_deletion_timeout_preserves_late_command_observation",
+    "returncode": 0,
+    "duration_s": 0.501,
+    "log": "22-project_deletion_timeout_preserves_late_command_observation.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 23,
+    "kind": "server",
+    "filter": "application::agent::tests::automation_turn",
+    "returncode": 0,
+    "duration_s": 1.135,
+    "log": "23-application-agent-tests-automation_turn.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 24,
+    "kind": "server",
+    "filter": "provider_transition",
+    "returncode": 0,
+    "duration_s": 2.489,
+    "log": "24-provider_transition.log",
+    "counts": [
+      "ok",
+      "25",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 25,
+    "kind": "server",
+    "filter": "application::agent::tests::provider_profiles",
+    "returncode": 0,
+    "duration_s": 2.816,
+    "log": "25-application-agent-tests-provider_profiles.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 26,
+    "kind": "server",
+    "filter": "application::agent::tests::human_root_notifications",
+    "returncode": 0,
+    "duration_s": 0.286,
+    "log": "26-application-agent-tests-human_root_notifications.log",
+    "counts": [
+      "ok",
+      "4",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 27,
+    "kind": "server",
+    "filter": "application::agent::tests::pending_actions",
+    "returncode": 0,
+    "duration_s": 7.705,
+    "log": "27-application-agent-tests-pending_actions.log",
+    "counts": [
+      "ok",
+      "75",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 28,
+    "kind": "server",
+    "filter": "application::agent_wait::tests",
+    "returncode": 0,
+    "duration_s": 0.148,
+    "log": "28-application-agent_wait-tests.log",
+    "counts": [
+      "ok",
+      "6",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 29,
+    "kind": "server",
+    "filter": "occupancy_tests",
+    "returncode": 0,
+    "duration_s": 0.421,
+    "log": "29-occupancy_tests.log",
+    "counts": [
+      "ok",
+      "4",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  },
+  {
+    "index": 30,
+    "kind": "server",
+    "filter": "application::agent::tests::context_window_consistency",
+    "returncode": 0,
+    "duration_s": 1.071,
+    "log": "30-application-agent-tests-context_window_consistency.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "bd0bef84129ac278252b442a312404e7743f178f526de15d9a6df1ebf194f48e"
+  }
+]

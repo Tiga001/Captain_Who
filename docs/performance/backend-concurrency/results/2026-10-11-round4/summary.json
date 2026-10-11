@@ -1,0 +1,1859 @@
+{
+  "round": 4,
+  "status": "implementation_and_round_validation_complete",
+  "implementation_commit": "e787b88d045549ea5d204f5c01f77f391b7cfc49",
+  "run_id": "round4-full-20261011-r1",
+  "run_status": "completed",
+  "source_changed_during_run": false,
+  "source": {
+    "head": "e787b88d045549ea5d204f5c01f77f391b7cfc49",
+    "source_manifest_sha256": "158a6aec7a960ab3524a125fd118a2a5cffe62de7ba73bb99799816a39a12c0d",
+    "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "benchmark_binary": {
+    "path": "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-7fdb09b124fbc390",
+    "sha256": "639efb3ecf20bd2887dd2ef0ef207e572a190de980ca695a43d9d8845181679c",
+    "size_bytes": 89097904,
+    "source": "built_by_runner"
+  },
+  "machine": {
+    "platform": "darwin",
+    "release": "25.5.0",
+    "architecture": "arm64",
+    "cpu_model": "Apple M4",
+    "logical_cpus": 10,
+    "total_ram_bytes": 17179869184
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "mycopilot-core-server",
+      "--bin",
+      "core-server",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "code": 0,
+    "signal": null,
+    "spawn_error": null,
+    "duration_ms": 192419.560208,
+    "resource_sampling": null,
+    "sampling_error": null
+  },
+  "run": {
+    "command": [
+      "/tmp/captain-backend-baseline-20261011-target/release/deps/core_server-7fdb09b124fbc390",
+      "application::agent::tests::backend_concurrency_baseline::backend_concurrency_disk_baseline",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "code": 0,
+    "signal": null,
+    "spawn_error": null,
+    "duration_ms": 200244.196333,
+    "resource_sampling": {
+      "withThreads": false,
+      "macThreads": true,
+      "interval_ms": 1000,
+      "scope": "test executable only; excludes runner/cargo and subprocesses",
+      "thread_count": "macOS ps -M thread rows; raw user/command fields discarded",
+      "rss": "ps rss KiB converted to bytes; low-frequency samples, not an exact peak"
+    },
+    "sampling_error": null
+  },
+  "results": {
+    "cases": 36,
+    "invalidLines": 0,
+    "integrityFailures": [],
+    "missing": false
+  },
+  "comparison_acceptance": "internally_consistent_evidence",
+  "comparison_violations": [],
+  "outcome_changes_requiring_interpretation": [],
+  "correctness": {
+    "suite_count": 37,
+    "unique_passed_tests": 1622,
+    "passed_executions": 1628,
+    "failed_executions": 0,
+    "ignored_executions": 1,
+    "ignored_tests": [
+      "storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery"
+    ]
+  },
+  "capacity": {
+    "logical_run_limit": 50,
+    "rpc_lane_count_limits": {
+      "read": 64,
+      "write": 64,
+      "control": 32,
+      "approval": 32
+    },
+    "handler_slots": {
+      "read": 4,
+      "write": 2,
+      "control": 2,
+      "approval": 2
+    },
+    "identity_resolver_workers": 2,
+    "observed_logical_peak": null
+  },
+  "boundary": "Microseconds; Core intake only, no renderer click latency. Exact success-only RPC quantiles and all-response counts remain separate; n=1 is one observation. Stage p95_upper_us is a histogram bucket bound. Fixed-rate completion/s is not maximum throughput. RSS/threads are sampled process-only peaks. A finite owner/slow-tool fixture cannot prove absence of sustained starvation or unobserved quota overflow.",
+  "limitations": [
+    "One full matrix per revision; this is not a statistical reliability or p99 claim.",
+    "Core intake response only, not native click-to-paint.",
+    "No observed logical peak field; cap 50 is source and regression evidence, not measured matrix peak.",
+    "Cumulative DB queue wait, Stop p95, steady response maximum, CPU and RSS increased; see results report.",
+    "Finite owner fixtures do not prove absence of sustained starvation.",
+    "Fixed offered steady rate is not maximum throughput.",
+    "Rounds five and six are not complete.",
+    "50-way approval success counts match, but admitted owner identities differ across runs; success latencies are not fully paired by owner.",
+    "The 50-way approval and Stop cases do not drain naturally before cleanup; recovery yields final persisted terminal states.",
+    "One/ten/thirty-second slow-tool overlap isolation was also present in round three."
+  ],
+  "before": {
+    "directory": "/Users/shenhuajiao/mycopilot-next/docs/performance/backend-concurrency/results/2026-10-11-round3",
+    "cases_sha256": "1685abb32b3aa37c9ed9bc72a13e4c3cef543026524e760adad5be2726403337",
+    "source": {
+      "head": "354762d6fae3f8959027b10069a972c9b44b427f",
+      "source_manifest_sha256": "6da035dbed139ae64717ee24b94d19d498cceaa2386ff30478153e82be91a2f7",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "run_duration_ms": 206015.834791,
+    "resource_sample_count": 206,
+    "totals": {
+      "rpc": {
+        "offered": 1608,
+        "dispatch_admitted": 1572,
+        "success_response": 1572,
+        "rejected_or_error": 36,
+        "no_response": 0,
+        "busy_or_capacity_rejections": 36
+      },
+      "root_terminal_statuses": {
+        "Completed": 1316,
+        "Cancelled": 104
+      },
+      "child_terminal_statuses": {
+        "Completed": 158
+      },
+      "accepted_root_starts": 1420,
+      "reopened_root_turns": 1420,
+      "reopened_child_turns": 158,
+      "cpu_seconds": 74.92440500000001,
+      "sampled_rss_peak_bytes": 322715648,
+      "sampled_thread_peak": 63,
+      "post_reopen_in_progress": 0,
+      "pre_close_in_progress": 18,
+      "not_drained_before_cleanup": [
+        "approval-u50-r50-h0-s0",
+        "stop-u50-r50-h0-s0"
+      ]
+    },
+    "integrity_violations": [],
+    "case_count": 36,
+    "database_aggregates": {
+      "sqlite.commit/terminal": {
+        "count": 1542,
+        "total_us": 767422,
+        "max_us": 8731
+      },
+      "sqlite.commit/trace_publication": {
+        "count": 5626,
+        "total_us": 548043,
+        "max_us": 8149
+      },
+      "sqlite.commit/turn_admission": {
+        "count": 1578,
+        "total_us": 705878,
+        "max_us": 14225
+      },
+      "sqlite.hold/connection": {
+        "count": 75029,
+        "total_us": 24158196,
+        "max_us": 31871
+      },
+      "sqlite.read_hold/reader": {
+        "count": 151785,
+        "total_us": 18755011,
+        "max_us": 17236
+      },
+      "sqlite.read_wait/reader": {
+        "count": 151785,
+        "total_us": 1180448,
+        "max_us": 4544
+      },
+      "sqlite.wait/connection": {
+        "count": 75029,
+        "total_us": 463,
+        "max_us": 31
+      },
+      "storage.queue_wait/writer": {
+        "count": 75031,
+        "total_us": 33096088,
+        "max_us": 32957
+      },
+      "storage.worker_wait/writer": {
+        "count": 31042,
+        "total_us": 254653,
+        "max_us": 12830
+      },
+      "sqlite.commit/approval": {
+        "count": 84,
+        "total_us": 17832,
+        "max_us": 2209
+      }
+    },
+    "key_cases": {
+      "text-u50-r50-h0-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 150,
+              "dispatch_admitted": 150,
+              "success_response": 150,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 956467,
+              "p50_us": 420375,
+              "p95_us": 856414
+            },
+            "success_actual_offer_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 954697,
+              "p50_us": 418704,
+              "p95_us": 855124
+            },
+            "all_response_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 956467,
+              "p50_us": 420375,
+              "p95_us": 856414
+            },
+            "queue_all_started": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 929398,
+              "p50_us": 402020,
+              "p95_us": 826068
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 252,
+          "kind": "sample_distribution",
+          "max_us": 2106,
+          "p50_us": 1179,
+          "p95_us": 1982
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 5.757613000000002,
+        "completed_root_turns_per_second": 29.87633587056456
+      },
+      "text-u50-r50-h128-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 150,
+              "dispatch_admitted": 150,
+              "success_response": 150,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1474248,
+              "p50_us": 702925,
+              "p95_us": 1388878
+            },
+            "success_actual_offer_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1472925,
+              "p50_us": 701242,
+              "p95_us": 1387585
+            },
+            "all_response_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1474248,
+              "p50_us": 702925,
+              "p95_us": 1388878
+            },
+            "queue_all_started": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1461443,
+              "p50_us": 683074,
+              "p95_us": 1356947
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 278,
+          "kind": "sample_distribution",
+          "max_us": 35544,
+          "p50_us": 1088,
+          "p95_us": 1974
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 9.480933999999998,
+        "completed_root_turns_per_second": 27.013836487048664
+      },
+      "approval-u50-r50-h0-s0": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 32,
+              "success_response": 32,
+              "rejected_or_error": 18,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 18
+            },
+            "success_scheduled_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 188664,
+              "p50_us": 27472,
+              "p95_us": 178825
+            },
+            "success_actual_offer_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 188335,
+              "p50_us": 27271,
+              "p95_us": 178503
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 188664,
+              "p50_us": 11284,
+              "p95_us": 173753
+            },
+            "queue_all_started": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 173446,
+              "p50_us": 22403,
+              "p95_us": 163001
+            },
+            "errors": {
+              "{\"code\": -32001, \"data\": {\"code\": \"overloaded\", \"retryable\": true, \"type\": \"rpc_dispatch_error\"}, \"message\": \"RPC request queue is full. Retry shortly.\"}": 18
+            }
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 883921,
+              "p50_us": 413862,
+              "p95_us": 833400
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 882165,
+              "p50_us": 412203,
+              "p95_us": 831651
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 883921,
+              "p50_us": 413862,
+              "p95_us": 833400
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 851683,
+              "p50_us": 382398,
+              "p95_us": 811185
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 157,
+          "kind": "sample_distribution",
+          "max_us": 59076,
+          "p50_us": 1448,
+          "p95_us": 13673
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 4.068934999999997,
+        "completed_root_turns_per_second": 10.208144057328937
+      },
+      "approvalbehindpreparation-u50-r50-h128-s0": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 1,
+              "dispatch_admitted": 1,
+              "success_response": 1,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 1434417,
+              "observed_us": 1434417
+            },
+            "success_actual_offer_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 1434416,
+              "observed_us": 1434416
+            },
+            "all_response_scheduled_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 1434417,
+              "observed_us": 1434417
+            },
+            "queue_all_started": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 1431387,
+              "observed_us": 1431387
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1434623,
+              "p50_us": 725701,
+              "p95_us": 1358953
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1434408,
+              "p50_us": 725586,
+              "p95_us": 1358746
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1434623,
+              "p50_us": 725701,
+              "p95_us": 1358953
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1400911,
+              "p50_us": 670394,
+              "p95_us": 1340425
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 85,
+          "kind": "sample_distribution",
+          "max_us": 2018,
+          "p50_us": 887,
+          "p95_us": 1766
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 3.385020000000001,
+        "completed_root_turns_per_second": 29.569998988706033
+      },
+      "stop-u50-r50-h0-s0": {
+        "operations": {
+          "agent.cancelRun": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 32,
+              "success_response": 32,
+              "rejected_or_error": 18,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 18
+            },
+            "success_scheduled_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 52590,
+              "p50_us": 21921,
+              "p95_us": 50135
+            },
+            "success_actual_offer_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 52355,
+              "p50_us": 21764,
+              "p95_us": 49904
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 52590,
+              "p50_us": 8863,
+              "p95_us": 48710
+            },
+            "queue_all_started": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 48388,
+              "p50_us": 19494,
+              "p95_us": 46819
+            },
+            "errors": {
+              "{\"code\": -32001, \"data\": {\"code\": \"overloaded\", \"retryable\": true, \"type\": \"rpc_dispatch_error\"}, \"message\": \"RPC request queue is full. Retry shortly.\"}": 18
+            }
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 597120,
+              "p50_us": 296489,
+              "p95_us": 577518
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 595491,
+              "p50_us": 294967,
+              "p95_us": 575896
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 597120,
+              "p50_us": 296489,
+              "p95_us": 577518
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 583401,
+              "p50_us": 280094,
+              "p95_us": 563623
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 135,
+          "kind": "sample_distribution",
+          "max_us": 2547,
+          "p50_us": 1368,
+          "p95_us": 2138
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 1.7588310000000096,
+        "completed_root_turns_per_second": 0.0
+      },
+      "slowtool-u5-r5-h0-s1": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5184,
+              "p50_us": 2541,
+              "p95_us": 5184
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5138,
+              "p50_us": 2503,
+              "p95_us": 5138
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5184,
+              "p50_us": 2541,
+              "p95_us": 5184
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 2492,
+              "p50_us": 97,
+              "p95_us": 2492
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 82452,
+              "p50_us": 40993,
+              "p95_us": 82452
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 81569,
+              "p50_us": 40119,
+              "p95_us": 81569
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 82452,
+              "p50_us": 40993,
+              "p95_us": 82452
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 42277,
+              "p50_us": 20395,
+              "p95_us": 42277
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 62,
+          "kind": "sample_distribution",
+          "max_us": 2050,
+          "p50_us": 1125,
+          "p95_us": 1920
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              159320,
+              159356,
+              159360,
+              159364
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 1131212,
+            "command_started_us": 113252,
+            "slow_run_id": "run-12c01cb9351e41648cddab881c8a5b96"
+          },
+          "observed_duration_us": 1017960,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.48687199999999997,
+        "completed_root_turns_per_second": 4.075617374519893
+      },
+      "slowtool-u5-r5-h0-s10": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 6478,
+              "p50_us": 3301,
+              "p95_us": 6478
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 6417,
+              "p50_us": 3298,
+              "p95_us": 6417
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 6478,
+              "p50_us": 3301,
+              "p95_us": 6478
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3245,
+              "p50_us": 166,
+              "p95_us": 3245
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 80156,
+              "p50_us": 48700,
+              "p95_us": 80156
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 78237,
+              "p50_us": 46793,
+              "p95_us": 78237
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 80156,
+              "p50_us": 48700,
+              "p95_us": 80156
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 44425,
+              "p50_us": 18056,
+              "p95_us": 44425
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 510,
+          "kind": "sample_distribution",
+          "max_us": 4482,
+          "p50_us": 2112,
+          "p95_us": 2848
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              146874,
+              146921,
+              146927,
+              146932
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 10126378,
+            "command_started_us": 110701,
+            "slow_run_id": "run-e0021726724c4ebc897ffa50943315f7"
+          },
+          "observed_duration_us": 10015677,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.5106059999999903,
+        "completed_root_turns_per_second": 0.49022356940016637
+      },
+      "slowtool-u5-r5-h0-s30": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5656,
+              "p50_us": 2227,
+              "p95_us": 5656
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5621,
+              "p50_us": 2196,
+              "p95_us": 5621
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 5656,
+              "p50_us": 2227,
+              "p95_us": 5656
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 2213,
+              "p50_us": 100,
+              "p95_us": 2213
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 105238,
+              "p50_us": 46660,
+              "p95_us": 105238
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 103492,
+              "p50_us": 44937,
+              "p95_us": 103492
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 105238,
+              "p50_us": 46660,
+              "p95_us": 105238
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 60382,
+              "p50_us": 29896,
+              "p95_us": 60382
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 1510,
+          "kind": "sample_distribution",
+          "max_us": 2922,
+          "p50_us": 1906,
+          "p95_us": 2618
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              169694,
+              169724,
+              169728,
+              169732
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 30112348,
+            "command_started_us": 111683,
+            "slow_run_id": "run-5594dea7337e401abe9682ef0feb8497"
+          },
+          "observed_duration_us": 30000665,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.5586760000000037,
+        "completed_root_turns_per_second": 0.16561226307137017
+      },
+      "steadytext-u20-r20-h0-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 620,
+              "dispatch_admitted": 620,
+              "success_response": 620,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 662566,
+              "p50_us": 200712,
+              "p95_us": 397067
+            },
+            "success_actual_offer_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 660191,
+              "p50_us": 199150,
+              "p95_us": 394835
+            },
+            "all_response_scheduled_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 662566,
+              "p50_us": 200712,
+              "p95_us": 397067
+            },
+            "queue_all_started": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 640553,
+              "p50_us": 168416,
+              "p95_us": 375241
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 3026,
+          "kind": "sample_distribution",
+          "max_us": 50599,
+          "p50_us": 2410,
+          "p95_us": 3797
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 23.82983000000001,
+        "completed_root_turns_per_second": 10.247746714708764
+      }
+    }
+  },
+  "after": {
+    "directory": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round4-full-20261011-r1",
+    "cases_sha256": "e8cab0060c04ec84baf24371bccc3f652a5282d2fe566069212fdf3b673a6825",
+    "source": {
+      "head": "e787b88d045549ea5d204f5c01f77f391b7cfc49",
+      "source_manifest_sha256": "158a6aec7a960ab3524a125fd118a2a5cffe62de7ba73bb99799816a39a12c0d",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "run_duration_ms": 200244.196333,
+    "resource_sample_count": 200,
+    "totals": {
+      "rpc": {
+        "offered": 1608,
+        "dispatch_admitted": 1572,
+        "success_response": 1572,
+        "rejected_or_error": 36,
+        "no_response": 0,
+        "busy_or_capacity_rejections": 36
+      },
+      "root_terminal_statuses": {
+        "Completed": 1316,
+        "Cancelled": 104
+      },
+      "child_terminal_statuses": {
+        "Completed": 158
+      },
+      "accepted_root_starts": 1420,
+      "reopened_root_turns": 1420,
+      "reopened_child_turns": 158,
+      "cpu_seconds": 76.01878400000001,
+      "sampled_rss_peak_bytes": 337543168,
+      "sampled_thread_peak": 42,
+      "post_reopen_in_progress": 0,
+      "pre_close_in_progress": 18,
+      "not_drained_before_cleanup": [
+        "approval-u50-r50-h0-s0",
+        "stop-u50-r50-h0-s0"
+      ]
+    },
+    "integrity_violations": [],
+    "case_count": 36,
+    "database_aggregates": {
+      "sqlite.commit/terminal": {
+        "count": 1542,
+        "total_us": 689518,
+        "max_us": 10483
+      },
+      "sqlite.commit/trace_publication": {
+        "count": 5626,
+        "total_us": 481213,
+        "max_us": 16593
+      },
+      "sqlite.commit/turn_admission": {
+        "count": 1578,
+        "total_us": 708027,
+        "max_us": 19001
+      },
+      "sqlite.hold/connection": {
+        "count": 74981,
+        "total_us": 23958010,
+        "max_us": 69987
+      },
+      "sqlite.read_hold/reader": {
+        "count": 155933,
+        "total_us": 21206857,
+        "max_us": 23334
+      },
+      "sqlite.read_wait/reader": {
+        "count": 155934,
+        "total_us": 9832516,
+        "max_us": 20342
+      },
+      "sqlite.wait/connection": {
+        "count": 74981,
+        "total_us": 1304,
+        "max_us": 32
+      },
+      "storage.queue_wait/writer": {
+        "count": 74981,
+        "total_us": 83345337,
+        "max_us": 77827
+      },
+      "storage.worker_wait/writer": {
+        "count": 31100,
+        "total_us": 262523,
+        "max_us": 15325
+      },
+      "sqlite.commit/approval": {
+        "count": 84,
+        "total_us": 14446,
+        "max_us": 2075
+      }
+    },
+    "key_cases": {
+      "text-u50-r50-h0-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 150,
+              "dispatch_admitted": 150,
+              "success_response": 150,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 633842,
+              "p50_us": 309623,
+              "p95_us": 610047
+            },
+            "success_actual_offer_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 630694,
+              "p50_us": 308067,
+              "p95_us": 608351
+            },
+            "all_response_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 633842,
+              "p50_us": 309623,
+              "p95_us": 610047
+            },
+            "queue_all_started": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 601919,
+              "p50_us": 276584,
+              "p95_us": 572284
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 237,
+          "kind": "sample_distribution",
+          "max_us": 3118,
+          "p50_us": 1639,
+          "p95_us": 2963
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 5.7488560000000035,
+        "completed_root_turns_per_second": 31.704651304847197
+      },
+      "text-u50-r50-h128-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 150,
+              "dispatch_admitted": 150,
+              "success_response": 150,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1042624,
+              "p50_us": 506006,
+              "p95_us": 968119
+            },
+            "success_actual_offer_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1040351,
+              "p50_us": 502940,
+              "p95_us": 964542
+            },
+            "all_response_scheduled_to_response": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 1042624,
+              "p50_us": 506006,
+              "p95_us": 968119
+            },
+            "queue_all_started": {
+              "count": 150,
+              "kind": "sample_distribution",
+              "max_us": 979490,
+              "p50_us": 452173,
+              "p95_us": 912209
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 257,
+          "kind": "sample_distribution",
+          "max_us": 3582,
+          "p50_us": 1929,
+          "p95_us": 3236
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 10.105616000000001,
+        "completed_root_turns_per_second": 29.189569126932202
+      },
+      "approval-u50-r50-h0-s0": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 32,
+              "success_response": 32,
+              "rejected_or_error": 18,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 18
+            },
+            "success_scheduled_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 136262,
+              "p50_us": 45977,
+              "p95_us": 132562
+            },
+            "success_actual_offer_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 136087,
+              "p50_us": 45844,
+              "p95_us": 132390
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 136262,
+              "p50_us": 12608,
+              "p95_us": 125340
+            },
+            "queue_all_started": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 125169,
+              "p50_us": 33794,
+              "p95_us": 121377
+            },
+            "errors": {
+              "{\"code\": -32001, \"data\": {\"code\": \"overloaded\", \"retryable\": true, \"type\": \"rpc_dispatch_error\"}, \"message\": \"RPC request queue is full. Retry shortly.\"}": 18
+            }
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 718030,
+              "p50_us": 359066,
+              "p95_us": 686100
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 715815,
+              "p50_us": 357033,
+              "p95_us": 683896
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 718030,
+              "p50_us": 359066,
+              "p95_us": 686100
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 682196,
+              "p50_us": 318230,
+              "p95_us": 652026
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 147,
+          "kind": "sample_distribution",
+          "max_us": 40812,
+          "p50_us": 2174,
+          "p95_us": 3641
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 3.7015990000000016,
+        "completed_root_turns_per_second": 10.94633082411504
+      },
+      "approvalbehindpreparation-u50-r50-h128-s0": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 1,
+              "dispatch_admitted": 1,
+              "success_response": 1,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 8261,
+              "observed_us": 8261
+            },
+            "success_actual_offer_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 8261,
+              "observed_us": 8261
+            },
+            "all_response_scheduled_to_response": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 8261,
+              "observed_us": 8261
+            },
+            "queue_all_started": {
+              "count": 1,
+              "kind": "single_observation",
+              "max_us": 5466,
+              "observed_us": 5466
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1103982,
+              "p50_us": 486156,
+              "p95_us": 1055546
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1103606,
+              "p50_us": 485951,
+              "p95_us": 1055183
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1103982,
+              "p50_us": 486156,
+              "p95_us": 1055546
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 1053245,
+              "p50_us": 430474,
+              "p95_us": 1007625
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 65,
+          "kind": "sample_distribution",
+          "max_us": 3090,
+          "p50_us": 1295,
+          "p95_us": 2904
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 3.6395369999999954,
+        "completed_root_turns_per_second": 38.618030604016894
+      },
+      "stop-u50-r50-h0-s0": {
+        "operations": {
+          "agent.cancelRun": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 32,
+              "success_response": 32,
+              "rejected_or_error": 18,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 18
+            },
+            "success_scheduled_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 70180,
+              "p50_us": 32813,
+              "p95_us": 70179
+            },
+            "success_actual_offer_to_response": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 70026,
+              "p50_us": 32699,
+              "p95_us": 70025
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 70180,
+              "p50_us": 19068,
+              "p95_us": 65320
+            },
+            "queue_all_started": {
+              "count": 32,
+              "kind": "sample_distribution",
+              "max_us": 65168,
+              "p50_us": 26753,
+              "p95_us": 65106
+            },
+            "errors": {
+              "{\"code\": -32001, \"data\": {\"code\": \"overloaded\", \"retryable\": true, \"type\": \"rpc_dispatch_error\"}, \"message\": \"RPC request queue is full. Retry shortly.\"}": 18
+            }
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 50,
+              "dispatch_admitted": 50,
+              "success_response": 50,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 482235,
+              "p50_us": 231992,
+              "p95_us": 464344
+            },
+            "success_actual_offer_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 480010,
+              "p50_us": 229926,
+              "p95_us": 462144
+            },
+            "all_response_scheduled_to_response": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 482235,
+              "p50_us": 231992,
+              "p95_us": 464344
+            },
+            "queue_all_started": {
+              "count": 50,
+              "kind": "sample_distribution",
+              "max_us": 445446,
+              "p50_us": 211119,
+              "p95_us": 423143
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 131,
+          "kind": "sample_distribution",
+          "max_us": 3552,
+          "p50_us": 2111,
+          "p95_us": 3246
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 1.6326440000000062,
+        "completed_root_turns_per_second": 0.0
+      },
+      "slowtool-u5-r5-h0-s1": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3816,
+              "p50_us": 1939,
+              "p95_us": 3816
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3738,
+              "p50_us": 1871,
+              "p95_us": 3738
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3816,
+              "p50_us": 1939,
+              "p95_us": 3816
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 1864,
+              "p50_us": 265,
+              "p95_us": 1864
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 59109,
+              "p50_us": 23232,
+              "p95_us": 59109
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 57696,
+              "p50_us": 21832,
+              "p95_us": 57696
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 59109,
+              "p50_us": 23232,
+              "p95_us": 59109
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 21810,
+              "p50_us": 13472,
+              "p95_us": 21810
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 63,
+          "kind": "sample_distribution",
+          "max_us": 3219,
+          "p50_us": 1592,
+          "p95_us": 2940
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              123639,
+              123704,
+              123708,
+              123712
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 1136378,
+            "command_started_us": 99828,
+            "slow_run_id": "run-9665ebaeb3c948cc808a0e0dc990903a"
+          },
+          "observed_duration_us": 1036550,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.4105229999999942,
+        "completed_root_turns_per_second": 4.0240768566487
+      },
+      "slowtool-u5-r5-h0-s10": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3775,
+              "p50_us": 1860,
+              "p95_us": 3775
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3694,
+              "p50_us": 1801,
+              "p95_us": 3694
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 3775,
+              "p50_us": 1860,
+              "p95_us": 3775
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 1798,
+              "p50_us": 247,
+              "p95_us": 1798
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 43267,
+              "p50_us": 25233,
+              "p95_us": 43267
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 41364,
+              "p50_us": 23350,
+              "p95_us": 41364
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 43267,
+              "p50_us": 25233,
+              "p95_us": 43267
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 23336,
+              "p50_us": 12111,
+              "p95_us": 23336
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 509,
+          "kind": "sample_distribution",
+          "max_us": 3250,
+          "p50_us": 1707,
+          "p95_us": 2990
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              126065,
+              126126,
+              126129,
+              126142
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 10101101,
+            "command_started_us": 102020,
+            "slow_run_id": "run-d1c188b569b24d8c906548ae62f1fae4"
+          },
+          "observed_duration_us": 9999081,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.4037290000000109,
+        "completed_root_turns_per_second": 0.49118953334047194
+      },
+      "slowtool-u5-r5-h0-s30": {
+        "operations": {
+          "agent.approveAction": {
+            "counts": {
+              "offered": 4,
+              "dispatch_admitted": 4,
+              "success_response": 4,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 4357,
+              "p50_us": 2371,
+              "p95_us": 4357
+            },
+            "success_actual_offer_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 4322,
+              "p50_us": 2343,
+              "p95_us": 4322
+            },
+            "all_response_scheduled_to_response": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 4357,
+              "p50_us": 2371,
+              "p95_us": 4357
+            },
+            "queue_all_started": {
+              "count": 4,
+              "kind": "sample_distribution",
+              "max_us": 2335,
+              "p50_us": 375,
+              "p95_us": 2335
+            },
+            "errors": {}
+          },
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 5,
+              "dispatch_admitted": 5,
+              "success_response": 5,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 40859,
+              "p50_us": 24696,
+              "p95_us": 40859
+            },
+            "success_actual_offer_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 39205,
+              "p50_us": 23066,
+              "p95_us": 39205
+            },
+            "all_response_scheduled_to_response": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 40859,
+              "p50_us": 24696,
+              "p95_us": 40859
+            },
+            "queue_all_started": {
+              "count": 5,
+              "kind": "sample_distribution",
+              "max_us": 23058,
+              "p50_us": 10433,
+              "p95_us": 23058
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 1512,
+          "kind": "sample_distribution",
+          "max_us": 3126,
+          "p50_us": 1668,
+          "p95_us": 2788
+        },
+        "slow_tool_overlap": {
+          "declared": {
+            "all_approvals_offered_during_command": true,
+            "approval_offered_us": [
+              125122,
+              125149,
+              125152,
+              125156
+            ],
+            "boundary": "Core outbound receipt of durable command lifecycle events and RPC offer; same monotonic clock",
+            "command_exited_us": 30124615,
+            "command_started_us": 107201,
+            "slow_run_id": "run-b3348cf481bc4992bc8391f984a79c32"
+          },
+          "observed_duration_us": 30017414,
+          "approval_offers_in_interval": 4,
+          "approval_offers_total": 4,
+          "successful_approval_responses_before_slow_exit": 4,
+          "independent_root_starts": 4,
+          "independent_root_terminals_before_slow_exit": 4,
+          "unresponded_approvals": 0
+        },
+        "cpu_seconds": 0.47756000000000576,
+        "completed_root_turns_per_second": 0.16543397401058738
+      },
+      "steadytext-u20-r20-h0-s0": {
+        "operations": {
+          "agent.startConversationTurn": {
+            "counts": {
+              "offered": 620,
+              "dispatch_admitted": 620,
+              "success_response": 620,
+              "rejected_or_error": 0,
+              "no_response": 0,
+              "busy_or_capacity_rejections": 0
+            },
+            "success_scheduled_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 1277824,
+              "p50_us": 134938,
+              "p95_us": 283371
+            },
+            "success_actual_offer_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 1255106,
+              "p50_us": 132457,
+              "p95_us": 280702
+            },
+            "all_response_scheduled_to_response": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 1277824,
+              "p50_us": 134938,
+              "p95_us": 283371
+            },
+            "queue_all_started": {
+              "count": 620,
+              "kind": "sample_distribution",
+              "max_us": 1226981,
+              "p50_us": 98011,
+              "p95_us": 242070
+            },
+            "errors": {}
+          }
+        },
+        "timer_lag": {
+          "count": 3020,
+          "kind": "sample_distribution",
+          "max_us": 238897,
+          "p50_us": 2935,
+          "p95_us": 3773
+        },
+        "slow_tool_overlap": null,
+        "cpu_seconds": 25.77018,
+        "completed_root_turns_per_second": 10.266254652062223
+      }
+    }
+  }
+}

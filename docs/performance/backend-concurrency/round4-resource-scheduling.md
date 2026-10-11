@@ -9,7 +9,7 @@ last_verified: 2026-10-11
 
 本页记录第四轮代码的实现契约和验证范围，不作为性能验收结果。第三轮已接受的存储架构与结果仍见
 [存储执行契约](round3-storage-execution.md)、[第三轮结果](round3-results.md)；本轮的最终源码状态、回归日志与完整负载比较由
-[PROGRESS](PROGRESS.md) 和最终结果材料记录。下文不声称完整矩阵已运行、所有路径已无全局阻塞，或任一延迟指标已改善。
+[PROGRESS](PROGRESS.md) 和 [第四轮结果](round4-results.md) 记录。实现契约与性能结论分开；未审计的全局范围和剩余同步路径见后文。
 
 ## 1. 分开的三种所有权
 
@@ -22,10 +22,10 @@ last_verified: 2026-10-11
 Preparing 不是新的业务 Run 额度，也不是数据库 schema 中的新运行状态。准备记录受既有已接纳作业所有权约束；
 初始消息、Trace、claim/receipt 与绑定的领域事务仍是跨重启接纳事实。数据库 writer、逻辑 Turn 额度与物理线程预算不能互相替代。
 
-## 2. 资源从 Core 身份解析
+## 2. 资源从 Core Server 身份解析
 
 [rpc_resources.rs](../../../crates/core-server/src/application/agent/rpc_resources.rs) 以持久化 Conversation、Agent/root、pending Action、
-question 及 Core 的 Run/Preparing 注册表解析排序范围。DTO 里的 ID 只是查找提示，不能单独授予并行执行或修改权限；handler
+question 及 Core Server 的 Run/Preparing 注册表解析排序范围。DTO 里的 ID 只是查找提示，不能单独授予并行执行或修改权限；handler
 仍执行授权、精确归属、revision、claim 和最终事务检查。解析失败、无法确定 owner、未经审计的配置/全局方法采用保守全局排序。
 
 范围分别包含 Conversation、Run、Action/question、树及 Project 成员/删除标记。普通 Project 成员之间不互斥；Project 删除标记
@@ -37,8 +37,9 @@ Stop/steer 从 Preparing、active Run、usage context 和 pending Action 收集�
 所有原 Project 与当前 Project 都进入集合。这样移动 Conversation 以后，对旧 Project 的文件作用域与新 Project 的成员删除仍相互排序。
 仅能从 Trace/session 找到 Conversation、不能恢复冻结 Project 的 Run 继续使用全局围栏。迁移本身还解析并声明已存在的目标 Project。
 
-已审计的新 Turn 方法在 Conversation 尚不存在时使用 `GlobalTurnPreparation`：它保持普通操作的全局冲突，只允许账号发布按
-第 4 节规则越过；不能把任意未知 owner 的 RPC 都当成可绕过的准备。身份解析在独立有界 worker 上执行，只复制小型 owner 查找提示，
+已审计的新 Turn 方法在 Conversation 尚不存在时使用 `GlobalTurnPreparation`：它保持普通操作的全局冲突，允许账号发布按
+第 4 节规则越过；已开始的准备也允许 Core Server 已登记且身份匹配的精确 Preparing Stop 越过。没有 Conversation ID 或首次解析早于
+Preparing 登记时仍保守排序，不能把任意未知 owner 的 RPC 都当成可绕过的准备。身份解析在独立有界 worker 上执行，只复制小型 owner 查找提示，
 不为解析再次复制完整消息或 checkpoint。owner 变化后的重解析与依赖等待均发生在取得 handler 槽之前。
 
 Transport 的资源声明只负责排序。它不允许在 handler 中跳过授权，也不允许执行中临时从一个 Conversation 升级为全局独占。
@@ -65,7 +66,7 @@ Conversation 和 Run。注册项还保存权威 Project、assistant ID、历史 
 
 运行期间取消和删除通过与最终接纳相同的 writer 顺序发布围栏，避免“最后检查通过后、提交前撤销”的窗口：
 
-- Stop 可按 Core 已登记的 Preparing Run 找到 owner，设置该 generation 的取消令牌。尚无初始 Trace 时，不制造一个已接纳 Turn。
+- Stop 可按 Core Server 已登记的 Preparing Run 找到 owner，设置该 generation 的取消令牌。尚无初始 Trace 时，不制造一个已接纳 Turn。
 - 删除先登记 Conversation/Project tombstone 并取消匹配项，再在 registry 锁之外等待真实准备作业与相关副作用退出。
 - 失败删除可撤除 tombstone，已取消的旧 generation 不会因此恢复有效。
 - 关机发布停止标记并取消 Preparing；旧作业仍保留物理预算与所有权，直到实际退出或调用方明确报告排空超时。
@@ -80,7 +81,7 @@ Agent 树删除的最终事务内均复核成员集合；新增、移入、移�
 
 Conversation 的逻辑预约可以跨越准备，但 coordinator 的全局 bookkeeping mutex 不跨越文件、SQL、模型或工具工作。
 service 层 Stop/删除使用自己的控制围栏，不取得该 Conversation 的长准备预约；transport 仍保留已声明资源的排序，只有经过
-Core Preparing owner 证明的 Stop 可以越过已经开始的匹配 Turn 准备，不能越过未知全局请求或尚未开始的 Turn。
+Core Server Preparing owner 证明的 Stop 可以越过已经开始的匹配 Turn 准备，不能越过未知全局请求或尚未开始的 Turn。
 
 ## 4. 账号许可发布和排队请求
 
@@ -174,7 +175,7 @@ Read/Write handler 仍使用默认 blocking pool；槽数不是额外创建的�
 KeyedAdmission 对冲突请求 FIFO；不相关键可越过被阻塞的请求，已排队的全局屏障不能被后来者不断超越。
 多键预约不提前占有子集，guard 退出/异常展开时释放原集合，短期资源不留下永久 per-key mutex 表。
 
-Transport 的 [ready 队列](../../../crates/core-server/src/transport/bounded_dispatch_resources.rs) 按 Core 解析的 root 轮转：Agent 使用图中
+Transport 的 [ready 队列](../../../crates/core-server/src/transport/bounded_dispatch_resources.rs) 按 Core Server 解析的 root 轮转：Agent 使用图中
 `root_conversation_id`，普通 Conversation 使用自身 ID，Project 删除使用该 Project 的独立调度标识。每个 lane 内，同一已识别 root
 同时最多一个 handler；这不是跨 lane 的全进程互斥，也不是将一个 root 的逻辑运行数限制为 1。资源依赖等待不占物理 handler 槽。
 队列项目仍计入既有数量和字节预算，关闭和回执语义不因公平调度而放宽。公平调度不抢占已经运行的同步作业，不保证任意输入下

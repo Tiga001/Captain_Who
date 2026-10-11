@@ -93,6 +93,7 @@ fixture 和测试为准。
 | [同步存储迁移库存](performance/backend-concurrency/round3-legacy-storage-inventory.md) | 剩余兼容入口、读取解码与后续迁移边界            |
 | [第三轮后端性能结果](performance/backend-concurrency/round3-results.md)                | 存储迁移实测、正确性验证、资源成本与第四轮门禁  |
 | [第四轮资源调度契约](performance/backend-concurrency/round4-resource-scheduling.md)    | Preparing、按资源排序、恢复、权限与删除边界     |
+| [第四轮后端性能结果](performance/backend-concurrency/round4-results.md)                | 资源排序实测、正确性验证、回退与第五轮门禁      |
 | [恢复 Runbook](operations/recovery-runbook.md)                                         | 数据、Agent、命令、MCP 与运行时恢复             |
 | [威胁模型](security/threat-model.md)                                                   | 信任边界、受保护资产和残余风险                  |
 
