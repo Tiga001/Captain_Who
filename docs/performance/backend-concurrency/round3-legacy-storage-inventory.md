@@ -9,7 +9,7 @@ last_verified: 2026-10-11
 
 ## 范围与核验基线
 
-这是第三轮工作区的静态审阅快照：基于 `f073d86d3bd7b9c95e6ca4843a3df6895ebd5fcb` 加本轮未提交实现；最终交付提交以 [PROGRESS.md](PROGRESS.md) 为准。
+这是第三轮源码提交 `354762d6fae3f8959027b10069a972c9b44b427f` 的静态审阅快照，起点为 `f073d86d3bd7b9c95e6ca4843a3df6895ebd5fcb`；最终交付记录见 [PROGRESS.md](PROGRESS.md)。
 它列出仍直接或经 `template_connection` 使用 `StorageState::connection()` 的生产入口及迁移边界，不表示第三轮已经完成全部存储调用迁移，也不是已发布版本承诺。
 
 本次扫描覆盖 `crates/core/src`、`crates/core-server/src`，并复查其余 `crates/`。排除测试文件、测试模块、fixture 和 benchmark；`StorageState` 自身的内存库兼容分支单列。

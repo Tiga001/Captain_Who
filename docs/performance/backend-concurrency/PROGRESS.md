@@ -7,6 +7,41 @@ last_verified: 2026-10-11
 
 # 后端并发优化交付记录
 
+## 第三轮：存储执行架构
+
+状态：**第三轮实现及本轮验收完成，第四轮可以开始；后端整体优化尚未完成。**
+
+起点 `f073d86d`，源码终点 `354762d6fae3f8959027b10069a972c9b44b427f`（`refactor(storage): isolate bounded WAL writes and snapshot reads`）。
+本页与最终证据另作本地文档提交；可用 `git log -1 -- docs/performance/backend-concurrency/PROGRESS.md` 查询最终交付提交。
+未推送、未发布；未改 Host、Renderer、前端数据逻辑、视觉或业务额度、权限和审批规则。
+
+已交付：
+
+- 实际 SQLite 3.53.2，包含官方 WAL reset 并发修复；rusqlite 0.40.2 / libsqlite3-sys 0.38.2。FULL、busy timeout、自动及周期检查点、Backup API 和显式关闭管理。
+- 单专属 writer，有数量/估算字节限制的 FIFO 和控制接纳预留；两条只读连接与有界租借。完整 admission/terminal/Trace/审批/邮件任务事务保持原子性。
+- journal hook 只记录 dirty；成功提交且已提交 journal 头推进后再通知，rollback/commit 失败不提前唤醒。读快照与游标一致，Trace 实例身份和发布失败游标规则保持。
+- Fork/child snapshot 的文件复制、Provider 克隆及 hash 移出连接，发布后在完整短事务中重新检查源与权限；历史主要解码、Artifact 读取和归档准备移出连接。
+- 补齐写队列后的 lease 新鲜检查，Provider transition 的任务归属、有界准备/提交、取消结算与关机等待；已开始同步 SQL 不随 async 等待者消失而丢弃。
+
+验证与收益：
+
+- 最终 1,471 项不同 Rust release 测试、1,478 次执行全部通过，1 项原有 ignored；138 个变更 Rust 文件格式、Clippy（既有三类排除及旧 trace API deprecated 排除）、文档与测试基础设施检查通过。
+- 36/36 同机同负载场景通过；1,608 RPC、1,420 根 Turn、158 子 Turn 的成功/拒绝/终态分布与第二轮完全一致，重开后 0 InProgress。
+- 50 并发长历史发送 p95 **2436.857 → 1388.878 ms**，审批 **275.343 → 178.825 ms**，停止 **56.226 → 50.135 ms**；已埋点累计 DB 等待 **63.068 → 34.532 s**。
+- 固定输入稳态 620/620 成功，响应 p95 **464.998 → 397.067 ms**，完成速率约 10.25 Turn/s；这不是最大吞吐证明。
+- **代价与残余：** CPU +3.9%，采样 RSS +11.1%，线程峰值 38 → 63；若干 timer 尾延迟回退。慢准备之后审批仍约 1.43 秒，全局依赖尚未移除。磁盘物理写入量不可可靠测得，WAL 文件尾部大小不能当成写入量。
+
+[存储执行契约](round3-storage-execution.md) · [完整实测与限制](round3-results.md) ·
+[剩余同步入口库存](round3-legacy-storage-inventory.md) · [原始证据](results/2026-10-11-round3/summary.json)
+
+第四轮前置条件已满足：提交后通知、完整事务写通道、共享身份的只读池、WAL/恢复回归已具备。
+第四轮先完成资源归属、Preparing/最终 CAS 与恢复协议，再拆 admission / execution_access / RPC 跨对话保护。
+第二轮桥接与本轮 writer 的重复等待必须逐入口移除；库存中的 20 个服务文件、约 100 处旧 guard 仍共享有界 gate，但不能算作全部异步 writer 已迁移。
+同步 Trace observer/Runtime emitter 及通知批次投递归属在第五轮收口。默认 blocking pool 与临时命令线程总预算、资源峰值和长快照也列入后续验收。
+
+本轮只使用临时磁盘数据库、合成历史、loopback 假模型和受控工具；未触碰用户库、计费服务或正在运行的软件。
+复用同一个约 2.6 GiB 隔离 target，夹具自动清理，保留约 1.1 MiB 压缩原始证据。原有未跟踪缓存和截图未提交或删除。
+
 ## 第二轮：阻塞隔离与控制响应
 
 状态：**第二轮实现及本轮验收完成，第三轮可以开始；后端整体优化尚未完成。**

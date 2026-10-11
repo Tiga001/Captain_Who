@@ -1,0 +1,52 @@
+{
+  "directory": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round3-full-20261011-r1",
+  "source_commit": "354762d6fae3f8959027b10069a972c9b44b427f",
+  "source_manifest_sha256": "6da035dbed139ae64717ee24b94d19d498cceaa2386ff30478153e82be91a2f7",
+  "source_changed_during_run": false,
+  "run_duration_ms": 206015.834791,
+  "case_count": 36,
+  "totals": {
+    "rpc": {
+      "offered": 1608,
+      "dispatch_admitted": 1572,
+      "success_response": 1572,
+      "rejected_or_error": 36,
+      "no_response": 0,
+      "busy_or_capacity_rejections": 36
+    },
+    "root_turns": 1420,
+    "child_turns": 158,
+    "root_terminal_statuses": {
+      "Completed": 1316,
+      "Cancelled": 104
+    },
+    "child_terminal_statuses": {
+      "Completed": 158
+    },
+    "database_wait_total_us": 34531652,
+    "database_held_total_us": 42913207,
+    "commit_total_us": 2039175,
+    "max_post_workload_wal_bytes": 7041112,
+    "sum_post_workload_file_bytes": {
+      "database_bytes": 259747840,
+      "wal_bytes": 158612912,
+      "shm_bytes": 1179648,
+      "journal_bytes": 0
+    },
+    "cpu_seconds": 74.92440500000001,
+    "pre_close_in_progress": 18,
+    "post_reopen_in_progress": 0,
+    "not_drained_before_cleanup_cases": [
+      "approval-u50-r50-h0-s0",
+      "stop-u50-r50-h0-s0"
+    ],
+    "sampled_rss_peak_bytes": 322715648,
+    "sampled_thread_peak": 63,
+    "resource_sample_count": 206,
+    "omitted": {
+      "stage_samples": 0,
+      "queue_samples": 0
+    }
+  },
+  "integrity_violations": []
+}

@@ -91,6 +91,7 @@ fixture 和测试为准。
 | [第二轮后端性能结果](performance/backend-concurrency/round2-results.md) | 阻塞隔离前后实测、正确性验证与迁移边界 |
 | [存储执行架构](performance/backend-concurrency/round3-storage-execution.md) | 第三轮提交可见性、写通道、读池与 WAL 管理 |
 | [同步存储迁移库存](performance/backend-concurrency/round3-legacy-storage-inventory.md) | 剩余兼容入口、读取解码与后续迁移边界 |
+| [第三轮后端性能结果](performance/backend-concurrency/round3-results.md) | 存储迁移实测、正确性验证、资源成本与第四轮门禁 |
 | [恢复 Runbook](operations/recovery-runbook.md)             | 数据、Agent、命令、MCP 与运行时恢复             |
 | [威胁模型](security/threat-model.md)                       | 信任边界、受保护资产和残余风险                  |
 

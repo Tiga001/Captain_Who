@@ -1,0 +1,314 @@
+[
+  {
+    "kind": "server",
+    "filter": "application::blocking_executor",
+    "returncode": 0,
+    "duration_s": 1.427,
+    "log": "final-00-application-blocking_executor.log",
+    "counts": [
+      "ok",
+      "11",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent_dispatcher::tests",
+    "returncode": 0,
+    "duration_s": 0.616,
+    "log": "final-01-application-agent_dispatcher-tests.log",
+    "counts": [
+      "ok",
+      "29",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "runtime_isolation_tests",
+    "returncode": 0,
+    "duration_s": 3.094,
+    "log": "final-02-runtime_isolation_tests.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "transport::bounded_dispatch",
+    "returncode": 0,
+    "duration_s": 0.041,
+    "log": "final-03-transport-bounded_dispatch.log",
+    "counts": [
+      "ok",
+      "25",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "workflow_scheduler::tests",
+    "returncode": 0,
+    "duration_s": 0.242,
+    "log": "final-04-workflow_scheduler-tests.log",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "terminal_persistence_retry_tests",
+    "returncode": 0,
+    "duration_s": 0.344,
+    "log": "final-05-terminal_persistence_retry_tests.log",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::execution_access",
+    "returncode": 0,
+    "duration_s": 0.13,
+    "log": "final-06-application-agent-execution_access.log",
+    "counts": [
+      "ok",
+      "6",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding",
+    "returncode": 0,
+    "duration_s": 0.13,
+    "log": "final-07-execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission",
+    "returncode": 0,
+    "duration_s": 0.128,
+    "log": "final-08-permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "wake_execution_fence::tests",
+    "returncode": 0,
+    "duration_s": 0.01,
+    "log": "final-09-wake_execution_fence-tests.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "trusted_terminal_fence_refusal_preserves_shared_usage_accumulator",
+    "returncode": 0,
+    "duration_s": 0.076,
+    "log": "final-10-trusted_terminal_fence_refusal_preserves_shared_usage_accumulator.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::cancellation",
+    "returncode": 0,
+    "duration_s": 1.093,
+    "log": "final-11-application-agent-tests-cancellation.log",
+    "counts": [
+      "ok",
+      "9",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::human_input::",
+    "returncode": 0,
+    "duration_s": 3.89,
+    "log": "final-12-application-agent-tests-human_input-.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::human_input_async::",
+    "returncode": 0,
+    "duration_s": 14.717,
+    "log": "final-13-application-agent-tests-human_input_async-.log",
+    "counts": [
+      "ok",
+      "31",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "pending_actions::approval_ordering",
+    "returncode": 0,
+    "duration_s": 0.183,
+    "log": "final-14-pending_actions-approval_ordering.log",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::collaboration_harness",
+    "returncode": 0,
+    "duration_s": 3.221,
+    "log": "final-15-application-agent-tests-collaboration_harness.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion",
+    "returncode": 0,
+    "duration_s": 0.349,
+    "log": "final-16-destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "project_deletion_timeout_preserves_late_command_observation",
+    "returncode": 0,
+    "duration_s": 0.51,
+    "log": "final-17-project_deletion_timeout_preserves_late_command_observation.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::automation_turn",
+    "returncode": 0,
+    "duration_s": 1.169,
+    "log": "final-18-application-agent-tests-automation_turn.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "provider_transition",
+    "returncode": 0,
+    "duration_s": 2.556,
+    "log": "final-19-provider_transition.log",
+    "counts": [
+      "ok",
+      "25",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::provider_profiles",
+    "returncode": 0,
+    "duration_s": 2.938,
+    "log": "final-20-application-agent-tests-provider_profiles.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::human_root_notifications",
+    "returncode": 0,
+    "duration_s": 0.288,
+    "log": "final-21-application-agent-tests-human_root_notifications.log",
+    "counts": [
+      "ok",
+      "4",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::pending_actions",
+    "returncode": 0,
+    "duration_s": 7.625,
+    "log": "final-22-application-agent-tests-pending_actions.log",
+    "counts": [
+      "ok",
+      "71",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent_wait::tests",
+    "returncode": 0,
+    "duration_s": 0.133,
+    "log": "final-23-application-agent_wait-tests.log",
+    "counts": [
+      "ok",
+      "6",
+      "0",
+      "0"
+    ]
+  }
+]

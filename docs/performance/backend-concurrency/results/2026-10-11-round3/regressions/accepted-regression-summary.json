@@ -1,0 +1,191 @@
+{
+  "groups": 26,
+  "executions_passed": 1478,
+  "unique_test_names": 1471,
+  "failed": 0,
+  "ignored": 1,
+  "group_results": [
+    {
+      "log": "accepted-server-regressions/final-00-application-blocking_executor.log",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 11
+    },
+    {
+      "log": "accepted-server-regressions/final-01-application-agent_dispatcher-tests.log",
+      "passed": 29,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 29
+    },
+    {
+      "log": "accepted-server-regressions/final-02-runtime_isolation_tests.log",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 8
+    },
+    {
+      "log": "accepted-server-regressions/final-03-transport-bounded_dispatch.log",
+      "passed": 25,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 25
+    },
+    {
+      "log": "accepted-server-regressions/final-04-workflow_scheduler-tests.log",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 5
+    },
+    {
+      "log": "accepted-server-regressions/final-05-terminal_persistence_retry_tests.log",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 2
+    },
+    {
+      "log": "accepted-server-regressions/final-06-application-agent-execution_access.log",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 6
+    },
+    {
+      "log": "accepted-server-regressions/final-07-execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 1
+    },
+    {
+      "log": "accepted-server-regressions/final-08-permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 1
+    },
+    {
+      "log": "accepted-server-regressions/final-09-wake_execution_fence-tests.log",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 3
+    },
+    {
+      "log": "accepted-server-regressions/final-10-trusted_terminal_fence_refusal_preserves_shared_usage_accumulator.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 1
+    },
+    {
+      "log": "accepted-server-regressions/final-11-application-agent-tests-cancellation.log",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 9
+    },
+    {
+      "log": "accepted-server-regressions/final-12-application-agent-tests-human_input-.log",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 14
+    },
+    {
+      "log": "accepted-server-regressions/final-13-application-agent-tests-human_input_async-.log",
+      "passed": 31,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 31
+    },
+    {
+      "log": "accepted-server-regressions/final-14-pending_actions-approval_ordering.log",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 2
+    },
+    {
+      "log": "accepted-server-regressions/final-15-application-agent-tests-collaboration_harness.log",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 14
+    },
+    {
+      "log": "accepted-server-regressions/final-16-destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 1
+    },
+    {
+      "log": "accepted-server-regressions/final-17-project_deletion_timeout_preserves_late_command_observation.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 1
+    },
+    {
+      "log": "accepted-server-regressions/final-18-application-agent-tests-automation_turn.log",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 10
+    },
+    {
+      "log": "accepted-server-regressions/final-19-provider_transition.log",
+      "passed": 25,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 25
+    },
+    {
+      "log": "accepted-server-regressions/final-20-application-agent-tests-provider_profiles.log",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 23
+    },
+    {
+      "log": "accepted-server-regressions/final-21-application-agent-tests-human_root_notifications.log",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 4
+    },
+    {
+      "log": "accepted-server-regressions/final-22-application-agent-tests-pending_actions.log",
+      "passed": 71,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 71
+    },
+    {
+      "log": "accepted-server-regressions/final-23-application-agent_wait-tests.log",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 6
+    },
+    {
+      "log": "core-performance-final.log",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "captured_names": 7
+    },
+    {
+      "log": "core-storage-final.log",
+      "passed": 1168,
+      "failed": 0,
+      "ignored": 1,
+      "captured_names": 1168
+    }
+  ]
+}
