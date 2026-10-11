@@ -6,8 +6,8 @@ use super::managed_command_loop::{read_json_request, write_text_stream, write_to
 use super::*;
 use crate::transport::baseline_dispatch::BaselineDispatcher;
 use mycopilot_protocol_rs::{
-    JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
-    AGENT_START_CONVERSATION_TURN_METHOD,
+    ExecutionAccessReason, JsonRpcRequest, SetExecutionAccessInput, AGENT_APPROVE_ACTION_METHOD,
+    AGENT_CANCEL_RUN_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -79,6 +79,7 @@ struct Events {
     command_exited_us: BTreeMap<String, u64>,
     context_peak_by_run: BTreeMap<String, Value>,
     context_compaction_events: usize,
+    execution_access_grants: Vec<Value>,
     provider_first_us: BTreeMap<String, u64>,
     provider_requests: usize,
     provider_request_bytes: usize,
@@ -498,7 +499,61 @@ async fn run_case(case: Case) -> Value {
         .effective_context_window_tokens();
     assert_eq!(fixture_context_window_tokens, FIXTURE_CONTEXT_WINDOW_TOKENS);
     let startup = Instant::now();
-    let service = AgentService::new_authorized_for_test(storage.clone());
+    let service = AgentService::new(storage.clone());
+    // Match the Host's finite lease renewal, without extending the production 60s TTL or
+    // bypassing admission checks. The fixture renews only for its bounded planned lifetime.
+    let execution_access_coverage_ms =
+        case.waves.saturating_sub(1) as u64 * 2_000 + case.slow_seconds * 1_000 + 25 + 300_000;
+    let authorization_started = tokio::time::Instant::now();
+    let authorization_deadline =
+        authorization_started + Duration::from_millis(execution_access_coverage_ms);
+    let grant = |service: &AgentService, revision: u64, ttl_ms: i64| {
+        let issued_at = now_ms();
+        let output = service
+            .set_execution_access(SetExecutionAccessInput {
+                revision,
+                identity_epoch: 0,
+                reason: ExecutionAccessReason::Allowed,
+                issued_at,
+                valid_until: issued_at + ttl_ms,
+            })
+            .expect("baseline execution lease uses the production validation path");
+        assert_eq!(
+            output.revision, revision,
+            "lease refresh must not be ignored as stale"
+        );
+        service
+            .check_automation_execution_access()
+            .expect("accepted baseline lease must authorize the existing admission path");
+    };
+    grant(&service, 1, 60_000);
+    sample(&events, |state| {
+        state.execution_access_grants.push(
+            json!({"at_us":us(epoch.elapsed()),"revision":1,"identity_epoch":0,"ttl_ms":60_000}),
+        )
+    });
+    let (stop_authorization, mut authorization_stopped) = tokio::sync::oneshot::channel();
+    let authorization_service = service.clone();
+    let authorization_events = events.clone();
+    let authorization_task = tokio::spawn(async move {
+        let mut revision = 1;
+        let mut next = authorization_started + Duration::from_secs(20);
+        loop {
+            tokio::select! {
+                _ = &mut authorization_stopped => break,
+                _ = tokio::time::sleep_until(next.min(authorization_deadline)) => {
+                    let remaining = authorization_deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis();
+                    if remaining == 0 { break; }
+                    revision += 1;
+                    let ttl_ms = remaining.min(60_000) as i64;
+                    grant(&authorization_service, revision, ttl_ms);
+                    sample(&authorization_events, |state| state.execution_access_grants.push(json!({
+                        "at_us":us(epoch.elapsed()),"revision":revision,"identity_epoch":0,"ttl_ms":ttl_ms})));
+                    next = tokio::time::Instant::now() + Duration::from_secs(20);
+                }
+            }
+        }
+    });
     let service_startup_us = us(startup.elapsed());
     assert_eq!(
         service.turn_concurrency_gate().limit(),
@@ -810,6 +865,9 @@ async fn run_case(case: Case) -> Value {
     })
     .await;
     drop(tree_probe);
+    let _ = stop_authorization.send(());
+    authorization_task.await.unwrap();
+    let execution_access_actual_ms = authorization_started.elapsed().as_millis() as u64;
     let measured_us = us(started.elapsed());
     let perf = mycopilot_core::performance::take_snapshot();
     let queue_metrics = mycopilot_core::performance::take_queue_snapshot();
@@ -984,6 +1042,9 @@ async fn run_case(case: Case) -> Value {
         "runtime_workers":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),
         "fixture_provider_threads":1,"logical_turn_limit":50,"fixed_wave_interval_ms":2_000,
         "fixture_context_window_tokens":fixture_context_window_tokens,
+        "execution_access_fixture":{"lease_ttl_ms":60_000,"refresh_interval_ms":20_000,
+            "planned_coverage_ms":execution_access_coverage_ms,"actual_renewal_task_ms":execution_access_actual_ms,
+            "refresh_count":state.execution_access_grants.len().saturating_sub(1)},
         "provider_delay_ms":50,"provider_output_bytes":"Baseline complete. ".len()+"output ".len()*32,
         "database_open_us":database_open_us,"service_startup_us":service_startup_us,"sqlite":sqlite});
     let lifecycle = json!({"measured_us":measured_us,"root_starts_durably_accepted":starts.len(),
