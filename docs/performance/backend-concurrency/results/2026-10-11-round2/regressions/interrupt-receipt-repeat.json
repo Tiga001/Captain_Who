@@ -1,0 +1,105 @@
+{
+  "filter": "sqlite_dispatcher_redelivers_interrupt_receipt_left_before_runtime_dispatch",
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 0,
+      "duration_s": 0.1446
+    },
+    {
+      "run": 2,
+      "exit_code": 0,
+      "duration_s": 0.1346
+    },
+    {
+      "run": 3,
+      "exit_code": 0,
+      "duration_s": 0.1342
+    },
+    {
+      "run": 4,
+      "exit_code": 0,
+      "duration_s": 0.1444
+    },
+    {
+      "run": 5,
+      "exit_code": 0,
+      "duration_s": 0.1413
+    },
+    {
+      "run": 6,
+      "exit_code": 0,
+      "duration_s": 0.0867
+    },
+    {
+      "run": 7,
+      "exit_code": 0,
+      "duration_s": 0.0895
+    },
+    {
+      "run": 8,
+      "exit_code": 0,
+      "duration_s": 0.088
+    },
+    {
+      "run": 9,
+      "exit_code": 0,
+      "duration_s": 0.0879
+    },
+    {
+      "run": 10,
+      "exit_code": 0,
+      "duration_s": 0.1416
+    },
+    {
+      "run": 11,
+      "exit_code": 0,
+      "duration_s": 0.087
+    },
+    {
+      "run": 12,
+      "exit_code": 0,
+      "duration_s": 0.1498
+    },
+    {
+      "run": 13,
+      "exit_code": 0,
+      "duration_s": 0.15
+    },
+    {
+      "run": 14,
+      "exit_code": 0,
+      "duration_s": 0.1463
+    },
+    {
+      "run": 15,
+      "exit_code": 0,
+      "duration_s": 0.13
+    },
+    {
+      "run": 16,
+      "exit_code": 0,
+      "duration_s": 0.1401
+    },
+    {
+      "run": 17,
+      "exit_code": 0,
+      "duration_s": 0.1499
+    },
+    {
+      "run": 18,
+      "exit_code": 0,
+      "duration_s": 0.1361
+    },
+    {
+      "run": 19,
+      "exit_code": 0,
+      "duration_s": 0.0898
+    },
+    {
+      "run": 20,
+      "exit_code": 0,
+      "duration_s": 0.1306
+    }
+  ]
+}

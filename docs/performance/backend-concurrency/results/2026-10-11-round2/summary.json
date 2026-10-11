@@ -1,0 +1,42 @@
+{
+  "directory": "/Users/shenhuajiao/mycopilot-next/.cache/backend-concurrency/round2-full-20261011-r2",
+  "source_commit": "d7b3fbaf4bc5169036a405045a87f4af371bdba2",
+  "source_manifest_sha256": "d71d54554446bbad5b50ac4493f7e11b212cd83f95e646f838f4185ad232ffe7",
+  "source_changed_during_run": false,
+  "run_duration_ms": 218351.819458,
+  "case_count": 36,
+  "totals": {
+    "rpc": {
+      "offered": 1608,
+      "dispatch_admitted": 1572,
+      "success_response": 1572,
+      "rejected_or_error": 36,
+      "no_response": 0,
+      "busy_or_capacity_rejections": 36
+    },
+    "root_turns": 1420,
+    "child_turns": 158,
+    "root_terminal_statuses": {
+      "Completed": 1316,
+      "Cancelled": 104
+    },
+    "child_terminal_statuses": {
+      "Completed": 158
+    },
+    "cpu_seconds": 72.11397000000001,
+    "pre_close_in_progress": 18,
+    "post_reopen_in_progress": 0,
+    "not_drained_before_cleanup_cases": [
+      "approval-u50-r50-h0-s0",
+      "stop-u50-r50-h0-s0"
+    ],
+    "sampled_rss_peak_bytes": 290406400,
+    "sampled_thread_peak": 38,
+    "resource_sample_count": 219,
+    "omitted": {
+      "stage_samples": 0,
+      "queue_samples": 0
+    }
+  },
+  "integrity_violations": []
+}

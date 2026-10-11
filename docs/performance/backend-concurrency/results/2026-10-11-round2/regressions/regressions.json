@@ -1,0 +1,275 @@
+[
+  {
+    "kind": "core",
+    "filter": "trusted_wake_",
+    "returncode": 0,
+    "duration_s": 6.134,
+    "log": "final-00-trusted_wake_.txt.gz",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "core",
+    "filter": "settlement_clock",
+    "returncode": 0,
+    "duration_s": 0.399,
+    "log": "final-01-settlement_clock.txt.gz",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "core",
+    "filter": "storage::agent_graph_repository::tests",
+    "returncode": 0,
+    "duration_s": 3.141,
+    "log": "final-02-storage-agent_graph_repository-tests.txt.gz",
+    "counts": [
+      "ok",
+      "43",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::blocking_executor",
+    "returncode": 0,
+    "duration_s": 1.576,
+    "log": "final-03-application-blocking_executor.txt.gz",
+    "counts": [
+      "ok",
+      "9",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent_dispatcher::tests",
+    "returncode": 0,
+    "duration_s": 0.556,
+    "log": "final-04-application-agent_dispatcher-tests.txt.gz",
+    "counts": [
+      "ok",
+      "29",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "runtime_isolation_tests",
+    "returncode": 0,
+    "duration_s": 3.037,
+    "log": "final-05-runtime_isolation_tests.txt.gz",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "transport::bounded_dispatch",
+    "returncode": 0,
+    "duration_s": 0.041,
+    "log": "final-06-transport-bounded_dispatch.txt.gz",
+    "counts": [
+      "ok",
+      "25",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "workflow_scheduler::tests",
+    "returncode": 0,
+    "duration_s": 0.234,
+    "log": "final-07-workflow_scheduler-tests.txt.gz",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "terminal_persistence_retry_tests",
+    "returncode": 0,
+    "duration_s": 0.392,
+    "log": "final-08-terminal_persistence_retry_tests.txt.gz",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::execution_access",
+    "returncode": 0,
+    "duration_s": 0.132,
+    "log": "final-09-application-agent-execution_access.txt.gz",
+    "counts": [
+      "ok",
+      "6",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding",
+    "returncode": 0,
+    "duration_s": 0.129,
+    "log": "final-10-execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding.txt.gz",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission",
+    "returncode": 0,
+    "duration_s": 0.13,
+    "log": "final-11-permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission.txt.gz",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "wake_execution_fence::tests",
+    "returncode": 0,
+    "duration_s": 0.012,
+    "log": "final-12-wake_execution_fence-tests.txt.gz",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "trusted_terminal_fence_refusal_preserves_shared_usage_accumulator",
+    "returncode": 0,
+    "duration_s": 0.074,
+    "log": "final-13-trusted_terminal_fence_refusal_preserves_shared_usage_accumulator.txt.gz",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::cancellation",
+    "returncode": 0,
+    "duration_s": 1.041,
+    "log": "final-14-application-agent-tests-cancellation.txt.gz",
+    "counts": [
+      "ok",
+      "9",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::human_input::",
+    "returncode": 0,
+    "duration_s": 3.892,
+    "log": "final-15-application-agent-tests-human_input-.txt.gz",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::human_input_async::",
+    "returncode": 0,
+    "duration_s": 14.773,
+    "log": "final-16-application-agent-tests-human_input_async-.txt.gz",
+    "counts": [
+      "ok",
+      "31",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "pending_actions::approval_ordering",
+    "returncode": 0,
+    "duration_s": 0.246,
+    "log": "final-17-pending_actions-approval_ordering.txt.gz",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "application::agent::tests::collaboration_harness",
+    "returncode": 0,
+    "duration_s": 3.715,
+    "log": "final-18-application-agent-tests-collaboration_harness.txt.gz",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion",
+    "returncode": 0,
+    "duration_s": 0.345,
+    "log": "final-19-destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion.txt.gz",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  },
+  {
+    "kind": "server",
+    "filter": "project_deletion_timeout_preserves_late_command_observation",
+    "returncode": 0,
+    "duration_s": 0.509,
+    "log": "final-20-project_deletion_timeout_preserves_late_command_observation.txt.gz",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ]
+  }
+]

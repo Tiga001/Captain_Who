@@ -1,0 +1,37 @@
+[
+  {
+    "name": "docs",
+    "command": [
+      "pnpm",
+      "check:docs"
+    ],
+    "exit_code": 0
+  },
+  {
+    "name": "test-layout",
+    "command": [
+      "pnpm",
+      "check:test-layout"
+    ],
+    "exit_code": 0
+  },
+  {
+    "name": "diff",
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0
+  },
+  {
+    "name": "staged-diff",
+    "command": [
+      "git",
+      "diff",
+      "--cached",
+      "--check"
+    ],
+    "exit_code": 0
+  }
+]

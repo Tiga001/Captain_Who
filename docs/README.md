@@ -87,6 +87,8 @@ fixture 和测试为准。
 | [并发与存储契约](performance/backend-concurrency/architecture-contracts.md) | 资源归属、原子性、恢复及迁移边界 |
 | [并发性能验收](performance/backend-concurrency/acceptance.md) | 性能目标、竞态回归与比较方法 |
 | [Host 与 Renderer 测量](performance/backend-concurrency/host-renderer-measurement.md) | 诊断入口、请求关联及计时口径 |
+| [阻塞隔离与生命周期](performance/backend-concurrency/round2-blocking-lifecycle.md) | 第二轮有界执行器、租约与关机边界 |
+| [第二轮后端性能结果](performance/backend-concurrency/round2-results.md) | 阻塞隔离前后实测、正确性验证与迁移边界 |
 | [恢复 Runbook](operations/recovery-runbook.md)             | 数据、Agent、命令、MCP 与运行时恢复             |
 | [威胁模型](security/threat-model.md)                       | 信任边界、受保护资产和残余风险                  |
 
