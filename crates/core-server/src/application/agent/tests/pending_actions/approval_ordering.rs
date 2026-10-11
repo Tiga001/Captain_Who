@@ -218,7 +218,15 @@ fn predecessor_gate_records(
 fn successor_approval_is_blocked_until_its_durable_predecessor_settles() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     // Construct the service before seeding the synthetic crash window so startup reconciliation
     // cannot repair it for this live-process gate test.
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
@@ -281,7 +289,15 @@ fn successor_approval_is_blocked_until_its_durable_predecessor_settles() {
 fn restart_loaded_pending_map_still_blocks_a_proven_successor() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let (predecessor, successor) = predecessor_gate_records(
         &storage,
         "run-restarted-predecessor-gate",

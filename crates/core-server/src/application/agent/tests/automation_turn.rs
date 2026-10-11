@@ -1103,7 +1103,15 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();

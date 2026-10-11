@@ -640,6 +640,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     );
 
     automation_scheduler.finish_shutdown().await;
+    agent_service.shutdown_blocking_work().await;
     automation_event_notifier.abort();
     let _ = automation_event_notifier.await;
     notification_event_notifier.abort();

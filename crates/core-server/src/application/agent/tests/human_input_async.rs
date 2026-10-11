@@ -1121,6 +1121,53 @@ async fn committed_async_answer_is_delivered_once_after_restart_before_dispatch(
 }
 
 #[tokio::test]
+async fn shutdown_does_not_dispatch_committed_answers_and_restart_recovers_them() {
+    for synchronous in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let turn = fixture.start();
+        fixture.request().await;
+        if synchronous {
+            fixture.reply(Reply::Sync);
+            fixture.done("waiting_for_user_input").await;
+        } else {
+            fixture.reply(Reply::Async(1));
+            fixture.request().await;
+            fixture.reply(Reply::Complete);
+            fixture.done("completed").await;
+        }
+        fixture.released(&turn.run_id).await;
+        let request = fixture.batches().pop().unwrap();
+        let accepted = fixture
+            .storage
+            .submit_human_interaction(&Fixture::submission(&request, false))
+            .unwrap();
+        let (_, timed_out) = fixture
+            .agent
+            .shutdown_active_runs(Duration::from_secs(1))
+            .await;
+        assert!(!timed_out);
+        fixture
+            .agent
+            .schedule_human_input_deliveries(fixture.notifications.clone());
+        fixture.no_request().await;
+        let persisted = fixture.batches().pop().unwrap();
+        assert_eq!(persisted.response, accepted.response);
+        assert_eq!(persisted.delivery, accepted.delivery);
+
+        fixture.restart();
+        fixture.request().await;
+        fixture.reply(Reply::Complete);
+        fixture.done("completed").await;
+        fixture.no_request().await;
+        let applied = fixture.batches().pop().unwrap();
+        assert_eq!(
+            applied.delivery.unwrap().status,
+            HumanInteractionDeliveryStatus::Applied
+        );
+    }
+}
+
+#[tokio::test]
 async fn ignore_one_async_batch_does_not_deliver_or_wake_and_leaves_other_batches_open() {
     let mut fixture = Fixture::new().await;
     let turn = fixture.start();

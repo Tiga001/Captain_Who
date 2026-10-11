@@ -311,6 +311,9 @@ impl AgentService {
         if workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
             return Err("Organization delivery is shutting down.".to_string().into());
         }
+        if response.is_some() && self.runtime_stopping.load(Ordering::Acquire) {
+            return Err("Human input delivery is shutting down.".to_string().into());
+        }
         if let Some(rewrite) = &rewrite {
             if let Some(existing) = self
                 .storage

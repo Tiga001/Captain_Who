@@ -50,7 +50,15 @@ fn pending_model_context_item(call: &AgentToolCall) -> ConversationModelContextI
 fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_locally() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("cancel-tree-stop-failure.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let conversation_id = "conversation-cancel-tree-stop-failure";
     let root_agent_id = "agent-cancel-tree-stop-failure";
     let run_id = "run-cancel-tree-stop-failure";
@@ -148,7 +156,15 @@ fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_loca
 fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_paired_trace() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-cancel".to_string(),
@@ -349,7 +365,15 @@ fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_pair
 #[test]
 fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-forced".to_string(),
@@ -526,7 +550,15 @@ fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
     const CALL_ID: &str = "call-cancelled-tool-call-finish";
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: CONVERSATION_ID.to_string(),
@@ -698,7 +730,15 @@ fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
 #[test]
 fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconciliation() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-forced-recovery".to_string(),
@@ -840,7 +880,15 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
 #[test]
 fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-atomic".to_string(),
@@ -912,7 +960,15 @@ fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
 #[tokio::test(flavor = "current_thread")]
 async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-cancel-before-spawn".to_string(),
@@ -1075,7 +1131,15 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
 #[tokio::test(flavor = "current_thread")]
 async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let conversation_id = "conversation-delete-inline-continuation";
     let assistant_message_id = "assistant-delete-inline-continuation";
     let run_id = "run-delete-inline-continuation";
@@ -1268,7 +1332,15 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
 #[tokio::test]
 async fn cancelling_run_during_approved_command_finishes_cancelled_without_resuming_model() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-command-cancel".to_string(),

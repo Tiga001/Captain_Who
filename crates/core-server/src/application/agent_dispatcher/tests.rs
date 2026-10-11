@@ -26,12 +26,15 @@ struct FakeStoreState {
     settled: Vec<String>,
     claimed: Vec<String>,
     max_active: usize,
+    renewals: usize,
+    reject_renewal: bool,
     recoveries: usize,
     recovery_not_before_ms: Option<i64>,
     recover_tree_stopped: bool,
     mark_wait_tree_stopped: bool,
     tree_stopped_settlement: Option<TreeStoppedWakeSettlement>,
     temporary_claim_failures: usize,
+    fatal_claim_after: Option<usize>,
     interrupt_disposition: Option<AgentInterruptDisposition>,
     interrupt_dispatched: bool,
     interrupt_dispatch_marks: Vec<(String, String, i64)>,
@@ -126,6 +129,14 @@ impl AgentDispatcherStore for FakeStore {
         now_ms: i64,
     ) -> Result<Option<AgentWakeRequestRecord>, AgentDispatchClaimError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state
+            .fatal_claim_after
+            .is_some_and(|count| state.claimed.len() >= count)
+        {
+            return Err(AgentDispatchClaimError::Fatal(
+                "synthetic claim failure".to_string(),
+            ));
+        }
         if state.temporary_claim_failures > 0 {
             state.temporary_claim_failures -= 1;
             return Err(AgentDispatchClaimError::NotReady(
@@ -190,6 +201,11 @@ impl AgentDispatcherStore for FakeStore {
     }
 
     fn renew_lease(&self, _wake_id: &str, _claim_token: &str, _now_ms: i64) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.renewals += 1;
+        if state.reject_renewal {
+            return Err("claim token expired or changed".to_string());
+        }
         Ok(())
     }
 
@@ -310,6 +326,8 @@ fn mutate_wake(
 }
 
 struct FakeExecutor {
+    blocking_work: Option<BlockingWork>,
+    start_blocker: Option<Arc<blocking_tests::PreparationBlocker>>,
     active: AtomicUsize,
     max_active: AtomicUsize,
     starts: Mutex<Vec<String>>,
@@ -323,6 +341,8 @@ struct FakeExecutor {
 impl FakeExecutor {
     fn immediate() -> Self {
         Self {
+            blocking_work: None,
+            start_blocker: None,
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             starts: Mutex::new(Vec::new()),
@@ -358,6 +378,8 @@ impl FakeExecutor {
         }
         (
             Self {
+                blocking_work: None,
+                start_blocker: None,
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
                 starts: Mutex::new(Vec::new()),
@@ -373,11 +395,18 @@ impl FakeExecutor {
 }
 
 impl AgentWakeTurnExecutionPort for FakeExecutor {
+    fn blocking_work(&self) -> Option<BlockingWork> {
+        self.blocking_work.clone()
+    }
+
     fn start(
         &self,
         wake: &AgentWakeRequestRecord,
         permit: AgentTurnConcurrencyPermit,
     ) -> Result<AgentWakeExecutionHandle, String> {
+        if let Some(blocker) = &self.start_blocker {
+            blocker.wait(&wake.agent_id);
+        }
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         self.permits
@@ -394,6 +423,7 @@ impl AgentWakeTurnExecutionPort for FakeExecutor {
         self.start_notify.notify_waiters();
         Ok(AgentWakeExecutionHandle {
             wake_id: wake.wake_id.clone(),
+            claim_token: wake.claim_token.clone().unwrap_or_default(),
             run_id: format!("run:{}", wake.wake_id),
             conversation_id: format!("conversation:{}", wake.agent_id),
             assistant_message_id: format!("assistant:{}", wake.wake_id),
@@ -438,6 +468,7 @@ impl AgentWakeTurnExecutionPort for FakeExecutor {
     ) -> Result<AgentWakeExecutionHandle, String> {
         Ok(AgentWakeExecutionHandle {
             wake_id: wake.wake_id.clone(),
+            claim_token: wake.claim_token.clone().unwrap_or_default(),
             run_id: wake
                 .run_id
                 .clone()
@@ -790,6 +821,7 @@ impl AgentWakeTurnExecutionPort for ApprovalResumeExecutor {
     ) -> Result<AgentWakeExecutionHandle, String> {
         Ok(AgentWakeExecutionHandle {
             wake_id: wake.wake_id.clone(),
+            claim_token: wake.claim_token.clone().unwrap_or_default(),
             run_id: format!("run:{}", wake.wake_id),
             conversation_id: format!("conversation:{}", wake.agent_id),
             assistant_message_id: format!("assistant:{}", wake.wake_id),
@@ -1217,6 +1249,8 @@ fn stale_empty_scan_cannot_overwrite_a_new_work_generation() {
     let store: Arc<dyn AgentDispatcherStore> = Arc::new(FakeStore::default());
     let executor: Arc<dyn AgentWakeTurnExecutionPort> = Arc::new(FakeExecutor::immediate());
     let shared = Arc::new(AgentDispatcherShared {
+        blocking_work: BlockingWork::new().unwrap(),
+        preparing: Mutex::new(HashSet::new()),
         store,
         executor,
         clock: Arc::new(TestClock::default()),
@@ -1442,8 +1476,9 @@ fn empty_conversation(id: &str) -> ChatConversationRecord {
 async fn durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply() {
     let fixture = tempfile::tempdir().unwrap();
     let storage = Arc::new(
-        mycopilot_core::storage::service::StorageService::open(
+        mycopilot_core::storage::service::StorageService::open_with_model_credentials(
             &fixture.path().join("terminal-observation.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
         )
         .unwrap(),
     );
@@ -1510,6 +1545,7 @@ async fn durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply
             .inspect_durable(
                 &AgentWakeExecutionHandle {
                     wake_id: format!("terminal-observation-wake-{index}"),
+                    claim_token: "terminal-observation-claim".into(),
                     run_id,
                     conversation_id: conversation_id.to_string(),
                     assistant_message_id,
@@ -1533,8 +1569,9 @@ async fn durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply
 fn sqlite_adapter_atomically_projects_claims_and_settles_direct_parent_result() {
     let fixture = tempfile::tempdir().unwrap();
     let storage = Arc::new(
-        mycopilot_core::storage::service::StorageService::open(
+        mycopilot_core::storage::service::StorageService::open_with_model_credentials(
             &fixture.path().join("dispatcher.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
         )
         .unwrap(),
     );
@@ -1638,8 +1675,13 @@ fn sqlite_adapter_atomically_projects_claims_and_settles_direct_parent_result() 
 async fn sqlite_dispatcher_redelivers_interrupt_receipt_left_before_runtime_dispatch() {
     let fixture = tempfile::tempdir().unwrap();
     let database_path = fixture.path().join("interrupt-recovery.sqlite");
-    let storage =
-        Arc::new(mycopilot_core::storage::service::StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        mycopilot_core::storage::service::StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(empty_conversation("conversation-root-interrupt"))
         .unwrap();
@@ -1757,18 +1799,32 @@ async fn sqlite_dispatcher_redelivers_interrupt_receipt_left_before_runtime_disp
     .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if storage
-                .list_undispatched_agent_interrupts()
+            let changed = dispatcher.shared.quiescence_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            // A hot synchronous SQLite polling loop can repeatedly reacquire the unfair
+            // connection mutex and starve the maintenance worker committing this receipt.
+            // Observe completion of the scan which delivered the interrupt, then inspect
+            // durable state once. The notification is a barrier, not evidence of an ACK.
+            let delivered = !executor.interrupts.lock().unwrap().is_empty();
+            let scan_finished = !dispatcher
+                .shared
+                .quiescence
+                .lock()
                 .unwrap()
-                .is_empty()
-            {
+                .scan_in_progress;
+            if delivered && scan_finished {
                 break;
             }
-            tokio::task::yield_now().await;
+            changed.await;
         }
     })
     .await
     .expect("the restarted Dispatcher must acknowledge the redelivered interrupt");
+    assert!(storage
+        .list_undispatched_agent_interrupts()
+        .unwrap()
+        .is_empty());
     assert_eq!(
         executor
             .interrupts
@@ -1791,3 +1847,6 @@ fn zero_global_limit_is_rejected() {
         Err(AgentDispatcherError::Configuration(_))
     ));
 }
+
+#[path = "blocking_tests.rs"]
+mod blocking_tests;

@@ -87,6 +87,7 @@ impl AgentService {
         }
         let service = self.clone();
         let task = spawn_worker(
+            self.blocking_work.preparation.clone(),
             self.workflow_scheduler_wake.clone(),
             self.workflow_dispatch_stopped.clone(),
             recovery_interval,
@@ -115,7 +116,14 @@ impl AgentService {
 impl WorkflowDeliveryScheduler {
     pub(crate) async fn shutdown(mut self) -> Result<(), String> {
         let service = self.service.clone();
-        tokio::task::spawn_blocking(move || service.stop_workflow_delivery_admissions())
+        self.service
+            .blocking_work
+            .control
+            .reserve(0)
+            .await
+            .map_err(|error| error.to_string())?
+            .submit(move || service.stop_workflow_delivery_admissions())
+            .wait()
             .await
             .map_err(|error| format!("Organization scheduler shutdown fence failed: {error}"))?;
         self.task
@@ -138,6 +146,7 @@ impl Drop for WorkflowDeliveryScheduler {
 }
 
 fn spawn_worker(
+    preparation: crate::application::blocking_executor::BlockingExecutor,
     wake: WorkflowSchedulerWake,
     stopped: Arc<AtomicBool>,
     recovery_interval: Duration,
@@ -172,13 +181,22 @@ fn spawn_worker(
             let stopped_for_scan = Arc::clone(&stopped);
             // Exactly one scan can be queued/running. Never select cancellation against this
             // JoinHandle: blocking work cannot be aborted safely and must drain on shutdown.
-            if let Err(error) = tokio::task::spawn_blocking(move || {
-                if !stopped_for_scan.load(Ordering::Acquire) {
-                    scan();
+            // One scheduler owner waits for a bounded preparation reservation BEFORE the scan
+            // can claim any durable input. Existing admission/version fencing stays in the scan.
+            let result = match preparation.reserve(4 * 1024 * 1024).await {
+                Ok(reservation) => {
+                    reservation
+                        .submit(move || {
+                            if !stopped_for_scan.load(Ordering::Acquire) {
+                                scan();
+                            }
+                        })
+                        .wait()
+                        .await
                 }
-            })
-            .await
-            {
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
                 eprintln!("organization scheduler scan failed; recovery will retry: {error}");
                 if let Some(retries) = &retries {
                     retries
@@ -222,8 +240,13 @@ mod tests {
     #[test]
     fn workflow_reads_and_draft_writes_do_not_scan_or_wake_but_readiness_writes_do() {
         let directory = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("readiness.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("readiness.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let service = AgentService::new_authorized_for_test(storage.clone());
         let (notifications, _) = crate::transport::outbound_channel();
         assert!(take_wake(&service.workflow_scheduler_wake)); // Initial execution-access grant.
@@ -305,6 +328,13 @@ mod tests {
                 .unwrap();
         });
         let task = spawn_worker(
+            crate::application::blocking_executor::BlockingExecutor::new(
+                "workflow_test",
+                1,
+                1,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
             wake.clone(),
             stopped.clone(),
             Duration::from_secs(60),
@@ -348,6 +378,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let scan_attempts = attempts.clone();
         let task = spawn_worker(
+            crate::application::blocking_executor::BlockingExecutor::new(
+                "workflow_test",
+                1,
+                1,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
             wake.clone(),
             stopped.clone(),
             Duration::from_millis(20),
@@ -379,6 +416,13 @@ mod tests {
         let release_rx = Mutex::new(release_rx);
         let scan_count = scans.clone();
         let task = spawn_worker(
+            crate::application::blocking_executor::BlockingExecutor::new(
+                "workflow_test",
+                1,
+                1,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
             wake.clone(),
             stopped.clone(),
             Duration::from_secs(60),
@@ -417,8 +461,13 @@ mod tests {
     #[tokio::test]
     async fn workflow_scheduler_stop_fences_root_and_provider_transition_admission() {
         let directory = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("shutdown.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("shutdown.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let service = AgentService::new_authorized_for_test(storage);
         let (notifications, _) = crate::transport::outbound_channel();
         let scheduler = service
@@ -518,6 +567,13 @@ mod deadline_tests {
         let state = retries.clone();
         let sequence = count.clone();
         let task = spawn_worker(
+            crate::application::blocking_executor::BlockingExecutor::new(
+                "workflow_test",
+                1,
+                1,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
             wake.clone(),
             stopped.clone(),
             Duration::from_secs(60),

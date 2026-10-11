@@ -36,6 +36,42 @@ impl AgentService {
         usage: Option<&AgentUsageRecordInsert>,
         collaboration_final_response_boundary: Option<u64>,
     ) -> Result<(), String> {
+        self.finalize_turn_with_human_root_notification_and_wake_fence(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            status,
+            content,
+            message_status,
+            run_status,
+            trace,
+            model_context_items,
+            trace_created_at,
+            completed_at,
+            usage,
+            collaboration_final_response_boundary,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finalize_turn_with_human_root_notification_and_wake_fence(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        status: AgentRunStatus,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        trace_created_at: i64,
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+        collaboration_final_response_boundary: Option<u64>,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
+    ) -> Result<(), String> {
         let notification = self.human_root_terminal_notification(
             run_id,
             conversation_id,
@@ -43,38 +79,22 @@ impl AgentService {
             status,
             completed_at,
         )?;
-        if let Some(notification) = notification.as_ref() {
-            self.storage
-                .finalize_chat_message_with_conversation_turn_notification(
-                    conversation_id,
-                    assistant_message_id,
-                    content,
-                    message_status,
-                    run_status,
-                    trace,
-                    model_context_items,
-                    trace_created_at,
-                    completed_at,
-                    usage,
-                    notification,
-                    collaboration_final_response_boundary,
-                )
-        } else {
-            self.storage
-                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
-                    conversation_id,
-                    assistant_message_id,
-                    content,
-                    message_status,
-                    run_status,
-                    trace,
-                    model_context_items,
-                    trace_created_at,
-                    completed_at,
-                    usage,
-                    collaboration_final_response_boundary,
-                )
-        }
+        self.storage
+            .finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
+                conversation_id,
+                assistant_message_id,
+                content,
+                message_status,
+                run_status,
+                trace,
+                model_context_items,
+                trace_created_at,
+                completed_at,
+                usage,
+                notification.as_ref(),
+                collaboration_final_response_boundary,
+                trusted_wake,
+            )
     }
 
     /// Resolves an ordinary user-owned root Turn from durable identities only.

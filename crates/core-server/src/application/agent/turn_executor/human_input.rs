@@ -165,7 +165,9 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             ) {
                 eprintln!("failed to settle steering after committed human suspension: {error}");
             }
-            return Err(fail("question steering owner changed during suspension".into()));
+            return Err(fail(
+                "question steering owner changed during suspension".into(),
+            ));
         }
         self.service
             .seed_trace_snapshot_from_checkpoint(&suspension.run_id, Some(&suspension.checkpoint));
@@ -324,6 +326,11 @@ impl AgentService {
         };
         for request in ready {
             let mut cancellations = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
+            // Shutdown snapshots this same registry after publishing its fence. A resume either
+            // registers before that snapshot and gets cancelled, or leaves its answer for restart.
+            if self.runtime_stopping.load(Ordering::Acquire) {
+                return;
+            }
             if cancellations.contains_key(&request.run_id) {
                 continue;
             }
@@ -354,37 +361,93 @@ impl AgentService {
             let service = self.clone();
             let notifications = notifications.clone();
             tokio::spawn(async move {
-                match service.prepare_human_input_segment(&claim, token.clone()) {
+                // The claim/token already own one logical permit. Wait for bounded physical
+                // preparation capacity without retaining cancellation, admission or DB guards.
+                let bytes = human_resume_estimated_bytes(&claim.checkpoint);
+                let preparation = match service.blocking_work.preparation.reserve(bytes).await {
+                    Ok(reservation) => {
+                        let prepare_service = service.clone();
+                        let prepare_claim = claim.clone();
+                        let prepare_token = token.clone();
+                        reservation
+                            .submit(move || {
+                                prepare_service
+                                    .prepare_human_input_segment(&prepare_claim, prepare_token)
+                            })
+                            .wait()
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| result)
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                match preparation {
                     Ok(segment) => {
                         service
                             .complete_runtime_segment(segment, notifications)
                             .await
                     }
                     Err(error) => {
-                        eprintln!("refused human input continuation: {error}");
-                        let durable_terminal =
-                            service.cancel_waiting_human_input_run(&claim.binding.run_id);
-                        service.unregister_cancellation_if_current(&claim.binding.run_id, &token);
-                        if let Ok(Some((snapshot, _))) = service
-                            .storage
-                            .load_sync_human_interaction_for_run(&claim.binding.run_id)
-                        {
-                            let _ = notifications.send(serde_json::json!({"jsonrpc":"2.0","method":mycopilot_protocol_rs::HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,"params":snapshot}));
-                        }
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(claim.binding.run_id.clone()), trace_sequence: None,
-                            message: "用户回答已保存，但原运行无法安全恢复。请检查当前模型设置后开始新的运行。".into(),
-                            recoverable: false, code: Some("human_input_resume_failed".into()), details: None,
-                        }));
-                        if durable_terminal {
-                            // Preparation cannot consume the queued answers. Once the failed
-                            // suspended Turn has durably released its lease, give earlier saved
-                            // async responses a new route without requiring another user event.
-                            service.publish_human_delivery_changes(
-                                &claim.binding.conversation_id,
-                                &notifications,
+                        let (completion, delivery_budget) =
+                            match service.blocking_work.completion.reserve_pair(bytes).await {
+                                Ok(reservation) => reservation,
+                                Err(executor_error) => {
+                                    service.report_runtime_completion_unavailable(
+                                        &claim.binding.run_id,
+                                        &token,
+                                        &notifications,
+                                        &executor_error.to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                        let failure_service = service.clone();
+                        let failure_run_id = claim.binding.run_id.clone();
+                        let failure_token = token.clone();
+                        let failure_notifications = notifications.clone();
+                        let settlement = completion.submit(move || {
+                            eprintln!("refused human input continuation: {error}");
+                            let durable_terminal =
+                                service.cancel_waiting_human_input_run(&claim.binding.run_id);
+                            service.unregister_cancellation_if_current(&claim.binding.run_id, &token);
+                            if let Ok(Some((snapshot, _))) = service
+                                .storage
+                                .load_sync_human_interaction_for_run(&claim.binding.run_id)
+                            {
+                                let _ = notifications.send(serde_json::json!({"jsonrpc":"2.0","method":mycopilot_protocol_rs::HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,"params":snapshot}));
+                            }
+                            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                                run_id: Some(claim.binding.run_id.clone()), trace_sequence: None,
+                                message: "用户回答已保存，但原运行无法安全恢复。请检查当前模型设置后开始新的运行。".into(),
+                                recoverable: false, code: Some("human_input_resume_failed".into()), details: None,
+                            }));
+                            if durable_terminal {
+                                // Preparation cannot consume the queued answers. Once the failed
+                                // suspended Turn has durably released its lease, give earlier saved
+                                // async responses a new route without requiring another user event.
+                                service.publish_human_delivery_changes(
+                                    &claim.binding.conversation_id,
+                                    &notifications,
+                                );
+                            }
+                            RuntimeDeliveryContinuation {
+                                budget: delivery_budget,
+                                service, notifications,
+                                should_deliver: durable_terminal,
+                                publish: Box::new(|| {}),
+                            }
+                        });
+                        let settled = match settlement.wait().await {
+                            Ok(delivery) => delivery.finish().await,
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = settled {
+                            failure_service.report_runtime_completion_unavailable(
+                                &failure_run_id,
+                                &failure_token,
+                                &failure_notifications,
+                                &error.to_string(),
                             );
-                            service.schedule_human_input_deliveries(notifications);
                         }
                     }
                 }
@@ -469,6 +532,7 @@ impl AgentService {
             context.permissions,
         );
         Ok(PreparedRuntimeTurnSegment {
+            trusted_wake: None,
             run_id: binding.run_id.clone(),
             conversation_id: binding.conversation_id.clone(),
             assistant_message_id: binding.assistant_message_id.clone(),
@@ -603,4 +667,26 @@ impl AgentService {
         }
         false
     }
+}
+
+// Traverse the already-owned JSON without serializing/copying it on a scheduler thread.
+fn human_resume_estimated_bytes(value: &serde_json::Value) -> usize {
+    fn value_bytes(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::String(text) => text.len().saturating_add(32),
+            serde_json::Value::Array(values) => values.iter().fold(32_usize, |size, value| {
+                size.saturating_add(value_bytes(value))
+            }),
+            serde_json::Value::Object(values) => {
+                values.iter().fold(64_usize, |size, (key, value)| {
+                    size.saturating_add(key.len())
+                        .saturating_add(value_bytes(value))
+                })
+            }
+            _ => 32,
+        }
+    }
+    value_bytes(value)
+        .saturating_mul(2)
+        .saturating_add(64 * 1024)
 }

@@ -1,4 +1,5 @@
 impl AgentService {
+    #[cfg(test)]
     pub(super) fn persist_final_assistant_output(
         &self,
         conversation_id: &str,
@@ -12,6 +13,25 @@ impl AgentService {
             output,
             None,
             collaboration_final_response_boundary,
+            None,
+        )
+    }
+
+    pub(super) fn persist_final_assistant_output_with_wake_fence(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        output: &mut AgentChatOutput,
+        collaboration_final_response_boundary: Option<u64>,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
+    ) -> Result<(), String> {
+        self.persist_final_assistant_output_inner(
+            conversation_id,
+            assistant_message_id,
+            output,
+            None,
+            collaboration_final_response_boundary,
+            trusted_wake,
         )
     }
 
@@ -28,6 +48,7 @@ impl AgentService {
             output,
             Some(model_context_items),
             None,
+            None,
         )
     }
 
@@ -38,6 +59,7 @@ impl AgentService {
         output: &mut AgentChatOutput,
         model_context_items: Option<&[ConversationModelContextItem]>,
         collaboration_final_response_boundary: Option<u64>,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
     ) -> Result<(), String> {
         if output.status == AgentRunStatus::WaitingForUserInput {
             // The native suspend admission already committed checkpoint, usage and waiting CAS.
@@ -144,14 +166,28 @@ impl AgentService {
                 AgentRunStatus::Completed | AgentRunStatus::Cancelled => None,
                 _ => unreachable!(),
             };
-            let usage_record = self.prepare_run_usage_record(
-                &output.run_id,
-                output.status,
-                output.usage.clone(),
-                usage_error,
-            );
-            let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
-            self.finalize_turn_with_human_root_notification(
+            let (usage_record, cumulative_usage) = if trusted_wake.is_some() {
+                self.preview_terminal_run_usage_record(
+                    &output.run_id,
+                    output.status,
+                    output.usage.clone(),
+                    usage_error,
+                )
+                .map(|(record, usage)| (Some(record), usage))
+                .unwrap_or((None, None))
+            } else {
+                let record = self.prepare_run_usage_record(
+                    &output.run_id,
+                    output.status,
+                    output.usage.clone(),
+                    usage_error,
+                );
+                (
+                    record,
+                    self.preview_cumulative_run_usage(&output.run_id, None),
+                )
+            };
+            self.finalize_turn_with_human_root_notification_and_wake_fence(
                 &output.run_id,
                 conversation_id,
                 assistant_message_id,
@@ -169,6 +205,7 @@ impl AgentService {
                 completed_at,
                 usage_record.as_ref(),
                 collaboration_final_response_boundary,
+                trusted_wake,
             )?;
             // Storage may append an authenticated user-stop event in the same terminal
             // transaction. Publish the committed fact, never infer it from token cancellation.
@@ -238,6 +275,7 @@ impl AgentService {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn persist_assistant_error(
         &self,
         conversation_id: &str,
@@ -256,6 +294,7 @@ impl AgentService {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn persist_assistant_error_with_model_context(
         &self,
         conversation_id: &str,
@@ -275,10 +314,37 @@ impl AgentService {
             conversation_turn_trace,
             model_context_items,
             None,
+            None,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_assistant_error_with_model_context_and_wake_fence(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
+    ) -> Result<Option<AgentUsage>, String> {
+        self.persist_assistant_failure_projection(
+            conversation_id,
+            assistant_message_id,
+            message,
+            Some("error"),
+            message,
+            usage,
+            conversation_turn_trace,
+            model_context_items,
+            None,
+            trusted_wake,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn persist_assistant_model_request_interruption(
         &self,
         conversation_id: &str,
@@ -302,6 +368,7 @@ impl AgentService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn persist_assistant_model_request_interruption_with_model_context(
         &self,
         conversation_id: &str,
@@ -325,6 +392,34 @@ impl AgentService {
             conversation_turn_trace,
             model_context_items,
             Some(reason),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_assistant_model_request_interruption_with_model_context_and_wake_fence(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        diagnostic_message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        reason: AgentModelRequestInterruptionReason,
+        partial_response: &str,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
+    ) -> Result<Option<AgentUsage>, String> {
+        self.persist_assistant_failure_projection(
+            conversation_id,
+            assistant_message_id,
+            partial_response,
+            Some("sent"),
+            diagnostic_message,
+            usage,
+            conversation_turn_trace,
+            model_context_items,
+            Some(reason),
+            trusted_wake,
         )
     }
 
@@ -340,6 +435,7 @@ impl AgentService {
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
         interruption: Option<AgentModelRequestInterruptionReason>,
+        trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
     ) -> Result<Option<AgentUsage>, String> {
         let failed_projection = if model_context_items.is_none() {
             self.failed_terminal_projection_from_latest_snapshot(
@@ -381,15 +477,29 @@ impl AgentService {
         let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
         let fallback_usage = usage.clone();
         let completed_at = now_ms();
+        let mut staged_cumulative_usage = None;
         let usage_record = run_id.as_deref().and_then(|run_id| {
-            self.prepare_run_usage_record(
-                run_id,
-                AgentRunStatus::Failed,
-                usage,
-                Some(diagnostic_message.to_string()),
-            )
+            if trusted_wake.is_some() {
+                self.preview_terminal_run_usage_record(
+                    run_id,
+                    AgentRunStatus::Failed,
+                    usage,
+                    Some(diagnostic_message.to_string()),
+                )
+                .map(|(record, cumulative)| {
+                    staged_cumulative_usage = cumulative;
+                    record
+                })
+            } else {
+                self.prepare_run_usage_record(
+                    run_id,
+                    AgentRunStatus::Failed,
+                    usage,
+                    Some(diagnostic_message.to_string()),
+                )
+            }
         });
-        self.finalize_turn_with_human_root_notification(
+        self.finalize_turn_with_human_root_notification_and_wake_fence(
             &conversation_turn_trace.run_id,
             conversation_id,
             assistant_message_id,
@@ -403,11 +513,16 @@ impl AgentService {
             completed_at,
             usage_record.as_ref(),
             None,
+            trusted_wake,
         )?;
-        let cumulative_usage = run_id
-            .as_deref()
-            .and_then(|run_id| self.preview_cumulative_run_usage(run_id, None))
-            .or(fallback_usage);
+        let cumulative_usage = if trusted_wake.is_some() {
+            staged_cumulative_usage
+        } else {
+            run_id
+                .as_deref()
+                .and_then(|run_id| self.preview_cumulative_run_usage(run_id, None))
+        }
+        .or(fallback_usage);
         if let Some(run_id) = run_id {
             self.finish_persisted_run_usage(&run_id, AgentRunStatus::Failed);
             self.retire_builtin_capability_run(&run_id);

@@ -6,6 +6,7 @@
 //! port below is backed by the shared [`AgentService`] Turn executor.
 
 use crate::application::agent::AgentRunCancellationOutcome;
+use crate::application::blocking_executor::{BlockingError, BlockingReservation, BlockingWork};
 use mycopilot_core::storage::service::AgentWakeApprovalWaitOutcome;
 use mycopilot_core::{
     AgentGraphError, AgentResultArtifactReference, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
@@ -25,6 +26,10 @@ pub(crate) const DEFAULT_AGENT_GLOBAL_CONCURRENCY: usize = 50;
 const DEFAULT_WAKE_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(20);
 const DEFAULT_DISPATCH_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_DISPATCH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+// Admission input is loaded inside the job. This conservative reservation budgets the closure
+// and expected history working set; it is not a bound on all model/runtime memory.
+const DISPATCH_PREPARATION_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
+const DISPATCH_MAINTENANCE_ESTIMATED_BYTES: usize = 16 * 1024;
 
 type DispatchFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -241,6 +246,7 @@ impl AgentDispatcherConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentWakeExecutionHandle {
     pub(crate) wake_id: String,
+    pub(crate) claim_token: String,
     pub(crate) run_id: String,
     pub(crate) conversation_id: String,
     pub(crate) assistant_message_id: String,
@@ -436,18 +442,15 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
         conversation_id: &str,
         assistant_message_id: &str,
         claim_token: &str,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<AgentWakeApprovalWaitOutcome, String> {
-        let outcome = self
-            .storage
-            .mark_agent_wake_waiting_for_pending_approval_at(
-                wake_id,
-                run_id,
-                conversation_id,
-                assistant_message_id,
-                claim_token,
-                now_ms,
-            )?;
+        let outcome = self.storage.mark_agent_wake_waiting_for_pending_approval(
+            wake_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            claim_token,
+        )?;
         if let AgentWakeApprovalWaitOutcome::Waiting(wake) = &outcome {
             self.wait_notifications
                 .notify_caller(&wake.requester_agent_id);
@@ -455,28 +458,27 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
         Ok(outcome)
     }
 
-    fn renew_lease(&self, wake_id: &str, claim_token: &str, now_ms: i64) -> Result<(), String> {
+    fn renew_lease(&self, wake_id: &str, claim_token: &str, _now_ms: i64) -> Result<(), String> {
+        // Production renewal obtains its current time after acquiring the SQLite connection.
+        // The trait clock remains available to deterministic fake stores only.
         self.storage
-            .renew_agent_wake_lease_at(wake_id, claim_token, now_ms)
+            .renew_agent_wake_lease(wake_id, claim_token)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
 
-    fn settle(&self, settlement: &AgentWakeSettlement, now_ms: i64) -> Result<(), String> {
+    fn settle(&self, settlement: &AgentWakeSettlement, _now_ms: i64) -> Result<(), String> {
         let result = self
             .storage
-            .finish_agent_turn_with_result_at(
-                &FinishAgentTurnResultInput {
-                    wake_id: settlement.wake_id.clone(),
-                    expected_status: settlement.expected_status,
-                    claim_token: settlement.claim_token.clone(),
-                    terminal_status: settlement.terminal_status,
-                    run_id: settlement.run_id.clone(),
-                    assistant_message_id: settlement.assistant_message_id.clone(),
-                    terminal_error: settlement.terminal_error.clone(),
-                },
-                now_ms,
-            )
+            .finish_agent_turn_with_result(&FinishAgentTurnResultInput {
+                wake_id: settlement.wake_id.clone(),
+                expected_status: settlement.expected_status,
+                claim_token: settlement.claim_token.clone(),
+                terminal_status: settlement.terminal_status,
+                run_id: settlement.run_id.clone(),
+                assistant_message_id: settlement.assistant_message_id.clone(),
+                terminal_error: settlement.terminal_error.clone(),
+            })
             .map_err(|error| error.to_string())?;
         self.wait_notifications
             .notify_caller(&result.result_message.recipient_agent_id);
@@ -567,6 +569,28 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
 /// A production implementation starts `AgentTurnStart::AgentWake`, then observes only durable
 /// Conversation trace/pending-action facts. Renderer events are intentionally absent here.
 pub(crate) trait AgentWakeTurnExecutionPort: Send + Sync {
+    fn blocking_work(&self) -> Option<BlockingWork> {
+        None
+    }
+
+    fn reconcile_execution_fences(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn renew_claim_lease(
+        &self,
+        store: &dyn AgentDispatcherStore,
+        wake_id: &str,
+        claim_token: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        store.renew_lease(wake_id, claim_token, now_ms)
+    }
+
+    fn interrupt_owned(&self, handle: &AgentWakeExecutionHandle) -> Result<(), String> {
+        self.interrupt(&handle.run_id).map(|_| ())
+    }
+
     fn start(
         &self,
         wake: &AgentWakeRequestRecord,
@@ -594,6 +618,7 @@ pub(crate) trait AgentWakeTurnExecutionPort: Send + Sync {
 /// Production adapter for the shared `AgentService` executor. Its observer uses the durable
 /// Conversation trace and pending-action rows; the private notification hub only avoids polling
 /// latency and is never trusted as evidence.
+#[derive(Clone)]
 pub(crate) struct SharedAgentTurnExecutionPort {
     service: crate::application::agent::AgentService,
     storage: Arc<mycopilot_core::storage::service::StorageService>,
@@ -625,11 +650,41 @@ impl SharedAgentTurnExecutionPort {
         self
     }
 
+    async fn inspect_durable_async(
+        &self,
+        handle: &AgentWakeExecutionHandle,
+        waiting_already_reported: bool,
+    ) -> Result<Option<AgentWakeExecutionObservation>, String> {
+        let port = self.clone();
+        let handle = handle.clone();
+        self.service
+            .blocking_work
+            .maintenance
+            .reserve(DISPATCH_MAINTENANCE_ESTIMATED_BYTES)
+            .await
+            .map_err(|error| error.to_string())?
+            .submit(move || port.inspect_durable(&handle, waiting_already_reported))
+            .wait()
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
     fn inspect_durable(
         &self,
         handle: &AgentWakeExecutionHandle,
         waiting_already_reported: bool,
     ) -> Result<Option<AgentWakeExecutionObservation>, String> {
+        if self.service.agent_wake_execution_refused(
+            &handle.wake_id,
+            &handle.claim_token,
+            &handle.run_id,
+            &handle.assistant_message_id,
+        ) {
+            return Err(
+                "child Runtime refused this execution claim; durable recovery owns its outcome"
+                    .into(),
+            );
+        }
         let trace = self
             .storage
             .get_conversation_turn_trace(&handle.assistant_message_id)?;
@@ -724,6 +779,37 @@ fn bounded_utf8_with_suffix(value: &str, maximum_bytes: usize, suffix: &str) -> 
 }
 
 impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
+    fn blocking_work(&self) -> Option<BlockingWork> {
+        Some(self.service.blocking_work.clone())
+    }
+
+    fn reconcile_execution_fences(&self) -> Result<(), String> {
+        self.service.reconcile_agent_wake_execution_fences()
+    }
+
+    fn renew_claim_lease(
+        &self,
+        store: &dyn AgentDispatcherStore,
+        wake_id: &str,
+        claim_token: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        self.service
+            .renew_unfenced_agent_wake_lease(wake_id, claim_token, || {
+                store.renew_lease(wake_id, claim_token, now_ms)
+            })
+    }
+
+    fn interrupt_owned(&self, handle: &AgentWakeExecutionHandle) -> Result<(), String> {
+        self.service.cancel_owned_agent_wake_runtime(
+            &handle.wake_id,
+            &handle.claim_token,
+            &handle.run_id,
+            &handle.assistant_message_id,
+        );
+        Ok(())
+    }
+
     fn start(
         &self,
         wake: &AgentWakeRequestRecord,
@@ -765,6 +851,7 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
             .map_err(|error| error.to_string())?;
         Ok(AgentWakeExecutionHandle {
             wake_id: wake.wake_id.clone(),
+            claim_token: claim_token.to_string(),
             run_id: output.run_id,
             conversation_id: output.conversation_id,
             assistant_message_id: output.assistant_message_id,
@@ -778,7 +865,10 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
     ) -> DispatchFuture<'a, Result<AgentWakeExecutionObservation, String>> {
         Box::pin(async move {
             loop {
-                if let Some(observation) = self.inspect_durable(handle, waiting_already_reported)? {
+                if let Some(observation) = self
+                    .inspect_durable_async(handle, waiting_already_reported)
+                    .await?
+                {
                     return Ok(observation);
                 }
                 let notification = self
@@ -788,7 +878,10 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
                 tokio::pin!(notified);
                 // The second check closes the check/subscribe race. A bounded tick also makes a
                 // fresh process observe commits published by a previous Host.
-                if let Some(observation) = self.inspect_durable(handle, waiting_already_reported)? {
+                if let Some(observation) = self
+                    .inspect_durable_async(handle, waiting_already_reported)
+                    .await?
+                {
                     return Ok(observation);
                 }
                 tokio::select! {
@@ -803,6 +896,20 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
         &self,
         wake: &AgentWakeRequestRecord,
     ) -> Result<AgentWakeExecutionHandle, String> {
+        let claim_token = wake
+            .claim_token
+            .clone()
+            .ok_or_else(|| "recovered Wake has no claim token".to_string())?;
+        if self.service.agent_wake_execution_refused(
+            &wake.wake_id,
+            &claim_token,
+            wake.run_id.as_deref().unwrap_or_default(),
+            wake.assistant_message_id.as_deref().unwrap_or_default(),
+        ) {
+            return Err(
+                "refused child Runtime claim cannot be reattached before durable recovery".into(),
+            );
+        }
         let agent = self
             .storage
             .get_agent_node(&wake.agent_id)
@@ -810,6 +917,7 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
             .ok_or_else(|| format!("recovered Wake {} Agent is missing", wake.wake_id))?;
         Ok(AgentWakeExecutionHandle {
             wake_id: wake.wake_id.clone(),
+            claim_token,
             run_id: wake
                 .run_id
                 .clone()
@@ -885,6 +993,7 @@ pub(crate) struct AgentDispatcherShutdownReport {
 #[derive(Clone)]
 struct RunningDispatch {
     wake_id: String,
+    claim_token: Option<String>,
     run_id: Option<String>,
     waiting_for_approval: bool,
 }
@@ -899,6 +1008,8 @@ struct AgentDispatcherQuiescence {
 struct AgentDispatcherShared {
     store: Arc<dyn AgentDispatcherStore>,
     executor: Arc<dyn AgentWakeTurnExecutionPort>,
+    blocking_work: BlockingWork,
+    preparing: Mutex<std::collections::HashSet<String>>,
     clock: Arc<dyn AgentDispatcherClock>,
     turn_concurrency: AgentTurnConcurrencyGate,
     work_available: Notify,
@@ -907,6 +1018,158 @@ struct AgentDispatcherShared {
     quiescence: Mutex<AgentDispatcherQuiescence>,
     quiescence_changed: Notify,
     config: AgentDispatcherConfig,
+}
+
+// Temporary synchronous StorageService bridge. Claim projection/recovery may still scan data;
+// renewal therefore owns a separate physical lane. Admission/cancellation may wait on global
+// guards and must use their separate executors. Round 3 moves scans to the storage architecture.
+async fn dispatcher_store<T: Send + 'static>(
+    shared: &Arc<AgentDispatcherShared>,
+    operation: impl FnOnce(&dyn AgentDispatcherStore, i64) -> Result<T, String> + Send + 'static,
+) -> Result<T, AgentDispatcherError> {
+    let worker = Arc::clone(shared);
+    shared
+        .blocking_work
+        .maintenance
+        .reserve(DISPATCH_MAINTENANCE_ESTIMATED_BYTES)
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .submit(move || operation(worker.store.as_ref(), worker.clock.now_ms()))
+        .wait()
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .map_err(AgentDispatcherError::Storage)
+}
+
+async fn dispatcher_renew_lease(
+    shared: &Arc<AgentDispatcherShared>,
+    wake_id: String,
+    claim_token: String,
+) -> Result<(), AgentDispatcherError> {
+    let worker = Arc::clone(shared);
+    shared
+        .blocking_work
+        .lease
+        .reserve(DISPATCH_MAINTENANCE_ESTIMATED_BYTES)
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .submit(move || {
+            worker.executor.renew_claim_lease(
+                worker.store.as_ref(),
+                &wake_id,
+                &claim_token,
+                worker.clock.now_ms(),
+            )
+        })
+        .wait()
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .map_err(AgentDispatcherError::Storage)
+}
+
+async fn dispatcher_control<T: Send + 'static>(
+    shared: &Arc<AgentDispatcherShared>,
+    operation: impl FnOnce(&dyn AgentWakeTurnExecutionPort) -> Result<T, String> + Send + 'static,
+) -> Result<T, AgentDispatcherError> {
+    let executor = Arc::clone(&shared.executor);
+    shared
+        .blocking_work
+        .control
+        .reserve(DISPATCH_MAINTENANCE_ESTIMATED_BYTES)
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .submit(move || operation(executor.as_ref()))
+        .wait()
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+        .map_err(AgentDispatcherError::Manager)
+}
+
+struct PreparingDispatchGuard {
+    claim_token: String,
+    shared: Arc<AgentDispatcherShared>,
+}
+
+impl Drop for PreparingDispatchGuard {
+    fn drop(&mut self) {
+        self.shared
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.claim_token);
+        self.shared.quiescence_changed.notify_waiters();
+    }
+}
+
+/// Starts immediately after claim, independently of preparation capacity and locks. Dropping
+/// the guard stops future ticks; an already-started durable renewal is still owned by the pool.
+struct DispatchWakeLease {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    failure: Arc<Mutex<Option<String>>>,
+    failure_changed: Arc<Notify>,
+}
+
+impl DispatchWakeLease {
+    fn start(shared: Arc<AgentDispatcherShared>, wake_id: String, claim_token: String) -> Self {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let failure = Arc::new(Mutex::new(None));
+        let worker_failure = Arc::clone(&failure);
+        let failure_changed = Arc::new(Notify::new());
+        let worker_failure_changed = Arc::clone(&failure_changed);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(shared.config.wake_lease_renew_interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut stopped => return,
+                    _ = tick.tick() => {}
+                }
+                let wake_id = wake_id.clone();
+                let claim_token = claim_token.clone();
+                if let Err(error) = dispatcher_renew_lease(&shared, wake_id, claim_token).await {
+                    *worker_failure
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(error.to_string());
+                    worker_failure_changed.notify_waiters();
+                    return;
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            failure,
+            failure_changed,
+        }
+    }
+
+    async fn wait_failure(&self) -> String {
+        loop {
+            let changed = self.failure_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(error) = self.failure() {
+                return error;
+            }
+            changed.await;
+        }
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+impl Drop for DispatchWakeLease {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
 }
 
 /// Process owner for the persistent scheduler. Dropping or aborting it never deletes a Wake;
@@ -949,7 +1212,14 @@ impl AgentDispatcher {
                 config.global_concurrency_limit
             )));
         }
+        let blocking_work = match executor.blocking_work() {
+            Some(work) => work,
+            None => BlockingWork::new()
+                .map_err(|error| AgentDispatcherError::Configuration(error.to_string()))?,
+        };
         let shared = Arc::new(AgentDispatcherShared {
+            blocking_work,
+            preparing: Mutex::new(std::collections::HashSet::new()),
             store,
             executor,
             clock,
@@ -1132,15 +1402,17 @@ impl AgentDispatcher {
                 let Some(run_id) = dispatch.run_id.as_deref() else {
                     continue;
                 };
-                if !dispatch.waiting_for_approval
-                    && !interrupted_runs.contains(run_id)
-                    && self
-                        .shared
-                        .executor
-                        .interrupt(run_id)
-                        .map(AgentRunCancellationOutcome::any_effect)
-                        .unwrap_or(false)
-                {
+                if !dispatch.waiting_for_approval && !interrupted_runs.contains(run_id) {
+                    let cancel_run = run_id.to_string();
+                    let effected = dispatcher_control(&self.shared, move |executor| {
+                        executor.interrupt(&cancel_run)
+                    })
+                    .await
+                    .map(AgentRunCancellationOutcome::any_effect)
+                    .unwrap_or(false);
+                    if !effected {
+                        continue;
+                    }
                     interrupted_runs.insert(run_id.to_string());
                     cancellation_requested = cancellation_requested.saturating_add(1);
                 }
@@ -1156,8 +1428,26 @@ impl AgentDispatcher {
                 });
             }
             let now = tokio::time::Instant::now();
-            if now >= cancellation_deadline {
+            let preparing = !self
+                .shared
+                .preparing
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty();
+            let scan_in_progress = self
+                .shared
+                .quiescence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .scan_in_progress;
+            if now >= cancellation_deadline && !preparing && !scan_in_progress {
                 break;
+            }
+            if now >= cancellation_deadline {
+                // A started synchronous preparation/claim may still commit. Keep its observer,
+                // renewal and exact permit alive until its real result can be handed off.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
             }
             tokio::time::sleep(
                 self.shared
@@ -1189,6 +1479,94 @@ async fn run_agent_dispatcher(
     shared: Arc<AgentDispatcherShared>,
 ) -> Result<usize, AgentDispatcherError> {
     let mut workers = JoinSet::<Result<(), AgentDispatcherError>>::new();
+    let mut result = run_agent_dispatcher_loop(Arc::clone(&shared), &mut workers).await;
+    if result.is_err() {
+        // A failed claim/recovery scan is also shutdown. Dropping JoinSet here would detach
+        // a non-abortable synchronous start and lose its lease/permit before its real result.
+        shared.shutdown_requested.store(true, Ordering::Release);
+        shared.work_available.notify_waiters();
+        loop {
+            let changed = shared.quiescence_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if shared
+                .preparing
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+            {
+                break;
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                completion = workers.join_next(), if !workers.is_empty() => {
+                    match completion {
+                        Some(Err(error)) => eprintln!("Agent dispatcher worker stopped while draining failed manager: {error}"),
+                        Some(Ok(Err(error))) => eprintln!("Agent dispatcher could not settle a worker while draining failed manager: {error}"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // A scan failure also owns previously started Turns, not only preparing ones. Keep
+        // approval waits durable, but deliver cancellation to every known live Run before its
+        // observer/renewal owner disappears. Report failures alongside the original scan error.
+        let running = shared
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .filter(|dispatch| !dispatch.waiting_for_approval)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut cancellation_errors = Vec::new();
+        for dispatch in running {
+            let Some(run_id) = dispatch.run_id else {
+                continue;
+            };
+            let cancel_run = run_id.clone();
+            match dispatcher_control(&shared, move |executor| executor.interrupt(&cancel_run)).await
+            {
+                Ok(outcome) if outcome.turn_termination_confirmed() => {}
+                Ok(_) => {
+                    let wake_id = dispatch.wake_id.clone();
+                    match dispatcher_store(&shared, move |store, _| store.get_wake(&wake_id)).await {
+                        Ok(Some(wake)) if wake.status.is_terminal() => {}
+                        Ok(Some(wake)) => cancellation_errors.push(format!(
+                            "Run {run_id} cancellation was not confirmed; Wake {} remains {}",
+                            dispatch.wake_id, wake.status.as_str()
+                        )),
+                        Ok(None) => cancellation_errors.push(format!("Run {run_id} cancellation was not confirmed; Wake {} is missing", dispatch.wake_id)),
+                        Err(error) => cancellation_errors.push(format!("Run {run_id} cancellation was not confirmed; Wake lookup failed: {error}")),
+                    }
+                }
+                Err(error) => cancellation_errors.push(format!("Run {run_id}: {error}")),
+            }
+        }
+        if !cancellation_errors.is_empty() {
+            result = Err(AgentDispatcherError::Manager(format!(
+                "{}; failed-manager cancellation incomplete (durable recovery required): {}",
+                result.as_ref().unwrap_err(),
+                cancellation_errors.join("; ")
+            )));
+        }
+        // Every start is now rejected before execution or has published/cancelled its actual
+        // Run. Only observers remain abortable; durable facts stay available for recovery.
+        workers.shutdown().await;
+        shared
+            .quiescence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .scan_in_progress = false;
+        shared.quiescence_changed.notify_waiters();
+    }
+    result
+}
+
+async fn run_agent_dispatcher_loop(
+    shared: Arc<AgentDispatcherShared>,
+    workers: &mut JoinSet<Result<(), AgentDispatcherError>>,
+) -> Result<usize, AgentDispatcherError> {
     let mut settled = 0usize;
     let recovery_generation = uuid::Uuid::new_v4().to_string();
     loop {
@@ -1197,15 +1575,17 @@ async fn run_agent_dispatcher(
         // process lease expires; the bounded fallback tick later reaches the deadline and
         // recovers it without requiring another restart or an in-memory notification.
         if !shared.shutdown_requested.load(Ordering::Acquire) {
-            recover_undispatched_interrupts(&shared)?;
+            let execution = Arc::clone(&shared.executor);
+            dispatcher_store(&shared, move |_, _| execution.reconcile_execution_fences()).await?;
+            recover_undispatched_interrupts(&shared).await?;
             let recovery_token = format!(
                 "agent-recovery:{recovery_generation}:{}",
                 shared.clock.now_ms()
             );
-            let recovery = shared
-                .store
-                .recover_orphaned_wakes(&recovery_token, shared.clock.now_ms())
-                .map_err(AgentDispatcherError::Storage)?;
+            let recovery = dispatcher_store(&shared, move |store, now| {
+                store.recover_orphaned_wakes(&recovery_token, now)
+            })
+            .await?;
             for action in recovery.actions {
                 let worker_shared = Arc::clone(&shared);
                 workers.spawn(async move { run_recovered_wake(worker_shared, action).await });
@@ -1214,15 +1594,36 @@ async fn run_agent_dispatcher(
 
         let mut durable_queue_empty = false;
         while !shared.shutdown_requested.load(Ordering::Acquire) {
+            // Physical preparation capacity is reserved before acquiring any durable claim.
+            // Exhaustion leaves the Wake queued in SQLite instead of creating another queue.
+            let preparation = match shared
+                .blocking_work
+                .preparation
+                .try_reserve(DISPATCH_PREPARATION_ESTIMATED_BYTES)
+            {
+                Ok(reservation) => reservation,
+                Err(BlockingError::Overloaded) => break,
+                Err(error) => return Err(AgentDispatcherError::Manager(error.to_string())),
+            };
             let permit = match shared.turn_concurrency.try_reserve_for_dispatch() {
                 Ok(permit) => permit,
                 Err(_) => break,
             };
             let claim_token = format!("agent-wake-claim:{}", uuid::Uuid::new_v4());
-            let wake = match shared
-                .store
-                .claim_next_dispatchable(&claim_token, shared.clock.now_ms())
-            {
+            let claim_store = Arc::clone(&shared.store);
+            let clock = Arc::clone(&shared.clock);
+            let worker_claim = claim_token.clone();
+            let claim = shared
+                .blocking_work
+                .maintenance
+                .reserve(DISPATCH_MAINTENANCE_ESTIMATED_BYTES)
+                .await
+                .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?
+                .submit(move || claim_store.claim_next_dispatchable(&worker_claim, clock.now_ms()))
+                .wait()
+                .await
+                .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?;
+            let wake = match claim {
                 Ok(wake) => wake,
                 Err(AgentDispatchClaimError::NotReady(error)) => {
                     // Projection contention is a per-candidate condition, not a manager-fatal
@@ -1243,9 +1644,14 @@ async fn run_agent_dispatcher(
                 break;
             };
             permit.activate_dispatch_reservation();
+            shared
+                .preparing
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(claim_token.clone());
             let worker_shared = Arc::clone(&shared);
             workers.spawn(async move {
-                run_claimed_wake(worker_shared, wake, claim_token, permit).await
+                run_claimed_wake(worker_shared, wake, claim_token, permit, preparation).await
             });
         }
 
@@ -1287,28 +1693,27 @@ async fn run_agent_dispatcher(
     }
 }
 
-fn recover_undispatched_interrupts(
-    shared: &AgentDispatcherShared,
+async fn recover_undispatched_interrupts(
+    shared: &Arc<AgentDispatcherShared>,
 ) -> Result<(), AgentDispatcherError> {
-    let pending = shared
-        .store
-        .list_undispatched_interrupts()
-        .map_err(AgentDispatcherError::Storage)?;
+    let pending = dispatcher_store(shared, |store, _| store.list_undispatched_interrupts()).await?;
     for interrupt in pending {
-        match shared.executor.interrupt(&interrupt.run_id) {
-            Ok(outcome) if outcome.turn_termination_confirmed() => shared
-                .store
-                .mark_interrupt_dispatched(
-                    &interrupt.caller_agent_id,
-                    &interrupt.request_id,
-                    shared.clock.now_ms(),
-                )
-                .map_err(AgentDispatcherError::Storage)?,
+        let run_id = interrupt.run_id.clone();
+        match dispatcher_control(shared, move |executor| executor.interrupt(&run_id)).await {
+            Ok(outcome) if outcome.turn_termination_confirmed() => {
+                dispatcher_store(shared, move |store, now| {
+                    store.mark_interrupt_dispatched(
+                        &interrupt.caller_agent_id,
+                        &interrupt.request_id,
+                        now,
+                    )
+                })
+                .await?;
+            }
             Ok(_) => {
-                let wake = shared
-                    .store
-                    .get_wake(&interrupt.wake_id)
-                    .map_err(AgentDispatcherError::Storage)?
+                let wake_id = interrupt.wake_id.clone();
+                let wake = dispatcher_store(shared, move |store, _| store.get_wake(&wake_id))
+                    .await?
                     .ok_or_else(|| {
                         AgentDispatcherError::Storage(format!(
                             "undispatched interrupt Wake {} disappeared",
@@ -1324,16 +1729,11 @@ fn recover_undispatched_interrupts(
                         interrupt.request_id, interrupt.wake_id, interrupt.run_id
                     )));
                 }
-                // No process-local owner exists yet. Keep the receipt undispatched; pending
-                // approval restoration or lease recovery may make the next bounded scan
-                // actionable, while a terminal Wake needs no fabricated acknowledgement.
             }
-            Err(error) => {
-                eprintln!(
-                    "failed to redeliver durable Agent interrupt {} for Run {}: {error}",
-                    interrupt.request_id, interrupt.run_id
-                );
-            }
+            Err(error) => eprintln!(
+                "failed to redeliver durable Agent interrupt {} for Run {}: {error}",
+                interrupt.request_id, interrupt.run_id
+            ),
         }
     }
     Ok(())
@@ -1373,10 +1773,11 @@ async fn run_recovered_wake(
 ) -> Result<(), AgentDispatcherError> {
     match recovery {
         AgentWakeRecoveryAction::Observe(wake) => {
-            let handle = shared
-                .executor
-                .recovered_handle(&wake)
-                .map_err(AgentDispatcherError::Manager)?;
+            let recovered_wake = wake.clone();
+            let handle = dispatcher_control(&shared, move |executor| {
+                executor.recovered_handle(&recovered_wake)
+            })
+            .await?;
             // `AgentService` reconstructed this counted lease from the durable in-progress trace.
             // Terminal traces need no slot; approval/in-progress traces must retain one through
             // result settlement.
@@ -1388,12 +1789,14 @@ async fn run_recovered_wake(
                 .insert(
                     wake.agent_id.clone(),
                     RunningDispatch {
+                        claim_token: wake.claim_token.clone(),
                         wake_id: wake.wake_id.clone(),
                         run_id: Some(handle.run_id.clone()),
                         waiting_for_approval: wake.status == AgentWakeStatus::WaitingForApproval,
                     },
                 );
             let _guard = RunningDispatchGuard {
+                claim_token: wake.claim_token.clone(),
                 agent_id: wake.agent_id.clone(),
                 shared: Arc::clone(&shared),
             };
@@ -1403,44 +1806,58 @@ async fn run_recovered_wake(
                 handle,
                 wake.status == AgentWakeStatus::WaitingForApproval,
                 retained_permit,
+                None,
             )
             .await
         }
-        AgentWakeRecoveryAction::FailBeforeRuntime(wake) => settle_recovery_without_replay(
-            &shared,
-            wake,
-            AgentWakeStatus::Failed,
-            "Host 在原子 Turn admission 后、Runtime 采样前退出。",
-        ),
+        AgentWakeRecoveryAction::FailBeforeRuntime(wake) => {
+            settle_recovery_without_replay(
+                &shared,
+                wake,
+                AgentWakeStatus::Failed,
+                "Host 在原子 Turn admission 后、Runtime 采样前退出。",
+            )
+            .await
+        }
         AgentWakeRecoveryAction::OutcomeUnknown(wake) => {
-            let handle = shared
-                .executor
-                .recovered_handle(&wake)
-                .map_err(AgentDispatcherError::Manager)?;
+            let recovered_wake = wake.clone();
+            let handle = dispatcher_control(&shared, move |executor| {
+                executor.recovered_handle(&recovered_wake)
+            })
+            .await?;
             let retained_permit = shared.executor.retain_recovered_permit(&handle.run_id);
             let settled = settle_recovery_without_replay(
                 &shared,
                 wake,
                 AgentWakeStatus::OutcomeUnknown,
                 "Host 在可能产生外部副作用后退出，系统拒绝盲目重放。",
-            );
+            )
+            .await;
             if settled.is_ok() {
-                shared
-                    .executor
-                    .retire_recovered_turn_after_settlement(&handle);
+                let retired_handle = handle.clone();
+                dispatcher_control(&shared, move |executor| {
+                    executor.retire_recovered_turn_after_settlement(&retired_handle);
+                    Ok(())
+                })
+                .await?;
             }
             drop(retained_permit);
             settled
         }
         AgentWakeRecoveryAction::TreeStopped(wake) => {
-            let handle = shared
-                .executor
-                .recovered_handle(&wake)
-                .map_err(AgentDispatcherError::Manager)?;
+            let recovered_wake = wake.clone();
+            let handle = dispatcher_control(&shared, move |executor| {
+                executor.recovered_handle(&recovered_wake)
+            })
+            .await?;
             let retained_permit = shared.executor.retain_recovered_permit(&handle.run_id);
             // On a restarted Host there is normally no live token, but this also retires a
             // durable pending approval if one was restored before Wake recovery.
-            let interrupt_error = shared.executor.interrupt(&handle.run_id).err();
+            let run_id = handle.run_id.clone();
+            let interrupt_error =
+                dispatcher_control(&shared, move |executor| executor.interrupt(&run_id))
+                    .await
+                    .err();
             let frozen = mycopilot_core::ActiveAgentTreeWake {
                 agent_id: wake.agent_id.clone(),
                 conversation_id: handle.conversation_id.clone(),
@@ -1454,22 +1871,26 @@ async fn run_recovered_wake(
                 })?,
                 status: wake.status,
             };
-            let stopped = shared
-                .store
-                .settle_tree_stopped_wake(&frozen, shared.clock.now_ms())
-                .map_err(|error| {
-                    AgentDispatcherError::Storage(match interrupt_error.as_deref() {
-                        Some(interrupt_error) => {
-                            format!("{error}; runtime cancellation also failed: {interrupt_error}")
-                        }
-                        None => error,
-                    })
-                })?;
+            let stopped = dispatcher_store(&shared, move |store, now| {
+                store.settle_tree_stopped_wake(&frozen, now)
+            })
+            .await
+            .map_err(|error| {
+                AgentDispatcherError::Storage(match interrupt_error.as_ref() {
+                    Some(interrupt_error) => {
+                        format!("{error}; runtime cancellation also failed: {interrupt_error}")
+                    }
+                    None => error.to_string(),
+                })
+            })?;
             match stopped {
                 TreeStoppedWakeSettlement::Interrupted => {
-                    shared
-                        .executor
-                        .retire_recovered_turn_after_settlement(&handle);
+                    let retired_handle = handle.clone();
+                    dispatcher_control(&shared, move |executor| {
+                        executor.retire_recovered_turn_after_settlement(&retired_handle);
+                        Ok(())
+                    })
+                    .await?;
                     drop(retained_permit);
                     Ok(())
                 }
@@ -1481,6 +1902,7 @@ async fn run_recovered_wake(
                         .insert(
                             wake.agent_id.clone(),
                             RunningDispatch {
+                                claim_token: wake.claim_token.clone(),
                                 wake_id: wake.wake_id.clone(),
                                 run_id: Some(handle.run_id.clone()),
                                 waiting_for_approval: wake.status
@@ -1488,6 +1910,7 @@ async fn run_recovered_wake(
                             },
                         );
                     let _guard = RunningDispatchGuard {
+                        claim_token: wake.claim_token.clone(),
                         agent_id: wake.agent_id.clone(),
                         shared: Arc::clone(&shared),
                     };
@@ -1497,6 +1920,7 @@ async fn run_recovered_wake(
                         handle,
                         wake.status == AgentWakeStatus::WaitingForApproval,
                         retained_permit,
+                        None,
                     )
                     .await
                 }
@@ -1509,11 +1933,15 @@ async fn run_recovered_wake(
                         wake,
                         AgentWakeStatus::OutcomeUnknown,
                         &reason,
-                    );
+                    )
+                    .await;
                     if settled.is_ok() {
-                        shared
-                            .executor
-                            .retire_recovered_turn_after_settlement(&handle);
+                        let retired_handle = handle.clone();
+                        dispatcher_control(&shared, move |executor| {
+                            executor.retire_recovered_turn_after_settlement(&retired_handle);
+                            Ok(())
+                        })
+                        .await?;
                     }
                     drop(retained_permit);
                     settled
@@ -1529,8 +1957,8 @@ async fn run_recovered_wake(
     }
 }
 
-fn settle_recovery_without_replay(
-    shared: &AgentDispatcherShared,
+async fn settle_recovery_without_replay(
+    shared: &Arc<AgentDispatcherShared>,
     wake: AgentWakeRequestRecord,
     terminal_status: AgentWakeStatus,
     terminal_error: &str,
@@ -1539,22 +1967,17 @@ fn settle_recovery_without_replay(
         .claim_token
         .clone()
         .ok_or_else(|| AgentDispatcherError::Storage("recovered Wake has no claim".to_string()))?;
-    shared
-        .store
-        .settle(
-            &AgentWakeSettlement {
-                wake_id: wake.wake_id,
-                expected_status: wake.status,
-                claim_token,
-                terminal_status,
-                run_id: wake.run_id,
-                assistant_message_id: wake.assistant_message_id,
-                artifact_refs: Vec::new(),
-                terminal_error: Some(terminal_error.to_string()),
-            },
-            shared.clock.now_ms(),
-        )
-        .map_err(AgentDispatcherError::Storage)
+    let settlement = AgentWakeSettlement {
+        wake_id: wake.wake_id,
+        expected_status: wake.status,
+        claim_token,
+        terminal_status,
+        run_id: wake.run_id,
+        assistant_message_id: wake.assistant_message_id,
+        artifact_refs: Vec::new(),
+        terminal_error: Some(terminal_error.to_string()),
+    };
+    dispatcher_store(shared, move |store, now| store.settle(&settlement, now)).await
 }
 
 async fn run_claimed_wake(
@@ -1562,7 +1985,17 @@ async fn run_claimed_wake(
     wake: AgentWakeRequestRecord,
     claim_token: String,
     global_permit: AgentTurnConcurrencyPermit,
+    preparation: BlockingReservation,
 ) -> Result<(), AgentDispatcherError> {
+    let preparing = PreparingDispatchGuard {
+        claim_token: claim_token.clone(),
+        shared: Arc::clone(&shared),
+    };
+    let lease = DispatchWakeLease::start(
+        Arc::clone(&shared),
+        wake.wake_id.clone(),
+        claim_token.clone(),
+    );
     shared
         .running
         .lock()
@@ -1570,23 +2003,69 @@ async fn run_claimed_wake(
         .insert(
             wake.agent_id.clone(),
             RunningDispatch {
+                claim_token: wake.claim_token.clone(),
                 wake_id: wake.wake_id.clone(),
                 run_id: None,
                 waiting_for_approval: false,
             },
         );
     let _running_guard = RunningDispatchGuard {
+        claim_token: wake.claim_token.clone(),
         agent_id: wake.agent_id.clone(),
         shared: Arc::clone(&shared),
     };
+    let worker_shared = Arc::clone(&shared);
+    let worker_wake = wake.clone();
+    let worker_permit = global_permit.clone();
+    let lease_failure = Arc::clone(&lease.failure);
+    let started = preparation
+        .submit(move || {
+            if worker_shared.shutdown_requested.load(Ordering::Acquire) {
+                // No Turn was accepted. Preserve the claim for authoritative expiry/recovery.
+                return Ok(None);
+            }
+            if let Some(error) = lease_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+            {
+                return Err(error);
+            }
+            let _preparation_span =
+                mycopilot_core::performance::Span::new("turn.child_preparation", "start");
+            worker_shared
+                .executor
+                .start(&worker_wake, worker_permit)
+                .map(Some)
+        })
+        .wait()
+        .await
+        .map_err(|error| AgentDispatcherError::Manager(error.to_string()))?;
 
-    let handle = match shared.executor.start(&wake, global_permit.clone()) {
-        Ok(handle) => handle,
+    // A synchronous start cannot be force-aborted. Keep its lease/permit and preparing guard
+    // until the actual result is known; shutdown waits for this exact handoff before observers.
+    if let Some(error) = lease.failure() {
+        if let Ok(Some(handle)) = &started {
+            let handle = handle.clone();
+            dispatcher_control(&shared, move |executor| executor.interrupt_owned(&handle)).await?;
+        }
+        return Err(AgentDispatcherError::Storage(format!(
+            "Wake {} lost its durable lease during preparation: {error}",
+            wake.wake_id
+        )));
+    }
+    let handle = match started {
+        Ok(Some(handle)) => handle,
+        Ok(None) => {
+            return Err(AgentDispatcherError::Manager(format!(
+                "Wake {} remains durably claimed because shutdown stopped preparation",
+                wake.wake_id
+            )))
+        }
         Err(error) => {
-            let persisted = shared
-                .store
-                .get_wake(&wake.wake_id)
-                .map_err(AgentDispatcherError::Storage)?
+            let wake_id = wake.wake_id.clone();
+            let persisted = dispatcher_store(&shared, move |store, _| store.get_wake(&wake_id))
+                .await?
                 .ok_or_else(|| {
                     AgentDispatcherError::Storage(format!(
                         "Wake {} disappeared after Turn start failed",
@@ -1603,22 +2082,17 @@ async fn run_claimed_wake(
                     wake.wake_id
                 )));
             }
-            shared
-                .store
-                .settle(
-                    &AgentWakeSettlement {
-                        wake_id: wake.wake_id.clone(),
-                        expected_status: persisted.status,
-                        claim_token: claim_token.clone(),
-                        terminal_status: AgentWakeStatus::Failed,
-                        run_id: persisted.run_id,
-                        assistant_message_id: persisted.assistant_message_id,
-                        artifact_refs: Vec::new(),
-                        terminal_error: Some(error),
-                    },
-                    shared.clock.now_ms(),
-                )
-                .map_err(AgentDispatcherError::Storage)?;
+            let settlement = AgentWakeSettlement {
+                wake_id: wake.wake_id.clone(),
+                expected_status: persisted.status,
+                claim_token,
+                terminal_status: AgentWakeStatus::Failed,
+                run_id: persisted.run_id,
+                assistant_message_id: persisted.assistant_message_id,
+                artifact_refs: Vec::new(),
+                terminal_error: Some(error),
+            };
+            dispatcher_store(&shared, move |store, now| store.settle(&settlement, now)).await?;
             notify_dispatcher_work_available(&shared);
             return Ok(());
         }
@@ -1628,11 +2102,24 @@ async fn run_claimed_wake(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get_mut(&wake.agent_id)
+        .filter(|current| current.claim_token == wake.claim_token)
     {
         running.run_id = Some(handle.run_id.clone());
     }
-
-    observe_and_settle(shared, wake, handle, false, Some(global_permit)).await
+    if shared.shutdown_requested.load(Ordering::Acquire) {
+        let run_id = handle.run_id.clone();
+        dispatcher_control(&shared, move |executor| executor.interrupt(&run_id)).await?;
+    }
+    drop(preparing);
+    observe_and_settle(
+        shared,
+        wake,
+        handle,
+        false,
+        Some(global_permit),
+        Some(lease),
+    )
+    .await
 }
 
 async fn observe_and_settle(
@@ -1641,52 +2128,56 @@ async fn observe_and_settle(
     handle: AgentWakeExecutionHandle,
     mut waiting_already_reported: bool,
     _settlement_permit: Option<AgentTurnConcurrencyPermit>,
+    lease: Option<DispatchWakeLease>,
 ) -> Result<(), AgentDispatcherError> {
     let claim_token = wake
         .claim_token
         .clone()
         .ok_or_else(|| AgentDispatcherError::Storage("active Wake has no claim token".into()))?;
-    let mut lease_tick = tokio::time::interval(shared.config.wake_lease_renew_interval);
-    lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    lease_tick.tick().await;
+    let lease = lease.unwrap_or_else(|| {
+        DispatchWakeLease::start(
+            Arc::clone(&shared),
+            wake.wake_id.clone(),
+            claim_token.clone(),
+        )
+    });
     loop {
         let observation = shared.executor.observe(&handle, waiting_already_reported);
         tokio::pin!(observation);
-        let observed = loop {
-            tokio::select! {
-                observation = &mut observation => break observation,
-                _ = lease_tick.tick() => {
-                    if let Err(error) = shared.store.renew_lease(
-                        &wake.wake_id,
-                        &claim_token,
-                        shared.clock.now_ms(),
-                    ) {
-                        let _ = shared.executor.interrupt(&handle.run_id);
-                        return Err(AgentDispatcherError::Storage(format!(
-                            "Wake {} lost its durable lease while Turn {} was active: {error}",
-                            wake.wake_id, handle.run_id
-                        )));
-                    }
-                }
+        let observed = tokio::select! {
+            observation = &mut observation => observation.map_err(AgentDispatcherError::Manager)?,
+            error = lease.wait_failure() => {
+                let expired_handle = handle.clone();
+                let cancellation = dispatcher_control(&shared, move |executor| executor.interrupt_owned(&expired_handle)).await;
+                return Err(AgentDispatcherError::Storage(format!(
+                    "Wake {} lost its durable lease while Turn {} was active: {error}; cancellation: {cancellation:?}",
+                    wake.wake_id, handle.run_id,
+                )));
             }
-        }
-        .map_err(AgentDispatcherError::Manager)?;
+        };
         match observed {
             AgentWakeExecutionObservation::WaitingForApproval => {
                 if !waiting_already_reported {
-                    let outcome = shared
-                        .store
-                        .mark_waiting_for_approval(
-                            &wake.wake_id,
-                            &handle.run_id,
-                            &handle.conversation_id,
-                            &handle.assistant_message_id,
-                            &claim_token,
-                            shared.clock.now_ms(),
+                    let waiting_handle = handle.clone();
+                    let waiting_claim = claim_token.clone();
+                    let outcome = dispatcher_store(&shared, move |store, now| {
+                        store.mark_waiting_for_approval(
+                            &waiting_handle.wake_id,
+                            &waiting_handle.run_id,
+                            &waiting_handle.conversation_id,
+                            &waiting_handle.assistant_message_id,
+                            &waiting_claim,
+                            now,
                         )
-                        .map_err(AgentDispatcherError::Storage)?;
+                    })
+                    .await?;
                     if let AgentWakeApprovalWaitOutcome::TreeStopped(stopped) = outcome {
-                        let interrupt_error = shared.executor.interrupt(&handle.run_id).err();
+                        let run_id = handle.run_id.clone();
+                        let interrupt_error = dispatcher_control(&shared, move |executor| {
+                            executor.interrupt(&run_id)
+                        })
+                        .await
+                        .err();
                         let frozen = mycopilot_core::ActiveAgentTreeWake {
                             agent_id: stopped.agent_id,
                             conversation_id: handle.conversation_id.clone(),
@@ -1696,17 +2187,18 @@ async fn observe_and_settle(
                             claim_token: claim_token.clone(),
                             status: stopped.status,
                         };
-                        let settlement = shared
-                            .store
-                            .settle_tree_stopped_wake(&frozen, shared.clock.now_ms())
-                            .map_err(|error| {
-                                AgentDispatcherError::Storage(match interrupt_error.as_deref() {
-                                    Some(interrupt_error) => format!(
-                                        "{error}; runtime cancellation also failed: {interrupt_error}"
-                                    ),
-                                    None => error,
-                                })
-                            })?;
+                        let settlement = dispatcher_store(&shared, move |store, now| {
+                            store.settle_tree_stopped_wake(&frozen, now)
+                        })
+                        .await
+                        .map_err(|error| {
+                            AgentDispatcherError::Storage(match interrupt_error.as_ref() {
+                                Some(interrupt_error) => format!(
+                                    "{error}; runtime cancellation also failed: {interrupt_error}"
+                                ),
+                                None => error.to_string(),
+                            })
+                        })?;
                         match settlement {
                             TreeStoppedWakeSettlement::Interrupted => {}
                             TreeStoppedWakeSettlement::AlreadyTerminal => continue,
@@ -1732,6 +2224,7 @@ async fn observe_and_settle(
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .get_mut(&wake.agent_id)
+                        .filter(|current| current.run_id.as_deref() == Some(handle.run_id.as_str()))
                     {
                         running.waiting_for_approval = waiting_already_reported;
                     }
@@ -1745,6 +2238,7 @@ async fn observe_and_settle(
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .get_mut(&wake.agent_id)
+                        .filter(|current| current.run_id.as_deref() == Some(handle.run_id.as_str()))
                     {
                         running.waiting_for_approval = false;
                     }
@@ -1755,29 +2249,23 @@ async fn observe_and_settle(
                 artifact_refs,
                 terminal_error,
             } => {
-                let persisted = shared
-                    .store
-                    .get_wake(&wake.wake_id)
-                    .map_err(AgentDispatcherError::Storage)?
+                let wake_id = wake.wake_id.clone();
+                let persisted = dispatcher_store(&shared, move |store, _| store.get_wake(&wake_id))
+                    .await?
                     .ok_or_else(|| {
                         AgentDispatcherError::Storage("active Wake disappeared".into())
                     })?;
-                shared
-                    .store
-                    .settle(
-                        &AgentWakeSettlement {
-                            wake_id: wake.wake_id.clone(),
-                            expected_status: persisted.status,
-                            claim_token,
-                            terminal_status: status,
-                            run_id: Some(handle.run_id.clone()),
-                            assistant_message_id: Some(handle.assistant_message_id.clone()),
-                            artifact_refs,
-                            terminal_error,
-                        },
-                        shared.clock.now_ms(),
-                    )
-                    .map_err(AgentDispatcherError::Storage)?;
+                let settlement = AgentWakeSettlement {
+                    wake_id: wake.wake_id.clone(),
+                    expected_status: persisted.status,
+                    claim_token,
+                    terminal_status: status,
+                    run_id: Some(handle.run_id.clone()),
+                    assistant_message_id: Some(handle.assistant_message_id.clone()),
+                    artifact_refs,
+                    terminal_error,
+                };
+                dispatcher_store(&shared, move |store, now| store.settle(&settlement, now)).await?;
                 notify_dispatcher_work_available(&shared);
                 return Ok(());
             }
@@ -1787,16 +2275,24 @@ async fn observe_and_settle(
 
 struct RunningDispatchGuard {
     agent_id: String,
+    claim_token: Option<String>,
     shared: Arc<AgentDispatcherShared>,
 }
 
 impl Drop for RunningDispatchGuard {
     fn drop(&mut self) {
-        self.shared
+        let mut running = self
+            .shared
             .running
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.agent_id);
+            .unwrap_or_else(|error| error.into_inner());
+        if running
+            .get(&self.agent_id)
+            .is_some_and(|current| current.claim_token == self.claim_token)
+        {
+            running.remove(&self.agent_id);
+        }
+        drop(running);
         notify_dispatcher_work_available(&self.shared);
     }
 }

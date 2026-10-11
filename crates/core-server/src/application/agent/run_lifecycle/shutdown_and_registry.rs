@@ -1,32 +1,63 @@
 impl AgentService {
     pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
-        self.stop_workflow_delivery_admissions();
-        let manual_tokens = self
-            .manual_context_compaction_cancellations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for token in &manual_tokens {
-            token.cancel();
-        }
-        let active_runs = {
-            let cancellations = self
-                .cancellations
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            cancellations
-                .iter()
-                .map(|(run_id, token)| (run_id.clone(), token.clone()))
-                .collect::<Vec<_>>()
+        // The shutdown fence and durable command cancellation can wait on admission/SQLite.
+        // They must not stop the runtime that is still driving lease maintenance and settlement.
+        let service = self.clone();
+        let reservation = match self.blocking_work.control.reserve(0).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                eprintln!("active run shutdown admission failed: {error}");
+                return (0, true);
+            }
         };
+        let cancelled = reservation
+            .submit(move || {
+                service.stop_workflow_delivery_admissions();
+                {
+                    let _admission = service
+                        .conversation_admission
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    service.runtime_stopping.store(true, Ordering::Release);
+                }
+                let manual_tokens = service
+                    .manual_context_compaction_cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for token in &manual_tokens {
+                    token.cancel();
+                }
+                let active_runs = {
+                    let cancellations = service
+                        .cancellations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    cancellations
+                        .iter()
+                        .map(|(run_id, token)| (run_id.clone(), token.clone()))
+                        .collect::<Vec<_>>()
+                };
 
-        for (run_id, token) in &active_runs {
-            token.cancel();
-            self.command_sessions.cancel_pre_handoff_for_run(run_id);
-            self.process_runs.cancel_run(run_id);
-        }
+                for (run_id, token) in &active_runs {
+                    token.cancel();
+                    service.command_sessions.cancel_pre_handoff_for_run(run_id);
+                    service.process_runs.cancel_run(run_id);
+                }
+
+                (manual_tokens, active_runs)
+            })
+            .wait()
+            .await;
+        let (manual_tokens, active_runs) = match cancelled {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                eprintln!("active run shutdown outcome may be unknown: {error}");
+                return (0, true);
+            }
+        };
 
         // Process shutdown and Agent Run retirement advance independently under one deadline.
         // The process lane closes start admission, terminates every group, and waits for durable
@@ -69,7 +100,23 @@ impl AgentService {
                         .keys()
                         .cloned()
                         .collect::<Vec<_>>();
-                    self.persist_forced_cancelled_runs(&remaining_run_ids);
+                    let service = self.clone();
+                    match self.blocking_work.completion.reserve(0).await {
+                        Ok(reservation) => {
+                            if let Err(error) = reservation
+                                .submit(move || {
+                                    service.persist_forced_cancelled_runs(&remaining_run_ids)
+                                })
+                                .wait()
+                                .await
+                            {
+                                eprintln!("forced run settlement outcome may be unknown: {error}");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("forced run settlement could not be scheduled: {error}")
+                        }
+                    }
                 }
                 return (active_runs.len() + manual_tokens.len(), true);
             }

@@ -103,7 +103,15 @@ async fn assert_precommitted_wait_survives_terminal_settlement(
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("wait-terminal.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             PROJECT_ID.to_string(),

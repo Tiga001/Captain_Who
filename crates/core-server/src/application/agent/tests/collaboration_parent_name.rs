@@ -84,7 +84,13 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("parent-name-approval.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             PROJECT.to_string(),
@@ -118,7 +124,7 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
                 context_window_indicator_enabled: true,
                 content: USER_REQUEST.to_string(),
                 attachments: Vec::new(),
-        folder_references: Vec::new(),
+                folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-parent-name-approval".to_string()),

@@ -514,20 +514,6 @@ impl AgentService {
         }
     }
 
-    pub(super) fn segment_steering_cleanup(
-        &self,
-        run_id: &str,
-        queue: &AgentSteerInputQueue,
-        notifications: CoreServerNotificationSender,
-    ) -> ActiveRunSteeringCleanup {
-        ActiveRunSteeringCleanup {
-            service: self.clone(),
-            run_id: run_id.to_string(),
-            queue: Some(queue.clone()),
-            notifications,
-        }
-    }
-
     pub(super) fn handoff_active_run_steering(
         &self,
         run_id: &str,

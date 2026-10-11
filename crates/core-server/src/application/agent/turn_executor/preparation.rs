@@ -73,6 +73,12 @@ impl AgentService {
         self.register_turn_concurrency_permit(&run_id, global_permit)?;
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
+        let trusted_wake = mycopilot_core::TrustedAgentWakeTurnAdmission {
+            agent_id: start.agent_id().to_string(),
+            wake_id: start.wake_id().to_string(),
+            claim_token: start.claim_token().to_string(),
+            source_agent_message_id: start.source_message_id().to_string(),
+        };
         let prepared = match prepare_agent_wake_turn(
             &self.storage,
             &self.skills,
@@ -81,12 +87,7 @@ impl AgentService {
             &run_id,
             previous_conversation.clone(),
             expected_revision,
-            mycopilot_core::TrustedAgentWakeTurnAdmission {
-                agent_id: start.agent_id().to_string(),
-                wake_id: start.wake_id().to_string(),
-                claim_token: start.claim_token().to_string(),
-                source_agent_message_id: start.source_message_id().to_string(),
-            },
+            trusted_wake.clone(),
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -106,7 +107,7 @@ impl AgentService {
             prepared,
             cancellation_token,
             notifications,
-            PreparedTurnRollback::AgentWake,
+            PreparedTurnRollback::AgentWake(trusted_wake),
         )
     }
 
@@ -121,7 +122,10 @@ impl AgentService {
         let cause = cause.to_string();
         let result = match rollback {
             PreparedTurnRollback::Continuation => self.settle_prepared_continuation_failure(
-                conversation_id, assistant_message_id, provisional_run_id, &cause,
+                conversation_id,
+                assistant_message_id,
+                provisional_run_id,
+                &cause,
             ),
             PreparedTurnRollback::Human {
                 user_message_id,
@@ -143,7 +147,7 @@ impl AgentService {
                         .map_err(|e| e.to_string())
                 })
                 .unwrap_or(Ok(())),
-            PreparedTurnRollback::AgentWake => Ok(()),
+            PreparedTurnRollback::AgentWake(_) => Ok(()),
             PreparedTurnRollback::Automation { automation_run_id } => {
                 self.settle_automation_start_failure(automation_run_id, &cause)
             }
@@ -369,26 +373,45 @@ impl AgentService {
         run_id: Option<&str>,
         cause: &str,
     ) -> Result<(), String> {
-        let Some(mut trace) = self.storage.get_conversation_turn_trace(assistant_message_id)? else {
+        let Some(mut trace) = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)?
+        else {
             return Ok(());
         };
         if trace.conversation_id != conversation_id || Some(trace.run_id.as_str()) != run_id {
             return Err("继续任务失败处理的身份不一致。".into());
         }
-        if trace.terminal_status.is_terminal() { return Ok(()); }
-        if trace.items.len() != 1 || !matches!(trace.items.first(),
+        if trace.terminal_status.is_terminal() {
+            return Ok(());
+        }
+        if trace.items.len() != 1
+            || !matches!(trace.items.first(),
             Some(mycopilot_core::ConversationTurnTraceItem::BackendState { event_id, .. })
-            if event_id.starts_with("user-continuation:")) {
+            if event_id.starts_with("user-continuation:"))
+        {
             return Err("继续任务已开始执行，不能按准备失败处理。".into());
         }
-        let created_at = self.storage.get_assistant_message_created_at(conversation_id, assistant_message_id)?
+        let created_at = self
+            .storage
+            .get_assistant_message_created_at(conversation_id, assistant_message_id)?
             .ok_or_else(|| "继续任务的回复已不存在。".to_string())?;
         trace.terminal_status = mycopilot_core::ConversationTurnTraceTerminalStatus::Failed;
         trace.terminal_error = Some(cause.to_string());
         self.finalize_turn_with_human_root_notification(
-            &trace.run_id, conversation_id, assistant_message_id, AgentRunStatus::Failed,
-            cause, Some("error"), "failed", &trace, None,
-            created_at, now_ms().max(created_at), None, None,
+            &trace.run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentRunStatus::Failed,
+            cause,
+            Some("error"),
+            "failed",
+            &trace,
+            None,
+            created_at,
+            now_ms().max(created_at),
+            None,
+            None,
         )
     }
 

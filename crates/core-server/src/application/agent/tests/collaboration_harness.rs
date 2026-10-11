@@ -461,7 +461,15 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("collaboration-harness.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             PROJECT_ID.to_string(),
@@ -882,7 +890,15 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("collaboration-startup-recovery.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             PROJECT_ID.to_string(),
@@ -1016,7 +1032,15 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("collaboration-root-stop.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             PROJECT_ID.to_string(),
@@ -1370,7 +1394,15 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
         .join("collaboration-command-interrupt.sqlite");
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let project_id = "project-collaboration-command-interrupt";
     let root_conversation_id = "conversation-collaboration-command-interrupt";
     storage
@@ -1665,7 +1697,15 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
     let database_path = fixture.path().join("collaboration-approval-handoff.sqlite");
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let project_id = "project-collaboration-approval-handoff";
     let root_conversation_id = "conversation-collaboration-approval-handoff-root";
     let root_agent_id = "agent-collaboration-approval-handoff-root";

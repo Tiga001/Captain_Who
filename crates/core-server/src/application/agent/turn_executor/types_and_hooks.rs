@@ -157,6 +157,9 @@ where
     for delay_ms in TERMINAL_PERSISTENCE_RETRY_DELAYS_MS {
         match persist() {
             Ok(value) => return Ok(value),
+            // The captured Wake no longer owns this Turn. Retrying or rolling usage back by
+            // stable run ID could mutate a replacement generation's process-local state.
+            Err(error) if error.starts_with("agent_wake_terminal_fenced:") => return Err(error),
             Err(_) => {
                 rollback_before_retry();
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -306,6 +309,9 @@ impl TrustedAgentWakeTurnStart {
 }
 
 pub(super) struct PreparedRuntimeTurnSegment {
+    /// Exact durable claim captured before preparation. A replacement claim cannot authorize
+    /// this segment merely because it has the same Agent/Conversation identity.
+    pub(super) trusted_wake: Option<mycopilot_core::TrustedAgentWakeTurnAdmission>,
     pub(super) run_id: String,
     pub(super) conversation_id: String,
     pub(super) assistant_message_id: String,
@@ -357,5 +363,5 @@ pub(super) enum PreparedTurnRollback {
     Automation {
         automation_run_id: String,
     },
-    AgentWake,
+    AgentWake(mycopilot_core::TrustedAgentWakeTurnAdmission),
 }

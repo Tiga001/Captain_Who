@@ -7,6 +7,7 @@ impl AgentService {
         notifications: CoreServerNotificationSender,
     ) -> RuntimeTurnSegmentOutcome {
         let PreparedRuntimeTurnSegment {
+            trusted_wake,
             run_id,
             conversation_id,
             assistant_message_id,
@@ -21,13 +22,10 @@ impl AgentService {
             steer_input,
             pending_action_predecessor_settlement,
             invalidate_mcp_payload_on_pending_store_failure,
-            steering_close_error_context,
+            steering_close_error_context: _,
         } = segment;
 
         self.bind_active_run_steering_notifications(&run_id, &steer_input, notifications.clone());
-        // Host preparation can fail before the Runtime installs its own queue Drop guard.
-        let _steering_cleanup =
-            self.segment_steering_cleanup(&run_id, &steer_input, notifications.clone());
         let emitter_steer_input = steer_input.clone();
 
         let human_binding = human_input_resume
@@ -399,154 +397,246 @@ impl AgentService {
             }
         });
 
-        let host_executor = self.host_action_executor(
-            agent_input.clone(),
-            run_id.clone(),
-            Some(conversation_id.clone()),
-            Some(assistant_message_id.clone()),
-            skill_resources.clone(),
-            notifications.clone(),
-        );
-        let trace_observer = self.trace_observer(
-            &run_id,
-            &conversation_id,
-            &assistant_message_id,
-            assistant_created_at,
-            agent_input.clone(),
-            context_window_tool_projection.clone(),
-            notifications.clone(),
-        );
-        let context_compaction_services = self.context_compaction_services(
-            &run_id,
-            &conversation_id,
-            &assistant_message_id,
-            agent_input.clone(),
-            context_window_tool_projection,
-            notifications.clone(),
-        );
-        let model_request_observer =
-            self.model_request_observer(&run_id, &conversation_id, &assistant_message_id);
-        let context_window_observer = agent_input
-            .context_window_indicator_enabled
-            .then(|| {
-                agent_input
-                    .model_config_id
-                    .as_deref()
-                    .map(|_| {
-                        self.context_window_observer(
+        // Preparation performs synchronous SQLite, skill and collaboration host construction.
+        // The model future below remains on Tokio; only this finite owned phase occupies a worker.
+        let preparation = self
+            .blocking_work
+            .preparation
+            .reserve(runtime_work_estimated_bytes(&agent_input))
+            .await;
+        let prepared_host = match preparation {
+            Ok(reservation) => {
+                let service = self.clone();
+                let prepared_wake = trusted_wake.clone();
+                let agent_input = agent_input.clone();
+                let run_id = run_id.clone();
+                let conversation_id = conversation_id.clone();
+                let assistant_message_id = assistant_message_id.clone();
+                let cancellation_token = cancellation_token.clone();
+                let steer_input = steer_input.clone();
+                let notifications = notifications.clone();
+                reservation
+                    .submit(move || -> AgentResult<AgentRuntimeHostServices> {
+                        let prepared = (|| -> AgentResult<AgentRuntimeHostServices> {
+                        let host_executor = service.host_action_executor(
+                            agent_input.clone(),
+                            run_id.clone(),
+                            Some(conversation_id.clone()),
+                            Some(assistant_message_id.clone()),
+                            skill_resources.clone(),
+                            notifications.clone(),
+                        );
+                        let trace_observer = service.trace_observer(
                             &run_id,
                             &conversation_id,
-                            &agent_input,
+                            &assistant_message_id,
+                            assistant_created_at,
+                            agent_input.clone(),
+                            context_window_tool_projection.clone(),
                             notifications.clone(),
-                        )
+                        );
+                        let context_compaction_services = service.context_compaction_services(
+                            &run_id,
+                            &conversation_id,
+                            &assistant_message_id,
+                            agent_input.clone(),
+                            context_window_tool_projection,
+                            notifications.clone(),
+                        );
+                        let model_request_observer = service.model_request_observer(
+                            &run_id,
+                            &conversation_id,
+                            &assistant_message_id,
+                        );
+                        let context_window_observer = agent_input
+                            .context_window_indicator_enabled
+                            .then(|| {
+                                agent_input.model_config_id.as_deref().map(|_| {
+                                    service.context_window_observer(
+                                        &run_id,
+                                        &conversation_id,
+                                        &agent_input,
+                                        notifications.clone(),
+                                    )
+                                })
+                            })
+                            .flatten();
+                        let mut host_services = AgentRuntimeHostServices::new()
+                            // Both callers complete a background segment: live notifications carry text,
+                            // while persistence uses the canonical trace/content. Neither replays output.events.
+                            // Keep terminal and control events for usage projection and completion handling.
+                            .with_transient_message_deltas()
+                            .with_conversation_world_state(service.conversation_world_state_host(
+                                &agent_input,
+                                &run_id,
+                                &conversation_id,
+                                &assistant_message_id,
+                                &cancellation_token,
+                            ))
+                            .with_web_search_policy(service.web_search_policy_source())
+                            .with_host_actions(host_executor, service.storage.clone())
+                            .with_command_session_executor(Arc::new(
+                                service.command_sessions.clone(),
+                            ))
+                            .with_office_engine(service.office_engine.clone())
+                            .with_trace_observer(trace_observer)
+                            .with_model_request_observer(model_request_observer)
+                            .with_context_compaction(context_compaction_services);
+                        if agent_input.context.as_ref().is_some_and(|context| {
+                            context.collaboration_identity.is_none()
+                                && context.conversation_id.as_deref()
+                                    == Some(conversation_id.as_str())
+                        }) && agent_input
+                            .prompt_preferences
+                            .as_ref()
+                            .is_none_or(|preferences| {
+                                preferences.automation_execution_context.is_none()
+                            })
+                        {
+                            host_services = host_services.with_human_interaction_runtime(Arc::new(
+                                StoredBlockingHumanInput {
+                                    service: service.clone(),
+                                    input: agent_input.clone(),
+                                    token: cancellation_token.clone(),
+                                    steer_input: steer_input.clone(),
+                                    notifications: notifications.clone(),
+                                    predecessor: human_binding.clone(),
+                                    approval_predecessor: human_approval_predecessor,
+                                },
+                            ));
+                            host_services = host_services.with_human_interaction_policy(Arc::new(
+                                crate::application::human_interaction::StoredHumanInteractionPolicy(
+                                    service.storage.clone(),
+                                ),
+                            ));
+                        }
+                        host_services = service.attach_workflow_runtime(
+                            host_services,
+                            &agent_input,
+                            super::workflow_execution::WorkflowTurnOwner {
+                                run_id: &run_id,
+                                conversation_id: &conversation_id,
+                                assistant_message_id: &assistant_message_id,
+                                token: &cancellation_token,
+                            },
+                            notifications.clone(),
+                        );
+                        if let Some(sink) = automation_report_sink {
+                            host_services = host_services.with_automation_report_sink(sink);
+                        }
+                        if let Some(builtin_capabilities) = service.builtin_capabilities.clone() {
+                            host_services =
+                                host_services.with_builtin_capabilities(builtin_capabilities);
+                        }
+                        if let Some(provider_continuation_vault) =
+                            service.provider_continuation_vault.as_ref()
+                        {
+                            host_services = host_services.with_provider_continuation_vault(
+                                Arc::clone(provider_continuation_vault),
+                            );
+                        }
+                        if let Some(context_window_observer) = context_window_observer {
+                            host_services =
+                                host_services.with_context_window_observer(context_window_observer);
+                        }
+                        if let Some(image_generation_execution) =
+                            service.image_generation_execution.clone()
+                        {
+                            host_services = host_services
+                                .with_image_generation_execution(image_generation_execution);
+                        }
+                        if let Some(skill_installation_prepare) =
+                            service.skill_installation_prepare.clone()
+                        {
+                            host_services = host_services
+                                .with_skill_installation_prepare(skill_installation_prepare);
+                        }
+                        if let Some(skill_installation) = service.skill_installation.clone() {
+                            host_services =
+                                host_services.with_skill_installation_commit(skill_installation);
+                        }
+                        let skill_workspace = agent_input
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.workspace.clone());
+                        host_services = host_services.with_skill_activation_resolver(
+                            model_skill_activation_resolver(
+                                service.storage.clone(),
+                                service.skills.clone(),
+                                skill_workspace,
+                            ),
+                        );
+                        host_services = host_services.with_steer_input(steer_input.clone());
+                        host_services = host_services.with_collaboration_inbox(Arc::new(
+                            PersistentAgentSamplingBoundaryInbox::new(Arc::clone(&service.storage)),
+                        ));
+                        let collaboration_harness =
+                        crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
+                            Arc::clone(&service.storage),
+                            service.clone(),
+                            service.collaboration_authorizer(),
+                            Arc::clone(&service.collaboration_dispatcher),
+                            notifications.clone(),
+                        );
+                        host_services = match collaboration_harness.attach_to_host_services(
+                            host_services,
+                            &conversation_id,
+                            &run_id,
+                        ) {
+                            Ok(services) => services,
+                            Err(error) => return Err(error),
+                        };
+                        if let Some(resources) = skill_resources {
+                            host_services = host_services.with_skill_resources(resources);
+                        }
+                        if let Some(resolver) = service.artifact_runtime.clone() {
+                            host_services =
+                                host_services.with_command_runtime_profile_resolver(resolver);
+                        }
+                        if let Some(mcp_tools) = mcp_tools {
+                            host_services = host_services.with_mcp_tools(mcp_tools);
+                        }
+
+                        service.schedule_async_human_input_deliveries(notifications.clone());
+                        Ok(host_services)
+                        })();
+                        // Capacity and host construction may outlive a durable claim. Validate
+                        // the captured token at the last synchronous boundary before Runtime,
+                        // rather than resolving whichever replacement token owns this identity.
+                        if let Some(trusted) = prepared_wake.as_ref() {
+                            service.register_agent_wake_runtime_owner(
+                                trusted, &run_id, &assistant_message_id, &cancellation_token,
+                            ).map_err(|error| runtime_wake_fence_error(trusted, error))?;
+                            #[cfg(test)]
+                            run_before_runtime_execution_fence_hook(&run_id);
+                            if let Err(error) = service.storage.validate_agent_wake_execution_fence(
+                                trusted, &run_id, &assistant_message_id,
+                            ) {
+                                // This segment no longer has authority even to write a failure
+                                // trace. Its old token cannot terminalize a same-Turn successor.
+                                // Durable tree-stop/recovery owners decide the eventual outcome.
+                                return Err(runtime_wake_fence_error(trusted, error));
+                            }
+                            if cancellation_token.is_cancelled() {
+                                return Err(AgentError::cancelled());
+                            }
+                        }
+                        prepared
                     })
-            })
-            .flatten();
-        let mut host_services = AgentRuntimeHostServices::new()
-            // Both callers complete a background segment: live notifications carry text,
-            // while persistence uses the canonical trace/content. Neither replays output.events.
-            // Keep terminal and control events for usage projection and completion handling.
-            .with_transient_message_deltas()
-            .with_conversation_world_state(self.conversation_world_state_host(
-                &agent_input,
-                &run_id,
-                &conversation_id,
-                &assistant_message_id,
-                &cancellation_token,
-            ))
-            .with_web_search_policy(self.web_search_policy_source())
-            .with_host_actions(host_executor, self.storage.clone())
-            .with_command_session_executor(Arc::new(self.command_sessions.clone()))
-            .with_office_engine(self.office_engine.clone())
-            .with_trace_observer(trace_observer)
-            .with_model_request_observer(model_request_observer)
-            .with_context_compaction(context_compaction_services);
-        if agent_input.context.as_ref().is_some_and(|context| {
-            context.collaboration_identity.is_none()
-                && context.conversation_id.as_deref() == Some(conversation_id.as_str())
-        }) && agent_input
-            .prompt_preferences
-            .as_ref()
-            .is_none_or(|preferences| preferences.automation_execution_context.is_none())
-        {
-            host_services =
-                host_services.with_human_interaction_runtime(Arc::new(StoredBlockingHumanInput {
-                    service: self.clone(),
-                    input: agent_input.clone(),
-                    token: cancellation_token.clone(),
-                    steer_input: steer_input.clone(),
-                    notifications: notifications.clone(),
-                    predecessor: human_binding.clone(),
-                    approval_predecessor: human_approval_predecessor,
-                }));
-            host_services = host_services.with_human_interaction_policy(Arc::new(
-                crate::application::human_interaction::StoredHumanInteractionPolicy(
-                    self.storage.clone(),
-                ),
-            ));
-        }
-        host_services = self.attach_workflow_runtime(
-            host_services,
-            &agent_input,
-            super::workflow_execution::WorkflowTurnOwner {
-                run_id: &run_id,
-                conversation_id: &conversation_id,
-                assistant_message_id: &assistant_message_id,
-                token: &cancellation_token,
-            },
-            notifications.clone(),
-        );
-        if let Some(sink) = automation_report_sink {
-            host_services = host_services.with_automation_report_sink(sink);
-        }
-        if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
-            host_services = host_services.with_builtin_capabilities(builtin_capabilities);
-        }
-        if let Some(provider_continuation_vault) = self.provider_continuation_vault.as_ref() {
-            host_services = host_services
-                .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));
-        }
-        if let Some(context_window_observer) = context_window_observer {
-            host_services = host_services.with_context_window_observer(context_window_observer);
-        }
-        if let Some(image_generation_execution) = self.image_generation_execution.clone() {
-            host_services =
-                host_services.with_image_generation_execution(image_generation_execution);
-        }
-        if let Some(skill_installation_prepare) = self.skill_installation_prepare.clone() {
-            host_services =
-                host_services.with_skill_installation_prepare(skill_installation_prepare);
-        }
-        if let Some(skill_installation) = self.skill_installation.clone() {
-            host_services = host_services.with_skill_installation_commit(skill_installation);
-        }
-        let skill_workspace = agent_input
-            .context
-            .as_ref()
-            .and_then(|context| context.workspace.clone());
-        host_services =
-            host_services.with_skill_activation_resolver(model_skill_activation_resolver(
-                self.storage.clone(),
-                self.skills.clone(),
-                skill_workspace,
-            ));
-        host_services = host_services.with_steer_input(steer_input.clone());
-        host_services = host_services.with_collaboration_inbox(Arc::new(
-            PersistentAgentSamplingBoundaryInbox::new(Arc::clone(&self.storage)),
-        ));
-        let collaboration_harness =
-            crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
-                Arc::clone(&self.storage),
-                self.clone(),
-                self.collaboration_authorizer(),
-                Arc::clone(&self.collaboration_dispatcher),
-                notifications.clone(),
-            );
-        host_services = match collaboration_harness.attach_to_host_services(
-            host_services,
-            &conversation_id,
-            &run_id,
-        ) {
+                    .wait()
+                    .await
+                    .map_err(|error| match trusted_wake.as_ref() {
+                        Some(trusted) => runtime_wake_fence_error(trusted, error),
+                        None => AgentError::new(error.to_string()),
+                    })
+                    .and_then(|result| result)
+            }
+            Err(error) => Err(match trusted_wake.as_ref() {
+                Some(trusted) => runtime_wake_fence_error(trusted, error),
+                None => AgentError::new(error.to_string()),
+            }),
+        };
+        let mut host_services = match prepared_host {
             Ok(services) => services,
             Err(error) => {
                 let final_response_collaboration_boundary = *final_response_collaboration_boundary
@@ -559,17 +649,6 @@ impl AgentService {
                 };
             }
         };
-        if let Some(resources) = skill_resources {
-            host_services = host_services.with_skill_resources(resources);
-        }
-        if let Some(resolver) = self.artifact_runtime.clone() {
-            host_services = host_services.with_command_runtime_profile_resolver(resolver);
-        }
-        if let Some(mcp_tools) = mcp_tools {
-            host_services = host_services.with_mcp_tools(mcp_tools);
-        }
-
-        self.schedule_async_human_input_deliveries(notifications.clone());
         let mut runtime_input = agent_input;
         if let Some((resume, _)) = human_input_resume {
             host_services = host_services.with_user_input_resume(resume);
@@ -596,24 +675,8 @@ impl AgentService {
             }
             None => result,
         };
-        // Approval moved pending guidance to another queue identity. Cleanup remains scoped to
-        // this segment, so a late completion cannot close that successor or its continuation.
-        let close_message = "The agent run has finished and no longer accepts guidance.";
-        let result = match self.unregister_active_run_control(
-            &run_id,
-            &steer_input,
-            AgentSteerRunRejectionCode::RunNotSteerable,
-            close_message,
-            &notifications,
-        ) {
-            Ok(()) => result,
-            Err(error) => {
-                terminal_event_gate.discard();
-                Err(AgentError::new(format!(
-                    "{steering_close_error_context}：{error}"
-                )))
-            }
-        };
+        // Exact steering retirement and its synchronous durable guidance rejection run in
+        // the caller's already-reserved completion job, before terminal persistence/publication.
 
         let final_response_collaboration_boundary = *final_response_collaboration_boundary
             .lock()
@@ -668,7 +731,10 @@ mod cancellation_result_tests {
             &gate,
         )
         .unwrap_err();
-        assert!(!real_error.is_cancelled(), "message text is not a cancellation signal");
+        assert!(
+            !real_error.is_cancelled(),
+            "message text is not a cancellation signal"
+        );
 
         let usage = AgentUsage {
             input_tokens: Some(24),
@@ -690,7 +756,61 @@ mod cancellation_result_tests {
         assert!(output.content.is_empty());
         assert!(matches!(
             gate.take_after_persistence(&output).as_slice(),
-            [AgentEvent::Done { status: Some(AgentRunStatus::Cancelled), content: None, .. }]
+            [AgentEvent::Done {
+                status: Some(AgentRunStatus::Cancelled),
+                content: None,
+                ..
+            }]
         ));
     }
+}
+
+/// Cheap scheduling weight for already-owned runtime state. This is a conservative estimate,
+/// not a second serialized checkpoint or an RSS accounting claim. Runtime output may grow while
+/// the reservation is held; the logical Turn limit continues to bound those live producers.
+pub(in crate::application::agent) fn runtime_work_estimated_bytes(input: &AgentChatInput) -> usize {
+    let message_bytes = input.messages.iter().fold(0_usize, |bytes, message| {
+        bytes
+            .saturating_add(message.content.len())
+            .saturating_add(
+                message
+                    .conversation_turn_trace
+                    .as_ref()
+                    .map_or(0, |trace| trace.items.len().saturating_mul(4096)),
+            )
+            .saturating_add(
+                message
+                    .conversation_model_context_items
+                    .len()
+                    .saturating_mul(4096),
+            )
+    });
+    let attachment_bytes = input
+        .attachments
+        .iter()
+        .chain(input.context_image_attachments.iter())
+        .fold(0_usize, |bytes, attachment| {
+            bytes.saturating_add(attachment.data.len())
+        });
+    let checkpoint_bytes = input.resume_checkpoint.as_ref().map_or(0, |checkpoint| {
+        checkpoint.context_items.len().saturating_mul(4096)
+    });
+    64_usize
+        .saturating_mul(1024)
+        .saturating_add(message_bytes)
+        .saturating_add(attachment_bytes)
+        .saturating_add(checkpoint_bytes)
+        .saturating_mul(2)
+}
+
+fn runtime_wake_fence_error(
+    trusted: &mycopilot_core::TrustedAgentWakeTurnAdmission,
+    error: impl std::fmt::Display,
+) -> AgentError {
+    AgentError::structured(
+        "agent_wake_execution_fenced",
+        error.to_string(),
+        // The original claim token is a Host capability and never enters UI notifications.
+        serde_json::json!({"wakeId": trusted.wake_id}),
+    )
 }

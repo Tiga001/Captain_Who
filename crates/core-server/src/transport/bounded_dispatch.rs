@@ -1,4 +1,5 @@
 use super::*;
+use crate::application::blocking_executor::{BlockingError, BlockingExecutor};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -209,6 +210,23 @@ impl Lane {
         } else {
             concurrency
         };
+        // Preserve lane quotas and ordering, but reserve physical workers for control/approval.
+        // Heavy preparation in Tokio's general blocking pool cannot occupy these workers.
+        let blocking = match class {
+            RpcDispatchClass::Control => Some(BlockingExecutor::new(
+                "rpc_control",
+                concurrency,
+                capacity,
+                16 * 1024 * 1024,
+            )),
+            RpcDispatchClass::Approval => Some(BlockingExecutor::new(
+                "rpc_approval",
+                concurrency,
+                capacity,
+                16 * 1024 * 1024,
+            )),
+            _ => None,
+        };
         let manager = tokio::spawn(async move {
             let mut running = JoinSet::new();
             loop {
@@ -226,13 +244,16 @@ impl Lane {
                         Some(job) => {
                             let stopping = Arc::clone(&stopping);
                             let outbound = outbound.clone();
-                            running.spawn(execute_job(class, job, stopping, outbound, Arc::clone(&execution)));
+                            running.spawn(execute_job(class, job, stopping, outbound, Arc::clone(&execution), blocking.clone()));
                         }
                         None => break,
                     }
                 }
             }
             while running.join_next().await.is_some() {}
+            if let Some(Ok(blocking)) = blocking {
+                blocking.shutdown().await;
+            }
         });
         Self {
             admission,
@@ -256,6 +277,7 @@ async fn execute_job(
     stopping: Arc<AtomicBool>,
     outbound: crate::transport::OutboundSender,
     execution: Arc<Semaphore>,
+    blocking: Option<Result<BlockingExecutor, BlockingError>>,
 ) {
     let lane = class.diagnostic_label();
     mycopilot_core::performance::record("rpc.lane_wait", lane, job.admitted_at.elapsed(), 0);
@@ -276,7 +298,7 @@ async fn execute_job(
                 .expect("lane execution remains open");
             if !stopping.load(Ordering::Acquire) {
                 let resolving_stop = Arc::clone(&stopping);
-                match tokio::task::spawn_blocking(move || {
+                match run_lane_blocking(&blocking, move || {
                     if resolving_stop.load(Ordering::Acquire) {
                         None
                     } else {
@@ -354,7 +376,7 @@ async fn execute_job(
         let running_stop = Arc::clone(&stopping);
         let running_id = job.request_id.clone();
         let queue_probe = job.queue_probe.take();
-        match tokio::task::spawn_blocking(move || {
+        match run_lane_blocking(&blocking, move || {
             drop(queue_probe);
             mycopilot_core::performance::record(
                 "rpc.blocking_pool_wait",
@@ -424,6 +446,28 @@ async fn execute_job(
     let _ = enqueue_outbound(&outbound, response);
     if let Some(completion) = job.completion {
         let _ = completion.send(true);
+    }
+}
+
+async fn run_lane_blocking<T, F>(
+    executor: &Option<Result<BlockingExecutor, BlockingError>>,
+    work: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match executor {
+        Some(Ok(executor)) => executor
+            .run(0, work)
+            .await
+            .map_err(|error| error.to_string()),
+        Some(Err(error)) => Err(error.to_string()),
+        // Read/write were already bounded by lane admission and execution permits. Round three
+        // replaces the storage boundary; do not add a second preparation queue under its locks.
+        None => tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -841,6 +885,67 @@ mod tests {
     }
     fn ok(value: i64) -> Value {
         response_success(id(value), true)
+    }
+
+    #[test]
+    fn control_and_approval_progress_when_default_blocking_pool_is_full() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (outbound, mut responses) = crate::transport::outbound_channel();
+            let rpc = RpcRequestDispatcher::new(outbound);
+            let (started, ready) = oneshot::channel();
+            let (release, wait) = sync_mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            });
+            ready.await.unwrap();
+            let began = std::time::Instant::now();
+            for (class, request_id, owner) in [
+                (RpcDispatchClass::Control, 11, "conversation:A"),
+                (RpcDispatchClass::Approval, 12, "conversation:B"),
+            ] {
+                rpc.try_submit_with_owner_resolution(
+                    class,
+                    id(request_id),
+                    Some(owner.into()),
+                    Some(Box::new(move || Some(owner.into()))),
+                    move || ok(request_id),
+                )
+                .unwrap();
+            }
+            let results = tokio::time::timeout(Duration::from_secs(1), async {
+                vec![
+                    responses.recv().await.unwrap(),
+                    responses.recv().await.unwrap(),
+                ]
+            })
+            .await;
+            // Always release the fixture blocker even when the assertion fails.
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let results =
+                results.expect("priority workers must not wait for default blocking capacity");
+            for response in &results {
+                assert!(response.get("error").is_none(), "{response}");
+                assert_eq!(response["result"], true, "{response}");
+            }
+            let mut ids: Vec<_> = results
+                .iter()
+                .map(|response| response["id"].as_i64().unwrap())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, vec![11, 12]);
+            eprintln!(
+                "priority_pool_saturation_control_and_approval_us={}",
+                began.elapsed().as_micros()
+            );
+            rpc.shutdown().await.unwrap();
+        });
     }
 
     #[test]

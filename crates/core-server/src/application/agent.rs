@@ -151,6 +151,7 @@ mod steering;
 mod turn;
 mod turn_executor;
 mod usage;
+mod wake_execution_fence;
 mod web_search_policy;
 mod workflow_execution;
 mod workflow_retry;
@@ -640,6 +641,8 @@ struct ActiveConversationTurn {
 
 #[derive(Clone)]
 pub struct AgentService {
+    pub(crate) blocking_work: crate::application::blocking_executor::BlockingWork,
+    wake_execution_fences: Arc<Mutex<wake_execution_fence::WakeExecutionFences>>,
     storage: Arc<StorageService>,
     collaboration_authorizer:
         crate::application::collaboration_authorization::CollaborationAuthorizer,
@@ -684,6 +687,7 @@ pub struct AgentService {
     conversation_admission: Arc<Mutex<()>>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
+    runtime_stopping: Arc<AtomicBool>,
     workflow_runtime_publications: workflow_runtime_publication::WorkflowRuntimePublications,
     workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake,
     workflow_dispatch_stopped: Arc<AtomicBool>,
@@ -866,6 +870,13 @@ impl AgentService {
                 Arc::clone(&storage),
             );
         let service = Self {
+            wake_execution_fences: Arc::new(Mutex::new(
+                wake_execution_fence::WakeExecutionFences::new(global_agent_concurrency_limit),
+            )),
+            blocking_work: crate::application::blocking_executor::BlockingWork::with_turn_limit(
+                global_agent_concurrency_limit,
+            )
+            .map_err(|error| error.to_string())?,
             storage,
             collaboration_authorizer,
             collaboration_dispatcher: Arc::new(Mutex::new(None)),
@@ -901,6 +912,7 @@ impl AgentService {
                 execution_access::ExecutionAccessState::default(),
             )),
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
+            runtime_stopping: Arc::new(AtomicBool::new(false)),
             workflow_runtime_publications:
                 workflow_runtime_publication::WorkflowRuntimePublications::default(),
             workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake::default(),
@@ -1791,6 +1803,17 @@ impl AgentService {
     ) -> Self {
         self.context_compaction_summary_generator = Some(generator);
         self
+    }
+
+    /// Called only after transport/schedulers stop admitting work and active-run shutdown has
+    /// either settled or reported its grace timeout. Started synchronous mutations always drain;
+    /// unsubmitted runtime completion reservations are fenced and recovered from durable state.
+    pub(crate) async fn shutdown_blocking_work(&self) {
+        self.blocking_work.preparation.shutdown_submitted().await;
+        self.blocking_work.control.shutdown_submitted().await;
+        self.blocking_work.completion.shutdown_submitted().await;
+        self.blocking_work.maintenance.shutdown_submitted().await;
+        self.blocking_work.lease.shutdown_submitted().await;
     }
 
     /// Takes ownership of the lazily-created collaboration Dispatcher and runs its existing

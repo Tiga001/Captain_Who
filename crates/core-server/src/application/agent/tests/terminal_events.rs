@@ -1315,7 +1315,15 @@ fn command_completion_waits_for_a_failed_project_deletion_then_persists_evidence
 #[test]
 fn project_deletion_timeout_preserves_late_command_observation() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");

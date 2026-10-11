@@ -339,71 +339,102 @@ impl AgentService {
         error: Option<String>,
     ) -> Option<AgentUsageRecordInsert> {
         let now = now_ms();
-        {
-            let mut contexts = self
-                .usage_contexts
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let state = contexts.get_mut(run_id)?;
+        let mut contexts = self
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = contexts.get_mut(run_id)?;
+        state
+            .context
+            .provider_usage_semantics
+            .merge_usage(&mut state.usage, usage);
+        state.status = status;
+        state.error = error;
+        Some(self.usage_record_from_state(state, now))
+    }
+
+    /// A child Runtime may have lost its claim while awaiting a provider or completion worker.
+    /// Stage its cumulative usage from an owned snapshot; only the fenced SQLite terminal write
+    /// may accept this value. Refusal leaves a successor's shared accumulator untouched.
+    pub(super) fn preview_terminal_run_usage_record(
+        &self,
+        run_id: &str,
+        status: AgentRunStatus,
+        usage: Option<AgentUsage>,
+        error: Option<String>,
+    ) -> Option<(AgentUsageRecordInsert, Option<AgentUsage>)> {
+        let mut state = self
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)?
+            .clone();
+        state
+            .context
+            .provider_usage_semantics
+            .merge_usage(&mut state.usage, usage);
+        state.status = status;
+        state.error = error;
+        let record = self.usage_record_from_state(&state, now_ms());
+        Some((record, state.usage))
+    }
+
+    fn usage_record_from_state(
+        &self,
+        state: &AgentRunUsageState,
+        now: i64,
+    ) -> AgentUsageRecordInsert {
+        let usage = state.usage.clone();
+        let billable_request_count = usage
+            .as_ref()
+            .and_then(|usage| usage.billable_request_count)
+            .unwrap_or(0);
+        let input_tokens = usage.as_ref().and_then(|usage| usage.input_tokens);
+        let cached_input_tokens = usage.as_ref().and_then(|usage| usage.cached_input_tokens);
+        let output_tokens = usage.as_ref().and_then(|usage| usage.output_tokens);
+        let billable_output_tokens = usage.as_ref().and_then(|usage| {
             state
                 .context
                 .provider_usage_semantics
-                .merge_usage(&mut state.usage, usage);
-            state.status = status;
-            state.error = error;
+                .billable_output_tokens(usage)
+        });
+        let estimated_cost = self.storage.estimate_usage_cost(
+            input_tokens,
+            cached_input_tokens,
+            billable_output_tokens,
+            state.context.input_price.as_deref().unwrap_or(""),
+            state.context.cached_input_price.as_deref().unwrap_or(""),
+            state.context.output_price.as_deref().unwrap_or(""),
+        );
 
-            let usage = state.usage.clone();
-            let billable_request_count = usage
+        AgentUsageRecordInsert {
+            id: format!("usage-{}", state.context.run_id),
+            conversation_id: state.context.conversation_id.clone(),
+            message_id: state.context.assistant_message_id.clone(),
+            run_id: state.context.run_id.clone(),
+            project_id: state.context.project_id.clone(),
+            model_id: state.context.model_id.clone(),
+            model_name: state.context.model_name.clone(),
+            started_at: Some(state.context.started_at),
+            completed_at: is_terminal_run_status(state.status).then_some(now),
+            status: Some(run_status_label(state.status).to_string()),
+            error: state.error.clone(),
+            created_at: now,
+            input_tokens,
+            output_tokens,
+            output_thinking_tokens: usage
                 .as_ref()
-                .and_then(|usage| usage.billable_request_count)
-                .unwrap_or(0);
-            let input_tokens = usage.as_ref().and_then(|usage| usage.input_tokens);
-            let cached_input_tokens = usage.as_ref().and_then(|usage| usage.cached_input_tokens);
-            let output_tokens = usage.as_ref().and_then(|usage| usage.output_tokens);
-            let billable_output_tokens = usage.as_ref().and_then(|usage| {
-                state
-                    .context
-                    .provider_usage_semantics
-                    .billable_output_tokens(usage)
-            });
-            let estimated_cost = self.storage.estimate_usage_cost(
-                input_tokens,
-                cached_input_tokens,
-                billable_output_tokens,
-                state.context.input_price.as_deref().unwrap_or(""),
-                state.context.cached_input_price.as_deref().unwrap_or(""),
-                state.context.output_price.as_deref().unwrap_or(""),
-            );
-
-            Some(AgentUsageRecordInsert {
-                id: format!("usage-{}", state.context.run_id),
-                conversation_id: state.context.conversation_id.clone(),
-                message_id: state.context.assistant_message_id.clone(),
-                run_id: state.context.run_id.clone(),
-                project_id: state.context.project_id.clone(),
-                model_id: state.context.model_id.clone(),
-                model_name: state.context.model_name.clone(),
-                started_at: Some(state.context.started_at),
-                completed_at: is_terminal_run_status(status).then_some(now),
-                status: Some(run_status_label(status).to_string()),
-                error: state.error.clone(),
-                created_at: now,
-                input_tokens,
-                output_tokens,
-                output_thinking_tokens: usage
-                    .as_ref()
-                    .and_then(|usage| usage.output_thinking_tokens),
-                total_tokens: usage.as_ref().and_then(|usage| usage.total_tokens),
-                cached_input_tokens: usage.as_ref().and_then(|usage| usage.cached_input_tokens),
-                cache_creation_input_tokens: usage
-                    .as_ref()
-                    .and_then(|usage| usage.cache_creation_input_tokens),
-                billable_request_count,
-                input_price: state.context.input_price.clone(),
-                cached_input_price: state.context.cached_input_price.clone(),
-                output_price: state.context.output_price.clone(),
-                estimated_cost,
-            })
+                .and_then(|usage| usage.output_thinking_tokens),
+            total_tokens: usage.as_ref().and_then(|usage| usage.total_tokens),
+            cached_input_tokens: usage.as_ref().and_then(|usage| usage.cached_input_tokens),
+            cache_creation_input_tokens: usage
+                .as_ref()
+                .and_then(|usage| usage.cache_creation_input_tokens),
+            billable_request_count,
+            input_price: state.context.input_price.clone(),
+            cached_input_price: state.context.cached_input_price.clone(),
+            output_price: state.context.output_price.clone(),
+            estimated_cost,
         }
     }
 
@@ -531,5 +562,109 @@ mod thinking_usage_tests {
             ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&total),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_usage_preview_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_terminal_fence_refusal_preserves_shared_usage_accumulator() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("terminal-usage-preview.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
+        let service = AgentService::new_authorized_for_test(storage.clone());
+        service.register_usage_context(
+            "preview-run",
+            AgentRunUsageContext {
+                conversation_id: "preview-chat".into(),
+                assistant_message_id: "preview-assistant".into(),
+                run_id: "preview-run".into(),
+                project_id: None,
+                model_id: "preview-model".into(),
+                model_name: "Synthetic model".into(),
+                provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+                input_price: None,
+                cached_input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let segment_usage = |input| AgentUsage {
+            input_tokens: Some(input),
+            output_tokens: Some(2),
+            output_thinking_tokens: None,
+            total_tokens: Some(input + 2),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: Some(1),
+        };
+        service
+            .prepare_run_usage_record(
+                "preview-run",
+                AgentRunStatus::Running,
+                Some(segment_usage(10)),
+                None,
+            )
+            .unwrap();
+        let before = service
+            .usage_contexts
+            .lock()
+            .unwrap()
+            .get("preview-run")
+            .unwrap()
+            .clone();
+        let (record, cumulative) = service
+            .preview_terminal_run_usage_record(
+                "preview-run",
+                AgentRunStatus::Failed,
+                Some(segment_usage(20)),
+                Some("old owner".into()),
+            )
+            .unwrap();
+        assert_eq!(record.input_tokens, Some(30));
+        assert_eq!(cumulative.unwrap().billable_request_count, Some(2));
+        assert_eq!(
+            service.usage_contexts.lock().unwrap().get("preview-run"),
+            Some(&before)
+        );
+        let trace = failed_conversation_trace_without_items(
+            "preview-run",
+            "preview-chat",
+            "preview-assistant",
+            "old owner",
+        );
+        let stale = mycopilot_core::TrustedAgentWakeTurnAdmission {
+            agent_id: "old-agent".into(),
+            wake_id: "old-wake".into(),
+            claim_token: "old-claim".into(),
+            source_agent_message_id: "old-source".into(),
+        };
+        let error = service
+            .persist_assistant_error_with_model_context_and_wake_fence(
+                "preview-chat",
+                "preview-assistant",
+                "old owner",
+                Some(segment_usage(20)),
+                &trace,
+                Some(&[]),
+                Some(&stale),
+            )
+            .unwrap_err();
+        assert!(error.starts_with("agent_wake_terminal_fenced:"), "{error}");
+        assert_eq!(
+            service.usage_contexts.lock().unwrap().get("preview-run"),
+            Some(&before)
+        );
+        assert!(storage
+            .load_agent_usage_for_owner("preview-run", "preview-chat", "preview-assistant")
+            .unwrap()
+            .is_none());
     }
 }

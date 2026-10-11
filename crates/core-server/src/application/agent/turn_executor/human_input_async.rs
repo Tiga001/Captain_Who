@@ -87,20 +87,33 @@ impl StoredBlockingHumanInput {
         if self.input.context.as_ref().is_none_or(|context| {
             context.collaboration_identity.is_some()
                 || context.conversation_id.as_deref() != Some(request.conversation_id.as_str())
-        })
-            || self.input.assistant_message_id.as_deref()
-                != Some(request.assistant_message_id.as_str())
-            || self.input.prompt_preferences.as_ref().is_some_and(|preferences| preferences.automation_execution_context.is_some())
+        }) || self.input.assistant_message_id.as_deref()
+            != Some(request.assistant_message_id.as_str())
+            || self
+                .input
+                .prompt_preferences
+                .as_ref()
+                .is_some_and(|preferences| preferences.automation_execution_context.is_some())
         {
             return Err(AgentError::new("invalid human interaction sampling owner"));
         }
-        let cancellations = self.service.cancellations.lock().unwrap_or_else(|error| error.into_inner());
+        let cancellations = self
+            .service
+            .cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if self.token.is_cancelled()
-            || !cancellations.get(&request.run_id).is_some_and(|token| token.shares_state_with(&self.token))
+            || !cancellations
+                .get(&request.run_id)
+                .is_some_and(|token| token.shares_state_with(&self.token))
         {
-            return Err(AgentError::new("human interaction execution segment was retired"));
+            return Err(AgentError::new(
+                "human interaction execution segment was retired",
+            ));
         }
-        self.service.storage.bind_human_interaction_ignored_at_sampling(&request)
+        self.service
+            .storage
+            .bind_human_interaction_ignored_at_sampling(&request)
             .map_err(|error| AgentError::new(error.to_string()))
     }
 }
@@ -168,6 +181,9 @@ impl AgentService {
         &self,
         notifications: CoreServerNotificationSender,
     ) {
+        if self.runtime_stopping.load(Ordering::Acquire) {
+            return;
+        }
         let _drain = self
             .human_input_delivery_dispatch
             .lock()
@@ -279,8 +295,9 @@ impl AgentService {
                         created_at: record.created_at,
                     },
                     || {
-                        let _ = notifications.send(agent_event_notification(
-                            AgentEvent::GuidanceQueued {
+                        let _ =
+                            notifications
+                                .send(agent_event_notification(AgentEvent::GuidanceQueued {
                                 run_id: run_id.clone(),
                                 guidance_id: record.guidance_id.clone(),
                                 client_message_id: record.client_message_id.clone(),
@@ -293,8 +310,7 @@ impl AgentService {
                                     .unwrap_or_default(),
                                 ),
                                 created_at: record.created_at,
-                            },
-                        ));
+                            }));
                     },
                 );
                 let queued = match queued {
@@ -360,7 +376,7 @@ impl AgentService {
             context_window_indicator_enabled: true,
             content,
             attachments: Vec::new(),
-        folder_references: Vec::new(),
+            folder_references: Vec::new(),
             skills: Vec::new(),
             title: None,
             user_message_id: Some(user_message_id.clone()),

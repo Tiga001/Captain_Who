@@ -337,7 +337,15 @@ async fn assert_sync_scenario(question_batches: usize, skip_all: bool, approval_
     let (address, mut requests, provider) = controlled_provider(replies).await;
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let human = HumanInteractionService::new(&storage, &agent);
@@ -573,8 +581,15 @@ async fn disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human
         ])
         .await;
         let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("storage.sqlite"),
+                std::sync::Arc::new(
+                    mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+                ),
+            )
+            .unwrap(),
+        );
         configure_storage(&storage, fixture.path(), &address);
         let settings = storage.load_agent_collaboration_settings().unwrap();
         storage
@@ -1128,7 +1143,15 @@ async fn assert_sync_submission_handoff(before_open_publication: bool) {
     )
     .await;
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     configure_storage(&storage, fixture.path(), &address);
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = crate::transport::outbound_channel();
@@ -1381,7 +1404,15 @@ async fn web_search_toggle_across_sync_and_approval_pauses_preserves_same_run() 
     ])
     .await;
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     configure_storage(&storage, fixture.path(), &address);
     let mut agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = crate::transport::outbound_channel();
@@ -1462,7 +1493,15 @@ async fn web_search_late_model_calls_are_denied_after_committed_off_setting() {
     )
     .await;
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     configure_storage(&storage, fixture.path(), &address);
     save_search_policy(
         &storage,
