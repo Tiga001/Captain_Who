@@ -20,8 +20,10 @@ impl StorageService {
         ) {
             return Err(format!("待审批操作目标状态必须是终态：{target_status}"));
         }
-        let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let estimated_bytes = pending_text_bytes(&[action_id, expected_status, target_status])
+            .saturating_add(estimated_json_bytes(trace)?);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, move |connection| {
+            let transaction = connection.transaction().map_err(storage_error)?;
         let affected = pending_action_repository::set_pending_action_target_status(
             &transaction,
             action_id,
@@ -44,6 +46,7 @@ impl StorageService {
         .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(trace_changed)
+        })?
     }
 
     /// Atomically settles a manually approved file-producing action and its exact bounded model
@@ -115,8 +118,14 @@ impl StorageService {
         crate::conversation_trace::validate_model_context_prefix(trace, model_context_items)
             .map_err(|error| format!("manual file-effect model context is invalid: {error}"))?;
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_audit_bytes(terminal_audit)
+            .saturating_add(pending_text_bytes(&[
+                expected_pending_status,
+                target_status,
+            ]))
+            .saturating_add(estimated_json_bytes(&(trace, model_context_items))?);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let pending =
@@ -240,6 +249,7 @@ impl StorageService {
                 AgentPendingActionResultCommitOutcome::Committed { trace_changed }
             },
         )
+        })?
     }
 
     /// Reads all durable pieces of a manual file-effect settlement from one SQLite snapshot.
@@ -290,7 +300,7 @@ impl StorageService {
         )
         .map_err(|error| format!("manual file-effect model context is invalid: {error}"))?;
 
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let Some(pending) =
             pending_action_repository::load_pending_action(&transaction, &terminal_audit.action_id)

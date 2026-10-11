@@ -19,7 +19,7 @@ impl StorageService {
             return Ok(BTreeMap::new());
         }
         let selected = serde_json::to_string(fallback_runs).map_err(|error| error.to_string())?;
-        read_states(&*self.state.connection()?, &selected).map_err(super::storage_error)
+        read_states(&*self.state.read_connection()?, &selected).map_err(super::storage_error)
     }
 }
 

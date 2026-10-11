@@ -1,6 +1,10 @@
 impl StorageService {
     pub fn list_unsettled_file_effects(&self) -> Result<Vec<AgentUnsettledFileEffect>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        // This inspection is advisory; final transitions retain their write-transaction CAS.
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         let candidates = agent_action_audit_repository::list_unsettled_file_effects(&connection)
             .map_err(storage_error)?;
         let mut unsettled = Vec::with_capacity(candidates.len());
@@ -32,7 +36,7 @@ impl StorageService {
         record: AgentActionAuditRecord,
     ) -> Result<Option<agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome>, String>
     {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         agent_action_audit_repository::inspect_action_audit_execution(&connection, &record)
             .map_err(storage_error)
     }
@@ -41,7 +45,7 @@ impl StorageService {
         &self,
         action_id: &str,
     ) -> Result<Option<AgentActionAuditRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         agent_action_audit_repository::load_action_audit_record(&connection, action_id)
             .map_err(storage_error)
     }
@@ -51,7 +55,7 @@ impl StorageService {
     pub fn list_executing_file_change_action_audits(
         &self,
     ) -> Result<Vec<AgentActionAuditRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         agent_action_audit_repository::list_executing_file_change_action_audits(&connection)
             .map_err(storage_error)
     }
@@ -60,36 +64,54 @@ impl StorageService {
         &self,
         record: AgentActionAuditRecord,
     ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
-        agent_action_audit_repository::insert_action_audit_record_if_absent(&connection, &record)
-            .map_err(storage_error)
+        let estimated_bytes = pending_audit_bytes(&record);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                agent_action_audit_repository::insert_action_audit_record_if_absent(
+                    connection, &record,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn claim_agent_action_audit_execution(
         &self,
         record: AgentActionAuditRecord,
     ) -> Result<agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let tree_stopped = transaction
-            .query_row(
-                "SELECT EXISTS(
+        let estimated_bytes = pending_audit_bytes(&record);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let tree_stopped = transaction
+                    .query_row(
+                        "SELECT EXISTS(
                      SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
                  )",
-                [&record.run_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(storage_error)?;
-        if tree_stopped {
-            return Err("stopped Agent Run cannot claim automatic action execution".to_string());
-        }
-        let outcome =
-            agent_action_audit_repository::claim_action_audit_execution(&transaction, &record)
+                        [&record.run_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(storage_error)?;
+                if tree_stopped {
+                    return Err(
+                        "stopped Agent Run cannot claim automatic action execution".to_string()
+                    );
+                }
+                let outcome = agent_action_audit_repository::claim_action_audit_execution(
+                    &transaction,
+                    &record,
+                )
                 .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     pub fn finalize_agent_action_audit_execution(
@@ -105,34 +127,54 @@ impl StorageService {
         if record.completed_at.is_none() {
             return Err("自动操作审计终态缺少 completed_at。".to_string());
         }
-        let connection = self.state.connection()?;
-        agent_action_audit_repository::finalize_claimed_action_audit_execution(&connection, &record)
-            .map_err(storage_error)
+        let estimated_bytes = pending_audit_bytes(&record);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                agent_action_audit_repository::finalize_claimed_action_audit_execution(
+                    connection, &record,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn upsert_agent_action_audit(&self, record: AgentActionAuditRecord) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        agent_action_audit_repository::upsert_action_audit_record(&connection, &record)
-            .map_err(storage_error)
+        let estimated_bytes = pending_audit_bytes(&record);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                agent_action_audit_repository::upsert_action_audit_record(connection, &record)
+                    .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn store_pending_agent_action(
         &self,
         record: AgentPendingActionRecord,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
-        let connection = self.state.connection()?;
-        let outcome = pending_action_repository::store_pending_action(&connection, &record)
-            .map_err(storage_error)?;
-        match outcome {
-            pending_action_repository::PendingActionStoreOutcome::Conflict {
-                ref existing_run_id,
-                ref existing_status,
-            } => Err(format!(
-                "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
-                record.action_id, existing_run_id, existing_status
-            )),
-            _ => Ok(outcome),
-        }
+        let estimated_bytes = pending_record_bytes(&record);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let outcome = pending_action_repository::store_pending_action(connection, &record)
+                    .map_err(storage_error)?;
+                match outcome {
+                    pending_action_repository::PendingActionStoreOutcome::Conflict {
+                        ref existing_run_id,
+                        ref existing_status,
+                    } => Err(format!(
+                        "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
+                        record.action_id, existing_run_id, existing_status
+                    )),
+                    _ => Ok(outcome),
+                }
+            },
+        )?
     }
 
     /// Persists the committed Direct FileChange credential for a manually approved action.
@@ -166,8 +208,12 @@ impl StorageService {
                 tool_name: &identity.tool_name,
             },
         )?;
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_record_bytes(identity).saturating_add(pending_text_bytes(&[
+            expected_action_json,
+            committed_action_json,
+        ]));
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let outcome = pending_action_repository::commit_executing_action_json(
@@ -217,6 +263,7 @@ impl StorageService {
         }
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
+        })?
     }
 
     /// Publishes an actionable approval and its user notification as one visibility boundary.
@@ -225,18 +272,25 @@ impl StorageService {
         record: AgentPendingActionRecord,
         notification: &notification_repository::NewNotificationEventRecord,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = store_pending_action_or_conflict(&transaction, &record)?;
-        notification_repository::enqueue_notification_event_in_transaction(
-            &transaction,
-            notification,
-        )
-        .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+        let estimated_bytes =
+            pending_record_bytes(&record).saturating_add(pending_notification_bytes(notification));
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = store_pending_action_or_conflict(&transaction, &record)?;
+                notification_repository::enqueue_notification_event_in_transaction(
+                    &transaction,
+                    notification,
+                )
+                .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     /// Atomically publishes one built-in capability approval and its initial manual audit.
@@ -252,14 +306,21 @@ impl StorageService {
         audit: AgentActionAuditRecord,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         validate_builtin_capability_initial_audit(&pending, &audit)?;
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
-        ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+        let estimated_bytes =
+            pending_record_bytes(&pending).saturating_add(pending_audit_bytes(&audit));
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+                ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     /// Atomically persists the hidden auto-approval journal and its frozen audit before a
@@ -275,14 +336,21 @@ impl StorageService {
         audit: AgentActionAuditRecord,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         validate_auto_file_change_initial_journal(&pending, &audit)?;
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
-        ensure_exact_auto_file_change_initial_audit(&transaction, &audit)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+        let estimated_bytes =
+            pending_record_bytes(&pending).saturating_add(pending_audit_bytes(&audit));
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+                ensure_exact_auto_file_change_initial_audit(&transaction, &audit)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     /// Atomically crosses the current automatic FileChange pre-dispatch boundary.
@@ -321,79 +389,93 @@ impl StorageService {
         if updated_at < pending.updated_at || executing_agent_input_json.trim().is_empty() {
             return Err("automatic FileChange executing journal is invalid".to_string());
         }
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let Some(existing_pending) =
-            pending_action_repository::load_pending_action(&transaction, &pending.action_id)
+        let estimated_bytes = pending_record_bytes(pending)
+            .saturating_add(pending_audit_bytes(approved_audit))
+            .saturating_add(pending_text_bytes(&[executing_agent_input_json]))
+            .saturating_add(estimated_json_bytes(&(
+                expected_run_grant_ref,
+                expected_file_change,
+                expected_run_context,
+            ))?);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Control,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let Some(existing_pending) = pending_action_repository::load_pending_action(
+                    &transaction,
+                    &pending.action_id,
+                )
                 .map_err(storage_error)?
-        else {
-            transaction.commit().map_err(storage_error)?;
-            return Ok(false);
-        };
-        let pending_matches = existing_pending.action_id == pending.action_id
-            && existing_pending.run_id == pending.run_id
-            && existing_pending.conversation_id == pending.conversation_id
-            && existing_pending.assistant_message_id == pending.assistant_message_id
-            && existing_pending.action_type == pending.action_type
-            && existing_pending.tool_name == pending.tool_name
-            && existing_pending.tool_call_id == pending.tool_call_id
-            && existing_pending.status == "approved"
-            && existing_pending.target_status.is_none()
-            && existing_pending.action_json == pending.action_json
-            && existing_pending.agent_input_json == pending.agent_input_json
-            && existing_pending.created_at == pending.created_at;
-        let existing_audit = agent_action_audit_repository::load_action_audit_record(
-            &transaction,
-            &approved_audit.action_id,
-        )
-        .map_err(storage_error)?;
-        let audit_matches = existing_audit.as_ref().is_some_and(|existing| {
-            same_builtin_capability_initial_audit(existing, approved_audit)
-        });
-        if !pending_matches || !audit_matches {
-            transaction.commit().map_err(storage_error)?;
-            return Ok(false);
-        }
-        if let (Some(grant_ref), Some(file_change), Some(run_context)) = (
-            expected_run_grant_ref,
-            expected_file_change,
-            expected_run_context,
-        ) {
-            let grant = file_change_run_grant_repository::get_active_run_grant(
-                &transaction,
-                &pending.run_id,
-            )
-            .map_err(storage_error)?;
-            let Some(grant) = grant else {
-                transaction.commit().map_err(storage_error)?;
-                return Ok(false);
-            };
-            if !super::file_change_run_grants::file_change_run_grant_authorizes(
-                &grant,
-                Some(grant_ref),
-                file_change,
-                run_context,
-            )
-            .map_err(|error| error.to_string())?
-            {
-                transaction.commit().map_err(storage_error)?;
-                return Ok(false);
-            }
-        }
-        let pending_changed = pending_action_repository::transition_pending_action_for_dispatch(
-            &transaction,
-            &pending.action_id,
-            "approved",
-            "executing",
-            executing_agent_input_json,
-            updated_at,
-        )
-        .map_err(storage_error)?;
-        let audit_changed = transaction
-            .execute(
-                "
+                else {
+                    transaction.commit().map_err(storage_error)?;
+                    return Ok(false);
+                };
+                let pending_matches = existing_pending.action_id == pending.action_id
+                    && existing_pending.run_id == pending.run_id
+                    && existing_pending.conversation_id == pending.conversation_id
+                    && existing_pending.assistant_message_id == pending.assistant_message_id
+                    && existing_pending.action_type == pending.action_type
+                    && existing_pending.tool_name == pending.tool_name
+                    && existing_pending.tool_call_id == pending.tool_call_id
+                    && existing_pending.status == "approved"
+                    && existing_pending.target_status.is_none()
+                    && existing_pending.action_json == pending.action_json
+                    && existing_pending.agent_input_json == pending.agent_input_json
+                    && existing_pending.created_at == pending.created_at;
+                let existing_audit = agent_action_audit_repository::load_action_audit_record(
+                    &transaction,
+                    &approved_audit.action_id,
+                )
+                .map_err(storage_error)?;
+                let audit_matches = existing_audit.as_ref().is_some_and(|existing| {
+                    same_builtin_capability_initial_audit(existing, approved_audit)
+                });
+                if !pending_matches || !audit_matches {
+                    transaction.commit().map_err(storage_error)?;
+                    return Ok(false);
+                }
+                if let (Some(grant_ref), Some(file_change), Some(run_context)) = (
+                    expected_run_grant_ref,
+                    expected_file_change,
+                    expected_run_context,
+                ) {
+                    let grant = file_change_run_grant_repository::get_active_run_grant(
+                        &transaction,
+                        &pending.run_id,
+                    )
+                    .map_err(storage_error)?;
+                    let Some(grant) = grant else {
+                        transaction.commit().map_err(storage_error)?;
+                        return Ok(false);
+                    };
+                    if !super::file_change_run_grants::file_change_run_grant_authorizes(
+                        &grant,
+                        Some(grant_ref),
+                        file_change,
+                        run_context,
+                    )
+                    .map_err(|error| error.to_string())?
+                    {
+                        transaction.commit().map_err(storage_error)?;
+                        return Ok(false);
+                    }
+                }
+                let pending_changed =
+                    pending_action_repository::transition_pending_action_for_dispatch(
+                        &transaction,
+                        &pending.action_id,
+                        "approved",
+                        "executing",
+                        executing_agent_input_json,
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                let audit_changed = transaction
+                    .execute(
+                        "
                 UPDATE agent_action_audit
                 SET status = 'executing'
                 WHERE action_id = ?1
@@ -418,26 +500,30 @@ impl StorageService {
                   AND completed_at IS NULL
                   AND blocked_reason IS NULL
                 ",
-                rusqlite::params![
-                    approved_audit.action_id,
-                    approved_audit.run_id,
-                    approved_audit.conversation_id,
-                    approved_audit.assistant_message_id,
-                    approved_audit.action_json,
-                    approved_audit.created_at,
-                    approved_audit.decided_at,
-                    approved_audit.effective_permissions_json,
-                    approved_audit.path_scope,
-                    approved_audit.command_cwd_scope,
-                    approved_audit.decision_source,
-                ],
-            )
-            .map_err(storage_error)?;
-        if pending_changed != 1 || audit_changed != 1 {
-            return Err("automatic FileChange dispatch journal lost its exact CAS".to_string());
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(true)
+                        rusqlite::params![
+                            approved_audit.action_id,
+                            approved_audit.run_id,
+                            approved_audit.conversation_id,
+                            approved_audit.assistant_message_id,
+                            approved_audit.action_json,
+                            approved_audit.created_at,
+                            approved_audit.decided_at,
+                            approved_audit.effective_permissions_json,
+                            approved_audit.path_scope,
+                            approved_audit.command_cwd_scope,
+                            approved_audit.decision_source,
+                        ],
+                    )
+                    .map_err(storage_error)?;
+                if pending_changed != 1 || audit_changed != 1 {
+                    return Err(
+                        "automatic FileChange dispatch journal lost its exact CAS".to_string()
+                    );
+                }
+                transaction.commit().map_err(storage_error)?;
+                Ok(true)
+            },
+        )?
     }
 
     pub fn store_builtin_capability_pending_action_with_audit_and_notification(
@@ -447,19 +533,27 @@ impl StorageService {
         notification: &notification_repository::NewNotificationEventRecord,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         validate_builtin_capability_initial_audit(&pending, &audit)?;
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
-        ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
-        notification_repository::enqueue_notification_event_in_transaction(
-            &transaction,
-            notification,
-        )
-        .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+        let estimated_bytes = pending_record_bytes(&pending)
+            .saturating_add(pending_audit_bytes(&audit))
+            .saturating_add(pending_notification_bytes(notification));
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+                ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
+                notification_repository::enqueue_notification_event_in_transaction(
+                    &transaction,
+                    notification,
+                )
+                .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     /// Publishes a successor approval and terminalizes its predecessor as one durable fact.
@@ -597,8 +691,18 @@ impl StorageService {
             return Err("predecessor settlement requires a terminal target status".to_string());
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_record_bytes(&successor)
+            .saturating_add(successor_audit.as_ref().map_or(0, pending_audit_bytes))
+            .saturating_add(successor_notification.map_or(0, pending_notification_bytes))
+            .saturating_add(pending_text_bytes(&[
+                predecessor_action_id,
+                predecessor_expected_status,
+                predecessor_terminal_status,
+                predecessor_terminal_agent_input_json,
+                predecessor_renderer_action_id.unwrap_or_default(),
+            ]));
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let predecessor =
@@ -665,10 +769,11 @@ impl StorageService {
         }
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
+        })?
     }
 
     pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
     }
 
@@ -679,7 +784,7 @@ impl StorageService {
     pub fn list_interrupted_agent_actions_for_host_reconciliation(
         &self,
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         pending_action_repository::list_interrupted_actions(&connection).map_err(storage_error)
     }
 
@@ -689,7 +794,7 @@ impl StorageService {
         &self,
         approval_id: &str,
     ) -> Result<Option<AgentPendingActionRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         pending_action_repository::load_pending_action(&connection, approval_id)
             .map_err(storage_error)
     }
@@ -698,7 +803,7 @@ impl StorageService {
     pub fn list_recoverable_agent_actions_after_reconciliation(
         &self,
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         pending_action_repository::list_recoverable_actions_after_reconciliation(&connection)
             .map_err(storage_error)
     }
@@ -722,7 +827,11 @@ impl StorageService {
         }
         let frozen_call_ids_json =
             serde_json::to_string(frozen_result_call_ids).map_err(|error| error.to_string())?;
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        // This inspection is advisory; final transitions retain their write-transaction CAS.
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         let Some(successor) = pending_action_repository::load_pending_action_dependency_scope(
             &connection,
             successor_action_id,
@@ -762,353 +871,373 @@ impl StorageService {
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
         const INTERRUPTION_REASON: &str =
             "The application exited after approval; process outcome is unknown and was not replayed.";
-        let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let interrupted = pending_action_repository::list_interrupted_actions(&transaction)
-            .map_err(storage_error)?;
-        let pending_successors =
-            pending_action_repository::list_pending_actions(&transaction).map_err(storage_error)?;
-        let mut retired_successors = HashSet::new();
-        let mut claimed_successors = HashSet::new();
-        for record in &interrupted {
-            if matches!(record.action_type.as_str(), "mcp_tool_call" | "file_change")
-                && record.status == "executing"
-                && !manual_file_effect_has_authoritative_settlement(&transaction, record)?
-            {
-                return Err(format!(
+        let estimated_bytes = std::mem::size_of_val(&updated_at).saturating_add(512);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection.transaction().map_err(storage_error)?;
+                let interrupted = pending_action_repository::list_interrupted_actions(&transaction)
+                    .map_err(storage_error)?;
+                let pending_successors =
+                    pending_action_repository::list_pending_actions(&transaction)
+                        .map_err(storage_error)?;
+                let mut retired_successors = HashSet::new();
+                let mut claimed_successors = HashSet::new();
+                for record in &interrupted {
+                    if matches!(record.action_type.as_str(), "mcp_tool_call" | "file_change")
+                        && record.status == "executing"
+                        && !manual_file_effect_has_authoritative_settlement(&transaction, record)?
+                    {
+                        return Err(format!(
                     "启动对账拒绝采用缺少权威审计与 ToolResult 证据的文件副作用目标终态：{}",
                     record.action_id
                 ));
-            }
-            let durable_run_status = match (
-                record.conversation_id.as_deref(),
-                record.assistant_message_id.as_deref(),
-            ) {
-                (Some(conversation_id), Some(message_id)) => {
-                    let raw = transaction
-                        .query_row(
-                            "SELECT agent_run_json FROM messages
+                    }
+                    let durable_run_status = match (
+                        record.conversation_id.as_deref(),
+                        record.assistant_message_id.as_deref(),
+                    ) {
+                        (Some(conversation_id), Some(message_id)) => {
+                            let raw = transaction
+                                .query_row(
+                                    "SELECT agent_run_json FROM messages
                          WHERE conversation_id = ?1 AND id = ?2",
-                            rusqlite::params![conversation_id, message_id],
-                            |row| row.get::<_, Option<String>>(0),
-                        )
-                        .optional()
-                        .map_err(storage_error)?
-                        .flatten();
-                    raw.map(|raw| {
-                        serde_json::from_str::<serde_json::Value>(&raw)
-                            .map_err(|error| {
-                                format!(
-                                    "无法解析中断操作 {} 的 agent run 状态：{error}",
-                                    record.action_id
+                                    rusqlite::params![conversation_id, message_id],
+                                    |row| row.get::<_, Option<String>>(0),
                                 )
+                                .optional()
+                                .map_err(storage_error)?
+                                .flatten();
+                            raw.map(|raw| {
+                                serde_json::from_str::<serde_json::Value>(&raw)
+                                    .map_err(|error| {
+                                        format!(
+                                            "无法解析中断操作 {} 的 agent run 状态：{error}",
+                                            record.action_id
+                                        )
+                                    })
+                                    .map(|run| {
+                                        run.get("status")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(ToString::to_string)
+                                    })
                             })
-                            .map(|run| {
-                                run.get("status")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string)
-                            })
-                    })
-                    .transpose()?
-                    .flatten()
-                }
-                _ => None,
-            };
-            let reconciled_status = match record.target_status.as_deref() {
-                Some(status @ ("completed" | "failed" | "rejected" | "cancelled")) => status,
-                None => {
-                    let affected = pending_action_repository::set_pending_action_target_status(
+                            .transpose()?
+                            .flatten()
+                        }
+                        _ => None,
+                    };
+                    let reconciled_status = match record.target_status.as_deref() {
+                        Some(status @ ("completed" | "failed" | "rejected" | "cancelled")) => {
+                            status
+                        }
+                        None => {
+                            let affected =
+                                pending_action_repository::set_pending_action_target_status(
+                                    &transaction,
+                                    &record.action_id,
+                                    &record.status,
+                                    "failed",
+                                    updated_at,
+                                )
+                                .map_err(storage_error)?;
+                            if affected != 1 {
+                                return Err(format!(
+                                    "启动对账无法为中断的待审批操作 {} 写入 failed 目标终态。",
+                                    record.action_id
+                                ));
+                            }
+                            "failed"
+                        }
+                        Some(status) => {
+                            return Err(format!(
+                                "启动对账发现待审批操作 {} 的目标终态无效：{status}",
+                                record.action_id
+                            ));
+                        }
+                    };
+                    let affected = pending_action_repository::transition_pending_action(
                         &transaction,
                         &record.action_id,
                         &record.status,
-                        "failed",
+                        reconciled_status,
+                        "{}",
                         updated_at,
                     )
                     .map_err(storage_error)?;
                     if affected != 1 {
                         return Err(format!(
-                            "启动对账无法为中断的待审批操作 {} 写入 failed 目标终态。",
+                            "启动对账无法以 CAS 迁移待审批操作 {}（expectedStatus={}）。",
+                            record.action_id, record.status
+                        ));
+                    }
+                    resolve_pending_approval_notification_in_transaction(
+                        &transaction,
+                        record,
+                        updated_at,
+                    )?;
+                    let successor_candidates = pending_successors
+                        .iter()
+                        .filter(|candidate| {
+                            !retired_successors.contains(&candidate.action_id)
+                                && is_pending_successor_candidate(record, candidate)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut valid_successors = Vec::new();
+                    for candidate in successor_candidates.iter().copied() {
+                        if is_valid_pending_successor(&transaction, record, candidate)? {
+                            valid_successors.push(candidate);
+                        }
+                    }
+                    if valid_successors.len() > 1 {
+                        return Err(format!(
+                            "启动对账发现 action {} 存在多个合法待审批后继。",
                             record.action_id
                         ));
                     }
-                    "failed"
-                }
-                Some(status) => {
-                    return Err(format!(
-                        "启动对账发现待审批操作 {} 的目标终态无效：{status}",
-                        record.action_id
-                    ));
-                }
-            };
-            let affected = pending_action_repository::transition_pending_action(
-                &transaction,
-                &record.action_id,
-                &record.status,
-                reconciled_status,
-                "{}",
-                updated_at,
-            )
-            .map_err(storage_error)?;
-            if affected != 1 {
-                return Err(format!(
-                    "启动对账无法以 CAS 迁移待审批操作 {}（expectedStatus={}）。",
-                    record.action_id, record.status
-                ));
-            }
-            resolve_pending_approval_notification_in_transaction(&transaction, record, updated_at)?;
-            let successor_candidates = pending_successors
-                .iter()
-                .filter(|candidate| {
-                    !retired_successors.contains(&candidate.action_id)
-                        && is_pending_successor_candidate(record, candidate)
-                })
-                .collect::<Vec<_>>();
-            let mut valid_successors = Vec::new();
-            for candidate in successor_candidates.iter().copied() {
-                if is_valid_pending_successor(&transaction, record, candidate)? {
-                    valid_successors.push(candidate);
-                }
-            }
-            if valid_successors.len() > 1 {
-                return Err(format!(
-                    "启动对账发现 action {} 存在多个合法待审批后继。",
-                    record.action_id
-                ));
-            }
-            for candidate in successor_candidates.iter().copied().filter(|candidate| {
-                !valid_successors
-                    .iter()
-                    .any(|valid| valid.action_id == candidate.action_id)
-            }) {
-                let target_affected = pending_action_repository::set_pending_action_target_status(
-                    &transaction,
-                    &candidate.action_id,
-                    "pending",
-                    "cancelled",
-                    updated_at,
-                )
-                .map_err(storage_error)?;
-                if target_affected != 1 {
-                    return Err(format!(
-                        "启动对账无法取消无效待审批后继 {}。",
-                        candidate.action_id
-                    ));
-                }
-                let transition_affected = pending_action_repository::transition_pending_action(
-                    &transaction,
-                    &candidate.action_id,
-                    "pending",
-                    "cancelled",
-                    "{}",
-                    updated_at,
-                )
-                .map_err(storage_error)?;
-                if transition_affected != 1 {
-                    return Err(format!(
-                        "启动对账无法终结无效待审批后继 {}。",
-                        candidate.action_id
-                    ));
-                }
-                resolve_pending_approval_notification_in_transaction(
-                    &transaction,
-                    candidate,
-                    updated_at,
-                )?;
-                retired_successors.insert(candidate.action_id.clone());
-            }
-            let valid_successor = valid_successors.first().copied();
-            if let Some(successor) = valid_successor {
-                if !claimed_successors.insert(successor.action_id.clone()) {
-                    return Err(format!(
-                        "启动对账发现待审批后继 {} 被多个父操作声明。",
-                        successor.action_id
-                    ));
-                }
-                if matches!(
-                    durable_run_status.as_deref(),
-                    Some("completed" | "failed" | "cancelled")
-                ) {
-                    return Err(format!(
-                        "启动对账发现 run {} 同时存在终态 assistant 与合法待审批后继。",
-                        record.run_id
-                    ));
-                }
-                if let (Some(conversation_id), Some(message_id)) = (
-                    record.conversation_id.as_deref(),
-                    record.assistant_message_id.as_deref(),
-                ) {
-                    chat_repository::update_message_run_waiting_state(
-                        &transaction,
-                        conversation_id,
-                        message_id,
-                        &record.run_id,
-                        updated_at,
-                    )
-                    .map_err(storage_error)?;
-                }
-                transaction
-                    .execute(
-                        "UPDATE agent_usage_records
+                    for candidate in successor_candidates.iter().copied().filter(|candidate| {
+                        !valid_successors
+                            .iter()
+                            .any(|valid| valid.action_id == candidate.action_id)
+                    }) {
+                        let target_affected =
+                            pending_action_repository::set_pending_action_target_status(
+                                &transaction,
+                                &candidate.action_id,
+                                "pending",
+                                "cancelled",
+                                updated_at,
+                            )
+                            .map_err(storage_error)?;
+                        if target_affected != 1 {
+                            return Err(format!(
+                                "启动对账无法取消无效待审批后继 {}。",
+                                candidate.action_id
+                            ));
+                        }
+                        let transition_affected =
+                            pending_action_repository::transition_pending_action(
+                                &transaction,
+                                &candidate.action_id,
+                                "pending",
+                                "cancelled",
+                                "{}",
+                                updated_at,
+                            )
+                            .map_err(storage_error)?;
+                        if transition_affected != 1 {
+                            return Err(format!(
+                                "启动对账无法终结无效待审批后继 {}。",
+                                candidate.action_id
+                            ));
+                        }
+                        resolve_pending_approval_notification_in_transaction(
+                            &transaction,
+                            candidate,
+                            updated_at,
+                        )?;
+                        retired_successors.insert(candidate.action_id.clone());
+                    }
+                    let valid_successor = valid_successors.first().copied();
+                    if let Some(successor) = valid_successor {
+                        if !claimed_successors.insert(successor.action_id.clone()) {
+                            return Err(format!(
+                                "启动对账发现待审批后继 {} 被多个父操作声明。",
+                                successor.action_id
+                            ));
+                        }
+                        if matches!(
+                            durable_run_status.as_deref(),
+                            Some("completed" | "failed" | "cancelled")
+                        ) {
+                            return Err(format!(
+                                "启动对账发现 run {} 同时存在终态 assistant 与合法待审批后继。",
+                                record.run_id
+                            ));
+                        }
+                        if let (Some(conversation_id), Some(message_id)) = (
+                            record.conversation_id.as_deref(),
+                            record.assistant_message_id.as_deref(),
+                        ) {
+                            chat_repository::update_message_run_waiting_state(
+                                &transaction,
+                                conversation_id,
+                                message_id,
+                                &record.run_id,
+                                updated_at,
+                            )
+                            .map_err(storage_error)?;
+                        }
+                        transaction
+                            .execute(
+                                "UPDATE agent_usage_records
                          SET status = 'waiting_for_approval', error = NULL, completed_at = NULL
                          WHERE run_id = ?1
                            AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
-                        [&record.run_id],
-                    )
-                    .map_err(storage_error)?;
-                continue;
-            }
-            if matches!(
-                durable_run_status.as_deref(),
-                Some("completed" | "failed" | "cancelled")
-            ) {
-                let assistant_message_id =
-                    record.assistant_message_id.as_deref().ok_or_else(|| {
-                        format!(
-                            "启动对账发现终态 run {} 缺少 Assistant owner。",
-                            record.run_id
+                                [&record.run_id],
+                            )
+                            .map_err(storage_error)?;
+                        continue;
+                    }
+                    if matches!(
+                        durable_run_status.as_deref(),
+                        Some("completed" | "failed" | "cancelled")
+                    ) {
+                        let assistant_message_id =
+                            record.assistant_message_id.as_deref().ok_or_else(|| {
+                                format!(
+                                    "启动对账发现终态 run {} 缺少 Assistant owner。",
+                                    record.run_id
+                                )
+                            })?;
+                        let trace = conversation_trace_repository::get_trace_for_message(
+                            &transaction,
+                            assistant_message_id,
                         )
-                    })?;
-                let trace = conversation_trace_repository::get_trace_for_message(
-                    &transaction,
-                    assistant_message_id,
-                )
-                .map_err(storage_error)?
-                .ok_or_else(|| {
-                    format!(
-                        "启动对账发现终态 run {} 缺少 ConversationTurnTrace。",
-                        record.run_id
-                    )
-                })?;
-                let model_context_items =
-                    conversation_model_context_repository::get_log_for_message(
-                        &transaction,
-                        assistant_message_id,
-                    )
-                    .map_err(storage_error)?
-                    .map(|log| log.items)
-                    .unwrap_or_default();
-                trace
-                    .validate_complete_model_context(&model_context_items)
-                    .map_err(|error| {
-                        format!(
-                            "启动对账发现终态 run {} 的模型历史不完整：{error}",
-                            record.run_id
-                        )
-                    })?;
-                transaction
-                    .execute(
-                        "UPDATE agent_usage_records
+                        .map_err(storage_error)?
+                        .ok_or_else(|| {
+                            format!(
+                                "启动对账发现终态 run {} 缺少 ConversationTurnTrace。",
+                                record.run_id
+                            )
+                        })?;
+                        let model_context_items =
+                            conversation_model_context_repository::get_log_for_message(
+                                &transaction,
+                                assistant_message_id,
+                            )
+                            .map_err(storage_error)?
+                            .map(|log| log.items)
+                            .unwrap_or_default();
+                        trace
+                            .validate_complete_model_context(&model_context_items)
+                            .map_err(|error| {
+                                format!(
+                                    "启动对账发现终态 run {} 的模型历史不完整：{error}",
+                                    record.run_id
+                                )
+                            })?;
+                        transaction
+                            .execute(
+                                "UPDATE agent_usage_records
                          SET status = ?2, completed_at = COALESCE(completed_at, ?3)
                          WHERE run_id = ?1
                            AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
-                        rusqlite::params![record.run_id, durable_run_status, updated_at],
-                    )
-                    .map_err(storage_error)?;
-                let notification_kind = match durable_run_status.as_deref() {
-                    Some("completed") => "task_completed",
-                    Some("failed") => "task_failed",
-                    Some("cancelled") => "task_cancelled",
-                    _ => unreachable!("terminal status was checked above"),
-                };
-                let conversation_id = record.conversation_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "启动对账发现终态 run {} 缺少 conversation owner。",
-                        record.run_id
-                    )
-                })?;
-                super::trace_reconciliation::enqueue_reconciled_human_root_notification(
-                    &transaction,
-                    &record.run_id,
-                    conversation_id,
-                    assistant_message_id,
-                    notification_kind,
-                    updated_at,
-                )?;
-                continue;
-            }
-            {
-                let conversation_id = record.conversation_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "启动对账无法终结 run {}：缺少 conversation owner。",
-                        record.run_id
-                    )
-                })?;
-                let message_id = record.assistant_message_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "启动对账无法终结 run {}：缺少 Assistant owner。",
-                        record.run_id
-                    )
-                })?;
-                let durable = load_durable_pending_trace_snapshot(&transaction, record, false)
-                    .map_err(|error| {
-                        format!(
-                            "启动对账无法终结 run {} 的 durable ToolCall：{error}",
-                            record.run_id
+                                rusqlite::params![record.run_id, durable_run_status, updated_at],
+                            )
+                            .map_err(storage_error)?;
+                        let notification_kind = match durable_run_status.as_deref() {
+                            Some("completed") => "task_completed",
+                            Some("failed") => "task_failed",
+                            Some("cancelled") => "task_cancelled",
+                            _ => unreachable!("terminal status was checked above"),
+                        };
+                        let conversation_id =
+                            record.conversation_id.as_deref().ok_or_else(|| {
+                                format!(
+                                    "启动对账发现终态 run {} 缺少 conversation owner。",
+                                    record.run_id
+                                )
+                            })?;
+                        super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+                            &transaction,
+                            &record.run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            notification_kind,
+                            updated_at,
+                        )?;
+                        continue;
+                    }
+                    {
+                        let conversation_id =
+                            record.conversation_id.as_deref().ok_or_else(|| {
+                                format!(
+                                    "启动对账无法终结 run {}：缺少 conversation owner。",
+                                    record.run_id
+                                )
+                            })?;
+                        let message_id =
+                            record.assistant_message_id.as_deref().ok_or_else(|| {
+                                format!(
+                                    "启动对账无法终结 run {}：缺少 Assistant owner。",
+                                    record.run_id
+                                )
+                            })?;
+                        let durable =
+                            load_durable_pending_trace_snapshot(&transaction, record, false)
+                                .map_err(|error| {
+                                    format!(
+                                        "启动对账无法终结 run {} 的 durable ToolCall：{error}",
+                                        record.run_id
+                                    )
+                                })?;
+                        let terminal = crate::terminal_conversation_trace_from_snapshot(
+                            durable.snapshot,
+                            &record.run_id,
+                            conversation_id,
+                            message_id,
+                            crate::ConversationTurnTraceTerminalStatus::Failed,
+                            INTERRUPTION_REASON,
+                        )?;
+                        conversation_trace_repository::commit_trace_in_connection(
+                            &transaction,
+                            &terminal.trace,
+                            record.created_at,
+                            updated_at,
                         )
-                    })?;
-                let terminal = crate::terminal_conversation_trace_from_snapshot(
-                    durable.snapshot,
-                    &record.run_id,
-                    conversation_id,
-                    message_id,
-                    crate::ConversationTurnTraceTerminalStatus::Failed,
-                    INTERRUPTION_REASON,
-                )?;
-                conversation_trace_repository::commit_trace_in_connection(
-                    &transaction,
-                    &terminal.trace,
-                    record.created_at,
-                    updated_at,
-                )
-                .map_err(storage_error)?;
-                conversation_model_context_repository::commit_items_in_connection(
-                    &transaction,
-                    conversation_id,
-                    message_id,
-                    &terminal.model_context_items,
-                )
-                .map_err(storage_error)?;
-                chat_repository::update_message_run_terminal_state(
-                    &transaction,
-                    conversation_id,
-                    message_id,
-                    &record.run_id,
-                    Some("error"),
-                    "failed",
-                    updated_at,
-                    None,
-                )
-                .map_err(storage_error)?;
-            }
-            transaction
-                .execute(
-                    "UPDATE agent_usage_records
+                        .map_err(storage_error)?;
+                        conversation_model_context_repository::commit_items_in_connection(
+                            &transaction,
+                            conversation_id,
+                            message_id,
+                            &terminal.model_context_items,
+                        )
+                        .map_err(storage_error)?;
+                        chat_repository::update_message_run_terminal_state(
+                            &transaction,
+                            conversation_id,
+                            message_id,
+                            &record.run_id,
+                            Some("error"),
+                            "failed",
+                            updated_at,
+                            None,
+                        )
+                        .map_err(storage_error)?;
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE agent_usage_records
                      SET status = 'failed', error = ?2, completed_at = ?3
                      WHERE run_id = ?1
                        AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
-                    rusqlite::params![record.run_id, INTERRUPTION_REASON, updated_at],
-                )
-                .map_err(storage_error)?;
-            super::trace_reconciliation::enqueue_reconciled_human_root_notification(
-                &transaction,
-                &record.run_id,
-                record.conversation_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "启动对账无法通知 run {}：缺少 conversation owner。",
-                        record.run_id
-                    )
-                })?,
-                record.assistant_message_id.as_deref().ok_or_else(|| {
-                    format!(
-                        "启动对账无法通知 run {}：缺少 Assistant owner。",
-                        record.run_id
-                    )
-                })?,
-                "task_failed",
-                updated_at,
-            )?;
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(interrupted)
+                            rusqlite::params![record.run_id, INTERRUPTION_REASON, updated_at],
+                        )
+                        .map_err(storage_error)?;
+                    super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+                        &transaction,
+                        &record.run_id,
+                        record.conversation_id.as_deref().ok_or_else(|| {
+                            format!(
+                                "启动对账无法通知 run {}：缺少 conversation owner。",
+                                record.run_id
+                            )
+                        })?,
+                        record.assistant_message_id.as_deref().ok_or_else(|| {
+                            format!(
+                                "启动对账无法通知 run {}：缺少 Assistant owner。",
+                                record.run_id
+                            )
+                        })?,
+                        "task_failed",
+                        updated_at,
+                    )?;
+                }
+                transaction.commit().map_err(storage_error)?;
+                Ok(interrupted)
+            },
+        )?
     }
 }

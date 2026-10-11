@@ -5,7 +5,13 @@ use super::*;
 async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupancy() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let run_id = "pre-runtime-continuation-failure-run";
     let conversation_id = "pre-runtime-continuation-failure-conversation";
     let assistant_message_id = "pre-runtime-continuation-failure-assistant";
@@ -204,7 +210,13 @@ async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupan
 async fn pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recovery() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "pre-runtime-continuation-conflict-run";
     let conversation_id = "pre-runtime-continuation-conflict-conversation";
@@ -355,7 +367,13 @@ async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releas
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service
         .reserve_conversation_turn(CONVERSATION_ID, RUN_ID, ASSISTANT_MESSAGE_ID)

@@ -188,12 +188,35 @@ pub fn claim_ready_automation_runs(
     lease_duration_ms: i64,
     limit: usize,
 ) -> rusqlite::Result<Vec<AutomationRunRecord>> {
-    if now < 0 || lease_duration_ms < 1_000 {
+    claim_ready_automation_runs_with_clock(connection, lease_duration_ms, limit, || now)
+}
+
+/// Production claim: acquire the writer and SQLite transaction before starting the lease clock.
+/// The explicit-time entry point remains deterministic for recovery and repository tests.
+pub fn claim_ready_automation_runs_now(
+    connection: &mut Connection,
+    lease_duration_ms: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<AutomationRunRecord>> {
+    claim_ready_automation_runs_with_clock(connection, lease_duration_ms, limit, now_ms)
+}
+
+fn claim_ready_automation_runs_with_clock(
+    connection: &mut Connection,
+    lease_duration_ms: i64,
+    limit: usize,
+    clock: impl FnOnce() -> i64,
+) -> rusqlite::Result<Vec<AutomationRunRecord>> {
+    if lease_duration_ms < 1_000 {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let limit = limit.clamp(1, 3);
-    let lease_expires_at = now.saturating_add(lease_duration_ms.clamp(1_000, 300_000));
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = clock();
+    if now < 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let lease_expires_at = now.saturating_add(lease_duration_ms.clamp(1_000, 300_000));
     let ids = {
         let mut statement = transaction.prepare(
             "SELECT run.id
@@ -661,6 +684,33 @@ pub fn revalidate_automation_permission_for_admission_in_transaction(
     Ok(AutomationPermissionAdmissionOutcome::Blocked)
 }
 
+/// Validates the unconsumed lease at the caller's actual transaction time. The returned deadline
+/// must be retained until final COMMIT: binding a run clears its claim token/deadline atomically,
+/// but does not authorize an admission transaction to outlive the lease it consumed.
+pub fn automation_admission_lease_deadline_in_transaction(
+    transaction: &Transaction<'_>,
+    input: &AutomationRunAdmissionInput,
+    checked_at: i64,
+) -> rusqlite::Result<Option<i64>> {
+    transaction
+        .query_row(
+            "SELECT admission_expires_at FROM automation_runs
+             WHERE id = ?1 AND status = 'admitting' AND admission_token = ?2
+               AND config_revision = ?3 AND cancellation_requested_at IS NULL
+               AND admission_expires_at > ?4
+               AND agent_run_id IS NULL AND conversation_id IS NULL
+               AND user_message_id IS NULL AND assistant_message_id IS NULL",
+            params![
+                input.automation_run_id,
+                input.admission_token,
+                input.config_revision,
+                checked_at
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
 /// Completes the exactly-once Automation side of root Turn admission inside the caller-owned
 /// `BEGIN IMMEDIATE` transaction that has already written conversation/messages/trace.
 pub fn admit_automation_run_in_transaction(
@@ -733,6 +783,9 @@ pub fn admit_automation_run_in_transaction(
         || current.admission_token.as_deref() != Some(input.admission_token.as_str())
         || current.config_revision != input.config_revision
         || current.cancellation_requested_at.is_some()
+        || current
+            .admission_expires_at
+            .is_none_or(|deadline| deadline <= input.admitted_at)
     {
         return Ok(AutomationRunAdmissionOutcome::Stale(Some(current)));
     }
@@ -771,7 +824,8 @@ pub fn admit_automation_run_in_transaction(
          WHERE id = ?6 AND status = 'admitting' AND admission_token = ?7
            AND config_revision = ?8 AND agent_run_id IS NULL
            AND conversation_id IS NULL AND user_message_id IS NULL
-           AND assistant_message_id IS NULL",
+           AND assistant_message_id IS NULL AND cancellation_requested_at IS NULL
+           AND admission_expires_at > ?9",
         params![
             &input.agent_run_id,
             &input.conversation_id,
@@ -781,6 +835,7 @@ pub fn admit_automation_run_in_transaction(
             &input.automation_run_id,
             &input.admission_token,
             input.config_revision,
+            input.admitted_at,
         ],
     )?;
     if changed != 1 {

@@ -83,7 +83,13 @@ fn seed_interrupted_manual_file_change(
 fn startup_reconciles_published_manual_direct_file_change_without_replaying_it() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let run_id = "run-manual-direct-crash";
     let conversation_id = "conversation-manual-direct-crash";
     let assistant_message_id = "assistant-manual-direct-crash";
@@ -275,8 +281,13 @@ fn startup_file_change_reconciliation_types_base_divergence_and_unreadable_targe
 
     for (index, case) in cases.into_iter().enumerate() {
         let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let run_id = format!("run-file-change-recovery-{index}");
         let conversation_id = format!("conversation-file-change-recovery-{index}");
         let assistant_message_id = format!("assistant-file-change-recovery-{index}");
@@ -399,7 +410,13 @@ fn startup_file_change_reconciliation_types_base_divergence_and_unreadable_targe
 #[test]
 fn startup_reconciles_published_manual_staged_file_changes_without_replaying_them() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let run_id = "run-manual-staged-crash";
     let conversation_id = "conversation-manual-staged-crash";
     let assistant_message_id = "assistant-manual-staged-crash";

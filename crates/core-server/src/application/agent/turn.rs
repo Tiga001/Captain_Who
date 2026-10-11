@@ -620,7 +620,8 @@ impl AgentService {
                     automation_admission.as_ref().map(|admission| {
                         (
                             admission,
-                            &execution_access_check as &dyn Fn() -> Result<(), AgentServiceError>,
+                            &execution_access_check
+                                as &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
                         )
                     }),
                     automation_execution_context,

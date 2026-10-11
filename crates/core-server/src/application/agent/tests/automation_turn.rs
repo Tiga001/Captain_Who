@@ -249,7 +249,15 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
@@ -465,7 +473,15 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
 async fn stale_automation_admission_rolls_back_conversation_messages_and_trace() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     let task = seed_automation(&storage, "automation-humanroot-stale");
@@ -562,7 +578,7 @@ fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_bin
         &conversation.id,
         "execution-access-assistant",
     );
-    let checks = std::cell::Cell::new(0);
+    let checks = std::sync::atomic::AtomicUsize::new(0);
     let error = storage
         .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
             conversation,
@@ -586,8 +602,7 @@ fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_bin
                 admitted_at: timestamp,
             },
             &|| {
-                checks.set(checks.get() + 1);
-                if checks.get() == 1 {
+                if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                     Ok(())
                 } else {
                     Err("ACCOUNT_LICENSE_UNAVAILABLE".into())
@@ -597,7 +612,7 @@ fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_bin
         .unwrap_err();
     assert_eq!(error, "ACCOUNT_LICENSE_UNAVAILABLE");
     assert_eq!(
-        checks.get(),
+        checks.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "Both initial transaction and final commit boundaries must check the lease"
     );
@@ -786,7 +801,15 @@ async fn archived_existing_chat_is_a_repairable_target_error_without_admission()
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -839,7 +862,15 @@ async fn archived_existing_chat_is_a_repairable_target_error_without_admission()
 async fn new_chat_with_unresolvable_model_credential_is_blocked_as_model_unavailable() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     // Point the inherited global credential at a backend this Host does not use: the identity
     // checks still pass while the single projection cannot resolve an effective credential.
@@ -885,7 +916,15 @@ async fn new_chat_with_unresolvable_model_credential_is_blocked_as_model_unavail
 async fn automation_model_validation_keeps_missing_and_disabled_codes() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let task = seed_automation(&storage, "automation-humanroot-model-codes");
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
@@ -953,7 +992,15 @@ async fn automation_model_validation_keeps_missing_and_disabled_codes() {
 async fn exhausted_shared_agent_gate_is_retryable_without_admission() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     let gate = service.turn_concurrency_gate();
@@ -996,7 +1043,15 @@ async fn existing_chat_with_active_human_root_turn_is_retryable_without_admissio
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {

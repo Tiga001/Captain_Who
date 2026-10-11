@@ -5,7 +5,13 @@ use super::*;
 fn builtin_sensitive_approval_tick_preserves_ticket_and_turn_ownership() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-sensitive-expiry-tick.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -93,7 +99,13 @@ fn builtin_sensitive_approval_tick_preserves_ticket_and_turn_ownership() {
 #[tokio::test]
 async fn approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_result() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -184,8 +196,13 @@ fn builtin_sensitive_cancel_reaches_pre_spawn_and_dispatching_process_guards() {
     .enumerate()
     {
         let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         save_test_pending_provider(
             &storage,
             "test-model",
@@ -251,7 +268,13 @@ fn builtin_sensitive_cancel_reaches_pre_spawn_and_dispatching_process_guards() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_once() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -351,7 +374,13 @@ async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_on
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

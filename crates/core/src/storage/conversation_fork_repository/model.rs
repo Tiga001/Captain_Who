@@ -231,6 +231,113 @@ pub(crate) struct ConversationForkPlan {
 }
 
 impl ConversationForkPlan {
+    /// Queue accounting walks owned payloads without allocating a second serialized copy.
+    pub(crate) fn estimated_bytes(&self) -> Result<usize, String> {
+        let mut bytes = 1024usize;
+        for history in std::iter::once(self.root_history_ref())
+            .chain(self.members.iter().map(|member| member.history.as_ref()))
+        {
+            bytes = bytes.saturating_add(estimated_serialized_bytes(history.target)?);
+            for audit in history.action_audits {
+                bytes = bytes
+                    .saturating_add(4096)
+                    .saturating_add(audit.action_json.len());
+                for payload in [
+                    &audit.file_change_result_json,
+                    &audit.command_result_json,
+                    &audit.tool_result_json,
+                    &audit.effective_permissions_json,
+                    &audit.error,
+                ] {
+                    bytes = bytes.saturating_add(payload.as_ref().map_or(0, String::len));
+                }
+            }
+            for record in history.world_state_records {
+                bytes = bytes
+                    .saturating_add(1024)
+                    .saturating_add(estimated_serialized_bytes(&record.record)?);
+            }
+            for trace in history.traces {
+                bytes = bytes.saturating_add(estimated_serialized_bytes(&trace.trace)?);
+                bytes =
+                    bytes.saturating_add(estimated_serialized_bytes(&trace.model_context_items)?);
+            }
+            for change in history.file_changes {
+                bytes = bytes
+                    .saturating_add(8192)
+                    .saturating_add(change.target.content.len())
+                    .saturating_add(change.target.base_content.len())
+                    .saturating_add(change.target.observation_json.len())
+                    .saturating_add(1024usize.saturating_mul(change.history.chunks.len()));
+                for operation in &change.history.operations {
+                    bytes = bytes
+                        .saturating_add(4096)
+                        .saturating_add(operation.receipt_json.len());
+                }
+            }
+            for diff in history.turn_diffs {
+                bytes = bytes.saturating_add(4096);
+                for file in &diff.record.files {
+                    bytes = bytes
+                        .saturating_add(file.path.len())
+                        .saturating_add(128)
+                        .saturating_add(file.before.text().map_or(0, str::len))
+                        .saturating_add(file.after.text().map_or(0, str::len));
+                }
+            }
+            for summary in history.summaries {
+                bytes = bytes.saturating_add(estimated_serialized_bytes(&summary.summary)?);
+            }
+            for receipt in history.compaction_receipts {
+                bytes = bytes.saturating_add(estimated_serialized_bytes(&receipt.source_receipt)?);
+                bytes =
+                    bytes.saturating_add(estimated_serialized_bytes(&receipt.source_observation)?);
+            }
+            for receipt in history.provider_transition_receipts {
+                bytes = bytes.saturating_add(estimated_serialized_bytes(&receipt.source_receipt)?);
+                bytes =
+                    bytes.saturating_add(estimated_serialized_bytes(&receipt.source_observation)?);
+            }
+            for guidance in history.guidances {
+                bytes = bytes
+                    .saturating_add(4096)
+                    .saturating_add(guidance.record.content.len())
+                    .saturating_add(guidance.record.folder_references_json.len());
+            }
+            for question in history.human_interaction_requests {
+                bytes = bytes.saturating_add(question.questions_json.len());
+            }
+            bytes = bytes.saturating_add(
+                1024usize.saturating_mul(
+                    history
+                        .attachments
+                        .len()
+                        .saturating_add(history.archives.len())
+                        .saturating_add(history.snapshot_origins.len())
+                        .saturating_add(history.id_replacements.len()),
+                ),
+            );
+        }
+        for mapping in &self.provider_continuation_mappings {
+            bytes = bytes.saturating_add(
+                mapping
+                    .source_record
+                    .ciphertext
+                    .as_ref()
+                    .map_or(0, Vec::len),
+            );
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn source_conversation_ids(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.source_conversation_id.as_str()).chain(
+            self.members
+                .iter()
+                .map(|member| member.source_agent.conversation_id.as_str()),
+        )
+    }
+
     fn root_history_ref(&self) -> ConversationHistoryForkPlanRef<'_> {
         ConversationHistoryForkPlanRef {
             source_conversation_id: &self.source_conversation_id,
@@ -334,7 +441,7 @@ impl ForkSourceSnapshot {
         ConversationForkError,
     > {
         if !self.summary_chains.contains_key(conversation_id) {
-            let chain = context_compaction_repository::list_active_summary_chain(
+            let chain = context_compaction_repository::list_active_summary_chain_readonly(
                 connection,
                 conversation_id,
             )
@@ -445,7 +552,63 @@ impl ForkSourceSnapshot {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_fork_plan_at_point(
+    connection: &Connection,
+    request_id: &str,
+    source_conversation_id: &str,
+    fork_point: &ConversationForkPoint,
+    created_at: i64,
+) -> Result<ConversationForkPlan, ConversationForkError> {
+    validate_fork_point_input(request_id, source_conversation_id, fork_point)?;
+    recover_fork_source_continuations(connection, source_conversation_id, fork_point)?;
+    build_fork_plan_at_point_readonly(
+        connection,
+        request_id,
+        source_conversation_id,
+        fork_point,
+        created_at,
+    )
+}
+
+/// Recover only the existing durable promotion window. This runs on the writer before the
+/// potentially large read/decode plan and before any filesystem or provider-vault work.
+pub(crate) fn recover_fork_source_continuations(
+    connection: &Connection,
+    source_conversation_id: &str,
+    fork_point: &ConversationForkPoint,
+) -> Result<(), ConversationForkError> {
+    let mut conversation_ids = vec![source_conversation_id.to_string()];
+    if let Some(root) =
+        agent_graph_repository::get_agent_node_by_conversation(connection, source_conversation_id)
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?
+    {
+        if root.parent_agent_id.is_some() {
+            return Err(ConversationForkError::Other(
+                "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
+            ));
+        }
+        let cutoff_at =
+            authoritative_fork_cutoff_at(connection, source_conversation_id, fork_point)?;
+        let tree = agent_graph_repository::list_agent_tree(connection, &root.root_agent_id)
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        conversation_ids.extend(
+            visible_member_agents(&tree, &root, cutoff_at)?
+                .into_iter()
+                .map(|member| member.conversation_id),
+        );
+    }
+    for conversation_id in conversation_ids {
+        provider_continuation_repository::promote_recoverable_staged_for_conversation(
+            connection,
+            &conversation_id,
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn build_fork_plan_at_point_readonly(
     connection: &Connection,
     request_id: &str,
     source_conversation_id: &str,
@@ -1038,4 +1201,23 @@ pub(crate) fn get_continuation_origin(
             },
         )
         .optional()
+}
+
+/// Counts encoded payload bytes without creating a transient JSON buffer.
+pub(crate) fn estimated_serialized_bytes<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<usize, String> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(value.len());
+            Ok(value.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|error| error.to_string())?;
+    Ok(counter.0)
 }

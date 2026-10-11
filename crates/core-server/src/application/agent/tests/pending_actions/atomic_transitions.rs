@@ -5,7 +5,13 @@ use super::*;
 fn missing_pending_transition_row_fails_closed_without_terminal_success() {
     const MARKER: &str = "MISSING_TRANSITION_SKILL_BODY";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
@@ -86,7 +92,13 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
 #[test]
 fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let call = AgentToolCall {
         id: "call-invalid-checkpoint".to_string(),
@@ -177,7 +189,13 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
 fn cancel_finalize_failure_atomically_restores_pending_payload() {
     const MARKER: &str = "CANCEL_ROLLBACK_SKILL_BODY";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let call = AgentToolCall {
         id: "action-cancel-rollback".to_string(),
@@ -256,7 +274,13 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
 #[test]
 fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-cancel-usage-failure".to_string(),

@@ -8,7 +8,13 @@ use super::*;
 fn startup_preserves_pending_mcp_tickets_while_pruning_expired_and_orphaned_payloads() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -164,7 +170,13 @@ fn startup_preserves_pending_mcp_tickets_while_pruning_expired_and_orphaned_payl
 fn mcp_startup_terminalization_uses_durable_identity_when_private_action_is_corrupt() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -284,7 +296,13 @@ fn mcp_startup_terminalization_uses_durable_identity_when_private_action_is_corr
 fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

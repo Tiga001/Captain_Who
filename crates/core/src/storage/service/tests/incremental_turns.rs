@@ -20,7 +20,7 @@ fn append_turn(
     revision: Option<i64>,
     messages: &[ChatMessageRecord],
     run_id: &str,
-    check_access: Option<&dyn Fn() -> Result<(), String>>,
+    check_access: Option<&(dyn Fn() -> Result<(), String> + Sync)>,
 ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
     candidate.updated_at = 10_001;
     candidate.messages.extend(messages.iter().cloned());
@@ -230,10 +230,9 @@ fn incremental_turn_admission_preserves_authority_and_rolls_back_late_access_fai
     let (candidate, revision) = service.load_conversation_for_turn("append-access").unwrap();
     let candidate = candidate.unwrap();
     let messages = new_turn_messages("new-user", "new-assistant");
-    let checks = std::cell::Cell::new(0);
+    let checks = std::sync::atomic::AtomicUsize::new(0);
     let check_access = || {
-        checks.set(checks.get() + 1);
-        if checks.get() == 2 {
+        if checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
             Err("access expired before commit".into())
         } else {
             Ok(())

@@ -26,7 +26,11 @@ struct Fixture {
 impl Fixture {
     fn new(root_model_id: Option<&str>) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &directory.path().join("storage.sqlite"),
+            Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         service
             .save_project(ProjectRecord::without_folders(
                 "project-a".to_string(),
@@ -733,6 +737,7 @@ mod model_recovery;
 mod observer_pages;
 mod recursive_forks;
 mod snapshot_history;
+mod staging_concurrency;
 
 fn release_profile_usize(name: &str, default: usize) -> usize {
     std::env::var(name)

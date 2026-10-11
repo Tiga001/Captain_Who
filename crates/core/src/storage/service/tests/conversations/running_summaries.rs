@@ -124,26 +124,32 @@ fn running_summaries_do_not_read_history_payloads_or_generate_previews() {
     );
     service
         .state
-        .connection()
-        .unwrap()
-        .authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "messages",
-                column_name: "content" | "agent_run_json" | "folder_references_json",
-            } => Authorization::Deny,
-            AuthAction::Read {
-                table_name:
-                    "conversation_turn_trace_items"
-                    | "conversation_model_context_items"
-                    | "attachments"
-                    | "agent_run_guidance",
-                ..
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        .configure_read_connections_for_test(|connection| {
+            connection
+                .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                    AuthAction::Read {
+                        table_name: "messages",
+                        column_name: "content" | "agent_run_json" | "folder_references_json",
+                    } => Authorization::Deny,
+                    AuthAction::Read {
+                        table_name:
+                            "conversation_turn_trace_items"
+                            | "conversation_model_context_items"
+                            | "attachments"
+                            | "agent_run_guidance",
+                        ..
+                    } => Authorization::Deny,
+                    _ => Authorization::Allow,
+                }))
+                .unwrap();
+        });
     let rows = service.load_running_conversation_summaries().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "summary-payload");
+    assert!(
+        service.load_conversation("summary-payload").is_err(),
+        "the pooled-reader authorizer must reject full history"
+    );
 }
 
 #[test]

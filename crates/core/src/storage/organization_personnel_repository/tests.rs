@@ -891,9 +891,11 @@ fn organization_edit_prose_does_not_visit_mail_history_and_removal_reads_only_li
         } else {
             rusqlite::hooks::Authorization::Allow
         }
-    }));
+    }))
+    .unwrap();
     manage(&mut c, &req).unwrap();
-    c.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+    c.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)
+        .unwrap();
     edit(
         &mut c,
         json!([{"action":"remove_member","memberId":"target"}]),

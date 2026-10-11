@@ -14,7 +14,11 @@ fn definition() -> Definition {
 fn organization_hierarchy_template_draft_and_duplicate_survive_storage_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("organization.sqlite");
-    let service = StorageService::open(&path).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let saved = service
         .workflow_request(Request::Save {
             definition: definition(),
@@ -45,7 +49,11 @@ fn organization_hierarchy_template_draft_and_duplicate_survive_storage_reopen() 
         .unwrap();
     drop(service);
 
-    let service = StorageService::open(&path).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let read = service.workflow_request(Request::List).unwrap();
     let record = read
         .records

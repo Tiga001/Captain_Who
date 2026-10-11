@@ -6,7 +6,13 @@ async fn skill_script_worker_setup_failure_persists_receipt_and_runs_continuatio
     const SCRIPT_URI: &str = "skill://package/installed%3Auser%3Afixture/revision/scripts/build.py";
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let run_id = "skill-worker-setup-failure-run";
     let conversation_id = "skill-worker-setup-failure-conversation";
     let assistant_message_id = "skill-worker-setup-failure-assistant";
@@ -198,7 +204,13 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
 ) {
     const SCRIPT_URI: &str = "skill://package/installed%3Auser%3Afixture/revision/scripts/build.py";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let (run_id, conversation_id, assistant_message_id, call_id) = match injected {
         InjectedSkillScriptWorkerPanic::AfterEffectBoundary => (
             "skill-worker-supervised-panic-run",
@@ -339,7 +351,7 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
         }
     }
     let process_guard = service.process_runs.register(&storage_id, run_id);
-    let (notifications, _receiver) = crate::transport::outbound_channel();
+    let (notifications, mut receiver) = crate::transport::outbound_channel();
     let queued = service
         .queue_skill_script_execution(executing, call.clone(), process_guard, notifications)
         .unwrap();
@@ -376,6 +388,25 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
     })
     .await
     .expect("the supervised panic must converge without an executing ghost");
+
+    // A WAL reader can observe the committed terminal Trace before its supervisor finishes
+    // process-local cleanup. Done is the public completion boundary and must follow release of
+    // the Turn owner/permit; keep the durable-state and occupancy assertions independently.
+    let done = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = receiver
+                .recv()
+                .await
+                .expect("supervised worker must publish Done before closing notifications");
+            if event["params"]["type"] == "done" && event["params"]["runId"] == run_id {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("the supervised panic must finish cleanup and publish Done");
+    assert_eq!(done["params"]["success"], false);
+    assert_eq!(done["params"]["status"], "failed");
 
     let trace = storage
         .get_conversation_turn_trace(assistant_message_id)

@@ -7,7 +7,13 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
     const SCRIPT_URI: &str =
         "skill://package/installed%3Auser%3Aapproval-fixture/revision/scripts/build.py";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -399,7 +405,13 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         std::future::pending::<()>().await;
     });
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": format!("http://{provider_address}/v1/chat/completions"),
         "apiToken": "test-token",

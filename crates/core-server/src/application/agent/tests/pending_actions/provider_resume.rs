@@ -301,7 +301,13 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     const URL_CANARY: &str = "SQLITE_PENDING_URL_CANARY_DO_NOT_PERSIST";
     const SEARCH_CANARY: &str = "SQLITE_PENDING_SEARCH_CANARY_DO_NOT_PERSIST";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let sensitive_api_url = format!("https://example.test/{URL_CANARY}/v1");
     save_test_pending_provider(
         &storage,
@@ -551,7 +557,13 @@ fn collaboration_resume_input(storage: &StorageService) -> AgentChatInput {
 #[test]
 fn persisted_resume_requires_exact_collaboration_identity_on_both_context_copies() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -613,7 +625,13 @@ fn persisted_resume_requires_exact_collaboration_identity_on_both_context_copies
 #[test]
 fn pending_resume_rejects_provider_token_replacement_at_the_same_endpoint() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-identity.example/v1";
     save_test_pending_provider(
         &storage,
@@ -642,7 +660,13 @@ fn pending_resume_rejects_provider_token_replacement_at_the_same_endpoint() {
 #[test]
 fn pending_resume_selects_local_config_when_provider_model_id_is_shared() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let selected_endpoint = "https://selected-provider.example/v1";
     let selected_token = "selected-provider-token";
     save_test_pending_provider(
@@ -698,7 +722,13 @@ fn pending_resume_selects_local_config_when_provider_model_id_is_shared() {
 #[test]
 fn pending_resume_rejects_tokenless_to_token_presence_drift() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-presence.example/v1";
     save_test_pending_provider(
         &storage,
@@ -719,7 +749,13 @@ fn pending_resume_rejects_tokenless_to_token_presence_drift() {
 #[test]
 fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edits() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-model.example/v1";
     save_test_pending_provider(
         &storage,
@@ -767,7 +803,13 @@ fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edit
 #[test]
 fn pending_resume_preserves_frozen_generic_profile_when_current_model_selects_deepseek() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-profile-change.example/v1";
     save_test_pending_provider(
         &storage,
@@ -797,7 +839,13 @@ fn pending_resume_preserves_frozen_generic_profile_when_current_model_selects_de
 #[test]
 fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-profile-freeze.example/v1/chat/completions";
     let token = "fixed-model-token";
     save_test_pending_provider(&storage, "test-model", endpoint, token, "disabled", "");
@@ -841,7 +889,13 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
 #[test]
 fn pending_resume_rejects_provider_endpoint_replacement() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-endpoint.example/v1";
     save_test_pending_provider(
         &storage,
@@ -870,7 +924,13 @@ fn pending_resume_rejects_provider_endpoint_replacement() {
 #[test]
 fn pending_resume_accepts_search_credential_replacement_without_rehydration() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let endpoint = "https://provider-search.example/v1";
     save_test_pending_provider(
         &storage,

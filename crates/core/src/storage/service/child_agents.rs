@@ -1,5 +1,5 @@
 use super::agent_templates::resolve_exact_agent_model;
-use super::conversations::cleanup_fork_files;
+use super::conversations::fork_staging::{child_snapshot_side_version, ForkFiles};
 use super::*;
 use crate::storage::child_context_snapshot_repository;
 use crate::{
@@ -14,7 +14,6 @@ const MAX_ID_BYTES: usize = 128;
 const MAX_TASK_NAME_BYTES: usize = 256;
 const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_TEMPLATE_KEY_BYTES: usize = 64;
-type ChildAttachmentStage = (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>);
 
 impl StorageService {
     /// Atomically creates the complete durable identity bundle for one direct child Agent.
@@ -118,136 +117,302 @@ impl StorageService {
             .load_model_projection()
             .map_err(ChildAgentSpawnError::StorageUnavailable)?;
         let created_at = now_ms();
-        let mut connection = self
-            .state
-            .connection()
-            .map_err(ChildAgentSpawnError::StorageUnavailable)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(spawn_database_error)?;
-        let parent = agent_graph_repository::get_agent_node(&transaction, &input.parent_agent_id)
-            .map_err(map_graph_error)?
-            .ok_or_else(|| ChildAgentSpawnError::ParentNotFound(input.parent_agent_id.clone()))?;
-        if let Some(origin_run_id) = origin_run_id {
-            agent_graph_repository::ensure_agent_tree_origin_run_can_schedule_in_transaction(
-                &transaction,
-                origin_run_id,
-                &parent.agent_id,
-            )
-            .map_err(map_graph_error)?;
-        }
-        if let Some(existing) = agent_graph_repository::resolve_child_spawn_by_creation_request(
-            &transaction,
-            &parent.agent_id,
-            &input.creation_request_id,
-        )
-        .map_err(map_spawn_lookup_error)?
-        {
-            ensure_idempotent_spawn(&existing, input)?;
-            ensure_expected_model_capabilities(
-                existing.agent.model_snapshot.as_ref(),
-                expected_model_capabilities,
-            )?;
-            ensure_expected_template_identity(
-                existing.agent.template_snapshot.as_ref(),
-                expected_template_identity,
-            )?;
-            // The snapshot repository owns comparison of the persisted logical-turn selector.
-            ensure_existing_child_snapshot_selector(
-                &transaction,
-                &existing.agent.conversation_id,
-                input.fork_turns,
-            )?;
-            transaction.commit().map_err(spawn_database_error)?;
-            return Ok(existing);
-        }
-        if parent.lifecycle != AgentLifecycle::Active {
-            return Err(ChildAgentSpawnError::ParentUnavailable(
-                parent.agent_id.clone(),
-            ));
-        }
-        enforce_tree_resource_limits(&transaction, &parent, limits)?;
-
-        let (template_snapshot, selected_model_id, model_selection_source) = select_model_identity(
-            &transaction,
-            &parent,
-            input,
-            expected_template_identity,
-            model_projection.as_ref(),
-        )?;
-        let settings = self
-            .model_settings_catalog_snapshot_in_connection(&transaction)
-            .map_err(ChildAgentSpawnError::StorageUnavailable)?
-            .ok_or_else(|| ChildAgentSpawnError::ModelUnavailable {
-                model_config_id: Some(selected_model_id.clone()),
-                reason: crate::AgentModelUnavailableReason::SettingsMissing,
-            })?;
-        let model_snapshot =
-            resolve_exact_agent_model(&settings, &selected_model_id).map_err(|reason| {
-                ChildAgentSpawnError::ModelUnavailable {
-                    model_config_id: Some(selected_model_id.clone()),
-                    reason,
-                }
-            })?;
-        ensure_expected_model_capabilities(Some(&model_snapshot), expected_model_capabilities)?;
-        validate_reasoning_effort(&settings, &selected_model_id, input.reasoning_effort)?;
-
         let child_agent_id = new_spawn_id("agent");
         let child_conversation_id = new_spawn_id("conversation");
         let task_message_id = new_spawn_id("agent-message");
         let projection_message_id = new_spawn_id("message");
         let wake_id = new_spawn_id("agent-wake");
         let claim_token = new_spawn_id("agent-message-claim");
-        let task_path = format!("{}/{}", parent.task_path, input.task_name);
-
-        insert_child_conversation(
-            &transaction,
-            &child_conversation_id,
-            parent.project_id.as_deref(),
-            &model_snapshot.model_config_id,
-            &input.task_name,
-            created_at,
-        )?;
-        let node_input = CreateAgentNodeInput {
-            agent_id: child_agent_id.clone(),
-            root_agent_id: parent.root_agent_id.clone(),
-            parent_agent_id: parent.agent_id.clone(),
-            conversation_id: child_conversation_id.clone(),
-            creation_request_id: input.creation_request_id.clone(),
-            task_name: input.task_name.clone(),
-            task_path,
-            template_snapshot,
-            model_snapshot,
-        };
-        let agent = match agent_graph_repository::create_agent_node_in_transaction(
-            &transaction,
-            &node_input,
-            model_selection_source,
-            input.reasoning_effort,
-            created_at,
-        )
-        .map_err(map_graph_error)?
-        {
-            IdempotentCreate::Created(agent) => agent,
-            IdempotentCreate::Existing(_) => {
-                return Err(ChildAgentSpawnError::CorruptRecord(
-                    "new spawn unexpectedly resolved as an existing node".to_string(),
-                ))
+        let (prepared_parent, mut snapshot_plan, source_version, source_side_version) = {
+            let mut connection = self
+                .state
+                .read_connection()
+                .map_err(ChildAgentSpawnError::StorageUnavailable)?;
+            let transaction = connection.transaction().map_err(spawn_database_error)?;
+            let parent =
+                agent_graph_repository::get_agent_node(&transaction, &input.parent_agent_id)
+                    .map_err(map_graph_error)?
+                    .ok_or_else(|| {
+                        ChildAgentSpawnError::ParentNotFound(input.parent_agent_id.clone())
+                    })?;
+            if let Some(origin_run_id) = origin_run_id {
+                agent_graph_repository::ensure_agent_tree_origin_run_can_schedule_in_transaction(
+                    &transaction,
+                    origin_run_id,
+                    &parent.agent_id,
+                )
+                .map_err(map_graph_error)?;
             }
-        };
-
-        let mut snapshot_plan =
-            child_context_snapshot_repository::build_child_context_snapshot_plan(
+            if let Some(existing) = agent_graph_repository::resolve_child_spawn_by_creation_request(
                 &transaction,
-                &parent.conversation_id,
+                &parent.agent_id,
+                &input.creation_request_id,
+            )
+            .map_err(map_spawn_lookup_error)?
+            {
+                ensure_idempotent_spawn(&existing, input)?;
+                ensure_expected_model_capabilities(
+                    existing.agent.model_snapshot.as_ref(),
+                    expected_model_capabilities,
+                )?;
+                ensure_expected_template_identity(
+                    existing.agent.template_snapshot.as_ref(),
+                    expected_template_identity,
+                )?;
+                // The snapshot repository owns comparison of the persisted logical-turn selector.
+                ensure_existing_child_snapshot_selector(
+                    &transaction,
+                    &existing.agent.conversation_id,
+                    input.fork_turns,
+                )?;
+                transaction.commit().map_err(spawn_database_error)?;
+                return Ok(existing);
+            }
+            if parent.lifecycle != AgentLifecycle::Active {
+                return Err(ChildAgentSpawnError::ParentUnavailable(
+                    parent.agent_id.clone(),
+                ));
+            }
+            enforce_tree_resource_limits(&transaction, &parent, limits)?;
+
+            let (template_snapshot, selected_model_id, model_selection_source) =
+                select_model_identity(
+                    &transaction,
+                    &parent,
+                    input,
+                    expected_template_identity,
+                    model_projection.as_ref(),
+                )?;
+            let settings = self
+                .model_settings_catalog_snapshot_in_connection(&transaction)
+                .map_err(ChildAgentSpawnError::StorageUnavailable)?
+                .ok_or_else(|| ChildAgentSpawnError::ModelUnavailable {
+                    model_config_id: Some(selected_model_id.clone()),
+                    reason: crate::AgentModelUnavailableReason::SettingsMissing,
+                })?;
+            if model_projection
+                .as_ref()
+                .map(|projection| projection.configuration_revision.as_str())
+                != Some(settings.configuration_revision.as_str())
+            {
+                return Err(ChildAgentSpawnError::Conflict(
+                    "model settings changed while preparing child admission".into(),
+                ));
+            }
+            let model_snapshot =
+                resolve_exact_agent_model(&settings, &selected_model_id).map_err(|reason| {
+                    ChildAgentSpawnError::ModelUnavailable {
+                        model_config_id: Some(selected_model_id.clone()),
+                        reason,
+                    }
+                })?;
+            ensure_expected_model_capabilities(Some(&model_snapshot), expected_model_capabilities)?;
+            validate_reasoning_effort(&settings, &selected_model_id, input.reasoning_effort)?;
+
+            let _ = (template_snapshot, model_selection_source, model_snapshot);
+            let snapshot_plan =
+                child_context_snapshot_repository::build_child_context_snapshot_plan(
+                    &transaction,
+                    &parent.conversation_id,
+                    &child_conversation_id,
+                    &input.fork_turns,
+                    created_at,
+                )
+                .map_err(|error| ChildAgentSpawnError::SnapshotUnavailable(error.to_string()))?;
+            let source_version = if matches!(input.fork_turns, AgentForkTurns::None) {
+                None
+            } else {
+                Some(
+                    super::history_snapshot::history_version_in_connection(
+                        &transaction,
+                        &parent.conversation_id,
+                        &self.state.instance_identity,
+                    )
+                    .map_err(ChildAgentSpawnError::StorageUnavailable)?
+                    .ok_or_else(|| {
+                        ChildAgentSpawnError::ParentNotFound(input.parent_agent_id.clone())
+                    })?,
+                )
+            };
+            let source_side_version = if source_version.is_some() {
+                Some(
+                    child_snapshot_side_version(&transaction, &parent.conversation_id)
+                        .map_err(ChildAgentSpawnError::StorageUnavailable)?,
+                )
+            } else {
+                None
+            };
+            transaction.commit().map_err(spawn_database_error)?;
+            (parent, snapshot_plan, source_version, source_side_version)
+        };
+        // No write transaction or read snapshot survives attachment publication. Each operation
+        // owns its new names, and final authority/quotas are rechecked before inserting a child.
+        let mut files = ForkFiles::prepare_attachments(
+            &self.attachment_root,
+            snapshot_plan.attachments.iter_mut(),
+        )
+        .map_err(ChildAgentSpawnError::SnapshotUnavailable)?;
+        // Refresh credential-backed availability after slow file work. The writer compares its
+        // configuration revision again; it never calls the credential backend while holding SQLite.
+        let model_projection = self
+            .load_model_projection()
+            .map_err(ChildAgentSpawnError::StorageUnavailable)?;
+        let estimated_bytes = snapshot_plan
+            .estimated_bytes()
+            .map_err(ChildAgentSpawnError::StorageUnavailable)?
+            .saturating_add(input.task.len())
+            .saturating_add(8192);
+        let persist = |connection: &mut rusqlite::Connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(spawn_database_error)?;
+            let parent =
+                agent_graph_repository::get_agent_node(&transaction, &input.parent_agent_id)
+                    .map_err(map_graph_error)?
+                    .ok_or_else(|| {
+                        ChildAgentSpawnError::ParentNotFound(input.parent_agent_id.clone())
+                    })?;
+            if let Some(origin_run_id) = origin_run_id {
+                agent_graph_repository::ensure_agent_tree_origin_run_can_schedule_in_transaction(
+                    &transaction,
+                    origin_run_id,
+                    &parent.agent_id,
+                )
+                .map_err(map_graph_error)?;
+            }
+            if let Some(existing) = agent_graph_repository::resolve_child_spawn_by_creation_request(
+                &transaction,
+                &parent.agent_id,
+                &input.creation_request_id,
+            )
+            .map_err(map_spawn_lookup_error)?
+            {
+                ensure_idempotent_spawn(&existing, input)?;
+                ensure_expected_model_capabilities(
+                    existing.agent.model_snapshot.as_ref(),
+                    expected_model_capabilities,
+                )?;
+                ensure_expected_template_identity(
+                    existing.agent.template_snapshot.as_ref(),
+                    expected_template_identity,
+                )?;
+                // The snapshot repository owns comparison of the persisted logical-turn selector.
+                ensure_existing_child_snapshot_selector(
+                    &transaction,
+                    &existing.agent.conversation_id,
+                    input.fork_turns,
+                )?;
+                transaction.commit().map_err(spawn_database_error)?;
+                return Ok(existing);
+            }
+            if parent != prepared_parent {
+                return Err(ChildAgentSpawnError::Conflict(
+                    "parent identity changed while preparing the child snapshot".into(),
+                ));
+            }
+            if let Some(expected) = &source_version {
+                let current = super::history_snapshot::history_version_in_connection(
+                    &transaction,
+                    &parent.conversation_id,
+                    &self.state.instance_identity,
+                )
+                .map_err(ChildAgentSpawnError::StorageUnavailable)?;
+                if current.as_ref() != Some(expected) {
+                    return Err(ChildAgentSpawnError::Conflict(
+                        "parent history changed while preparing the child snapshot".into(),
+                    ));
+                }
+            }
+            if let Some(expected) = source_side_version {
+                if child_snapshot_side_version(&transaction, &parent.conversation_id)
+                    .map_err(ChildAgentSpawnError::StorageUnavailable)?
+                    != expected
+                {
+                    return Err(ChildAgentSpawnError::Conflict(
+                        "parent snapshot side records changed while preparing the child snapshot"
+                            .into(),
+                    ));
+                }
+            }
+            if parent.lifecycle != AgentLifecycle::Active {
+                return Err(ChildAgentSpawnError::ParentUnavailable(
+                    parent.agent_id.clone(),
+                ));
+            }
+            enforce_tree_resource_limits(&transaction, &parent, limits)?;
+
+            let (template_snapshot, selected_model_id, model_selection_source) =
+                select_model_identity(
+                    &transaction,
+                    &parent,
+                    input,
+                    expected_template_identity,
+                    model_projection.as_ref(),
+                )?;
+            let settings = self
+                .model_settings_catalog_snapshot_in_connection(&transaction)
+                .map_err(ChildAgentSpawnError::StorageUnavailable)?
+                .ok_or_else(|| ChildAgentSpawnError::ModelUnavailable {
+                    model_config_id: Some(selected_model_id.clone()),
+                    reason: crate::AgentModelUnavailableReason::SettingsMissing,
+                })?;
+            if model_projection
+                .as_ref()
+                .map(|projection| projection.configuration_revision.as_str())
+                != Some(settings.configuration_revision.as_str())
+            {
+                return Err(ChildAgentSpawnError::Conflict(
+                    "model settings changed while preparing child admission".into(),
+                ));
+            }
+            let model_snapshot =
+                resolve_exact_agent_model(&settings, &selected_model_id).map_err(|reason| {
+                    ChildAgentSpawnError::ModelUnavailable {
+                        model_config_id: Some(selected_model_id.clone()),
+                        reason,
+                    }
+                })?;
+            ensure_expected_model_capabilities(Some(&model_snapshot), expected_model_capabilities)?;
+            validate_reasoning_effort(&settings, &selected_model_id, input.reasoning_effort)?;
+
+            let task_path = format!("{}/{}", parent.task_path, input.task_name);
+
+            insert_child_conversation(
+                &transaction,
                 &child_conversation_id,
-                &input.fork_turns,
+                parent.project_id.as_deref(),
+                &model_snapshot.model_config_id,
+                &input.task_name,
+                created_at,
+            )?;
+            let node_input = CreateAgentNodeInput {
+                agent_id: child_agent_id.clone(),
+                root_agent_id: parent.root_agent_id.clone(),
+                parent_agent_id: parent.agent_id.clone(),
+                conversation_id: child_conversation_id.clone(),
+                creation_request_id: input.creation_request_id.clone(),
+                task_name: input.task_name.clone(),
+                task_path,
+                template_snapshot,
+                model_snapshot,
+            };
+            let agent = match agent_graph_repository::create_agent_node_in_transaction(
+                &transaction,
+                &node_input,
+                model_selection_source,
+                input.reasoning_effort,
                 created_at,
             )
-            .map_err(|error| ChildAgentSpawnError::SnapshotUnavailable(error.to_string()))?;
-        let (staged_files, committed_files) =
-            self.stage_child_snapshot_attachments(&mut snapshot_plan)?;
-        let persistence_result = (|| {
+            .map_err(map_graph_error)?
+            {
+                IdempotentCreate::Created(agent) => agent,
+                IdempotentCreate::Existing(_) => {
+                    return Err(ChildAgentSpawnError::CorruptRecord(
+                        "new spawn unexpectedly resolved as an existing node".to_string(),
+                    ))
+                }
+            };
+
             child_context_snapshot_repository::apply_child_context_snapshot_in_transaction(
                 &transaction,
                 &snapshot_plan,
@@ -318,11 +483,34 @@ impl StorageService {
             };
             transaction.commit().map_err(spawn_database_error)?;
             Ok(record)
-        })();
-        if persistence_result.is_err() {
-            cleanup_fork_files(&staged_files, &committed_files);
-        }
-        persistence_result
+        };
+        self.state
+            .write_sync(
+                estimated_bytes,
+                crate::storage::StorageWriteClass::Normal,
+                |connection| {
+                    let result = persist(connection);
+                    match &result {
+                        Ok(record) if record.agent.conversation_id == child_conversation_id => {
+                            files.mark_committed()
+                        }
+                        Err(_) => {
+                            // Preserve bytes unless a rolled-back, readable database proves that this
+                            // operation did not publish references. Do not turn an uncertain write into success.
+                            let unreferenced = connection.is_autocommit() && connection.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM conversations WHERE id=?1)",
+                        [&child_conversation_id], |row| row.get::<_, bool>(0),
+                    ).unwrap_or(false);
+                            if !unreferenced {
+                                files.mark_committed();
+                            }
+                        }
+                        _ => {}
+                    }
+                    result
+                },
+            )
+            .map_err(ChildAgentSpawnError::StorageUnavailable)?
     }
 
     /// Resolves trusted Wake execution facts exclusively from the durable collaboration bundle.
@@ -412,77 +600,6 @@ impl StorageService {
         )?;
         validate_frozen_reasoning_for_wake(self, &connection, &bundle.spawn)?;
         Ok(bundle)
-    }
-
-    fn stage_child_snapshot_attachments(
-        &self,
-        plan: &mut child_context_snapshot_repository::ChildContextSnapshotPlan,
-    ) -> Result<ChildAttachmentStage, ChildAgentSpawnError> {
-        let mut staged_files = Vec::new();
-        let mut committed_files = Vec::new();
-        let prepare = (|| -> Result<(), ChildAgentSpawnError> {
-            for attachment in &mut plan.attachments {
-                let source_path = safe_existing_attachment_storage_path(
-                    &self.attachment_root,
-                    &attachment.source.storage_rel_path,
-                )
-                .ok_or_else(|| {
-                    ChildAgentSpawnError::SnapshotUnavailable(format!(
-                        "source attachment is missing: {}",
-                        attachment.source.original_name
-                    ))
-                })?;
-                let target_rel_path = attachment_storage_rel_path(
-                    &attachment.target.conversation_id,
-                    &attachment.target.message_id,
-                    &attachment.target.id,
-                    &attachment.target.original_name,
-                );
-                attachment.target.storage_rel_path = slash_path(&target_rel_path);
-                let target_path = self.attachment_root.join(&target_rel_path);
-                let parent = target_path.parent().ok_or_else(|| {
-                    ChildAgentSpawnError::SnapshotUnavailable(
-                        "child snapshot attachment path is invalid".to_string(),
-                    )
-                })?;
-                fs::create_dir_all(parent).map_err(|error| {
-                    ChildAgentSpawnError::SnapshotUnavailable(format!(
-                        "failed to create child attachment directory: {error}"
-                    ))
-                })?;
-                let staging_path = parent.join(format!(
-                    ".{}.child-snapshot-{}",
-                    safe_path_component(&attachment.target.id, "attachment"),
-                    Uuid::new_v4()
-                ));
-                staged_files.push((staging_path.clone(), target_path));
-                let copied = fs::copy(source_path, &staging_path).map_err(|error| {
-                    ChildAgentSpawnError::SnapshotUnavailable(format!(
-                        "failed to copy child snapshot attachment: {error}"
-                    ))
-                })?;
-                if copied != attachment.source.size_bytes {
-                    return Err(ChildAgentSpawnError::SnapshotUnavailable(format!(
-                        "child snapshot attachment size changed: {}",
-                        attachment.source.original_name
-                    )));
-                }
-            }
-            for (staging_path, target_path) in &staged_files {
-                fs::rename(staging_path, target_path).map_err(|error| {
-                    ChildAgentSpawnError::SnapshotUnavailable(format!(
-                        "failed to publish child snapshot attachment: {error}"
-                    ))
-                })?;
-                committed_files.push(target_path.clone());
-            }
-            Ok(())
-        })();
-        if let Err(error) = prepare {
-            cleanup_fork_files(&staged_files, &committed_files);
-            return Err(error);
-        }
-        Ok((staged_files, committed_files))
     }
 }
 

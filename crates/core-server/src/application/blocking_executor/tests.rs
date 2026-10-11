@@ -7,6 +7,55 @@ fn executor(workers: usize, count: usize, bytes: usize) -> BlockingExecutor {
 }
 
 #[tokio::test]
+async fn resizing_reservations_is_atomic_and_preserves_settlement_after_overload() {
+    let pool = executor(1, 2, 12);
+    let mut first = pool.try_reserve(4).unwrap();
+    let second = pool.try_reserve(6).unwrap();
+    assert_eq!(first.try_resize(7), Err(BlockingError::Overloaded));
+    assert_eq!(first.try_resize(13), Err(BlockingError::TooLarge));
+    assert_eq!(first.bytes, 4);
+    assert_eq!(pool.0 .0.state.lock().unwrap().bytes, 10);
+    first.try_resize(6).unwrap();
+    assert_eq!(pool.0 .0.state.lock().unwrap().bytes, 12);
+    assert!(matches!(
+        pool.try_reserve(0),
+        Err(BlockingError::Overloaded)
+    ));
+    drop(second);
+    pool.close();
+    first.try_resize(12).unwrap();
+    assert_eq!(first.submit(|| "settled").wait().await, Ok("settled"));
+    pool.shutdown().await;
+    assert_eq!(pool.0 .0.state.lock().unwrap().bytes, 0);
+}
+
+#[tokio::test]
+async fn shrinking_wakes_capacity_waiter_and_final_shutdown_rejects_resize() {
+    let pool = executor(1, 2, 10);
+    let mut first = pool.try_reserve(10).unwrap();
+    let waiting = pool.clone();
+    let next = tokio::spawn(async move { waiting.reserve(6).await });
+    tokio::task::yield_now().await;
+    assert!(!next.is_finished());
+    first.try_resize(4).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    pool.shutdown_submitted().await;
+    assert_eq!(first.try_resize(1), Err(BlockingError::Closed));
+    assert_eq!(first.bytes, 4);
+    assert_eq!(
+        first.submit(|| panic!("late mutation")).wait().await,
+        Err(BlockingError::Closed)
+    );
+    drop(second);
+    assert_eq!(pool.0 .0.state.lock().unwrap().bytes, 0);
+    assert_eq!(pool.0 .0.state.lock().unwrap().jobs, 0);
+}
+
+#[tokio::test]
 async fn paired_reservations_are_atomic_and_tail_retains_its_budget() {
     let pool = executor(1, 4, 12);
     let (first, tail) = pool.reserve_pair(4).await.unwrap();

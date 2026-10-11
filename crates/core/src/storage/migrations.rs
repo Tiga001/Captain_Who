@@ -1011,11 +1011,13 @@ mod tests {
             } else {
                 rusqlite::hooks::Authorization::Allow
             }
-        }));
+        }))
+        .unwrap();
         assert!(run_migrations(&c).is_err());
         c.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        );
+        )
+        .unwrap();
         assert_eq!(read_schema_version(&c).unwrap(), 65);
         validate_schema_fingerprint(&c, V65_SCHEMA_FINGERPRINT).unwrap();
         run_migrations(&c).unwrap();

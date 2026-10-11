@@ -4,6 +4,7 @@ use crate::application::agent_support::{
     AgentProviderTransitionOperationStatus, AgentProviderTransitionReason,
     AgentProviderTransitionRecovery,
 };
+use crate::application::blocking_executor::{BlockingError, BlockingReservation};
 use mycopilot_core::storage::models::{
     ChatConversationRecord, ModelConfigRecord, ModelSettingsSnapshot,
 };
@@ -46,6 +47,28 @@ struct PreparedProviderTransition {
 enum ProviderTransitionPreparation {
     Ready(Box<PreparedProviderTransition>),
     Blocked(AgentProviderTransitionPreflightOutput),
+}
+
+struct ProviderTransitionCapacity {
+    preparation: BlockingReservation,
+    completion: BlockingReservation,
+    retained_bytes: usize,
+}
+
+fn provider_transition_work_bytes(value: &impl serde::Serialize) -> Result<usize, String> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buffer.len());
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).map_err(|error| error.to_string())?;
+    Ok(count.0.saturating_mul(2).saturating_add(8192))
 }
 
 impl AgentService {
@@ -168,6 +191,9 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if self.runtime_stopping.load(Ordering::Acquire) {
+            return Err("Agent runtime is shutting down.".to_string().into());
+        }
         if workflow && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
             return Err("Organization delivery is shutting down.".to_string().into());
         }
@@ -306,6 +332,27 @@ impl AgentService {
         )
         .map_err(|_| "无法建立安全的历史压缩任务。".to_string())?;
 
+        // No accepted receipt or background owner exists until BOTH physical phases have
+        // bounded capacity. The completion reservation remains owned across the model await;
+        // unlike a Turn, provider transitions do not have a separate logical concurrency permit.
+        let retained_bytes =
+            provider_transition_work_bytes(&(prefix, &prefix.model_source_items, &receipt))?;
+        let capacity = (|| {
+            let preparation = self.blocking_work.preparation.try_reserve(retained_bytes)?;
+            let completion = self.blocking_work.completion.try_reserve(retained_bytes)?;
+            Ok::<_, crate::application::blocking_executor::BlockingError>(
+                ProviderTransitionCapacity {
+                    preparation,
+                    completion,
+                    retained_bytes,
+                },
+            )
+        })()
+        .map_err(|error| {
+            eprintln!("provider transition physical admission refused: {error}");
+            AgentServiceError::from("无法启动历史压缩，请稍后重试。".to_string())
+        })?;
+
         {
             let mut transitions = self
                 .provider_transitions
@@ -348,11 +395,15 @@ impl AgentService {
         emit_provider_transition_notification(&notifications, &running);
 
         let service = self.clone();
-        let prefix = prefix.clone();
+        let prefix = prepared.prefix.expect("validated compaction prefix");
         let target = prepared.target;
         let conversation = prepared.conversation;
         let conversation_revision = prepared.conversation_revision;
-        tokio::spawn(async move {
+        let mut rejected_receipt = receipt.clone();
+        let rejected_run_id = run_id.clone();
+        let rejected_conversation_id = conversation.id.clone();
+        let rejected_operation_id = operation_id.clone();
+        let spawned = self.provider_transition_tasks.spawn(async move {
             service
                 .run_provider_transition_compaction(
                     operation_id,
@@ -364,9 +415,29 @@ impl AgentService {
                     prefix,
                     receipt,
                     notifications,
+                    capacity,
                 )
                 .await;
         });
+        if let Err(error) = spawned {
+            // Admission and shutdown normally serialize on conversation_admission. Keep a
+            // durable failed receipt if a direct shutdown caller nevertheless closed the owner.
+            let _failure: Result<(), _> = self.fail_provider_transition_receipt(
+                &rejected_run_id,
+                &mut rejected_receipt,
+                AgentError::new(error),
+                None,
+            );
+            self.release_provider_transition_claim(
+                &rejected_conversation_id,
+                &rejected_operation_id,
+            );
+            self.provider_transition_operations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&rejected_operation_id);
+            return Err("无法启动历史压缩，请稍后重试。".to_string().into());
+        }
 
         Ok(running)
     }
@@ -867,15 +938,18 @@ impl AgentService {
         prefix: mycopilot_core::ContextCompactionPrefix,
         mut receipt: ContextCompactionReceipt,
         notifications: CoreServerNotificationSender,
+        capacity: ProviderTransitionCapacity,
     ) {
+        let covered_through_message_id = prefix.covered_through.message_id().to_string();
         let result = self
             .execute_provider_transition_compaction(
                 &run_id,
                 &conversation,
                 conversation_revision,
                 &target,
-                &prefix,
+                prefix,
                 &mut receipt,
+                capacity,
             )
             .await;
         let operation = match result {
@@ -898,9 +972,7 @@ impl AgentService {
                     conversation_updated_at: Some(conversation_updated_at),
                     model_id: Some(target_model_id),
                     summary_id: Some(summary.id),
-                    covered_through_message_id: Some(
-                        prefix.covered_through.message_id().to_string(),
-                    ),
+                    covered_through_message_id: Some(covered_through_message_id.clone()),
                     error: None,
                 }
             }
@@ -921,7 +993,7 @@ impl AgentService {
                 conversation_updated_at: None,
                 model_id: None,
                 summary_id: None,
-                covered_through_message_id: Some(prefix.covered_through.message_id().to_string()),
+                covered_through_message_id: Some(covered_through_message_id.clone()),
                 error: Some(error),
             },
         };
@@ -937,121 +1009,299 @@ impl AgentService {
         self.schedule_async_human_input_deliveries(notifications.clone());
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_provider_transition_compaction(
         &self,
         run_id: &str,
         conversation: &ChatConversationRecord,
         conversation_revision: i64,
         target: &ProviderTransitionTarget,
-        prefix: &mycopilot_core::ContextCompactionPrefix,
+        prefix: mycopilot_core::ContextCompactionPrefix,
         receipt: &mut ContextCompactionReceipt,
+        capacity: ProviderTransitionCapacity,
     ) -> Result<(ContextCompactionSummary, i64), AgentProviderTransitionOperationError> {
-        if let Err(error) = receipt.advance_stage(
-            mycopilot_core::ContextCompactionReceiptStage::Preparing,
-            now_ms(),
-        ) {
-            return self.fail_provider_transition_receipt(
-                run_id,
-                receipt,
-                provider_transition_agent_error(
-                    "provider_transition_generation_failed",
-                    "历史压缩失败，模型未切换。",
-                    &error,
-                ),
-                None,
-            );
-        }
-        if let Err(error) = self
-            .storage
-            .record_context_compaction_receipt(receipt, None)
-        {
-            return self.fail_provider_transition_receipt(
-                run_id,
-                receipt,
-                provider_transition_agent_error(
-                    "provider_transition_generation_failed",
-                    "历史压缩失败，模型未切换。",
-                    &error,
-                ),
-                None,
-            );
-        }
-        if let Err(error) = receipt.attach_prepared_prefix(prefix, now_ms()) {
-            return self.fail_provider_transition_receipt(
-                run_id,
-                receipt,
-                provider_transition_agent_error(
-                    "provider_transition_generation_failed",
-                    "历史压缩失败，模型未切换。",
-                    &error,
-                ),
-                None,
-            );
-        }
-        if let Err(error) = self
-            .storage
-            .record_context_compaction_receipt(receipt, None)
-        {
-            return self.fail_provider_transition_receipt(
-                run_id,
-                receipt,
-                provider_transition_agent_error(
-                    "provider_transition_generation_failed",
-                    "历史压缩失败，模型未切换。",
-                    &error,
-                ),
-                None,
-            );
-        }
-
-        let continuity = match ContextContinuitySnapshot::from_prefix(prefix) {
-            Ok(continuity) => continuity,
+        let prefix = Arc::new(prefix);
+        let ProviderTransitionCapacity {
+            preparation,
+            mut completion,
+            retained_bytes,
+        } = capacity;
+        let service = self.clone();
+        let prepared_prefix = Arc::clone(&prefix);
+        let prepared_run = run_id.to_string();
+        let mut prepared_receipt = receipt.clone();
+        let project_for_model = self.context_compaction_summary_generator.is_none();
+        let prepared = preparation
+            .submit(move || {
+                let result = service.prepare_provider_transition_compaction(
+                    &prepared_run,
+                    prepared_prefix,
+                    &mut prepared_receipt,
+                    project_for_model,
+                );
+                (prepared_receipt, result)
+            })
+            .wait()
+            .await;
+        let request = match prepared {
+            Ok((updated, result)) => {
+                *receipt = updated;
+                match result {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return self
+                            .fail_provider_transition_receipt_async(
+                                run_id,
+                                receipt,
+                                error,
+                                None,
+                                completion,
+                                retained_bytes,
+                            )
+                            .await
+                    }
+                }
+            }
+            Err(error @ (BlockingError::Closed | BlockingError::Cancelled)) => {
+                return self
+                    .fail_provider_transition_receipt_async(
+                        run_id,
+                        receipt,
+                        AgentError::new(error.to_string()),
+                        None,
+                        completion,
+                        retained_bytes,
+                    )
+                    .await;
+            }
             Err(error) => {
-                return self.fail_provider_transition_receipt(
+                return Err(self.provider_transition_worker_failure(receipt, error.to_string()))
+            }
+        };
+        // The regular generator wrapper performs synchronous projection on first poll. It has
+        // already been done by preparation above; only the actual model await belongs here.
+        let generator = self
+            .context_compaction_summary_generator
+            .clone()
+            .unwrap_or_else(|| {
+                let generator =
+                    AgentContextCompactionModelGenerator::from_chat_input(&target.generator_input);
+                Arc::new(move |request, cancellation| {
+                    let generator = generator.clone();
+                    Box::pin(async move { generator.generate(request, cancellation).await })
+                })
+            });
+        let cancellation = self.provider_transition_tasks.cancellation();
+        if let Err(error) = cancellation.check() {
+            return self
+                .fail_provider_transition_receipt_async(
                     run_id,
                     receipt,
+                    error,
+                    None,
+                    completion,
+                    retained_bytes,
+                )
+                .await;
+        }
+        let generated = tokio::select! {
+            // Preserve known usage when completed generation races the shutdown fence.
+            biased;
+            result = generator(request, cancellation.clone()) => result,
+            _ = cancellation.cancelled() => Err(AgentError::cancelled()),
+        };
+        let generated = match generated {
+            Ok(generated) => generated,
+            Err(error) => {
+                let observation = error.model_request_observation().cloned();
+                let error = if error.is_cancelled() {
+                    error
+                } else {
                     provider_transition_agent_error(
                         "provider_transition_generation_failed",
                         "历史压缩失败，模型未切换。",
                         &error,
-                    ),
-                    None,
-                )
+                    )
+                };
+                return self
+                    .fail_provider_transition_receipt_async(
+                        run_id,
+                        receipt,
+                        error,
+                        observation.as_ref(),
+                        completion,
+                        retained_bytes,
+                    )
+                    .await;
             }
         };
-        let request = AgentContextCompactionGenerationRequest {
+        // The accepted prefix was already counted before the RPC published its receipt.
+        // Reuse that budget; do not serialize long history again on a Tokio worker.
+        let completion_bytes =
+            provider_transition_work_bytes(&(&*receipt, &generated.draft, &generated.observation))
+                .map(|generated_bytes| retained_bytes.saturating_add(generated_bytes));
+        let resized = completion_bytes.and_then(|bytes| {
+            completion
+                .try_resize(bytes)
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = resized {
+            let observation = generated.observation;
+            drop(generated.draft);
+            return self
+                .fail_provider_transition_receipt_async(
+                    run_id,
+                    receipt,
+                    AgentError::new(error),
+                    Some(&observation),
+                    completion,
+                    retained_bytes,
+                )
+                .await;
+        }
+        let service = self.clone();
+        let run_id = run_id.to_string();
+        let expected_model_id = conversation.model_id.clone();
+        let expected_updated_at = conversation.updated_at;
+        let target_model_id = target.model.id.clone();
+        let target_protocol_revision = target.protocol_revision.clone();
+        let mut completion_receipt = receipt.clone();
+        // This owner joins the actual mutation. Dropping an outer shutdown waiter never cancels
+        // this task or changes an in-flight commit into a claimed rollback.
+        match completion
+            .submit(move || {
+                let result = service.commit_provider_transition_compaction(
+                    &run_id,
+                    &prefix,
+                    &mut completion_receipt,
+                    generated,
+                    expected_model_id.as_deref(),
+                    expected_updated_at,
+                    conversation_revision,
+                    &target_model_id,
+                    &target_protocol_revision,
+                );
+                (completion_receipt, result)
+            })
+            .wait()
+            .await
+        {
+            Ok((updated, result)) => {
+                *receipt = updated;
+                result
+            }
+            Err(error) => Err(self.provider_transition_worker_failure(receipt, error.to_string())),
+        }
+    }
+
+    fn prepare_provider_transition_compaction(
+        &self,
+        run_id: &str,
+        prefix: Arc<mycopilot_core::ContextCompactionPrefix>,
+        receipt: &mut ContextCompactionReceipt,
+        project_for_model: bool,
+    ) -> Result<AgentContextCompactionGenerationRequest, AgentError> {
+        let cancellation = self.provider_transition_tasks.cancellation();
+        cancellation.check()?;
+        if let Err(error) = receipt.advance_stage(
+            mycopilot_core::ContextCompactionReceiptStage::Preparing,
+            now_ms(),
+        ) {
+            return Err(provider_transition_agent_error(
+                "provider_transition_generation_failed",
+                "历史压缩失败，模型未切换。",
+                &error,
+            ));
+        }
+        if let Err(error) = self
+            .storage
+            .record_context_compaction_receipt(receipt, None)
+        {
+            return Err(provider_transition_agent_error(
+                "provider_transition_generation_failed",
+                "历史压缩失败，模型未切换。",
+                &error,
+            ));
+        }
+        if let Err(error) = receipt.attach_prepared_prefix(&prefix, now_ms()) {
+            return Err(provider_transition_agent_error(
+                "provider_transition_generation_failed",
+                "历史压缩失败，模型未切换。",
+                &error,
+            ));
+        }
+        if let Err(error) = self
+            .storage
+            .record_context_compaction_receipt(receipt, None)
+        {
+            return Err(provider_transition_agent_error(
+                "provider_transition_generation_failed",
+                "历史压缩失败，模型未切换。",
+                &error,
+            ));
+        }
+
+        let continuity = match ContextContinuitySnapshot::from_prefix(&prefix) {
+            Ok(continuity) => continuity,
+            Err(error) => {
+                return Err(provider_transition_agent_error(
+                    "provider_transition_generation_failed",
+                    "历史压缩失败，模型未切换。",
+                    &error,
+                ))
+            }
+        };
+        let mut request = AgentContextCompactionGenerationRequest {
             operation_id: receipt.operation_id.clone(),
             run_id: run_id.to_string(),
-            conversation_id: conversation.id.clone(),
+            conversation_id: prefix.conversation_id.clone(),
             assistant_message_id: receipt.assistant_message_id.clone(),
             request_index: 1,
-            prefix: Arc::new(prefix.clone()),
+            prefix: Arc::clone(&prefix),
             continuity,
             source_input_tokens: receipt.plan.source_input_tokens,
             uncovered_tail_input_tokens: 0,
             target_replacement_tokens: receipt.plan.target_replacement_tokens,
         };
-        let generator = self
-            .context_compaction_summary_generator
-            .clone()
-            .unwrap_or_else(|| self.model_context_compaction_generator(&target.generator_input));
-        let cancellation = AgentCancellationToken::new();
-        let generated = match generator(request, cancellation).await {
-            Ok(generated) => generated,
-            Err(error) => {
-                let observation = error.model_request_observation().cloned();
-                return self.fail_provider_transition_receipt(
-                    run_id,
-                    receipt,
-                    provider_transition_agent_error(
+        if project_for_model {
+            request.prefix = match self
+                .storage
+                .project_context_compaction_prefix_for_model(&prefix)
+            {
+                Ok(projected) => Arc::new(projected),
+                Err(error) => {
+                    return Err(provider_transition_agent_error(
                         "provider_transition_generation_failed",
                         "历史压缩失败，模型未切换。",
-                        &error,
-                    ),
-                    observation.as_ref(),
-                );
-            }
-        };
+                        &AgentError::new(error),
+                    ))
+                }
+            };
+        }
+        Ok(request)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_provider_transition_compaction(
+        &self,
+        run_id: &str,
+        prefix: &mycopilot_core::ContextCompactionPrefix,
+        receipt: &mut ContextCompactionReceipt,
+        generated: AgentContextCompactionGenerationOutput,
+        expected_model_id: Option<&str>,
+        expected_updated_at: i64,
+        conversation_revision: i64,
+        target_model_id: &str,
+        target_protocol_revision: &str,
+    ) -> Result<(ContextCompactionSummary, i64), AgentProviderTransitionOperationError> {
+        if let Err(error) = self.provider_transition_tasks.cancellation().check() {
+            return self.fail_provider_transition_receipt(
+                run_id,
+                receipt,
+                error,
+                Some(&generated.observation),
+            );
+        }
         if let Err(error) = receipt.advance_stage(
             mycopilot_core::ContextCompactionReceiptStage::Committing,
             now_ms(),
@@ -1104,11 +1354,11 @@ impl AgentService {
                 generated.draft,
                 &applied,
                 &generated.observation,
-                conversation.model_id.as_deref(),
-                conversation.updated_at,
+                expected_model_id,
+                expected_updated_at,
                 conversation_revision,
-                &target.model.id,
-                &target.protocol_revision,
+                target_model_id,
+                target_protocol_revision,
             ) {
             Ok(committed) => committed,
             Err(error) => {
@@ -1141,21 +1391,85 @@ impl AgentService {
         Ok((summary, conversation_updated_at))
     }
 
-    fn fail_provider_transition_receipt(
+    #[allow(clippy::too_many_arguments)]
+    async fn fail_provider_transition_receipt_async<T>(
+        &self,
+        run_id: &str,
+        receipt: &mut ContextCompactionReceipt,
+        error: AgentError,
+        observation: Option<&mycopilot_core::ModelRequestObservation>,
+        mut reservation: BlockingReservation,
+        retained_bytes: usize,
+    ) -> Result<T, AgentProviderTransitionOperationError> {
+        let safe = provider_transition_operation_error_from_agent_error(&error);
+        let resized = provider_transition_work_bytes(&(&*receipt, observation)).and_then(|bytes| {
+            reservation
+                .try_resize(bytes.max(retained_bytes))
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = resized {
+            self.provider_transition_worker_failure(receipt, error);
+            return Err(safe);
+        }
+        let service = self.clone();
+        let run_id = run_id.to_string();
+        let observation = observation.cloned();
+        let mut settled = receipt.clone();
+        match reservation
+            .submit(move || {
+                let result: Result<(), _> = service.fail_provider_transition_receipt(
+                    &run_id,
+                    &mut settled,
+                    error,
+                    observation.as_ref(),
+                );
+                (settled, result)
+            })
+            .wait()
+            .await
+        {
+            Ok((updated, _)) => *receipt = updated,
+            Err(error) => {
+                self.provider_transition_worker_failure(receipt, error.to_string());
+            }
+        }
+        Err(safe)
+    }
+
+    fn provider_transition_worker_failure(
+        &self,
+        receipt: &ContextCompactionReceipt,
+        error: String,
+    ) -> AgentProviderTransitionOperationError {
+        self.provider_transition_tasks.record_failure(format!(
+            "provider transition {} could not finish owned blocking work: {error}; durable receipt retained for recovery",
+            receipt.operation_id,
+        ));
+        provider_transition_operation_error_from_agent_error(&AgentError::new(error))
+    }
+
+    fn fail_provider_transition_receipt<T>(
         &self,
         _run_id: &str,
         receipt: &mut ContextCompactionReceipt,
         error: AgentError,
         observation: Option<&mycopilot_core::ModelRequestObservation>,
-    ) -> Result<(ContextCompactionSummary, i64), AgentProviderTransitionOperationError> {
+    ) -> Result<T, AgentProviderTransitionOperationError> {
         let safe = provider_transition_operation_error_from_agent_error(&error);
-        if receipt
+        let settlement = receipt
             .complete_error(&error, observation, now_ms())
-            .is_ok()
-        {
-            let _ = self
-                .storage
-                .record_context_compaction_receipt(receipt, observation);
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                self.storage
+                    .record_context_compaction_receipt(receipt, observation)
+            });
+        if let Err(error) = settlement {
+            // The last durable receipt remains recovery evidence. Never claim clean shutdown
+            // after losing terminal state/known usage, and never leak storage internals to UI.
+            self.provider_transition_tasks.record_failure(format!(
+                "provider transition {} terminal receipt was not persisted: {error}",
+                receipt.operation_id,
+            ));
         }
         Err(safe)
     }

@@ -905,38 +905,40 @@ fn build_single_conversation_fork_plan_at_point(
         Vec::new()
     } else {
         let runtime_tool_call_id_map = Arc::new(tool_call_id_map.clone());
-        provider_continuation_repository::list_replayable_for_conversation(connection, &source.id)
-            .map_err(database_error)?
-            .into_iter()
-            .filter_map(|record| {
-                let target_assistant_message_id =
-                    message_id_map.get(&record.assistant_message_id)?.clone();
-                Some((record, target_assistant_message_id))
+        provider_continuation_repository::list_replayable_for_conversation_readonly(
+            connection, &source.id,
+        )
+        .map_err(database_error)?
+        .into_iter()
+        .filter_map(|record| {
+            let target_assistant_message_id =
+                message_id_map.get(&record.assistant_message_id)?.clone();
+            Some((record, target_assistant_message_id))
+        })
+        .map(|(record, target_assistant_message_id)| {
+            let source_ref = ProviderContinuationRef::parse(
+                crate::protocol::PROVIDER_CONTINUATION_REF_VERSION,
+                record.continuation_id.clone(),
+            )?;
+            let target_run_id = mapped_id(
+                &run_id_map,
+                &record.run_id,
+                "Provider continuation 所属运行",
+            )?;
+            Ok(ProviderContinuationForkMapping {
+                source_ref,
+                source_record: record.clone(),
+                source_conversation_id: source.id.clone(),
+                source_assistant_message_id: record.assistant_message_id.clone(),
+                source_run_id: record.run_id.clone(),
+                request_index: record.request_index,
+                target_conversation_id: target_conversation_id.clone(),
+                target_assistant_message_id,
+                target_run_id,
+                runtime_tool_call_id_map: Arc::clone(&runtime_tool_call_id_map),
             })
-            .map(|(record, target_assistant_message_id)| {
-                let source_ref = ProviderContinuationRef::parse(
-                    crate::protocol::PROVIDER_CONTINUATION_REF_VERSION,
-                    record.continuation_id.clone(),
-                )?;
-                let target_run_id = mapped_id(
-                    &run_id_map,
-                    &record.run_id,
-                    "Provider continuation 所属运行",
-                )?;
-                Ok(ProviderContinuationForkMapping {
-                    source_ref,
-                    source_record: record.clone(),
-                    source_conversation_id: source.id.clone(),
-                    source_assistant_message_id: record.assistant_message_id.clone(),
-                    source_run_id: record.run_id.clone(),
-                    request_index: record.request_index,
-                    target_conversation_id: target_conversation_id.clone(),
-                    target_assistant_message_id,
-                    target_run_id,
-                    runtime_tool_call_id_map: Arc::clone(&runtime_tool_call_id_map),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?
+        })
+        .collect::<Result<Vec<_>, String>>()?
     };
 
     let collaboration_root = source_root.map(|source_root| CollaborationRootFork {

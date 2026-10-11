@@ -75,6 +75,19 @@ impl Registry {
         }
     }
 
+    fn resize(&mut self, entry: &QueueEntry, bytes: usize) {
+        if let Some(queue) = self.queues.get_mut(&entry.key) {
+            if let Some((_, previous_bytes)) = queue.entries.get_mut(&entry.id) {
+                queue.bytes = queue
+                    .bytes
+                    .saturating_sub(*previous_bytes)
+                    .saturating_add(bytes);
+                *previous_bytes = bytes;
+                queue.peak_bytes = queue.peak_bytes.max(queue.bytes);
+            }
+        }
+    }
+
     fn snapshot(&mut self, now: Instant) -> Vec<QueueMeasurement> {
         self.queues
             .iter_mut()
@@ -129,6 +142,16 @@ impl Drop for QueueEntry {
     }
 }
 
+impl QueueEntry {
+    /// Update retained-byte accounting without changing queue identity, age or count.
+    pub fn resize_bytes(&mut self, bytes: usize) {
+        registry()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .resize(self, bytes);
+    }
+}
+
 /// Resets window peaks, retaining pending entries/age across windows. No application effects.
 pub fn take_queue_snapshot() -> Vec<QueueMeasurement> {
     if !super::enabled() {
@@ -143,6 +166,26 @@ pub fn take_queue_snapshot() -> Vec<QueueMeasurement> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resizing_retains_age_and_count_and_reports_the_peak_bytes() {
+        let now = Instant::now();
+        let mut registry = Registry::default();
+        let entry = registry
+            .insert(("blocking", "completion"), 10, now)
+            .unwrap();
+        registry.resize(&entry, 90);
+        registry.resize(&entry, 20);
+        let snapshot = registry.snapshot(now + std::time::Duration::from_millis(40));
+        assert_eq!(
+            (snapshot[0].count, snapshot[0].bytes, snapshot[0].oldest_us),
+            (1, 20, 40_000)
+        );
+        assert_eq!((snapshot[0].peak_count, snapshot[0].peak_bytes), (1, 90));
+        registry.remove(&entry);
+        assert_eq!(registry.snapshot(now)[0].bytes, 0);
+        std::mem::forget(entry);
+    }
 
     #[test]
     fn pending_age_survives_window_reset_and_removed_entries_release_bytes() {

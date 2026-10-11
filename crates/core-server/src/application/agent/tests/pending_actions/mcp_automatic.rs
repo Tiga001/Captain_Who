@@ -127,7 +127,13 @@ fn auto_mcp_agent_input(storage: &StorageService, run_id: &str, action_id: &str)
 async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs_terminal_row() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("auto-mcp-journal.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -315,7 +321,13 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
 async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_failure() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("auto-mcp-outcome-unknown.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -397,7 +409,13 @@ async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_f
 fn startup_adopts_a_terminal_auto_mcp_result_when_its_dispatch_journal_lagged() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("auto-mcp-terminal-adoption.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -500,7 +518,13 @@ fn startup_adopts_a_terminal_auto_mcp_result_when_its_dispatch_journal_lagged() 
 fn startup_rejects_malformed_terminal_auto_mcp_result_instead_of_adopting_it() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("auto-mcp-malformed-terminal.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -571,7 +595,13 @@ fn startup_rejects_malformed_terminal_auto_mcp_result_instead_of_adopting_it() {
 fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unknown() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("auto-mcp-restart.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

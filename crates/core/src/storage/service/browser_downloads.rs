@@ -284,7 +284,11 @@ mod tests {
     #[test]
     fn browser_download_settings_use_cas_and_store_a_canonical_directory() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let selected = root.path().join("selected");
         fs::create_dir(&selected).unwrap();
 
@@ -322,7 +326,11 @@ mod tests {
     #[test]
     fn browser_download_history_accepts_an_empty_regular_file() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let path = root.path().join("empty.txt");
         fs::write(&path, []).unwrap();
 
@@ -351,7 +359,11 @@ mod tests {
     #[test]
     fn browser_download_history_preserves_ownership_and_clears_only_metadata() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         service
             .save_project(ProjectRecord::with_primary_folder(
                 "project-a".to_string(),
@@ -449,7 +461,11 @@ mod tests {
     #[test]
     fn projectless_agent_download_is_shared_only_inside_its_agent_tree() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         for conversation_id in [
             "conversation-root",
             "conversation-child",

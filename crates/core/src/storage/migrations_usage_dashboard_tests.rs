@@ -162,9 +162,11 @@ fn usage_dashboard_v71_mid_migration_failure_rolls_back_backfill_and_schema() {
             ..
         } => Authorization::Deny,
         _ => Authorization::Allow,
-    }));
+    }))
+    .unwrap();
     assert!(run_migrations(&c).is_err());
-    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
     // SQLite counts rolled-back changes, proving the failure occurred after backfill writes.
     assert!(c.total_changes() > changes);
     assert_eq!(read_schema_version(&c).unwrap(), 70);

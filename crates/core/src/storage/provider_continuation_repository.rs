@@ -533,6 +533,19 @@ pub(crate) fn list_replayable_for_conversation(
         ));
     }
     promote_recoverable_staged_for_conversation(connection, conversation_id)?;
+    list_replayable_for_conversation_readonly(connection, conversation_id)
+}
+
+/// Exact envelopes only. Recovery promotion belongs to the writer before opening this snapshot.
+pub(crate) fn list_replayable_for_conversation_readonly(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<StoredProviderContinuationRecord>> {
+    if !valid_identity(conversation_id) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid provider continuation conversation scope".to_string(),
+        ));
+    }
     let mut statement = connection.prepare(
         "
         SELECT continuation.continuation_id,
@@ -1078,7 +1091,7 @@ pub(crate) fn settle_staged_conversation_message_in_connection(
 /// independently reject an incomplete projection, while provider-neutral split projections must
 /// still observe the provider boundary. Staged rows with no matching durable call remain invisible
 /// orphans.
-fn promote_recoverable_staged_for_conversation(
+pub(crate) fn promote_recoverable_staged_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<usize> {

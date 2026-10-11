@@ -5,7 +5,13 @@ use super::*;
 fn startup_reconciliation_failure_prevents_agent_service_startup() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -130,7 +136,13 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
 #[test]
 fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-orphaned-trace".to_string(),

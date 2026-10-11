@@ -1058,13 +1058,15 @@ mod tests {
         let mut empty = trace("empty", "empty", "empty");
         empty.items.clear();
         replace_trace(&mut connection, &empty, 1, 2).unwrap();
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                column_name: "item_json" | "event_json",
-                ..
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    column_name: "item_json" | "event_json",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
         for id in ["active", "completed", "failed", "cancelled"] {
             assert_eq!(
                 get_trace_next_sequence_for_message(&connection, id).unwrap(),
@@ -1204,17 +1206,19 @@ mod tests {
         insert_conversation(&connection, "empty");
 
         // This denies actual SQL reads, so fetching bodies and discarding them still fails.
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read { table_name, .. }
-                if !matches!(
-                    table_name,
-                    "conversation_turn_traces" | "conversation_turn_rewrites"
-                ) =>
-            {
-                Authorization::Deny
-            }
-            _ => Authorization::Allow,
-        }));
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read { table_name, .. }
+                    if !matches!(
+                        table_name,
+                        "conversation_turn_traces" | "conversation_turn_rewrites"
+                    ) =>
+                {
+                    Authorization::Deny
+                }
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
         assert!(get_in_progress_turn_identity(&connection, "active")
             .unwrap()
             .is_some());

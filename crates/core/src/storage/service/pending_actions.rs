@@ -1,4 +1,5 @@
 include!("pending_actions/identity.rs");
+include!("pending_actions/write_admission.rs");
 include!("pending_actions/file_effects.rs");
 
 // Each shard extends the same StorageService; no transaction, CAS, lease, or effect boundary moves

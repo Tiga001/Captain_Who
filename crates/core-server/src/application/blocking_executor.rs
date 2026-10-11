@@ -293,6 +293,32 @@ pub(crate) struct BlockingReservation {
     _probe: Option<mycopilot_core::performance::QueueEntry>,
 }
 impl BlockingReservation {
+    /// Adjust this owned reservation before submission without joining another wait queue.
+    /// Failure preserves the old budget so an accepted operation can still settle a small
+    /// durable error. Closing new admission permits settlement; final shutdown rejects it.
+    pub(crate) fn try_resize(&mut self, bytes: usize) -> Result<(), BlockingError> {
+        let shared = &self.owner.0;
+        let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.allow_reserved {
+            return Err(BlockingError::Closed);
+        }
+        if bytes > shared.max_bytes {
+            return Err(BlockingError::TooLarge);
+        }
+        let other_bytes = state.bytes - self.bytes;
+        if bytes > shared.max_bytes - other_bytes {
+            return Err(BlockingError::Overloaded);
+        }
+        state.bytes = other_bytes + bytes;
+        self.bytes = bytes;
+        if let Some(probe) = &mut self._probe {
+            probe.resize_bytes(bytes);
+        }
+        drop(state);
+        shared.changed.notify_waiters();
+        Ok(())
+    }
+
     pub(crate) fn submit<T, F>(mut self, work: F) -> BlockingTask<T>
     where
         T: Send + 'static,

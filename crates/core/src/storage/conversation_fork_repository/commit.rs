@@ -6,11 +6,23 @@ pub(crate) fn commit_fork_plan(
     commit_fork_plan_with_provider_continuations(connection, plan, &[])
 }
 
+#[cfg(test)]
 pub(crate) fn commit_fork_plan_with_provider_continuations(
     connection: &mut Connection,
     plan: &ConversationForkPlan,
     provider_continuations: &[PreparedProviderContinuationClone],
 ) -> Result<(), ConversationForkError> {
+    commit_prepared_fork_plan(connection, plan, provider_continuations, |_| Ok(())).map(|_| ())
+}
+
+/// Commits a prepared fork after rechecking its source cut inside the write transaction.
+/// The callback must perform only database validation; staging and cryptography precede it.
+pub(crate) fn commit_prepared_fork_plan(
+    connection: &mut Connection,
+    plan: &ConversationForkPlan,
+    provider_continuations: &[PreparedProviderContinuationClone],
+    validate_source: impl FnOnce(&Connection) -> Result<(), ConversationForkError>,
+) -> Result<String, ConversationForkError> {
     if provider_continuations.len() != plan.provider_continuation_mappings.len() {
         return Err("Provider continuation 克隆未完整准备，已安全取消整个分叉。"
             .to_string()
@@ -41,6 +53,25 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
+    // A concurrent identical request may finish while this operation stages its own files.
+    // Resolve the receipt before source validation: an already committed branch remains a
+    // valid idempotent result even if its source subsequently changes.
+    if let Some(existing) =
+        find_existing_fork(&transaction, &plan.request_id).map_err(database_error)?
+    {
+        if existing.source_conversation_id != plan.source_conversation_id
+            || existing.source_fork_point != plan.source_fork_point
+        {
+            return Err("同一个分叉请求 ID 不能用于不同的历史快照。"
+                .to_string()
+                .into());
+        }
+        validate_existing_fork_authority(&transaction, &existing)?;
+        let target = existing.target_conversation_id;
+        transaction.commit().map_err(database_error)?;
+        return Ok(target);
+    }
+    validate_source(&transaction)?;
     let source_conversation_ids = std::iter::once(plan.source_conversation_id.clone())
         .chain(
             plan.members
@@ -104,7 +135,7 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
     insert_conversation(&transaction, &plan.target)?;
     // Workflow provenance is independent of Agent-tree snapshot authorization and survives
     // ordinary standalone forks as well as collaboration-root forks.
-    for (source_message_id,target_message_id) in &plan.message_id_map {
+    for (source_message_id, target_message_id) in &plan.message_id_map {
         transaction.execute("INSERT INTO workflow_mail_message_origins(message_id,conversation_id,input_id) SELECT ?1,?2,input_id FROM workflow_mail_message_origins WHERE message_id=?3 AND conversation_id=?4",params![target_message_id,plan.target.id,source_message_id,plan.source_conversation_id]).map_err(database_error)?;
     }
 
@@ -199,8 +230,6 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         apply_history_facts(&transaction, member.history.as_ref())?;
     }
     settle_forked_member_lifecycles(&transaction, plan)?;
-    transaction
-        .commit()
-        .map_err(database_error)
-        .map_err(Into::into)
+    transaction.commit().map_err(database_error)?;
+    Ok(plan.target.id.clone())
 }

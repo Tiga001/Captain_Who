@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) mod fork_staging;
+
 #[derive(Debug, Clone)]
 struct AgentTreeDeletionScope {
     root_agent_id: String,
@@ -606,15 +608,6 @@ fn conversation_matches_previous_after_removing(
                     && current.status == previous.status
                     && current.agent_run_json == previous.agent_run_json
             })
-}
-
-pub(super) fn cleanup_fork_files(staged: &[(PathBuf, PathBuf)], committed: &[PathBuf]) {
-    for (staging_path, _) in staged {
-        let _ = fs::remove_file(staging_path);
-    }
-    for target_path in committed {
-        let _ = fs::remove_file(target_path);
-    }
 }
 
 // Each shard extends the same StorageService. Method bodies retain the exact transaction owner and

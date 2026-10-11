@@ -1,22 +1,43 @@
 impl StorageService {
+    fn with_conversation_read_snapshot<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut connection = self.state.read_connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let result = read(&transaction)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(result)
+    }
+
     pub fn load_projects(&self) -> Result<Vec<ProjectRecord>, String> {
-        let connection = self.state.connection()?;
-        project_repository::list_projects(&connection).map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            project_repository::list_projects(connection).map_err(storage_error)
+        })
     }
 
     pub fn save_project(&self, project: ProjectRecord) -> Result<ProjectRecord, String> {
-        let connection = self.state.connection()?;
-        project_repository::save_project(&connection, project.clone()).map_err(storage_error)?;
-        Ok(project)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(&project)?,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                project_repository::save_project(connection, project.clone())
+                    .map_err(storage_error)?;
+                Ok(project)
+            },
+        )?
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
+        let attachments = self.state.write_sync(
+            project_id.len().saturating_add(256),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
         let attachments =
-            attachment_repository::list_project_deletion_attachments(&connection, project_id)
+            attachment_repository::list_project_deletion_attachments(connection, project_id)
                 .map_err(storage_error)?;
-        let tree_scopes = project_agent_tree_deletion_scopes(&connection, project_id)?;
-        let conversation_ids = project_conversation_ids(&connection, project_id)?;
+        let tree_scopes = project_agent_tree_deletion_scopes(connection, project_id)?;
+        let conversation_ids = project_conversation_ids(connection, project_id)?;
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
             invalidate_workflows_before_trigger_disabled_deletion(&transaction, &conversation_ids)?;
@@ -56,7 +77,7 @@ impl StorageService {
             project_repository::delete_project(&transaction, project_id).map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
         } else {
-            with_agent_deletion_transaction(&mut connection, |transaction| {
+            with_agent_deletion_transaction(connection, |transaction| {
                 automation_repository::prepare_tombstoned_automations_for_project_delete(
                     transaction,
                     project_id,
@@ -122,7 +143,9 @@ impl StorageService {
                 Ok(())
             })?;
         }
-        drop(connection);
+        Ok::<_, String>(attachments)
+            },
+        )??;
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted project attachment files: {error}");
         }
@@ -137,13 +160,15 @@ impl StorageService {
     fn load_conversations_with_projection_evidence(
         &self,
     ) -> Result<(Vec<ChatConversationRecord>, ConversationProjectionEvidence), String> {
-        let connection = self.state.connection()?;
+        let mut pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection.transaction().map_err(storage_error)?;
         let mut conversations =
             chat_repository::list_active_conversations(&connection).map_err(storage_error)?;
         let preview_attachments =
             self.attach_message_attachments(&connection, &mut conversations)?;
         let evidence = attach_message_guidance_timelines(&connection, &mut conversations)?;
-        drop(connection);
+        connection.commit().map_err(storage_error)?;
+        drop(pooled_connection);
         self.hydrate_message_attachment_previews(&mut conversations, preview_attachments);
         Ok((conversations, evidence))
     }
@@ -152,58 +177,73 @@ impl StorageService {
     /// backend-owned continuation boundary. Internal Agent callers continue to use the plain
     /// conversation record and never consume presentation lineage.
     pub fn load_conversation_views(&self) -> Result<Vec<ChatConversationViewRecord>, String> {
-        let (conversations, evidence) = self.load_conversations_with_projection_evidence()?;
-        let connection = self.state.connection()?;
-        conversations
-            .into_iter()
-            .filter_map(
-                |conversation| match agent_graph_repository::get_agent_node_by_conversation(
-                    &connection,
-                    &conversation.id,
-                ) {
-                    Ok(Some(node)) if node.parent_agent_id.is_some() => None,
-                    Ok(_) => Some(Ok(conversation)),
-                    Err(error) => Some(Err(error.to_string())),
-                },
-            )
-            .collect::<Result<Vec<_>, String>>()?
-            .into_iter()
-            .map(|conversation| {
-                let mut conversation = conversation;
-                chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
+        let (mut conversations, previews, origins) =
+            self.with_conversation_read_snapshot(|connection| {
+                let conversations = chat_repository::list_active_conversations(connection)
                     .map_err(storage_error)?;
-                evidence.retain_workflow_top_level_messages(&mut conversation);
-                let continuation_origin = conversation_fork_repository::get_continuation_origin(
-                    &connection,
-                    &conversation.id,
-                )
-                .map_err(storage_error)?;
-                Ok(ChatConversationViewRecord {
+                let mut conversations = conversations
+                    .into_iter()
+                    .filter_map(|conversation| {
+                        match agent_graph_repository::get_agent_node_by_conversation(
+                            connection,
+                            &conversation.id,
+                        ) {
+                            Ok(Some(node)) if node.parent_agent_id.is_some() => None,
+                            Ok(_) => Some(Ok(conversation)),
+                            Err(error) => Some(Err(error.to_string())),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let previews = self.attach_message_attachments(connection, &mut conversations)?;
+                let evidence = attach_message_guidance_timelines(connection, &mut conversations)?;
+                let mut origins = Vec::with_capacity(conversations.len());
+                for conversation in &mut conversations {
+                    chat_repository::retain_user_facing_root_messages(connection, conversation)
+                        .map_err(storage_error)?;
+                    evidence.retain_workflow_top_level_messages(conversation);
+                    origins.push(
+                        conversation_fork_repository::get_continuation_origin(
+                            connection,
+                            &conversation.id,
+                        )
+                        .map_err(storage_error)?,
+                    );
+                }
+                Ok((conversations, previews, origins))
+            })?;
+        self.hydrate_message_attachment_previews(&mut conversations, previews);
+        Ok(conversations
+            .into_iter()
+            .zip(origins)
+            .map(
+                |(conversation, continuation_origin)| ChatConversationViewRecord {
                     conversation,
                     continuation_origin,
-                })
-            })
-            .collect()
+                },
+            )
+            .collect())
     }
 
     pub fn load_conversation_meta(
         &self,
         conversation_id: &str,
     ) -> Result<Option<ChatConversationMetaRecord>, String> {
-        chat_repository::get_conversation_meta(&*self.state.connection()?, conversation_id)
+        chat_repository::get_conversation_meta(&*self.state.read_connection()?, conversation_id)
             .map_err(storage_error)
     }
 
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
-        let connection = self.state.connection()?;
-        chat_repository::list_root_conversation_metas(&connection).map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            chat_repository::list_root_conversation_metas(connection).map_err(storage_error)
+        })
     }
 
     pub fn load_running_conversation_summaries(
         &self,
     ) -> Result<Vec<crate::storage::models::RunningConversationSummary>, String> {
-        let connection = self.state.connection()?;
-        chat_repository::list_running_conversation_summaries(&connection).map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            chat_repository::list_running_conversation_summaries(connection).map_err(storage_error)
+        })
     }
 
     pub fn load_conversation(
@@ -224,7 +264,8 @@ impl StorageService {
         ),
         String,
     > {
-        let connection = self.state.connection()?;
+        let mut pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection.transaction().map_err(storage_error)?;
         let reading = crate::performance::Span::new("storage.read_decode", "conversation_messages");
         let mut conversation =
             chat_repository::get_active_conversation(&connection, conversation_id)
@@ -239,7 +280,8 @@ impl StorageService {
         } else {
             (Vec::new(), ConversationProjectionEvidence::default())
         };
-        drop(connection);
+        connection.commit().map_err(storage_error)?;
+        drop(pooled_connection);
         if let Some(conversation) = &mut conversation {
             self.hydrate_message_attachment_previews(
                 std::slice::from_mut(conversation),
@@ -273,7 +315,7 @@ impl StorageService {
         {
             return Err("Invalid observer history page request.".into());
         }
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let (mut conversation, has_more) = match message_limit {
             Some(limit) => chat_repository::get_active_conversation_page(
@@ -380,7 +422,7 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<(Option<ChatConversationRecord>, Option<i64>), String> {
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let revision = transaction
             .query_row(
@@ -415,33 +457,52 @@ impl StorageService {
     }
 
     pub fn conversation_revision(&self, conversation_id: &str) -> Result<Option<i64>, String> {
-        let connection = self.state.connection()?;
-        connection
-            .query_row(
-                "SELECT revision FROM conversations WHERE id = ?1",
-                [conversation_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            connection
+                .query_row(
+                    "SELECT revision FROM conversations WHERE id = ?1",
+                    [conversation_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(storage_error)
+        })
     }
 
     pub fn load_conversation_view(
         &self,
         conversation_id: &str,
     ) -> Result<Option<ChatConversationViewRecord>, String> {
-        let (conversation, evidence) =
-            self.load_conversation_with_projection_evidence(conversation_id)?;
-        let Some(mut conversation) = conversation else {
+        let Some((mut conversation, previews, continuation_origin)) = self
+            .with_conversation_read_snapshot(|connection| {
+                let Some(mut conversation) =
+                    chat_repository::get_active_conversation(connection, conversation_id)
+                        .map_err(storage_error)?
+                else {
+                    return Ok(None);
+                };
+                let previews = self.attach_message_attachments(
+                    connection,
+                    std::slice::from_mut(&mut conversation),
+                )?;
+                let evidence = attach_message_guidance_timelines(
+                    connection,
+                    std::slice::from_mut(&mut conversation),
+                )?;
+                chat_repository::retain_user_facing_root_messages(connection, &mut conversation)
+                    .map_err(storage_error)?;
+                evidence.retain_workflow_top_level_messages(&mut conversation);
+                let continuation_origin = conversation_fork_repository::get_continuation_origin(
+                    connection,
+                    conversation_id,
+                )
+                .map_err(storage_error)?;
+                Ok(Some((conversation, previews, continuation_origin)))
+            })?
+        else {
             return Ok(None);
         };
-        let connection = self.state.connection()?;
-        chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
-            .map_err(storage_error)?;
-        evidence.retain_workflow_top_level_messages(&mut conversation);
-        let continuation_origin =
-            conversation_fork_repository::get_continuation_origin(&connection, conversation_id)
-                .map_err(storage_error)?;
+        self.hydrate_message_attachment_previews(std::slice::from_mut(&mut conversation), previews);
         Ok(Some(ChatConversationViewRecord {
             conversation,
             continuation_origin,
@@ -474,7 +535,8 @@ impl StorageService {
             &point,
         )
         .map_err(conversation_fork_repository::ConversationForkError::Other)?;
-        let mut connection = self.state.connection()?;
+        let mut pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection.transaction().map_err(storage_error)?;
         if let Some(existing) =
             conversation_fork_repository::find_existing_fork(&connection, &request_id)
                 .map_err(storage_error)?
@@ -499,7 +561,8 @@ impl StorageService {
                 &connection,
                 std::slice::from_mut(&mut conversation),
             )?;
-            drop(connection);
+            connection.commit().map_err(storage_error)?;
+            drop(pooled_connection);
             self.hydrate_message_attachment_previews(
                 std::slice::from_mut(&mut conversation),
                 preview_attachments,
@@ -507,14 +570,41 @@ impl StorageService {
             return Ok(conversation);
         }
 
-        let mut plan = conversation_fork_repository::build_fork_plan_at_point(
-            &connection,
+        connection.commit().map_err(storage_error)?;
+        drop(pooled_connection);
+        self.state.write_sync(
+            request_id
+                .len()
+                .saturating_add(source_conversation_id.len())
+                .saturating_add(512),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| -> Result<(), conversation_fork_repository::ConversationForkError> {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                conversation_fork_repository::recover_fork_source_continuations(
+                    &transaction,
+                    &source_conversation_id,
+                    &point,
+                )?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(())
+            },
+        )??;
+        let mut pooled_connection = self.state.read_connection()?;
+        let transaction = pooled_connection.transaction().map_err(storage_error)?;
+        let mut plan = conversation_fork_repository::build_fork_plan_at_point_readonly(
+            &transaction,
             &request_id,
             &source_conversation_id,
             &point,
             now_ms(),
         )?;
-        ensure_project_reference_exists(&connection, plan.target.project_id.as_deref())?;
+        ensure_project_reference_exists(&transaction, plan.target.project_id.as_deref())?;
+        let source_versions = fork_staging::ForkSourceVersions::capture(self, &transaction, &plan)?;
+        transaction.commit().map_err(storage_error)?;
+        // Neither the database connection nor a read snapshot survives cryptography/file I/O.
+        drop(pooled_connection);
         let provider_continuations = if plan.provider_continuation_mappings.is_empty() {
             Vec::new()
         } else {
@@ -534,76 +624,59 @@ impl StorageService {
                 })?
         };
 
-        let mut staged_files = Vec::new();
-        let mut committed_files = Vec::new();
-        let prepare_files = (|| -> Result<(), String> {
-            for attachment in plan.attachments_mut() {
-                let source_path = safe_existing_attachment_storage_path(
-                    &self.attachment_root,
-                    &attachment.source.storage_rel_path,
-                )
-                .ok_or_else(|| {
-                    format!("原任务附件文件不存在：{}", attachment.source.original_name)
-                })?;
-                let target_rel_path = attachment_storage_rel_path(
-                    &attachment.target.conversation_id,
-                    &attachment.target.message_id,
-                    &attachment.target.id,
-                    &attachment.target.original_name,
-                );
-                attachment.target.storage_rel_path = slash_path(&target_rel_path);
-                let target_path = self.attachment_root.join(&target_rel_path);
-                let parent = target_path
-                    .parent()
-                    .ok_or_else(|| "新任务附件路径无效。".to_string())?;
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("创建新任务附件目录失败：{error}"))?;
-                let staging_path = parent.join(format!(
-                    ".{}.forking-{}",
-                    safe_path_component(&attachment.target.id, "attachment"),
-                    Uuid::new_v4()
-                ));
-                staged_files.push((staging_path.clone(), target_path));
-                let copied = fs::copy(&source_path, &staging_path)
-                    .map_err(|error| format!("复制附件失败：{error}"))?;
-                if copied != attachment.source.size_bytes {
-                    return Err(format!(
-                        "复制附件时大小不一致：{}",
-                        attachment.source.original_name
-                    ));
+        let mut files = fork_staging::ForkFiles::prepare(&self.attachment_root, &mut plan)?;
+        let estimated_bytes = plan.estimated_bytes()?.saturating_add(
+            provider_continuations
+                .iter()
+                .map(|clone| clone.record.ciphertext.len())
+                .sum::<usize>(),
+        );
+        let target_id = self.state.write_sync(
+            estimated_bytes,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| -> Result<String, conversation_fork_repository::ConversationForkError> {
+                let target_id = match conversation_fork_repository::commit_prepared_fork_plan(
+                    connection,
+                    &plan,
+                    &provider_continuations,
+                    |transaction| source_versions.validate(self, transaction, &plan),
+                ) {
+                    Ok(target_id) => target_id,
+                    Err(error) => {
+                        // A failed COMMIT/rollback or an unreadable database cannot prove that no
+                        // durable reference exists. Preserve published bytes in that case; report
+                        // the original failure rather than inventing a successful receipt.
+                        let unreferenced = connection.is_autocommit()
+                            && connection
+                                .query_row(
+                                    "SELECT NOT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+                                    [&plan.target.id],
+                                    |row| row.get::<_, bool>(0),
+                                )
+                                .unwrap_or(false);
+                        if !unreferenced {
+                            files.mark_committed();
+                        }
+                        return Err(error);
+                    }
+                };
+                if target_id == plan.target.id {
+                    // This must precede fallible read-back: committed rows already own these files.
+                    files.mark_committed();
                 }
-            }
-            for (staging_path, target_path) in &staged_files {
-                fs::rename(staging_path, target_path)
-                    .map_err(|error| format!("提交新任务附件失败：{error}"))?;
-                committed_files.push(target_path.clone());
-            }
-            Ok(())
-        })();
-        if let Err(error) = prepare_files {
-            drop(connection);
-            cleanup_fork_files(&staged_files, &committed_files);
-            return Err(error.into());
-        }
-
-        if let Err(error) =
-            conversation_fork_repository::commit_fork_plan_with_provider_continuations(
-                &mut connection,
-                &plan,
-                &provider_continuations,
-            )
-        {
-            drop(connection);
-            cleanup_fork_files(&staged_files, &committed_files);
-            return Err(error);
-        }
-        let mut conversation = chat_repository::get_conversation(&connection, &plan.target.id)
+                Ok(target_id)
+            },
+        )??;
+        let mut pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection.transaction().map_err(storage_error)?;
+        let mut conversation = chat_repository::get_conversation(&connection, &target_id)
             .map_err(storage_error)?
             .ok_or_else(|| "新任务创建后无法重新读取。".to_string())?;
         let preview_attachments =
             self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))?;
-        drop(connection);
+        connection.commit().map_err(storage_error)?;
+        drop(pooled_connection);
         self.hydrate_message_attachment_previews(
             std::slice::from_mut(&mut conversation),
             preview_attachments,
@@ -638,7 +711,8 @@ impl StorageService {
         mut conversation: ChatConversationRecord,
     ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
     {
-        let connection = self.state.connection()?;
+        let mut pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection.transaction().map_err(storage_error)?;
         chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
             .map_err(storage_error)?;
         let evidence =
@@ -648,6 +722,7 @@ impl StorageService {
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
                 .map_err(storage_error)?;
+        connection.commit().map_err(storage_error)?;
         Ok(ChatConversationViewRecord {
             conversation,
             continuation_origin,
@@ -655,8 +730,9 @@ impl StorageService {
     }
 
     pub fn search_chats(&self, input: &ChatSearchInput) -> Result<Vec<ChatSearchResult>, String> {
-        let connection = self.state.connection()?;
-        chat_search_repository::search_chats(&connection, input).map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            chat_search_repository::search_chats(connection, input).map_err(storage_error)
+        })
     }
 
     pub fn project_agent_messages_for_model(
@@ -664,70 +740,76 @@ impl StorageService {
         conversation_id: &str,
         messages: &mut Vec<crate::AgentChatMessage>,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        let workflow_inputs =
-            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
-                &connection,
-                conversation_id,
-            )?;
-        let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
-            .iter()
-            .map(|(message_id, _)| message_id.as_str())
-            .collect();
-        // These chat bubbles are a UI projection. Their non-human model input is the
-        // durable WorkflowDelivery trace, or the workflow inbox before first sampling.
-        messages.retain(|message| {
-            !message
-                .message_id
-                .as_deref()
-                .is_some_and(|id| workflow_message_ids.contains(id))
-        });
-        for message in messages.iter_mut().filter(|message| message.role == "user") {
-            let Some(message_id) = message.message_id.as_deref() else {
-                continue;
-            };
-            if let Some(content) = crate::storage::agent_message_model_projection::project_message(
-                &connection,
-                conversation_id,
-                message_id,
-            )? {
-                message.content = content;
+        self.with_conversation_read_snapshot(|connection| {
+            let workflow_inputs =
+                crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+                    connection,
+                    conversation_id,
+                )?;
+            let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
+                .iter()
+                .map(|(message_id, _)| message_id.as_str())
+                .collect();
+            // These chat bubbles are a UI projection. Their non-human model input is the
+            // durable WorkflowDelivery trace, or the workflow inbox before first sampling.
+            messages.retain(|message| {
+                !message
+                    .message_id
+                    .as_deref()
+                    .is_some_and(|id| workflow_message_ids.contains(id))
+            });
+            for message in messages.iter_mut().filter(|message| message.role == "user") {
+                let Some(message_id) = message.message_id.as_deref() else {
+                    continue;
+                };
+                if let Some(content) =
+                    crate::storage::agent_message_model_projection::project_message(
+                        connection,
+                        conversation_id,
+                        message_id,
+                    )?
+                {
+                    message.content = content;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn project_history_conversation_for_model(
         &self,
         conversation: &mut ChatConversationRecord,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        let workflow_inputs =
-            crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
-                &connection,
-                &conversation.id,
-            )?;
-        let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
-            .iter()
-            .map(|(message_id, _)| message_id.as_str())
-            .collect();
-        conversation
-            .messages
-            .retain(|message| !workflow_message_ids.contains(message.id.as_str()));
-        for message in conversation
-            .messages
-            .iter_mut()
-            .filter(|message| message.role == "user")
-        {
-            if let Some(content) = crate::storage::agent_message_model_projection::project_message(
-                &connection,
-                &conversation.id,
-                &message.id,
-            )? {
-                message.content = content;
+        self.with_conversation_read_snapshot(|connection| {
+            let workflow_inputs =
+                crate::storage::workflow_execution_repository::delivery_origins_for_conversation(
+                    connection,
+                    &conversation.id,
+                )?;
+            let workflow_message_ids: std::collections::HashSet<_> = workflow_inputs
+                .iter()
+                .map(|(message_id, _)| message_id.as_str())
+                .collect();
+            conversation
+                .messages
+                .retain(|message| !workflow_message_ids.contains(message.id.as_str()));
+            for message in conversation
+                .messages
+                .iter_mut()
+                .filter(|message| message.role == "user")
+            {
+                if let Some(content) =
+                    crate::storage::agent_message_model_projection::project_message(
+                        connection,
+                        &conversation.id,
+                        &message.id,
+                    )?
+                {
+                    message.content = content;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub(crate) fn read_compacted_conversation_history(
@@ -735,12 +817,13 @@ impl StorageService {
         conversation_id: &str,
         summary_id: &str,
     ) -> Result<conversation_history_repository::CompactedHistorySnapshot, String> {
-        let connection = self.state.connection()?;
-        conversation_history_repository::read_compacted_snapshot(
-            &connection,
-            conversation_id,
-            summary_id,
-        )
+        self.with_conversation_read_snapshot(|connection| {
+            conversation_history_repository::read_compacted_snapshot(
+                connection,
+                conversation_id,
+                summary_id,
+            )
+        })
     }
 
     pub fn search_conversation_history(
@@ -750,25 +833,26 @@ impl StorageService {
         filter: &conversation_history_repository::ConversationHistorySearchFilter,
         limit: usize,
     ) -> Result<Vec<conversation_history_repository::ConversationHistorySearchHit>, String> {
-        let connection = self.state.connection()?;
-        let mut hits = conversation_history_repository::search_records(
-            &connection,
-            conversation_id,
-            query,
-            filter,
-            limit,
-        )
-        .map_err(storage_error)?;
-        for hit in &mut hits {
-            crate::storage::agent_message_model_projection::project_history_preview(
-                &connection,
+        self.with_conversation_read_snapshot(|connection| {
+            let mut hits = conversation_history_repository::search_records(
+                connection,
                 conversation_id,
-                &hit.reference,
-                &mut hit.preview,
-                &mut hit.preview_truncated,
-            )?;
-        }
-        Ok(hits)
+                query,
+                filter,
+                limit,
+            )
+            .map_err(storage_error)?;
+            for hit in &mut hits {
+                crate::storage::agent_message_model_projection::project_history_preview(
+                    connection,
+                    conversation_id,
+                    &hit.reference,
+                    &mut hit.preview,
+                    &mut hit.preview_truncated,
+                )?;
+            }
+            Ok(hits)
+        })
     }
 
     pub fn conversation_history_around(
@@ -781,25 +865,26 @@ impl StorageService {
         Option<Vec<conversation_history_repository::ConversationHistoryTimelineRecord>>,
         String,
     > {
-        let connection = self.state.connection()?;
-        let mut records = conversation_history_repository::records_around(
-            &connection,
-            conversation_id,
-            reference,
-            before,
-            after,
-        )
-        .map_err(storage_error)?;
-        for record in records.iter_mut().flatten() {
-            crate::storage::agent_message_model_projection::project_history_preview(
-                &connection,
+        self.with_conversation_read_snapshot(|connection| {
+            let mut records = conversation_history_repository::records_around(
+                connection,
                 conversation_id,
-                &record.reference,
-                &mut record.preview,
-                &mut record.preview_truncated,
-            )?;
-        }
-        Ok(records)
+                reference,
+                before,
+                after,
+            )
+            .map_err(storage_error)?;
+            for record in records.iter_mut().flatten() {
+                crate::storage::agent_message_model_projection::project_history_preview(
+                    connection,
+                    conversation_id,
+                    &record.reference,
+                    &mut record.preview,
+                    &mut record.preview_truncated,
+                )?;
+            }
+            Ok(records)
+        })
     }
 
     pub fn conversation_history_range(
@@ -812,25 +897,26 @@ impl StorageService {
         Option<Vec<conversation_history_repository::ConversationHistoryTimelineRecord>>,
         String,
     > {
-        let connection = self.state.connection()?;
-        let mut records = conversation_history_repository::records_in_range(
-            &connection,
-            conversation_id,
-            start,
-            end,
-            limit,
-        )
-        .map_err(storage_error)?;
-        for record in records.iter_mut().flatten() {
-            crate::storage::agent_message_model_projection::project_history_preview(
-                &connection,
+        self.with_conversation_read_snapshot(|connection| {
+            let mut records = conversation_history_repository::records_in_range(
+                connection,
                 conversation_id,
-                &record.reference,
-                &mut record.preview,
-                &mut record.preview_truncated,
-            )?;
-        }
-        Ok(records)
+                start,
+                end,
+                limit,
+            )
+            .map_err(storage_error)?;
+            for record in records.iter_mut().flatten() {
+                crate::storage::agent_message_model_projection::project_history_preview(
+                    connection,
+                    conversation_id,
+                    &record.reference,
+                    &mut record.preview,
+                    &mut record.preview_truncated,
+                )?;
+            }
+            Ok(records)
+        })
     }
 
     pub fn conversation_history_tool_exchange(
@@ -841,15 +927,16 @@ impl StorageService {
         run_id: Option<&str>,
     ) -> Result<Option<Vec<conversation_history_repository::ConversationHistoryRecord>>, String>
     {
-        let connection = self.state.connection()?;
-        conversation_history_repository::get_tool_exchange(
-            &connection,
-            conversation_id,
-            reference,
-            call_id,
-            run_id,
-        )
-        .map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            conversation_history_repository::get_tool_exchange(
+                connection,
+                conversation_id,
+                reference,
+                call_id,
+                run_id,
+            )
+            .map_err(storage_error)
+        })
     }
 
     pub fn read_conversation_history_record(
@@ -857,18 +944,22 @@ impl StorageService {
         conversation_id: &str,
         reference: &conversation_history_repository::ConversationHistoryRecordRef,
     ) -> Result<Option<conversation_history_repository::ConversationHistoryRecord>, String> {
-        let connection = self.state.connection()?;
-        let mut record =
-            conversation_history_repository::read_record(&connection, conversation_id, reference)
-                .map_err(storage_error)?;
-        if let Some(record) = record.as_mut() {
-            crate::storage::agent_message_model_projection::project_history_record(
-                &connection,
+        self.with_conversation_read_snapshot(|connection| {
+            let mut record = conversation_history_repository::read_record(
+                connection,
                 conversation_id,
-                record,
-            )?;
-        }
-        Ok(record)
+                reference,
+            )
+            .map_err(storage_error)?;
+            if let Some(record) = record.as_mut() {
+                crate::storage::agent_message_model_projection::project_history_record(
+                    connection,
+                    conversation_id,
+                    record,
+                )?;
+            }
+            Ok(record)
+        })
     }
 
     pub fn archive_conversation_tool_result(
@@ -876,21 +967,47 @@ impl StorageService {
         input: conversation_history_archive_repository::ConversationHistoryArchiveInput,
     ) -> Result<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor, String>
     {
-        let mut connection = self.state.connection()?;
-        conversation_history_archive_repository::store_archive(&mut connection, &input)
-            .map_err(storage_error)
+        let prepared = conversation_history_archive_repository::prepare_archive(
+            &input,
+            crate::storage::execution::WRITE_BYTES,
+        )
+        .map_err(storage_error)?;
+        self.state.write_sync(
+            prepared.estimated_bytes(),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                conversation_history_archive_repository::store_prepared_archive(
+                    connection, &prepared,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn delete_unreferenced_exact_conversation_tool_result(
         &self,
         input: conversation_history_archive_repository::ConversationHistoryArchiveInput,
     ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
-        conversation_history_archive_repository::delete_unreferenced_exact_archive(
-            &mut connection,
-            &input,
-        )
-        .map_err(storage_error)
+        let bytes = [
+            &input.conversation_id,
+            &input.assistant_message_id,
+            &input.call_id,
+            &input.tool,
+            &input.content_type,
+            &input.content,
+        ]
+        .into_iter()
+        .fold(256usize, |total, value| total.saturating_add(value.len()));
+        self.state.write_sync(
+            bytes,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                conversation_history_archive_repository::delete_unreferenced_exact_archive(
+                    connection, &input,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn archive_conversation_tool_result_file(
@@ -898,9 +1015,21 @@ impl StorageService {
         input: conversation_history_archive_repository::ConversationHistoryArchiveFileInput,
     ) -> Result<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor, String>
     {
-        let mut connection = self.state.connection()?;
-        conversation_history_archive_repository::store_archive_file(&mut connection, &input)
-            .map_err(storage_error)
+        let prepared = conversation_history_archive_repository::prepare_archive_file(
+            &input,
+            crate::storage::execution::WRITE_BYTES,
+        )
+        .map_err(storage_error)?;
+        self.state.write_sync(
+            prepared.estimated_bytes(),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                conversation_history_archive_repository::store_prepared_archive(
+                    connection, &prepared,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn find_conversation_history_archive_for_trace_item(
@@ -912,23 +1041,24 @@ impl StorageService {
         Option<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor>,
         String,
     > {
-        let connection = self.state.connection()?;
-        if conversation_turn_rewrite_repository::superseded_message_ids(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)?
-        .contains(assistant_message_id)
-        {
-            return Ok(None);
-        }
-        conversation_history_archive_repository::find_archive_for_trace_item(
-            &connection,
-            conversation_id,
-            assistant_message_id,
-            sequence,
-        )
-        .map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            if conversation_turn_rewrite_repository::superseded_message_ids(
+                connection,
+                conversation_id,
+            )
+            .map_err(storage_error)?
+            .contains(assistant_message_id)
+            {
+                return Ok(None);
+            }
+            conversation_history_archive_repository::find_archive_for_trace_item(
+                connection,
+                conversation_id,
+                assistant_message_id,
+                sequence,
+            )
+            .map_err(storage_error)
+        })
     }
 
     pub fn find_conversation_history_archive_by_ref(
@@ -939,26 +1069,27 @@ impl StorageService {
         Option<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor>,
         String,
     > {
-        let connection = self.state.connection()?;
-        let archive = conversation_history_archive_repository::find_archive_by_ref(
-            &connection,
-            conversation_id,
-            archive_ref,
-        )
-        .map_err(storage_error)?;
-        let Some(archive) = archive else {
-            return Ok(None);
-        };
-        if conversation_turn_rewrite_repository::superseded_message_ids(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)?
-        .contains(&archive.assistant_message_id)
-        {
-            return Ok(None);
-        }
-        Ok(Some(archive))
+        self.with_conversation_read_snapshot(|connection| {
+            let archive = conversation_history_archive_repository::find_archive_by_ref(
+                connection,
+                conversation_id,
+                archive_ref,
+            )
+            .map_err(storage_error)?;
+            let Some(archive) = archive else {
+                return Ok(None);
+            };
+            if conversation_turn_rewrite_repository::superseded_message_ids(
+                connection,
+                conversation_id,
+            )
+            .map_err(storage_error)?
+            .contains(&archive.assistant_message_id)
+            {
+                return Ok(None);
+            }
+            Ok(Some(archive))
+        })
     }
 
     pub fn find_conversation_history_archive_match_char_offset(
@@ -967,32 +1098,33 @@ impl StorageService {
         archive_ref: &str,
         query: &str,
     ) -> Result<Option<u64>, String> {
-        let connection = self.state.connection()?;
-        let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
-            &connection,
-            conversation_id,
-            archive_ref,
-        )
-        .map_err(storage_error)?
-        else {
-            return Ok(None);
-        };
-        if conversation_turn_rewrite_repository::superseded_message_ids(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)?
-        .contains(&archive.assistant_message_id)
-        {
-            return Ok(None);
-        }
-        conversation_history_archive_repository::find_archive_match_char_offset(
-            &connection,
-            conversation_id,
-            archive_ref,
-            query,
-        )
-        .map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
+                connection,
+                conversation_id,
+                archive_ref,
+            )
+            .map_err(storage_error)?
+            else {
+                return Ok(None);
+            };
+            if conversation_turn_rewrite_repository::superseded_message_ids(
+                connection,
+                conversation_id,
+            )
+            .map_err(storage_error)?
+            .contains(&archive.assistant_message_id)
+            {
+                return Ok(None);
+            }
+            conversation_history_archive_repository::find_archive_match_char_offset(
+                connection,
+                conversation_id,
+                archive_ref,
+                query,
+            )
+            .map_err(storage_error)
+        })
     }
 
     pub fn read_conversation_history_archive_page(
@@ -1006,34 +1138,35 @@ impl StorageService {
         Option<conversation_history_archive_repository::ConversationHistoryArchivePage>,
         String,
     > {
-        let connection = self.state.connection()?;
-        let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
-            &connection,
-            conversation_id,
-            archive_ref,
-        )
-        .map_err(storage_error)?
-        else {
-            return Ok(None);
-        };
-        if conversation_turn_rewrite_repository::superseded_message_ids(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)?
-        .contains(&archive.assistant_message_id)
-        {
-            return Ok(None);
-        }
-        conversation_history_archive_repository::read_archive_page(
-            &connection,
-            conversation_id,
-            archive_ref,
-            unit,
-            start,
-            maximum,
-        )
-        .map_err(storage_error)
+        self.with_conversation_read_snapshot(|connection| {
+            let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
+                connection,
+                conversation_id,
+                archive_ref,
+            )
+            .map_err(storage_error)?
+            else {
+                return Ok(None);
+            };
+            if conversation_turn_rewrite_repository::superseded_message_ids(
+                connection,
+                conversation_id,
+            )
+            .map_err(storage_error)?
+            .contains(&archive.assistant_message_id)
+            {
+                return Ok(None);
+            }
+            conversation_history_archive_repository::read_archive_page(
+                connection,
+                conversation_id,
+                archive_ref,
+                unit,
+                start,
+                maximum,
+            )
+            .map_err(storage_error)
+        })
     }
 
     /// Reads a Host-internal Archive audit route within the caller's conversation boundary.

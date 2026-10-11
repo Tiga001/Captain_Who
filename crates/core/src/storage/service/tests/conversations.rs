@@ -72,7 +72,15 @@ pub(super) fn trace_storage_selects<T>(
         let mut connection = service.state.connection().unwrap();
         connection.trace(Some(record_storage_sql));
     }
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection.trace(Some(record_storage_sql))
+        });
     let output = operation();
+    service
+        .state
+        .configure_read_connections_for_test(|connection| connection.trace(None));
     {
         let mut connection = service.state.connection().unwrap();
         connection.trace(None);
@@ -945,7 +953,11 @@ fn loading_a_durable_image_generation_result_restores_the_live_renderer_contract
 fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
     let fixture = tempfile::tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let service = StorageService::open(&database_path).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &database_path,
+        Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let source_conversation_id = "conversation-fork-continue-source";
     let source_assistant_message_id = "assistant-fork-continue-source";
     let mut source = conversation(source_conversation_id, None, "user-fork-continue-source");
@@ -1101,7 +1113,11 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
     // Reopen to cover the real application lifecycle: Turn admission must receive the raw
     // immutable snapshot, while a renderer read continues to receive the reconstructed Timeline.
     drop(service);
-    let reopened = StorageService::open(&database_path).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &database_path,
+        Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let (candidate, revision) = reopened
         .load_conversation_for_turn(&forked_conversation_id)
         .unwrap();

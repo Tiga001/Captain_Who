@@ -118,26 +118,43 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
             serde_json::json!({"checkpoint": "x".repeat(64 * 1024)}).to_string();
         service.store_pending_agent_action(unrelated).unwrap();
     }
-    service.state.connection().unwrap().authorizer(Some(
-        |context: rusqlite::hooks::AuthContext<'_>| match context.action {
-            rusqlite::hooks::AuthAction::Read {
-                table_name: "agent_pending_actions",
-                column_name: "agent_input_json",
-            } => rusqlite::hooks::Authorization::Deny,
-            _ => rusqlite::hooks::Authorization::Allow,
-        },
-    ));
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection
+                .authorizer(Some(
+                    |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+                        rusqlite::hooks::AuthAction::Read {
+                            table_name: "agent_pending_actions",
+                            column_name: "agent_input_json",
+                        } => rusqlite::hooks::Authorization::Deny,
+                        _ => rusqlite::hooks::Authorization::Allow,
+                    },
+                ))
+                .unwrap();
+        });
     assert!(service
         .pending_agent_action_has_unsettled_predecessor(
             &child_storage_id,
             &["parent-action".to_string()],
         )
         .unwrap());
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection
+                .authorizer(
+                    None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+                )
+                .unwrap();
+        });
     {
         let connection = service.state.connection().unwrap();
-        connection.authorizer(
-            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        );
+        connection
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .unwrap();
         connection
             .execute(
                 "DELETE FROM agent_pending_actions WHERE run_id LIKE 'unrelated-run-%'",

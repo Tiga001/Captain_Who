@@ -365,7 +365,11 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
         .is_some());
     drop(service);
 
-    let reopened = StorageService::open(&database_path).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &database_path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
 }
 

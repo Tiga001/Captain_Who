@@ -9,22 +9,32 @@ impl StorageService {
         &self,
         reconciled_at: i64,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        provider_continuation_repository::reconcile_staged_projections_at_startup(
-            &mut connection,
-            reconciled_at,
-        )
-        .map(|_| ())
-        .map_err(storage_error)
+        self.state.write_sync(
+            1024,
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                provider_continuation_repository::reconcile_staged_projections_at_startup(
+                    connection,
+                    reconciled_at,
+                )
+                .map(|_| ())
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub(crate) fn store_staged_provider_continuation(
         &self,
         record: &provider_continuation_repository::ProviderContinuationEnvelopeRecord,
     ) -> Result<provider_continuation_repository::ProviderContinuationStoreOutcome, String> {
-        let mut connection = self.state.connection()?;
-        provider_continuation_repository::store_staged(&mut connection, record)
-            .map_err(storage_error)
+        self.state.write_sync(
+            provider_envelope_job_bytes(record),
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                provider_continuation_repository::store_staged(connection, record)
+                    .map_err(storage_error)
+            },
+        )?
     }
 
     pub(crate) fn store_staged_provider_continuation_with_projection(
@@ -32,13 +42,16 @@ impl StorageService {
         record: &provider_continuation_repository::ProviderContinuationEnvelopeRecord,
         projection: provider_continuation_repository::ProviderContinuationProjection,
     ) -> Result<provider_continuation_repository::ProviderContinuationStoreOutcome, String> {
-        let mut connection = self.state.connection()?;
-        provider_continuation_repository::store_staged_with_projection(
-            &mut connection,
-            record,
-            projection,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            provider_envelope_job_bytes(record),
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                provider_continuation_repository::store_staged_with_projection(
+                    connection, record, projection,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub(crate) fn promote_staged_provider_continuation(
@@ -47,13 +60,18 @@ impl StorageService {
         promoted_at: i64,
     ) -> Result<provider_continuation_repository::ProviderContinuationPromotionOutcome, String>
     {
-        let mut connection = self.state.connection()?;
-        provider_continuation_repository::promote_staged(
-            &mut connection,
-            continuation_id,
-            promoted_at,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            continuation_id.len() + 1024,
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                provider_continuation_repository::promote_staged(
+                    connection,
+                    continuation_id,
+                    promoted_at,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     #[allow(dead_code)] // Exact-ref integrity lookup; normal hydration uses conversation-wide loading.
@@ -62,7 +80,8 @@ impl StorageService {
         continuation_id: &str,
     ) -> Result<Option<provider_continuation_repository::StoredProviderContinuationRecord>, String>
     {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         provider_continuation_repository::load(&connection, continuation_id).map_err(storage_error)
     }
 
@@ -71,24 +90,48 @@ impl StorageService {
         conversation_id: &str,
     ) -> Result<Vec<provider_continuation_repository::StoredProviderContinuationRecord>, String>
     {
-        let connection = self.state.connection()?;
-        provider_continuation_repository::list_replayable_for_conversation(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)
+        // These lookups also recover durable-but-unpromoted envelopes. Keep their writes and
+        // result in one writer transaction; a query_only reader must never perform promotion.
+        self.state.write_sync(
+            conversation_id.len().saturating_add(256),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let result = provider_continuation_repository::list_replayable_for_conversation(
+                    &transaction,
+                    conversation_id,
+                )
+                .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(result)
+            },
+        )?
     }
 
     pub(crate) fn has_replayable_provider_continuations_for_conversation(
         &self,
         conversation_id: &str,
     ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
-        provider_continuation_repository::has_replayable_for_conversation(
-            &connection,
-            conversation_id,
-        )
-        .map_err(storage_error)
+        // These lookups also recover durable-but-unpromoted envelopes. Keep their writes and
+        // result in one writer transaction; a query_only reader must never perform promotion.
+        self.state.write_sync(
+            conversation_id.len().saturating_add(256),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let result = provider_continuation_repository::has_replayable_for_conversation(
+                    &transaction,
+                    conversation_id,
+                )
+                .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(result)
+            },
+        )?
     }
 
     pub(crate) fn has_released_provider_continuations_for_projections(
@@ -99,7 +142,6 @@ impl StorageService {
             provider_continuation_repository::ProviderContinuationProjection,
         )],
     ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
         let cursors = projections
             .iter()
             .map(|(assistant_message_id, projection)| match projection {
@@ -127,6 +169,8 @@ impl StorageService {
                 }
             })
             .collect::<Vec<_>>();
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         provider_continuation_repository::has_released_for_covered_projections(
             &connection,
             conversation_id,
@@ -140,8 +184,34 @@ impl StorageService {
         continuation_id: &str,
         released_at: i64,
     ) -> Result<provider_continuation_repository::ProviderContinuationReleaseOutcome, String> {
-        let connection = self.state.connection()?;
-        provider_continuation_repository::release(&connection, continuation_id, released_at)
-            .map_err(storage_error)
+        self.state.write_sync(
+            continuation_id.len() + 1024,
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                provider_continuation_repository::release(connection, continuation_id, released_at)
+                    .map_err(storage_error)
+            },
+        )?
     }
+}
+
+fn provider_envelope_job_bytes(
+    record: &provider_continuation_repository::ProviderContinuationEnvelopeRecord,
+) -> usize {
+    record.continuation_id.len()
+        + record.conversation_id.len()
+        + record.assistant_message_id.len()
+        + record.run_id.len()
+        + record.assistant_turn_id.len()
+        + record.assistant_turn_digest.len()
+        + record.provider_protocol_digest.len()
+        + record.payload_digest.len()
+        + record.nonce.len()
+        + record.ciphertext.len()
+        + record
+            .runtime_tool_calls
+            .iter()
+            .map(|c| c.runtime_call_id.len() + 64)
+            .sum::<usize>()
+        + 1024
 }

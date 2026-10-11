@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::{write_size::estimated_json_bytes, StorageWriteClass};
 
 use crate::storage::agent_command_session_repository::{
     AgentCommandSessionCreate, AgentCommandSessionCreateOutcome, AgentCommandSessionModelRead,
@@ -12,6 +13,26 @@ use crate::{
     ConversationCommandSessionLifecyclePhase, ConversationHistoryArchiveTraceMetadata,
     ConversationTurnTrace,
 };
+
+fn command_session_job_bytes(parts: &[&str]) -> usize {
+    parts.iter().fold(512_usize, |bytes, part| {
+        bytes.saturating_add(part.len().saturating_mul(2))
+    })
+}
+fn command_session_terminal_bytes(
+    input: &AgentCommandSessionTerminalUpdate<'_>,
+) -> Result<usize, String> {
+    Ok(command_session_job_bytes(&[
+        input.conversation_id,
+        input.session_id,
+        input.archive_ref.unwrap_or_default(),
+        input.terminal_reason.unwrap_or_default(),
+    ])
+    .saturating_add(estimated_json_bytes(&(
+        input.published_outputs,
+        input.artifact_observation,
+    ))?))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCommandSessionLifecycleAppendOutcome {
@@ -70,7 +91,10 @@ impl StorageService {
             );
         };
 
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         let archive = conversation_history_archive_repository::find_archive_by_ref(
             &connection,
             conversation_id,
@@ -118,9 +142,17 @@ impl StorageService {
         &self,
         input: &AgentCommandSessionCreate,
     ) -> Result<AgentCommandSessionCreateOutcome, String> {
-        let mut connection = self.state.connection()?;
-        agent_command_session_repository::create_session(&mut connection, input)
-            .map_err(storage_error)
+        let estimated_bytes = estimated_json_bytes(&(
+            &input.snapshot,
+            &input.approval_provenance,
+            &input.permission_provenance,
+        ))?
+        .saturating_add(512);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                agent_command_session_repository::create_session(connection, input)
+                    .map_err(storage_error)
+            })?
     }
 
     pub fn mark_agent_command_session_running(
@@ -129,14 +161,17 @@ impl StorageService {
         session_id: &str,
         updated_at: i64,
     ) -> Result<AgentCommandSessionTransitionOutcome, String> {
-        let mut connection = self.state.connection()?;
-        agent_command_session_repository::mark_running(
-            &mut connection,
-            conversation_id,
-            session_id,
-            updated_at,
-        )
-        .map_err(storage_error)
+        let estimated_bytes = command_session_job_bytes(&[conversation_id, session_id]);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                agent_command_session_repository::mark_running(
+                    connection,
+                    conversation_id,
+                    session_id,
+                    updated_at,
+                )
+                .map_err(storage_error)
+            })?
     }
 
     /// Atomically crosses the durable running boundary and records its sidecar audit event.
@@ -146,41 +181,44 @@ impl StorageService {
         session_id: &str,
         updated_at: i64,
     ) -> Result<AgentCommandSessionTransitionOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = agent_command_session_repository::mark_running_in_connection(
-            &transaction,
-            conversation_id,
-            session_id,
-            updated_at,
-        )
-        .map_err(storage_error)?;
-        if matches!(
-            outcome,
-            AgentCommandSessionTransitionOutcome::Updated
-                | AgentCommandSessionTransitionOutcome::Idempotent
-        ) {
-            let record = agent_command_session_repository::get_session(
-                &transaction,
-                conversation_id,
-                session_id,
-            )
-            .map_err(storage_error)?
-            .ok_or_else(|| "命令 Session 在 running 转换期间消失。".to_string())?;
-            conversation_trace_repository::append_command_session_lifecycle_in_connection(
-                &transaction,
-                &record.snapshot.assistant_message_id,
-                conversation_id,
-                started_lifecycle(&record)?,
-                false,
-                updated_at,
-            )
-            .map_err(storage_error)?;
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+        let estimated_bytes = command_session_job_bytes(&[conversation_id, session_id]);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = agent_command_session_repository::mark_running_in_connection(
+                    &transaction,
+                    conversation_id,
+                    session_id,
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+                if matches!(
+                    outcome,
+                    AgentCommandSessionTransitionOutcome::Updated
+                        | AgentCommandSessionTransitionOutcome::Idempotent
+                ) {
+                    let record = agent_command_session_repository::get_session(
+                        &transaction,
+                        conversation_id,
+                        session_id,
+                    )
+                    .map_err(storage_error)?
+                    .ok_or_else(|| "命令 Session 在 running 转换期间消失。".to_string())?;
+                    conversation_trace_repository::append_command_session_lifecycle_in_connection(
+                        &transaction,
+                        &record.snapshot.assistant_message_id,
+                        conversation_id,
+                        started_lifecycle(&record)?,
+                        false,
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                }
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            })?
     }
 
     /// Appends the deterministic `started` event to the lifecycle sidecar journal.
@@ -194,42 +232,49 @@ impl StorageService {
         session_id: &str,
         committed_at: i64,
     ) -> Result<AgentCommandSessionLifecycleAppendOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let Some(record) = agent_command_session_repository::get_session(
-            &transaction,
-            conversation_id,
-            session_id,
-        )
-        .map_err(storage_error)?
-        else {
-            transaction.commit().map_err(storage_error)?;
-            return Ok(AgentCommandSessionLifecycleAppendOutcome::SessionNotFound);
-        };
-        let lifecycle = started_lifecycle(&record)?;
-        let outcome =
-            conversation_trace_repository::append_command_session_lifecycle_in_connection(
-                &transaction,
-                &record.snapshot.assistant_message_id,
-                conversation_id,
-                lifecycle,
-                true,
-                committed_at,
-            )
-            .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(map_lifecycle_outcome(outcome))
+        let estimated_bytes = command_session_job_bytes(&[conversation_id, session_id]);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let Some(record) = agent_command_session_repository::get_session(
+                    &transaction,
+                    conversation_id,
+                    session_id,
+                )
+                .map_err(storage_error)?
+                else {
+                    transaction.commit().map_err(storage_error)?;
+                    return Ok(AgentCommandSessionLifecycleAppendOutcome::SessionNotFound);
+                };
+                let lifecycle = started_lifecycle(&record)?;
+                let outcome =
+                    conversation_trace_repository::append_command_session_lifecycle_in_connection(
+                        &transaction,
+                        &record.snapshot.assistant_message_id,
+                        conversation_id,
+                        lifecycle,
+                        true,
+                        committed_at,
+                    )
+                    .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(map_lifecycle_outcome(outcome))
+            })?
     }
 
     pub fn append_agent_command_session_output(
         &self,
         input: &AgentCommandSessionOutputAppend<'_>,
     ) -> Result<AgentCommandSessionTransitionOutcome, String> {
-        let mut connection = self.state.connection()?;
-        agent_command_session_repository::append_output(&mut connection, input)
-            .map_err(storage_error)
+        let estimated_bytes = command_session_job_bytes(&[input.conversation_id, input.session_id])
+            .saturating_add(estimated_json_bytes(input.chunks)?);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                agent_command_session_repository::append_output(connection, input)
+                    .map_err(storage_error)
+            })?
     }
 
     /// Commits only the operational Session state.
@@ -241,9 +286,12 @@ impl StorageService {
         &self,
         input: &AgentCommandSessionTerminalUpdate<'_>,
     ) -> Result<AgentCommandSessionTransitionOutcome, String> {
-        let mut connection = self.state.connection()?;
-        agent_command_session_repository::commit_terminal(&mut connection, input)
-            .map_err(storage_error)
+        let estimated_bytes = command_session_terminal_bytes(input)?;
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                agent_command_session_repository::commit_terminal(connection, input)
+                    .map_err(storage_error)
+            })?
     }
 
     /// Atomically appends an audit-only terminal item to the existing turn Trace and settles the
@@ -270,50 +318,55 @@ impl StorageService {
         &self,
         input: &AgentCommandSessionTerminalUpdate<'_>,
     ) -> Result<AgentCommandSessionTransitionOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let Some(record) = agent_command_session_repository::get_session(
-            &transaction,
-            input.conversation_id,
-            input.session_id,
-        )
-        .map_err(storage_error)?
-        else {
-            transaction.commit().map_err(storage_error)?;
-            return Ok(AgentCommandSessionTransitionOutcome::NotFound);
-        };
-        let outcome =
-            agent_command_session_repository::commit_terminal_in_connection(&transaction, input)
+        let estimated_bytes = command_session_terminal_bytes(input)?;
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let Some(record) = agent_command_session_repository::get_session(
+                    &transaction,
+                    input.conversation_id,
+                    input.session_id,
+                )
+                .map_err(storage_error)?
+                else {
+                    transaction.commit().map_err(storage_error)?;
+                    return Ok(AgentCommandSessionTransitionOutcome::NotFound);
+                };
+                let outcome = agent_command_session_repository::commit_terminal_in_connection(
+                    &transaction,
+                    input,
+                )
                 .map_err(storage_error)?;
-        if matches!(
-            outcome,
-            AgentCommandSessionTransitionOutcome::Updated
-                | AgentCommandSessionTransitionOutcome::Idempotent
-        ) {
-            append_required_lifecycle(
-                &transaction,
-                &record,
-                started_lifecycle(&record)?,
-                true,
-                input.committed_at,
-            )?;
-            append_required_lifecycle(
-                &transaction,
-                &record,
-                terminal_lifecycle(&transaction, &record, input)?,
-                true,
-                input.committed_at,
-            )?;
-            agent_command_session_repository::prune_terminal_sessions_in_connection(
-                &transaction,
-                input.conversation_id,
-            )
-            .map_err(storage_error)?;
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+                if matches!(
+                    outcome,
+                    AgentCommandSessionTransitionOutcome::Updated
+                        | AgentCommandSessionTransitionOutcome::Idempotent
+                ) {
+                    append_required_lifecycle(
+                        &transaction,
+                        &record,
+                        started_lifecycle(&record)?,
+                        true,
+                        input.committed_at,
+                    )?;
+                    append_required_lifecycle(
+                        &transaction,
+                        &record,
+                        terminal_lifecycle(&transaction, &record, input)?,
+                        true,
+                        input.committed_at,
+                    )?;
+                    agent_command_session_repository::prune_terminal_sessions_in_connection(
+                        &transaction,
+                        input.conversation_id,
+                    )
+                    .map_err(storage_error)?;
+                }
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            })?
     }
 
     pub fn load_agent_command_session(
@@ -321,7 +374,10 @@ impl StorageService {
         conversation_id: &str,
         session_id: &str,
     ) -> Result<Option<AgentCommandSessionRecord>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         agent_command_session_repository::get_session(&connection, conversation_id, session_id)
             .map_err(storage_error)
     }
@@ -331,7 +387,10 @@ impl StorageService {
         conversation_id: &str,
         terminal_limit: usize,
     ) -> Result<Vec<AgentCommandSessionRecord>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         agent_command_session_repository::list_sessions_for_conversation(
             &connection,
             conversation_id,
@@ -347,7 +406,10 @@ impl StorageService {
         after_sequence: u64,
         max_bytes: usize,
     ) -> Result<Option<AgentCommandSessionTranscript>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         agent_command_session_repository::read_transcript(
             &connection,
             conversation_id,
@@ -368,7 +430,7 @@ impl StorageService {
         after_sequence: u64,
         max_bytes: usize,
     ) -> Result<Option<(AgentCommandSessionRecord, AgentCommandSessionTranscript)>, String> {
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let Some(record) = agent_command_session_repository::get_session(
             &transaction,
@@ -402,9 +464,17 @@ impl StorageService {
         &self,
         input: &AgentCommandSessionModelReadRequest<'_>,
     ) -> Result<Option<AgentCommandSessionModelRead>, String> {
-        let mut connection = self.state.connection()?;
-        agent_command_session_repository::read_or_create_model_read(&mut connection, input)
-            .map_err(storage_error)
+        let estimated_bytes = command_session_job_bytes(&[
+            input.conversation_id,
+            input.session_id,
+            input.run_id,
+            input.call_id,
+        ]);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                agent_command_session_repository::read_or_create_model_read(connection, input)
+                    .map_err(storage_error)
+            })?
     }
 
     /// Replays an existing ToolCall receipt without waiting, interrupting, or advancing output.
@@ -412,7 +482,10 @@ impl StorageService {
         &self,
         input: &AgentCommandSessionModelReadRequest<'_>,
     ) -> Result<Option<AgentCommandSessionModelRead>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         agent_command_session_repository::load_model_read(&connection, input).map_err(storage_error)
     }
 
@@ -425,8 +498,9 @@ impl StorageService {
         &self,
         reconciled_at: i64,
     ) -> Result<Vec<AgentCommandSessionRecord>, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = 512;
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let active =
@@ -493,6 +567,7 @@ impl StorageService {
             .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(unresolved)
+        })?
     }
 }
 
@@ -647,8 +722,20 @@ mod tests {
     fn open_pair() -> (tempfile::TempDir, Arc<StorageService>, Arc<StorageService>) {
         let directory = tempdir().unwrap();
         let database = directory.path().join("sessions.sqlite");
-        let first = Arc::new(StorageService::open(&database).unwrap());
-        let second = Arc::new(StorageService::open(&database).unwrap());
+        let first = Arc::new(
+            StorageService::open_with_model_credentials(
+                &database,
+                std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
+        let second = Arc::new(
+            StorageService::open_with_model_credentials(
+                &database,
+                std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         (directory, first, second)
     }
 

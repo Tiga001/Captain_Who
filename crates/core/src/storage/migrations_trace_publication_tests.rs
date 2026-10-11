@@ -78,22 +78,25 @@ fn v61_upgrade_failure_keeps_exact_v60_catalog_and_rows() {
         )
         .unwrap();
     connection.pragma_update(None, "user_version", 60).unwrap();
-    connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
-        if matches!(
-            context.action,
-            rusqlite::hooks::AuthAction::CreateIndex {
-                index_name: "idx_human_interaction_requests_attention",
-                ..
+    connection
+        .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::CreateIndex {
+                    index_name: "idx_human_interaction_requests_attention",
+                    ..
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
             }
-        ) {
-            rusqlite::hooks::Authorization::Deny
-        } else {
-            rusqlite::hooks::Authorization::Allow
-        }
-    }));
+        }))
+        .unwrap();
     assert!(run_migrations(&connection).is_err());
     connection
-        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)
+        .unwrap();
     assert_eq!(read_schema_version(&connection).unwrap(), 60);
     validate_schema_fingerprint(&connection, V60_SCHEMA_FINGERPRINT).unwrap();
 }

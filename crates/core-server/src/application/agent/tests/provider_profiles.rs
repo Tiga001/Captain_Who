@@ -282,7 +282,11 @@ fn renderer_turn_input_rejects_host_only_collaboration_fields() {
 fn prepared_turn_preserves_provider_default_and_explicit_output_limits() {
     for max_tokens in [None, Some(30_000), Some(256_000)] {
         let fixture = tempdir().unwrap();
-        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         storage.save_model_settings(test_model_settings()).unwrap();
         let mut input = turn_input("model-1");
         input.max_tokens = max_tokens;
@@ -300,7 +304,11 @@ fn prepared_turn_preserves_provider_default_and_explicit_output_limits() {
 #[test]
 fn prepared_turn_keeps_local_usage_identity_separate_from_provider_wire_model() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let mut settings = test_model_settings();
     settings.models[0].id = "model-config-local".to_string();
     settings.models[0].display_name = "Model display name".to_string();
@@ -356,7 +364,11 @@ fn prepared_turn_keeps_local_usage_identity_separate_from_provider_wire_model() 
 #[test]
 fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let request =
         serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
             json!({
@@ -429,7 +441,11 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
 #[test]
 fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let request =
         serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
             json!({
@@ -486,7 +502,11 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
 #[test]
 fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     storage.save_model_settings(test_model_settings()).unwrap();
 
     let prepare = |suffix: &str| {
@@ -572,7 +592,11 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
 #[test]
 fn explicit_profile_incompatible_with_the_endpoint_dialect_fails_closed() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
     settings.models[0].provider_profile_config =
@@ -597,7 +621,13 @@ fn explicit_profile_incompatible_with_the_endpoint_dialect_fails_closed() {
 #[test]
 fn generic_agent_service_startup_does_not_require_provider_continuation_credentials() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
 
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
@@ -624,7 +654,13 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -717,7 +753,13 @@ async fn ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message() {
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -825,7 +867,13 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             "rewrite-project".to_string(),
@@ -1059,7 +1107,13 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
 fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             "rewrite-failure-project".to_string(),
@@ -1694,7 +1748,13 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -2005,7 +2065,13 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
         requests
     });
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -2166,7 +2232,13 @@ async fn dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -2427,7 +2499,13 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -2615,7 +2693,13 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
 #[test]
 fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -2707,7 +2791,12 @@ async fn independent_hosts_admit_only_one_turn_without_loser_message_side_effect
     });
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage_a = Arc::new(StorageService::open(&database_path).unwrap());
+    let model_credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage_a = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+            .unwrap(),
+    );
     save_provider_profile_fixture(
         &storage_a,
         &format!("http://{address}/v1/chat/completions"),
@@ -2727,7 +2816,9 @@ async fn independent_hosts_admit_only_one_turn_without_loser_message_side_effect
             unread_at: None,
         })
         .unwrap();
-    let storage_b = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage_b = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials).unwrap(),
+    );
     let service_a = AgentService::new_authorized_for_test(Arc::clone(&storage_a));
     let service_b = AgentService::new_authorized_for_test(Arc::clone(&storage_b));
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -2792,7 +2883,13 @@ async fn independent_hosts_admit_only_one_turn_without_loser_message_side_effect
 #[test]
 fn public_human_turn_rejects_a_child_conversation_before_any_turn_write() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -2867,7 +2964,13 @@ fn public_human_turn_rejects_a_child_conversation_before_any_turn_write() {
 #[test]
 fn public_human_turn_rejects_an_inactive_root_before_any_turn_write() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -2959,7 +3062,11 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
         });
         let fixture = tempdir().unwrap();
         let storage = Arc::new(
-            StorageService::open(&fixture.path().join(format!("{scenario}.sqlite"))).unwrap(),
+            StorageService::open_with_model_credentials(
+                &fixture.path().join(format!("{scenario}.sqlite")),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
         );
         save_provider_profile_fixture(
             &storage,
@@ -3028,7 +3135,13 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
     });
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-no-provider-vault.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let profile = deepseek_flash_profile(
         mycopilot_core::ReasoningMode::Disabled,
         mycopilot_core::ProviderReasoningEffort::ProviderDefault,

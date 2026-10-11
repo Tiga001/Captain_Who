@@ -68,7 +68,13 @@ fn seed_turn(
 #[test]
 fn completed_human_root_turn_atomically_publishes_one_safe_notification() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     seed_turn(
         &storage,
@@ -136,7 +142,13 @@ fn completed_human_root_turn_atomically_publishes_one_safe_notification() {
 #[test]
 fn failed_human_root_turn_uses_prompt_identity_and_never_the_error() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     seed_turn(
         &storage,
@@ -182,7 +194,13 @@ fn emoji_heavy_prompt_persists_notification_without_rolling_back_terminal_turn()
     use unicode_segmentation::UnicodeSegmentation;
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let prompt = std::iter::repeat_n("👨‍👩‍👧‍👦", 80).collect::<String>();
     seed_turn(
@@ -238,7 +256,13 @@ fn emoji_heavy_prompt_persists_notification_without_rolling_back_terminal_turn()
 #[test]
 fn child_conversation_is_not_classified_as_an_ordinary_human_root_turn() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {

@@ -43,6 +43,41 @@ fn append(
     )
 }
 
+#[tokio::test]
+async fn closed_writer_consumes_publication_authority_without_starting_a_transaction() {
+    let (_directory, service, mut recorder, mut cursor) = fixture();
+    recorder.record_narration("committed prefix").unwrap();
+    append(&service, &mut cursor, &recorder).unwrap();
+    assert!(cursor.committed.is_some());
+    service.state.shutdown().await.unwrap();
+    recorder.record_narration("must not be admitted").unwrap();
+    assert_eq!(
+        append(&service, &mut cursor, &recorder).unwrap_err(),
+        "storage_executor_closed"
+    );
+    assert!(cursor.committed.is_none());
+}
+
+#[test]
+fn publication_on_the_writer_retains_the_callers_real_transaction_measurements() {
+    let (_directory, service, mut recorder, mut cursor) = fixture();
+    recorder.record_narration("first").unwrap();
+    crate::storage::trace_performance_metrics::start();
+    append(&service, &mut cursor, &recorder).unwrap();
+    let cold = crate::storage::trace_performance_metrics::finish();
+    assert_eq!(cold.transaction_ns.len(), 1);
+    assert_eq!(cold.lock_wait_ns.len(), 1);
+
+    recorder.record_narration("second").unwrap();
+    crate::storage::trace_performance_metrics::start();
+    append(&service, &mut cursor, &recorder).unwrap();
+    let hot = crate::storage::trace_performance_metrics::finish();
+    assert_eq!(hot.transaction_ns.len(), 1);
+    assert_eq!(hot.lock_wait_ns.len(), 1);
+    assert_eq!(hot.trace_loads, 0);
+    assert_eq!(hot.decompressions, 0);
+}
+
 #[test]
 fn trusted_suffix_reads_no_historical_payload_and_duplicate_is_a_noop() {
     let (_directory, service, mut recorder, mut cursor) = fixture();
@@ -69,7 +104,8 @@ fn trusted_suffix_reads_no_historical_payload_and_duplicate_is_a_noop() {
             } else {
                 Authorization::Allow
             }
-        }));
+        }))
+        .unwrap();
     recorder.record_narration("second").unwrap();
     let publication = recorder.publication();
     assert!(

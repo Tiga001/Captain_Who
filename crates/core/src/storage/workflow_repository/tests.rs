@@ -115,7 +115,11 @@ fn single_board_read_skips_catalog_and_activity_projection() {
 fn workflow_reopens_with_exact_graph_layout_and_revision() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("workflows.sqlite");
-    let service = StorageService::open(&path).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let first = service
         .workflow_request(Request::Save {
             definition: graph(),
@@ -126,7 +130,11 @@ fn workflow_reopens_with_exact_graph_layout_and_revision() {
     assert_eq!(first.records[0].issues[0].code, "node_model_unavailable");
     assert_eq!(first.records[0].revision, 1);
     drop(service);
-    let service = StorageService::open(&path).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let read = service.workflow_request(Request::List).unwrap();
     assert_eq!(
         serde_json::to_value(&first).unwrap(),
@@ -141,7 +149,11 @@ fn service_uses_execution_projection_for_disabled_and_credential_missing_models(
     use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord};
     use crate::{ProviderProfileConfig, ProviderProtocolDialect};
     let directory = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&directory.path().join("models.sqlite")).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &directory.path().join("models.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let settings = |enabled: bool, token: &str| ModelSettingsRecord {
         api_url: "https://provider.example/v1/chat/completions".into(),
         api_token: token.into(),

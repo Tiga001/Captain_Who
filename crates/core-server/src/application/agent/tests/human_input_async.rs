@@ -968,10 +968,9 @@ async fn human_root_rewrite_and_async_answer_expiry_at_commit_roll_back_all_turn
             "content": response.as_ref().map(|r| mycopilot_core::storage::human_interaction_repository::async_human_interaction_answer_content(r).unwrap()).unwrap_or_else(|| ORIGINAL.into()),
             "userMessageId": "commit-check-user", "assistantMessageId": "commit-check-assistant"
         })).unwrap();
-        let checks = std::cell::Cell::new(0);
+        let checks = std::sync::atomic::AtomicUsize::new(0);
         let check = || {
-            checks.set(checks.get() + 1);
-            if checks.get() == 1 {
+            if checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 Ok(())
             } else {
                 Err(ExecutionAccessDenied::unavailable().agent_error())
@@ -1022,7 +1021,7 @@ async fn human_root_rewrite_and_async_answer_expiry_at_commit_roll_back_all_turn
             "{kind}: {error}"
         );
         assert_eq!(
-            checks.get(),
+            checks.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "{kind} must check both transaction admission and final commit"
         );

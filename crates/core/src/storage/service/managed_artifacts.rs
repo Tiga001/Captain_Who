@@ -157,20 +157,26 @@ impl StorageService {
             height: metadata.height,
             created_at: now_ms(),
         };
-        let mut connection = self.state.connection()?;
-        let registered = managed_artifact_repository::register(&mut connection, &record)
-            .map_err(storage_error)?;
-        managed_artifact_repository::grant(
-            &mut connection,
-            &ManagedArtifactGrant {
-                artifact_id: registered.artifact_id.clone(),
-                conversation_id: authority.conversation_id.to_string(),
-                run_id: authority.run_id.to_string(),
-                call_id: authority.call_id.to_string(),
-                created_at: now_ms(),
+        let registered = self.state.write_sync(
+            4096,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                let registered = managed_artifact_repository::register(connection, &record)
+                    .map_err(storage_error)?;
+                managed_artifact_repository::grant(
+                    connection,
+                    &ManagedArtifactGrant {
+                        artifact_id: registered.artifact_id.clone(),
+                        conversation_id: authority.conversation_id.to_string(),
+                        run_id: authority.run_id.to_string(),
+                        call_id: authority.call_id.to_string(),
+                        created_at: now_ms(),
+                    },
+                )
+                .map_err(storage_error)?;
+                Ok::<_, String>(registered)
             },
-        )
-        .map_err(storage_error)?;
+        )??;
         Ok(PublishedManagedArtifact {
             kind: registered.kind,
             format: registered.format,
@@ -191,10 +197,7 @@ impl StorageService {
         let Some(conversation_id) = conversation_id else {
             return Ok(None);
         };
-        let connection = self.state.connection()?;
-        let Some(record) =
-            managed_artifact_repository::find_authorized(&connection, artifact_id, conversation_id)
-                .map_err(storage_error)?
+        let Some(record) = self.authorized_managed_artifact_record(artifact_id, conversation_id)?
         else {
             return Ok(None);
         };
@@ -215,16 +218,35 @@ impl StorageService {
         artifact_id: &str,
         conversation_id: &str,
     ) -> Result<Option<AuthorizedManagedArtifactContent>, String> {
-        let connection = self.state.connection()?;
-        let Some(record) =
-            managed_artifact_repository::find_authorized(&connection, artifact_id, conversation_id)
-                .map_err(storage_error)?
+        self.read_managed_artifact_after_authorization(artifact_id, conversation_id, || {})
+    }
+
+    fn authorized_managed_artifact_record(
+        &self,
+        artifact_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<ManagedArtifactRecord>, String> {
+        let connection = self.state.read_connection()?;
+        let snapshot = connection.unchecked_transaction().map_err(storage_error)?;
+        managed_artifact_repository::find_authorized(&snapshot, artifact_id, conversation_id)
+            .map_err(storage_error)
+    }
+
+    fn read_managed_artifact_after_authorization(
+        &self,
+        artifact_id: &str,
+        conversation_id: &str,
+        before_read: impl FnOnce(),
+    ) -> Result<Option<AuthorizedManagedArtifactContent>, String> {
+        let Some(record) = self.authorized_managed_artifact_record(artifact_id, conversation_id)?
         else {
             return Ok(None);
         };
+        // Neither the writer connection nor a pinned WAL snapshot survives the file operation.
+        before_read();
         let relative = safe_artifact_relative_path(&record.storage_relative_path)?;
         let path = self.managed_artifact_root.join(relative);
-        let mut file = open_regular_file_no_follow(&path)
+        let file = open_regular_file_no_follow(&path)
             .map_err(|error| format!("managed Artifact could not be opened safely: {error}"))?;
         let actual_size = file
             .metadata()
@@ -243,7 +265,8 @@ impl StorageService {
         let capacity = usize::try_from(actual_size)
             .map_err(|_| "managed Artifact is too large for this platform".to_string())?;
         let mut bytes = Vec::with_capacity(capacity);
-        file.read_to_end(&mut bytes)
+        file.take(actual_size.saturating_add(1))
+            .read_to_end(&mut bytes)
             .map_err(|error| format!("managed Artifact could not be read: {error}"))?;
         if bytes.len() as u64 != actual_size
             || format!("{:x}", Sha256::digest(&bytes)) != record.sha256
@@ -251,6 +274,16 @@ impl StorageService {
             return Err(
                 "managed Artifact bytes no longer match their journal identity".to_string(),
             );
+        }
+        // File I/O is not permission authority. Recheck on a new snapshot after verification;
+        // deletion, grant revocation or tree changes during the read must not release bytes.
+        let Some(current) =
+            self.authorized_managed_artifact_record(artifact_id, conversation_id)?
+        else {
+            return Ok(None);
+        };
+        if current != record {
+            return Err("managed Artifact registry identity changed during read".into());
         }
         Ok(Some(AuthorizedManagedArtifactContent {
             kind: record.kind,
@@ -540,7 +573,11 @@ mod tests {
     use std::io::Cursor;
 
     fn test_storage(root: &Path) -> StorageService {
-        StorageService::open(&root.join("storage.sqlite")).unwrap()
+        StorageService::open_with_model_credentials(
+            &root.join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap()
     }
 
     fn png_bytes() -> Vec<u8> {
@@ -549,6 +586,63 @@ mod tests {
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn file_read_releases_sqlite_and_rechecks_grants_before_returning_bytes() {
+        for revoke in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let storage = test_storage(root.path());
+            storage.state.connection().unwrap().execute(
+                "INSERT INTO conversations(id,title,created_at,updated_at) VALUES('owner','test',1,1)", [],
+            ).unwrap();
+            let source = root.path().join("file.pdf");
+            let bytes = b"%PDF-1.7\n%%EOF\n";
+            fs::write(&source, bytes).unwrap();
+            let artifact = storage
+                .publish_managed_artifact_file(
+                    &source,
+                    ManagedArtifactAuthority {
+                        conversation_id: "owner",
+                        run_id: "run",
+                        call_id: "call",
+                    },
+                )
+                .unwrap();
+            let artifact_id = format!("sha256:{}", artifact.sha256);
+            let content = storage
+                .read_managed_artifact_after_authorization(&artifact_id, "owner", || {
+                    // This would fail the nested-connection guard (or deadlock with the old mutex)
+                    // if file preparation still retained a writer or read snapshot.
+                    storage
+                        .state
+                        .write_sync(
+                            1024,
+                            crate::storage::StorageWriteClass::Control,
+                            |connection| {
+                                if revoke {
+                                    connection.execute(
+                                        "DELETE FROM managed_artifact_grants WHERE artifact_id=?1",
+                                        [&artifact_id],
+                                    )
+                                } else {
+                                    connection.execute(
+                                        "UPDATE conversations SET title='updated' WHERE id='owner'",
+                                        [],
+                                    )
+                                }
+                            },
+                        )
+                        .unwrap()
+                        .unwrap();
+                })
+                .unwrap();
+            if revoke {
+                assert!(content.is_none());
+            } else {
+                assert_eq!(content.unwrap().bytes, bytes);
+            }
+        }
     }
 
     #[test]

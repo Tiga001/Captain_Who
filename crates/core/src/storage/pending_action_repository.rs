@@ -792,24 +792,28 @@ mod tests {
             }
             store_pending_action(&connection, &unrelated).unwrap();
         }
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "agent_pending_actions",
-                column_name: "agent_input_json",
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "agent_pending_actions",
+                    column_name: "agent_input_json",
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
         let scope = load_pending_action_dependency_scope(&connection, "successor")
             .unwrap()
             .unwrap();
         // Even action JSON is unnecessary once the exact successor identity has been loaded.
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "agent_pending_actions",
-                column_name: "agent_input_json" | "action_json",
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "agent_pending_actions",
+                    column_name: "agent_input_json" | "action_json",
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
         let frozen = r#"["shared-call", "successor"]"#;
         assert_eq!(
             list_unsettled_predecessor_call_ids(&connection, &scope, frozen).unwrap(),

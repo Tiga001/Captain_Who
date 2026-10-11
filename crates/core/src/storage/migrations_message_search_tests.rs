@@ -41,7 +41,8 @@ fn index_write_counter(c: &Connection) -> Arc<AtomicUsize> {
                 observed.fetch_add(1, Ordering::Relaxed);
             }
         },
-    ));
+    ))
+    .unwrap();
     changes
 }
 

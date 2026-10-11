@@ -6,6 +6,7 @@ use crate::storage::models::{
     CredentialMutation, CredentialStatus, ModelConfigEditorRecord, ModelSettingsEditorRecord,
     StoredModelConfigRecord, StoredModelSettingsRecord, StoredModelSettingsSnapshot,
 };
+use crate::storage::{write_size::estimated_json_bytes, StorageWriteClass};
 use std::collections::BTreeSet;
 
 pub(super) const MAX_SKILL_ENABLEMENT_ID_BYTES: usize = 16 * 1024;
@@ -234,7 +235,7 @@ impl StorageService {
         &self,
         profile_id: &str,
     ) -> Result<Option<ImageGenerationProfileRecord>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         image_generation_repository::load_image_generation_profile(&connection, profile_id)
             .map_err(storage_error)
     }
@@ -246,14 +247,19 @@ impl StorageService {
         replacement: &ImageGenerationProfileRecord,
     ) -> Result<image_generation_repository::ImageGenerationProfileCompareAndSetOutcome, String>
     {
-        let mut connection = self.state.connection()?;
-        image_generation_repository::compare_and_set_image_generation_profile(
-            &mut connection,
-            profile_id,
-            expected_generation,
-            replacement,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            estimated_json_bytes(replacement)?.saturating_add(profile_id.len()),
+            StorageWriteClass::Normal,
+            |connection| {
+                image_generation_repository::compare_and_set_image_generation_profile(
+                    connection,
+                    profile_id,
+                    expected_generation,
+                    replacement,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn stage_image_generation_credential(
@@ -262,33 +268,43 @@ impl StorageService {
         expected_generation: u64,
         credential_ref: &str,
     ) -> Result<image_generation_repository::ImageGenerationCredentialStageOutcome, String> {
-        let mut connection = self.state.connection()?;
-        image_generation_repository::stage_image_generation_credential(
-            &mut connection,
-            profile_id,
-            expected_generation,
-            credential_ref,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[profile_id, credential_ref]),
+            StorageWriteClass::Normal,
+            |connection| {
+                image_generation_repository::stage_image_generation_credential(
+                    connection,
+                    profile_id,
+                    expected_generation,
+                    credential_ref,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn complete_image_generation_credential_staging(
         &self,
         credential_ref: &str,
     ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
-        image_generation_repository::complete_image_generation_credential_staging(
-            &connection,
-            credential_ref,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[credential_ref]),
+            StorageWriteClass::Control,
+            |connection| {
+                image_generation_repository::complete_image_generation_credential_staging(
+                    connection,
+                    credential_ref,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn list_image_generation_credential_staging(
         &self,
     ) -> Result<Vec<image_generation_repository::ImageGenerationCredentialStagingRecord>, String>
     {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         image_generation_repository::list_image_generation_credential_staging(&connection)
             .map_err(storage_error)
     }
@@ -297,7 +313,7 @@ impl StorageService {
         &self,
     ) -> Result<Vec<image_generation_repository::ImageGenerationCredentialCleanupRecord>, String>
     {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         image_generation_repository::list_image_generation_credential_cleanup(&connection)
             .map_err(storage_error)
     }
@@ -306,12 +322,17 @@ impl StorageService {
         &self,
         credential_ref: &str,
     ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
-        image_generation_repository::complete_image_generation_credential_cleanup(
-            &connection,
-            credential_ref,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[credential_ref]),
+            StorageWriteClass::Control,
+            |connection| {
+                image_generation_repository::complete_image_generation_credential_cleanup(
+                    connection,
+                    credential_ref,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn load_model_settings(&self) -> Result<Option<ModelSettingsRecord>, String> {
@@ -320,7 +341,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings(&mut connection).map_err(storage_error)?
         };
         stored
@@ -335,7 +356,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -354,7 +375,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings(&mut connection).map_err(storage_error)?
         };
         let Some(settings) = stored else {
@@ -394,7 +415,7 @@ impl StorageService {
             .lock()
             .map_err(|_| unavailable())?;
         let stored = {
-            let mut connection = self.state.connection().map_err(|_| unavailable())?;
+            let mut connection = self.state.read_connection().map_err(|_| unavailable())?;
             config_repository::load_model_settings(&mut connection).map_err(|_| unavailable())?
         };
         let enabled = stored
@@ -431,7 +452,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -457,7 +478,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -472,7 +493,7 @@ impl StorageService {
     /// that may offer a model for execution must use [`Self::load_executable_model_catalog`].
     pub fn load_model_settings_catalog(&self) -> Result<Option<ModelSettingsRecord>, String> {
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -496,7 +517,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -531,7 +552,7 @@ impl StorageService {
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         validate_model_settings(&settings)?;
         let existing = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings(&mut connection).map_err(storage_error)?
         };
         let (stored, replacements) =
@@ -551,7 +572,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let existing_snapshot = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -1207,11 +1228,14 @@ impl StorageService {
             .iter()
             .map(|replacement| replacement.reference.as_str().to_string())
             .collect::<Vec<_>>();
-        {
-            let mut connection = self.state.connection()?;
-            config_repository::stage_model_provider_credentials(&mut connection, &staged_refs)
-                .map_err(storage_error)?;
-        }
+        self.state.write_sync(
+            estimated_json_bytes(&staged_refs)?,
+            StorageWriteClass::Normal,
+            |connection| {
+                config_repository::stage_model_provider_credentials(connection, &staged_refs)
+                    .map_err(storage_error)
+            },
+        )??;
 
         for replacement in replacements {
             let reference = replacement.reference;
@@ -1230,12 +1254,17 @@ impl StorageService {
                         self.model_credentials.delete(&staged_reference),
                         Ok(CredentialDeleteOutcome::Deleted | CredentialDeleteOutcome::NotFound)
                     ) {
-                        if let Ok(connection) = self.state.connection() {
-                            let _ = config_repository::remove_model_provider_credential_staging(
-                                &connection,
-                                staged,
-                            );
-                        }
+                        // Cleanup is best effort as before: its durable journal remains on any
+                        // SQL/admission failure and reconciliation retries it on the next startup.
+                        let _ = self.state.write_sync(
+                            settings_text_bytes(&[staged]),
+                            StorageWriteClass::Control,
+                            |connection| {
+                                config_repository::remove_model_provider_credential_staging(
+                                    connection, staged,
+                                )
+                            },
+                        );
                     }
                 }
                 return Err("provider credential store is unavailable".to_string());
@@ -1249,16 +1278,22 @@ impl StorageService {
             .difference(&active_refs)
             .cloned()
             .collect::<Vec<_>>();
-        let committed = {
-            let mut connection = self.state.connection()?;
-            config_repository::save_model_settings_with_credential_journal(
-                &mut connection,
-                stored,
-                &staged_refs,
-                &retired_refs,
-            )
-            .map_err(storage_error)?
-        };
+        let bytes = stored_model_settings_bytes(&stored)?
+            .saturating_add(estimated_json_bytes(&staged_refs)?)
+            .saturating_add(estimated_json_bytes(&retired_refs)?);
+        // The caller keeps the credential coordinator. This worker only touches SQLite;
+        // secret reads/writes and projection-cache coordination never enter the writer.
+        let committed =
+            self.state
+                .write_sync(bytes, StorageWriteClass::Normal, |connection| {
+                    config_repository::save_model_settings_with_credential_journal(
+                        connection,
+                        stored,
+                        &staged_refs,
+                        &retired_refs,
+                    )
+                    .map_err(storage_error)
+                })??;
 
         for retired in retired_refs {
             let Ok(reference) = CredentialReference::parse(&retired) else {
@@ -1270,12 +1305,15 @@ impl StorageService {
                     Ok(CredentialDeleteOutcome::Deleted | CredentialDeleteOutcome::NotFound)
                 )
             {
-                if let Ok(connection) = self.state.connection() {
-                    let _ = config_repository::remove_model_provider_credential_cleanup(
-                        &connection,
-                        &retired,
-                    );
-                }
+                let _ = self.state.write_sync(
+                    settings_text_bytes(&[&retired]),
+                    StorageWriteClass::Control,
+                    |connection| {
+                        config_repository::remove_model_provider_credential_cleanup(
+                            connection, &retired,
+                        )
+                    },
+                );
             }
         }
         Ok(committed)
@@ -1291,18 +1329,23 @@ impl StorageService {
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let mut report = ModelProviderCredentialReconciliationReport::default();
         let staged_records = {
-            let connection = self.state.connection()?;
+            let connection = self.state.read_connection()?;
             config_repository::list_model_provider_credential_staging(&connection)
                 .map_err(storage_error)?
         };
         for staged in staged_records {
             if staged.is_active {
-                let connection = self.state.connection()?;
-                config_repository::remove_model_provider_credential_staging(
-                    &connection,
-                    &staged.credential_ref,
-                )
-                .map_err(storage_error)?;
+                self.state.write_sync(
+                    settings_text_bytes(&[&staged.credential_ref]),
+                    StorageWriteClass::Control,
+                    |connection| {
+                        config_repository::remove_model_provider_credential_staging(
+                            connection,
+                            &staged.credential_ref,
+                        )
+                        .map_err(storage_error)
+                    },
+                )??;
                 report.completed_staging += 1;
                 continue;
             }
@@ -1316,27 +1359,37 @@ impl StorageService {
             self.model_credentials
                 .delete(&reference)
                 .map_err(|_| "provider credential store is unavailable".to_string())?;
-            let connection = self.state.connection()?;
-            config_repository::remove_model_provider_credential_staging(
-                &connection,
-                &staged.credential_ref,
-            )
-            .map_err(storage_error)?;
+            self.state.write_sync(
+                settings_text_bytes(&[&staged.credential_ref]),
+                StorageWriteClass::Control,
+                |connection| {
+                    config_repository::remove_model_provider_credential_staging(
+                        connection,
+                        &staged.credential_ref,
+                    )
+                    .map_err(storage_error)
+                },
+            )??;
             report.removed_orphaned_credentials += 1;
         }
         let cleanup_records = {
-            let connection = self.state.connection()?;
+            let connection = self.state.read_connection()?;
             config_repository::list_model_provider_credential_cleanup(&connection)
                 .map_err(storage_error)?
         };
         for retired in cleanup_records {
             if retired.is_active {
-                let connection = self.state.connection()?;
-                config_repository::remove_model_provider_credential_cleanup(
-                    &connection,
-                    &retired.credential_ref,
-                )
-                .map_err(storage_error)?;
+                self.state.write_sync(
+                    settings_text_bytes(&[&retired.credential_ref]),
+                    StorageWriteClass::Control,
+                    |connection| {
+                        config_repository::remove_model_provider_credential_cleanup(
+                            connection,
+                            &retired.credential_ref,
+                        )
+                        .map_err(storage_error)
+                    },
+                )??;
                 continue;
             }
             let reference = CredentialReference::parse(&retired.credential_ref)
@@ -1349,19 +1402,24 @@ impl StorageService {
             self.model_credentials
                 .delete(&reference)
                 .map_err(|_| "provider credential store is unavailable".to_string())?;
-            let connection = self.state.connection()?;
-            config_repository::remove_model_provider_credential_cleanup(
-                &connection,
-                &retired.credential_ref,
-            )
-            .map_err(storage_error)?;
+            self.state.write_sync(
+                settings_text_bytes(&[&retired.credential_ref]),
+                StorageWriteClass::Control,
+                |connection| {
+                    config_repository::remove_model_provider_credential_cleanup(
+                        connection,
+                        &retired.credential_ref,
+                    )
+                    .map_err(storage_error)
+                },
+            )??;
             report.removed_retired_credentials += 1;
         }
         Ok(report)
     }
 
     pub fn load_agent_prompt_preferences(&self) -> Result<AgentPromptPreferencesRecord, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         agent_prompt_preferences_repository::load_agent_prompt_preferences(&connection)
             .map_err(storage_error)
     }
@@ -1370,17 +1428,29 @@ impl StorageService {
         &self,
         preferences: AgentPromptPreferencesRecord,
     ) -> Result<AgentPromptPreferencesRecord, String> {
-        let connection = self.state.connection()?;
-        agent_prompt_preferences_repository::save_agent_prompt_preferences(&connection, preferences)
-            .map_err(storage_error)
+        self.state.write_sync(
+            estimated_json_bytes(&preferences)?,
+            StorageWriteClass::Normal,
+            |connection| {
+                agent_prompt_preferences_repository::save_agent_prompt_preferences(
+                    connection,
+                    preferences,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn load_composer_draft(
         &self,
         scope_id: &str,
     ) -> Result<Option<ComposerDraftRecord>, String> {
-        composer_draft_repository::get_composer_draft(&*self.state.connection()?, scope_id)
-            .map_err(storage_error)?
+        let draft = {
+            let connection = self.state.read_connection()?;
+            composer_draft_repository::get_composer_draft(&connection, scope_id)
+                .map_err(storage_error)?
+        };
+        draft
             .map(|draft| {
                 draft.validate_current_payloads()?;
                 Ok(draft.normalize_permission_mode())
@@ -1389,18 +1459,17 @@ impl StorageService {
     }
 
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
-        let connection = self.state.connection()?;
-        composer_draft_repository::list_composer_drafts(&connection)
-            .map_err(storage_error)
-            .and_then(|drafts| {
-                drafts
-                    .into_iter()
-                    .map(|draft| {
-                        draft.validate_current_payloads()?;
-                        Ok(draft.normalize_permission_mode())
-                    })
-                    .collect()
+        let drafts = {
+            let connection = self.state.read_connection()?;
+            composer_draft_repository::list_composer_drafts(&connection).map_err(storage_error)?
+        };
+        drafts
+            .into_iter()
+            .map(|draft| {
+                draft.validate_current_payloads()?;
+                Ok(draft.normalize_permission_mode())
             })
+            .collect()
     }
 
     pub fn save_composer_draft(
@@ -1409,11 +1478,20 @@ impl StorageService {
     ) -> Result<ComposerDraftRecord, String> {
         draft.validate_current_payloads()?;
         let draft = draft.normalize_permission_mode();
-        let connection = self.state.connection()?;
-        ensure_project_reference_exists(&connection, draft.project_id.as_deref())?;
-        composer_draft_repository::save_composer_draft(&connection, draft.clone())
-            .map_err(storage_error)?;
-        Ok(draft)
+        self.state.write_sync(
+            estimated_json_bytes(&draft)?,
+            StorageWriteClass::Normal,
+            |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                ensure_project_reference_exists(&transaction, draft.project_id.as_deref())?;
+                composer_draft_repository::save_composer_draft(&transaction, draft.clone())
+                    .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(draft)
+            },
+        )?
     }
 
     pub fn save_composer_draft_message(
@@ -1425,14 +1503,16 @@ impl StorageService {
         if scope_id.trim().is_empty() || updated_at < 0 {
             return Err("stored_composer_draft_malformed".to_string());
         }
-        let connection = self.state.connection()?;
-        composer_draft_repository::save_composer_draft_message(
-            &connection,
-            scope_id,
-            message,
-            updated_at,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[scope_id, message]),
+            StorageWriteClass::Normal,
+            |connection| {
+                composer_draft_repository::save_composer_draft_message(
+                    connection, scope_id, message, updated_at,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     /// Loads effective enablement for a batch of complete, opaque Skill ids.
@@ -1461,7 +1541,7 @@ impl StorageService {
         for skill_id in skill_ids {
             validate_skill_enablement_id(skill_id)?;
         }
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         skill_enablement_repository::load_skill_enablement_states(&mut connection, skill_ids)
             .map_err(storage_error)
     }
@@ -1474,9 +1554,16 @@ impl StorageService {
     ) -> Result<bool, String> {
         validate_skill_enablement_id(skill_id)?;
         validate_independent_skill_enablement(skill_id)?;
-        let connection = self.state.connection()?;
-        skill_enablement_repository::set_skill_enablement_override(&connection, skill_id, enabled)
-            .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[skill_id]),
+            StorageWriteClass::Control,
+            |connection| {
+                skill_enablement_repository::set_skill_enablement_override(
+                    connection, skill_id, enabled,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     /// Atomically mutates effective enablement if it still matches the state
@@ -1491,28 +1578,38 @@ impl StorageService {
     ) -> Result<skill_enablement_repository::SkillEnablementCompareAndSetOutcome, String> {
         validate_skill_enablement_id(skill_id)?;
         validate_independent_skill_enablement(skill_id)?;
-        let mut connection = self.state.connection()?;
-        skill_enablement_repository::compare_and_set_skill_enablement(
-            &mut connection,
-            skill_id,
-            expected_enabled,
-            expected_generation,
-            target,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[skill_id]),
+            StorageWriteClass::Control,
+            |connection| {
+                skill_enablement_repository::compare_and_set_skill_enablement(
+                    connection,
+                    skill_id,
+                    expected_enabled,
+                    expected_generation,
+                    target,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     /// Removes an explicit override, restoring the default enabled state.
     pub fn delete_skill_enablement_override(&self, skill_id: &str) -> Result<bool, String> {
         validate_skill_enablement_id(skill_id)?;
         validate_independent_skill_enablement(skill_id)?;
-        let connection = self.state.connection()?;
-        skill_enablement_repository::delete_skill_enablement_override(&connection, skill_id)
-            .map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[skill_id]),
+            StorageWriteClass::Control,
+            |connection| {
+                skill_enablement_repository::delete_skill_enablement_override(connection, skill_id)
+                    .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn load_ui_preferences(&self) -> Result<UiPreferencesRecord, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         preferences_repository::load_ui_preferences(&connection).map_err(storage_error)
     }
 
@@ -1520,13 +1617,37 @@ impl StorageService {
         &self,
         preferences: UiPreferencesRecord,
     ) -> Result<UiPreferencesRecord, String> {
-        let connection = self.state.connection()?;
-        preferences_repository::save_ui_preferences(&connection, preferences).map_err(storage_error)
+        self.state.write_sync(
+            estimated_json_bytes(&preferences)?,
+            StorageWriteClass::Control,
+            |connection| {
+                preferences_repository::save_ui_preferences(connection, preferences)
+                    .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn upsert_agent_usage(&self, record: AgentUsageRecordInsert) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        usage_repository::upsert_usage_record(&connection, &record).map_err(storage_error)
+        self.state.write_sync(
+            settings_text_bytes(&[
+                &record.id,
+                &record.conversation_id,
+                &record.message_id,
+                &record.run_id,
+                record.project_id.as_deref().unwrap_or_default(),
+                &record.model_id,
+                &record.model_name,
+                record.status.as_deref().unwrap_or_default(),
+                record.error.as_deref().unwrap_or_default(),
+                record.input_price.as_deref().unwrap_or_default(),
+                record.cached_input_price.as_deref().unwrap_or_default(),
+                record.output_price.as_deref().unwrap_or_default(),
+            ]),
+            StorageWriteClass::Normal,
+            |connection| {
+                usage_repository::upsert_usage_record(connection, &record).map_err(storage_error)
+            },
+        )?
     }
 
     pub fn load_agent_usage_for_owner(
@@ -1535,7 +1656,7 @@ impl StorageService {
         conversation_id: &str,
         message_id: &str,
     ) -> Result<Option<AgentUsageRecordInsert>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
         usage_repository::load_usage_record_for_owner(
             &connection,
             run_id,
@@ -1550,8 +1671,12 @@ impl StorageService {
         input: &AgentUsageSummaryInput,
         now_ms: i64,
     ) -> Result<AgentUsageSummaryOutput, String> {
-        let connection = self.state.connection()?;
-        usage_repository::usage_summary(&connection, input, now_ms).map_err(storage_error)
+        let mut connection = self.state.read_connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let summary =
+            usage_repository::usage_summary(&transaction, input, now_ms).map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(summary)
     }
 
     pub fn get_usage_dashboard(
@@ -1561,7 +1686,7 @@ impl StorageService {
         crate::storage::usage_dashboard_repository::validate(input)?;
         let snapshot = {
             let waiting = crate::performance::Span::new("usage.dashboard", "lock.wait");
-            let connection = self.state.connection()?;
+            let connection = self.state.read_connection()?;
             drop(waiting);
             crate::storage::usage_dashboard_repository::read_snapshot(&connection, input)?
         };
@@ -1573,16 +1698,25 @@ impl StorageService {
         input: &crate::LocalTokenUsageSummaryInput,
         now_ms: i64,
     ) -> Result<crate::LocalTokenUsageSummaryOutput, String> {
-        let connection = self.state.connection()?;
-        crate::storage::local_token_usage_repository::summary(&connection, input, now_ms)
+        let mut connection = self.state.read_connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let summary =
+            crate::storage::local_token_usage_repository::summary(&transaction, input, now_ms)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(summary)
     }
 
     pub fn clear_usage_records(
         &self,
         input: &AgentUsageClearInput,
     ) -> Result<AgentUsageClearOutput, String> {
-        let connection = self.state.connection()?;
-        usage_repository::clear_usage_records(&connection, input).map_err(storage_error)
+        self.state.write_sync(
+            estimated_json_bytes(input)?,
+            StorageWriteClass::Normal,
+            |connection| {
+                usage_repository::clear_usage_records(connection, input).map_err(storage_error)
+            },
+        )?
     }
 
     pub fn estimate_usage_cost(
@@ -1653,3 +1787,38 @@ fn validate_provider_image_input(
         _ => Ok(()),
     }
 }
+
+// Count retained input data without materializing serialized secrets. Stored settings contain
+// opaque references only and deliberately remain non-Serde internal models.
+fn settings_text_bytes(values: &[&str]) -> usize {
+    values
+        .iter()
+        .fold(1024usize, |size, value| size.saturating_add(value.len()))
+}
+
+fn stored_model_settings_bytes(settings: &StoredModelSettingsRecord) -> Result<usize, String> {
+    let mut bytes = settings_text_bytes(&[
+        &settings.api_url,
+        settings.api_token_ref.as_deref().unwrap_or_default(),
+        &settings.search_mode,
+        settings.tavily_api_key_ref.as_deref().unwrap_or_default(),
+    ]);
+    for model in &settings.models {
+        bytes = bytes
+            .saturating_add(settings_text_bytes(&[
+                &model.id,
+                &model.provider_model_id,
+                &model.display_name,
+                model.api_url_override.as_deref().unwrap_or_default(),
+                model.api_token_override_ref.as_deref().unwrap_or_default(),
+                &model.input_price,
+                &model.cached_input_price,
+                &model.output_price,
+            ]))
+            .saturating_add(estimated_json_bytes(&model.provider_profile_config)?);
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod execution_tests;

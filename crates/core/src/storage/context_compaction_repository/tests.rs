@@ -1711,6 +1711,24 @@ fn mutation_inside_covered_raw_prefix_drops_the_derived_head() {
         )
         .unwrap();
 
+    connection.execute_batch("PRAGMA query_only=ON").unwrap();
+    assert!(
+        list_active_summary_chain_readonly(&connection, "conversation-1")
+            .unwrap()
+            .is_empty()
+    );
+    let retained: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM context_compaction_summaries WHERE id='summary-1')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        retained,
+        "read-only inspection must not delete derived state"
+    );
+    connection.execute_batch("PRAGMA query_only=OFF").unwrap();
     assert!(get_active_summary(&connection, "conversation-1")
         .unwrap()
         .is_none());
@@ -1741,6 +1759,13 @@ fn mutation_cannot_drop_a_summary_after_provider_replay_was_released() {
         )
         .unwrap();
 
+    connection.execute_batch("PRAGMA query_only=ON").unwrap();
+    let readonly_error =
+        list_active_summary_chain_readonly(&connection, "conversation-1").unwrap_err();
+    assert!(readonly_error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    connection.execute_batch("PRAGMA query_only=OFF").unwrap();
     let error = get_active_summary(&connection, "conversation-1").unwrap_err();
     assert!(error
         .to_string()

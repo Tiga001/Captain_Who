@@ -122,7 +122,8 @@ fn v70_recovery_facts_follow_binding_late_events_and_rollback_without_bodies() {
             ..
         } => Authorization::Deny,
         _ => Authorization::Allow,
-    }));
+    }))
+    .unwrap();
     c.execute(
         "UPDATE workflow_mail_inputs SET delivery_id='delivery-early' WHERE input_id='early'",
         [],

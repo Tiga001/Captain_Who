@@ -158,7 +158,11 @@ fn replacement_candidate(
 #[test]
 fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
     let fixture = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     service
         .save_project(ProjectRecord::with_primary_folder(
             "project-1".to_string(),
@@ -646,7 +650,11 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
 #[test]
 fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
     let fixture = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     service
         .save_project(ProjectRecord::with_primary_folder(
             "project-1".to_string(),
@@ -866,7 +874,11 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
 #[test]
 fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
     let fixture = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     service
         .save_project(ProjectRecord::with_primary_folder(
             "project-1".to_string(),

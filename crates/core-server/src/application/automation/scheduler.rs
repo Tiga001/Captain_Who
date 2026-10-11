@@ -298,7 +298,7 @@ impl AutomationSchedulerState {
             return Ok(false);
         }
         let claimed = blocking_storage(Arc::clone(&self.storage), move |storage| {
-            storage.claim_ready_automation_runs(now_ms(), AUTOMATION_ADMISSION_LEASE_MS, available)
+            storage.claim_ready_automation_runs_now(AUTOMATION_ADMISSION_LEASE_MS, available)
         })
         .await?;
         let claimed_was_full = claimed.len() == available;

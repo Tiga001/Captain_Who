@@ -39,22 +39,25 @@ fn workflow_pending_v61_upgrade_only_adds_index_and_reopens() {
 #[test]
 fn workflow_pending_v61_upgrade_failure_rolls_back_catalog_and_version() {
     let connection = v61();
-    connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
-        if matches!(
-            context.action,
-            rusqlite::hooks::AuthAction::CreateIndex {
-                index_name: "workflow_execution_input_pending_sequence",
-                ..
+    connection
+        .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::CreateIndex {
+                    index_name: "workflow_execution_input_pending_sequence",
+                    ..
+                }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
             }
-        ) {
-            rusqlite::hooks::Authorization::Deny
-        } else {
-            rusqlite::hooks::Authorization::Allow
-        }
-    }));
+        }))
+        .unwrap();
     assert!(run_migrations(&connection).is_err());
     connection
-        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)
+        .unwrap();
     assert_eq!(read_schema_version(&connection).unwrap(), 61);
     validate_schema_fingerprint(&connection, V61_SCHEMA_FINGERPRINT).unwrap();
     assert_eq!(

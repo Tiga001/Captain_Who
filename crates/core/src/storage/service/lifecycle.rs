@@ -19,6 +19,17 @@ pub struct StorageService {
 }
 
 impl StorageService {
+    /// A PASSIVE checkpoint never waits for an old read snapshot to finish. Its frame counters
+    /// expose pinned WAL progress, while FULL commit durability remains independent of it.
+    pub async fn checkpoint_storage(&self) -> Result<crate::storage::WalCheckpoint, String> {
+        self.state.checkpoint().await
+    }
+
+    /// Invoke after mutation producers and the round-two blocking executor have drained.
+    pub async fn shutdown_storage(&self) -> Result<crate::storage::WalCheckpoint, String> {
+        self.state.shutdown().await
+    }
+
     pub fn subscribe_storage_events(
         &self,
         stream: crate::storage::StorageEventStream,

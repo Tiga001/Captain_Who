@@ -1,13 +1,30 @@
 use super::*;
+use crate::storage::{write_size::estimated_json_bytes, StorageWriteClass};
+
+fn world_state_job_bytes(parts: &[&str]) -> usize {
+    parts.iter().fold(512_usize, |bytes, part| {
+        bytes.saturating_add(part.len().saturating_mul(2))
+    })
+}
 
 impl StorageService {
     pub fn commit_conversation_world_state_request(
         &self,
         request: &world_state_repository::ConversationWorldStateCommitRequest<'_>,
     ) -> Result<world_state_repository::ConversationWorldStateCommitOutcome, String> {
-        let mut connection = self.state.connection()?;
-        world_state_repository::commit_request(&mut connection, request)
-            .map_err(|error| error.to_string())
+        let estimated_bytes =
+            world_state_job_bytes(&[request.conversation_id, request.initial_epoch_id])
+                .saturating_add(estimated_json_bytes(&(
+                    request.boundary,
+                    request.expected_head,
+                    request.owned_section_ids,
+                    request.sections,
+                ))?);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                world_state_repository::commit_request(connection, request)
+                    .map_err(|error| error.to_string())
+            })?
     }
 
     pub fn mark_conversation_world_state_request_observed(
@@ -15,9 +32,13 @@ impl StorageService {
         conversation_id: &str,
         boundary: &crate::world_state::WorldStateRequestBoundary,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        world_state_repository::mark_request_observed(&mut connection, conversation_id, boundary)
-            .map_err(|error| error.to_string())
+        let estimated_bytes = world_state_job_bytes(&[conversation_id])
+            .saturating_add(estimated_json_bytes(boundary)?);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                world_state_repository::mark_request_observed(connection, conversation_id, boundary)
+                    .map_err(|error| error.to_string())
+            })?
     }
 
     pub fn append_conversation_world_state_record(
@@ -29,28 +50,39 @@ impl StorageService {
         record: &WorldStateRecord,
         created_at: i64,
     ) -> Result<world_state_repository::ConversationWorldStateAppendOutcome, String> {
-        let mut connection = self.state.connection()?;
-        world_state_repository::append_record(
-            &mut connection,
-            &world_state_repository::ConversationWorldStateRecordWrite {
-                conversation_id,
-                epoch_generation,
-                base_summary_id,
-                effective_before_message_id,
-                request_boundary: None,
-                model_observed: true,
-                record,
-                created_at,
-            },
-        )
-        .map_err(|error| error.to_string())
+        let estimated_bytes = world_state_job_bytes(&[
+            conversation_id,
+            base_summary_id.unwrap_or_default(),
+            effective_before_message_id.unwrap_or_default(),
+        ])
+        .saturating_add(estimated_json_bytes(record)?);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                world_state_repository::append_record(
+                    connection,
+                    &world_state_repository::ConversationWorldStateRecordWrite {
+                        conversation_id,
+                        epoch_generation,
+                        base_summary_id,
+                        effective_before_message_id,
+                        request_boundary: None,
+                        model_observed: true,
+                        record,
+                        created_at,
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })?
     }
 
     pub fn list_active_conversation_world_state_records(
         &self,
         conversation_id: &str,
     ) -> Result<Vec<world_state_repository::ConversationWorldStateJournalEntry>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         let mut entries =
             world_state_repository::list_active_journal_entries(&connection, conversation_id)
                 .map_err(|error| error.to_string())?;
@@ -59,6 +91,8 @@ impl StorageService {
             conversation_id,
         )
         .map_err(|error| error.to_string())?;
+        connection.commit().map_err(storage_error)?;
+        drop(pooled_connection);
         for entry in &mut entries {
             if let Some(boundary) = &mut entry.request_boundary {
                 boundary.assistant_message_id =
@@ -83,7 +117,10 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<world_state_repository::ConversationWorldStateJournalEntry>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         world_state_repository::get_active_head_entry(&connection, conversation_id)
             .map_err(|error| error.to_string())
     }
@@ -94,16 +131,27 @@ impl StorageService {
         epoch_id: &str,
         sequence: u64,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        world_state_repository::rewind_after(&mut connection, conversation_id, epoch_id, sequence)
-            .map_err(|error| error.to_string())
+        let estimated_bytes = world_state_job_bytes(&[conversation_id, epoch_id]);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                world_state_repository::rewind_after(
+                    connection,
+                    conversation_id,
+                    epoch_id,
+                    sequence,
+                )
+                .map_err(|error| error.to_string())
+            })?
     }
 
     pub fn fold_active_conversation_world_state(
         &self,
         conversation_id: &str,
     ) -> Result<Option<crate::WorldStateSnapshot>, String> {
-        let connection = self.state.connection()?;
+        let pooled_connection = self.state.read_connection()?;
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(storage_error)?;
         world_state_repository::fold_active_snapshot(&connection, conversation_id)
             .map_err(|error| error.to_string())
     }
@@ -112,8 +160,18 @@ impl StorageService {
         &self,
         request: &world_state_repository::ConversationWorldStateRebaseRequest<'_>,
     ) -> Result<world_state_repository::ConversationWorldStateRebaseOutcome, String> {
-        let mut connection = self.state.connection()?;
-        world_state_repository::rebase_active_epoch(&mut connection, request)
-            .map_err(|error| error.to_string())
+        let estimated_bytes = world_state_job_bytes(&[
+            request.conversation_id,
+            request.expected_source_epoch_id,
+            request.expected_source_revision,
+            request.new_epoch_id,
+            request.base_summary_id,
+        ])
+        .saturating_add(estimated_json_bytes(request.covered_through)?);
+        self.state
+            .write_sync(estimated_bytes, StorageWriteClass::Normal, |connection| {
+                world_state_repository::rebase_active_epoch(connection, request)
+                    .map_err(|error| error.to_string())
+            })?
     }
 }

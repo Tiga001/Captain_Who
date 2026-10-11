@@ -20,6 +20,7 @@ impl AgentService {
                         .unwrap_or_else(|error| error.into_inner());
                     service.runtime_stopping.store(true, Ordering::Release);
                 }
+                service.provider_transition_tasks.begin_shutdown();
                 let manual_tokens = service
                     .manual_context_compaction_cancellations
                     .lock()
@@ -88,7 +89,11 @@ impl AgentService {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .is_empty();
-            if active_runs_settled && sessions_settled && manual_settled {
+            if active_runs_settled
+                && sessions_settled
+                && manual_settled
+                && self.provider_transition_tasks.active() == 0
+            {
                 return (active_runs.len() + manual_tokens.len(), false);
             }
             if tokio::time::Instant::now() >= deadline {

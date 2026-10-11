@@ -932,3 +932,177 @@ fn history_snapshot_noop_trace_updates_reuse_payload_but_actual_payload_tamper_i
         .load_conversation_history_snapshot("history")
         .is_err());
 }
+
+#[test]
+fn wal_history_reader_observes_committed_data_while_writer_is_uncommitted() {
+    let fixture = StorageFixture::new();
+    let service = Arc::new(fixture.service());
+    seeded_history(&service, "history");
+    let original = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    let mut writer = service.state.connection().unwrap();
+    let transaction = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE messages SET content='uncommitted replacement' WHERE id='history-user'",
+            [],
+        )
+        .unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader_service = service.clone();
+    let reader = std::thread::spawn(move || {
+        sent.send(reader_service.load_conversation_history_snapshot("history"))
+            .unwrap();
+    });
+    // Release the writer even on failure so this regression fails instead of leaking a thread.
+    let observation = received.recv_timeout(std::time::Duration::from_secs(2));
+    transaction.rollback().unwrap();
+    drop(writer);
+    reader.join().unwrap();
+    let observed = observation
+        .expect("history must use the read pool without waiting for the writer")
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.version, original.version);
+    assert_eq!(
+        observed.conversation.messages[0].content,
+        original.conversation.messages[0].content
+    );
+    assert!(service
+        .is_conversation_history_snapshot_current(&original.version)
+        .unwrap());
+
+    // A subsequent completed write is read using a new snapshot, never the pooled connection's
+    // old read transaction, and the history cache does not retain the rolled-back candidate.
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET content='committed replacement' WHERE id='history-user'",
+            [],
+        )
+        .unwrap();
+    let current = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.version, original.version);
+    assert_eq!(
+        current.conversation.messages[0].content,
+        "committed replacement"
+    );
+}
+
+#[test]
+fn wal_history_versions_and_cache_identity_are_shared_across_read_connections() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seeded_history(&service, "history");
+    let first = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    // Occupying one connection forces the service to read through the other member of the pool.
+    let occupied = service.state.read_connection().unwrap();
+    let second = std::thread::scope(|threads| {
+        threads
+            .spawn(|| {
+                service
+                    .load_conversation_history_snapshot("history")
+                    .unwrap()
+                    .unwrap()
+            })
+            .join()
+            .unwrap()
+    });
+    drop(occupied);
+    assert_eq!(first.version, second.version);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(service
+        .is_conversation_history_snapshot_current(&first.version)
+        .unwrap());
+}
+
+#[test]
+fn wal_project_folders_and_metadata_are_read_from_one_snapshot() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{atomic::AtomicBool, mpsc, Mutex};
+    use std::time::Duration;
+
+    let fixture = StorageFixture::new();
+    let service = Arc::new(fixture.service());
+    let original = service
+        .load_projects()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == "project-1")
+        .unwrap();
+    let (started, started_rx) = mpsc::channel();
+    let (resume, resume_rx) = mpsc::channel();
+    let resume_rx = Arc::new(Mutex::new(resume_rx));
+    let intercepted = Arc::new(AtomicBool::new(false));
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            let started = started.clone();
+            let resume_rx = resume_rx.clone();
+            let intercepted = intercepted.clone();
+            connection
+                .authorizer(Some(move |context: AuthContext<'_>| {
+                    // list_projects has read the folders before preparing the project metadata query.
+                    if matches!(
+                        context.action,
+                        AuthAction::Read {
+                            table_name: "projects",
+                            ..
+                        }
+                    ) && !intercepted.swap(true, Ordering::AcqRel)
+                    {
+                        let _ = started.send(());
+                        let _ = resume_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(3));
+                    }
+                    Authorization::Allow
+                }))
+                .unwrap();
+        });
+    let reader_service = service.clone();
+    let reader = std::thread::spawn(move || reader_service.load_projects());
+    let entered = started_rx.recv_timeout(Duration::from_secs(3));
+    let writer = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    let committed = writer.execute_batch(
+        "BEGIN IMMEDIATE;
+         UPDATE projects SET name = 'new project name' WHERE id = 'project-1';
+         UPDATE project_folders SET alias = 'new folder alias' WHERE project_id = 'project-1';
+         COMMIT;",
+    );
+    let _ = resume.send(());
+    let projects = reader.join().unwrap().unwrap();
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .unwrap();
+        });
+    entered.expect("project reader must reach the controlled snapshot boundary");
+    committed.expect("independent WAL writer should commit while the read snapshot is pinned");
+    let observed = projects.into_iter().find(|p| p.id == "project-1").unwrap();
+    assert_eq!(observed.name, original.name);
+    assert_eq!(observed.folders[0].alias, original.folders[0].alias);
+    let fresh = service
+        .load_projects()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == "project-1")
+        .unwrap();
+    assert_eq!(fresh.name, "new project name");
+    assert_eq!(fresh.folders[0].alias, "new folder alias");
+}

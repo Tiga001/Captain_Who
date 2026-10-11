@@ -243,7 +243,11 @@ mod tests {
     #[test]
     fn browser_preferences_use_optimistic_concurrency() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
 
         let saved = service
             .save_browser_preferences(BrowserPreferencesUpdate {
@@ -271,7 +275,11 @@ mod tests {
     #[test]
     fn browser_history_supports_search_selection_and_time_ranges() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let first = history("123e4567-e89b-42d3-a456-426614174010", "example.com", 100);
         let second = history("123e4567-e89b-42d3-a456-426614174011", "openai.com", 200);
         service.register_browser_history(first.clone()).unwrap();
@@ -319,7 +327,11 @@ mod tests {
     #[test]
     fn browser_history_accepts_local_file_urls() {
         let root = tempfile::tempdir().unwrap();
-        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &root.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let record = BrowserHistoryRecord {
             schema_version: BROWSER_DATA_SCHEMA_VERSION,
             history_id: "browser-history:123e4567-e89b-42d3-a456-426614174012".to_string(),

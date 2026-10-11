@@ -1289,7 +1289,11 @@ fn active_root_fork_is_atomic_idempotent_and_preserves_agent_actor_without_cross
         )
         .unwrap();
 
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     let retried = reopened.fork_conversation_request_view(request).unwrap();
     assert_eq!(retried.conversation.id, target_id);
     assert!(retried

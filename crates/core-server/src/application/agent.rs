@@ -142,6 +142,7 @@ mod pending_action_store;
 mod persisted_resume_input;
 mod prepared_history;
 mod provider_transition;
+mod provider_transition_lifecycle;
 pub use manual_context_compaction::{
     AgentManualContextCompactionCancelInput, AgentManualContextCompactionStartInput,
     AgentManualContextCompactionStatusInput,
@@ -692,6 +693,7 @@ pub struct AgentService {
     workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake,
     workflow_dispatch_stopped: Arc<AtomicBool>,
     workflow_retry: Arc<Mutex<workflow_retry::WorkflowRetryState>>,
+    provider_transition_tasks: Arc<provider_transition_lifecycle::ProviderTransitionTasks>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
     manual_context_compaction_cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
@@ -918,6 +920,9 @@ impl AgentService {
             workflow_scheduler_wake: workflow_scheduler::WorkflowSchedulerWake::default(),
             workflow_dispatch_stopped: Arc::new(AtomicBool::new(false)),
             workflow_retry: Arc::new(Mutex::new(workflow_retry::WorkflowRetryState::default())),
+            provider_transition_tasks: Arc::new(
+                provider_transition_lifecycle::ProviderTransitionTasks::default(),
+            ),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
             manual_context_compaction_cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -1808,7 +1813,10 @@ impl AgentService {
     /// Called only after transport/schedulers stop admitting work and active-run shutdown has
     /// either settled or reported its grace timeout. Started synchronous mutations always drain;
     /// unsubmitted runtime completion reservations are fenced and recovered from durable state.
-    pub(crate) async fn shutdown_blocking_work(&self) {
+    pub(crate) async fn shutdown_blocking_work(&self) -> Result<(), String> {
+        // Provider transition is a separate producer: cancel its model wait and finish all
+        // terminal receipt/usage writes before any blocking or SQLite queue is closed.
+        let provider_transitions = self.provider_transition_tasks.shutdown().await;
         self.blocking_work.preparation.shutdown_submitted().await;
         self.blocking_work.control.shutdown_submitted().await;
         self.blocking_work.completion.shutdown_submitted().await;
@@ -1817,6 +1825,7 @@ impl AgentService {
         self.blocking_work.recovery.shutdown_submitted().await;
         self.blocking_work.maintenance.shutdown_submitted().await;
         self.blocking_work.lease.shutdown_submitted().await;
+        provider_transitions
     }
 
     /// Takes ownership of the lazily-created collaboration Dispatcher and runs its existing

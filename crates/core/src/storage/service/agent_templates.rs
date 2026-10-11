@@ -279,7 +279,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let service = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
+            let service = StorageService::open_with_model_credentials(
+                &directory.path().join("storage.sqlite"),
+                std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap();
             for project_id in ["project-a", "project-b"] {
                 service
                     .save_project(ProjectRecord::without_folders(

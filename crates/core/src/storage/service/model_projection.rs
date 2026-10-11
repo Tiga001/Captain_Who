@@ -52,7 +52,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };
@@ -74,7 +74,7 @@ impl StorageService {
             .lock()
             .map_err(|_| "model credential coordinator is unavailable".to_string())?;
         let stored = {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             config_repository::load_model_settings_snapshot(&mut connection)
                 .map_err(storage_error)?
         };

@@ -402,6 +402,17 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .with_managed_playwright_runtime(Arc::clone(&managed_playwright_runtime))
         .with_browser_risk_coordinator(Arc::clone(&bootstrap.browser_risk_coordinator)),
     );
+    let checkpoint_storage = Arc::clone(&bootstrap.storage);
+    let wal_checkpoint_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = checkpoint_storage.checkpoint_storage().await {
+                eprintln!("storage WAL checkpoint failed: {error}");
+            }
+        }
+    });
     let mcp_payload_store = mcp_approval_payload_store(Arc::clone(&bootstrap.storage));
     let _ = mcp_payload_store.reconcile_expired(mycopilot_core::storage::now_ms());
     let mcp_bridge = Arc::new(
@@ -640,7 +651,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     );
 
     automation_scheduler.finish_shutdown().await;
-    agent_service.shutdown_blocking_work().await;
+    let blocking_shutdown = agent_service.shutdown_blocking_work().await;
     automation_event_notifier.abort();
     let _ = automation_event_notifier.await;
     notification_event_notifier.abort();
@@ -659,18 +670,28 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         eprintln!("{error}");
     }
 
+    wal_checkpoint_task.abort();
+    let _ = wal_checkpoint_task.await;
+    // Aborting the maintenance awaiter cannot abort a started SQLite operation. The storage
+    // close boundary drains that job and every accepted mutation before closing connections.
+    let storage_shutdown = bootstrap.storage.shutdown_storage().await;
     let mut outbound_error = None;
     if let Ok(Some(shutdown_id)) = &input_result {
-        if let Err(error) = enqueue_outbound(
-            &outbound_tx,
-            response_success(
+        let shutdown_failure = blocking_shutdown
+            .as_ref()
+            .err()
+            .or_else(|| storage_shutdown.as_ref().err());
+        let response = match shutdown_failure {
+            None => response_success(
                 shutdown_id.clone(),
                 CoreShutdownResponse {
                     cancelled_runs,
                     timed_out,
                 },
             ),
-        ) {
+            Some(error) => response_error(Some(shutdown_id.clone()), -32000, error.clone()),
+        };
+        if let Err(error) = enqueue_outbound(&outbound_tx, response) {
             outbound_error = Some(error);
         }
     }
@@ -685,6 +706,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .await
         .map_err(|error| io::Error::other(format!("outbound writer stopped: {error}")))?;
     input_result?;
+    blocking_shutdown.map_err(io::Error::other)?;
+    storage_shutdown.map_err(io::Error::other)?;
     mcp_approval_expiry_shutdown.map_err(io::Error::other)?;
     workflow_dispatcher_shutdown.map_err(io::Error::other)?;
     git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;

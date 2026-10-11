@@ -6,7 +6,13 @@ use super::*;
 fn startup_reconciles_published_automatic_direct_file_change_without_replaying_it() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -165,7 +171,13 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
 #[test]
 fn startup_reconciles_published_automatic_staged_file_changes_without_replaying_them() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
     // not terminalize the fixture trace before its hidden Pending journal exists.
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
@@ -288,7 +300,13 @@ fn startup_reconciles_published_automatic_staged_file_changes_without_replaying_
 fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
     // not terminalize the fixture trace before its hidden Pending journal exists.
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));

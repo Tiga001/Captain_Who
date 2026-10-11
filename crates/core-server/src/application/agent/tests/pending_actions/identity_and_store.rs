@@ -10,7 +10,13 @@ use sha2::{Digest, Sha256};
 #[test]
 fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -138,7 +144,13 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
 #[test]
 fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
@@ -291,7 +303,11 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
 #[test]
 fn mcp_pending_and_checkpoint_json_freeze_only_the_safe_payload_capability() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -333,7 +349,13 @@ fn mcp_pending_and_checkpoint_json_freeze_only_the_safe_payload_capability() {
 #[test]
 fn pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -411,7 +433,13 @@ fn pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence(
 fn mcp_pending_identity_mismatch_is_rejected_on_store_and_malformed_resume_is_retired() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -552,7 +580,13 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_malformed_resume_is_re
 fn malformed_non_mcp_pending_states_retire_without_restoring_an_executable_action() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let now = mycopilot_core::storage::now_ms();
     let mut storage_ids = Vec::new();
 
@@ -630,7 +664,11 @@ fn malformed_non_mcp_pending_states_retire_without_restoring_an_executable_actio
 #[test]
 fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     save_test_pending_provider(
         &storage,
         "test-model",

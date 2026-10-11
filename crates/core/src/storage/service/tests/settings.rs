@@ -2845,30 +2845,36 @@ fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_hi
         .save_conversation(conversation("target", Some("project-1"), "message"))
         .unwrap();
     {
-        let mut connection = service.state.connection().unwrap();
+        let connection = service.state.connection().unwrap();
         connection.execute("INSERT INTO composer_drafts(scope_id,message,permission_mode,permission_mode_version,attachments_json,folder_references_json,skills_json,queued_messages_json,updated_at) VALUES('target','keep draft','default',1,'[]','[]','[]','[]',1)",[]).unwrap();
         connection.execute("INSERT INTO composer_drafts(scope_id,message,permission_mode,permission_mode_version,attachments_json,folder_references_json,skills_json,queued_messages_json,updated_at) VALUES('unrelated','bad queued payload','default',1,'[]','[]','[]','[{}]',1)",[]).unwrap();
-        connection.trace(Some(|sql| {
-            if sql.trim_start().starts_with("SELECT") {
-                SELECTS.fetch_add(1, Ordering::SeqCst);
-            }
-        }));
-        connection.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
-            if matches!(
-                context.action,
-                rusqlite::hooks::AuthAction::Read {
-                    table_name: "messages"
-                        | "conversation_turn_traces"
-                        | "conversation_turn_trace_items",
-                    ..
-                }
-            ) {
-                rusqlite::hooks::Authorization::Deny
-            } else {
-                rusqlite::hooks::Authorization::Allow
-            }
-        }));
     }
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection.trace(Some(|sql| {
+                if sql.trim_start().starts_with("SELECT") {
+                    SELECTS.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+            connection
+                .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        rusqlite::hooks::AuthAction::Read {
+                            table_name: "messages"
+                                | "conversation_turn_traces"
+                                | "conversation_turn_trace_items",
+                            ..
+                        }
+                    ) {
+                        rusqlite::hooks::Authorization::Deny
+                    } else {
+                        rusqlite::hooks::Authorization::Allow
+                    }
+                }))
+                .unwrap();
+        });
     let meta = service.load_conversation_meta("target").unwrap().unwrap();
     assert_eq!(meta.project_id.as_deref(), Some("project-1"));
     assert_eq!(
@@ -2896,9 +2902,14 @@ fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_hi
     );
     service
         .state
-        .connection()
-        .unwrap()
-        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+        .configure_read_connections_for_test(|connection| {
+            connection.trace(None);
+            connection
+                .authorizer(
+                    None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+                )
+                .unwrap();
+        });
 }
 
 #[test]

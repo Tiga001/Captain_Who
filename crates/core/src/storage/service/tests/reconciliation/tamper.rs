@@ -109,7 +109,11 @@ fn assert_tampered_manual_trace_receipt_remains_unsettled(
         service.list_unsettled_file_effects().unwrap(),
         vec![expected.clone()]
     );
-    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert_eq!(
         reopened.list_unsettled_file_effects().unwrap(),
         vec![expected]
@@ -446,7 +450,11 @@ fn command_terminal_outcome_cannot_diverge_from_execution_evidence() {
             vec![expected.clone()],
             "{case} was treated as an authoritative command settlement"
         );
-        let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+        let reopened = StorageService::open_with_model_credentials(
+            &fixture.root.join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         assert_eq!(
             reopened.list_unsettled_file_effects().unwrap(),
             vec![expected]

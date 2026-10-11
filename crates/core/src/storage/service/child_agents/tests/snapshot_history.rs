@@ -283,7 +283,11 @@ fn user_facing_root_reload_hides_only_agent_projection_while_observer_keeps_orig
         .any(|message| message.id == result.projection_message_id));
 
     // Reopen the database to characterize renderer reloads rather than an in-memory cache.
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     let single_root = reopened
         .load_conversation_view("root-conversation")
         .unwrap()

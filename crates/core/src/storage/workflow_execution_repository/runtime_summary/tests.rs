@@ -44,9 +44,11 @@ fn runtime_summary_matches_counts_and_pauses_without_reading_envelope_bodies() {
             ..
         } => Authorization::Deny,
         _ => Authorization::Allow,
-    }));
+    }))
+    .unwrap();
     let snapshot = runtime_summary(&c, "instance", None).unwrap();
-    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
     assert!(snapshot.inputs.is_empty() && snapshot.input_runs.is_empty());
     assert_eq!(snapshot.sequence, full.sequence);
     assert_eq!(

@@ -178,6 +178,11 @@ fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
             .connection()
             .unwrap()
             .trace(Some(count_history_queries));
+        service
+            .state
+            .configure_read_connections_for_test(|connection| {
+                connection.trace(Some(count_history_queries))
+            });
         let view = if bulk {
             service.load_conversation_views().unwrap().remove(0)
         } else {
@@ -187,6 +192,9 @@ fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
                 .unwrap()
         };
         service.state.connection().unwrap().trace(None);
+        service
+            .state
+            .configure_read_connections_for_test(|connection| connection.trace(None));
         assert_eq!(
             HISTORY_QUERY_COUNTS.with(std::cell::Cell::get),
             [1, 1, 1],

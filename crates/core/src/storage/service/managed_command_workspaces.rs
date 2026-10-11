@@ -69,7 +69,11 @@ mod tests {
     #[test]
     fn same_run_reopens_the_same_private_workspace_without_exposing_identity() {
         let fixture = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let first = storage
             .acquire_managed_command_workspace("conversation-sensitive", "run-sensitive")
             .unwrap();
@@ -91,7 +95,11 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let database = fixture.path().join("storage.sqlite");
         let execution_root = {
-            let storage = StorageService::open(&database).unwrap();
+            let storage = StorageService::open_with_model_credentials(
+                &database,
+                std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap();
             let lease = storage
                 .acquire_managed_command_workspace("conversation", "run")
                 .unwrap();
@@ -104,7 +112,11 @@ mod tests {
         };
         assert!(execution_root.join("intermediate.txt").is_file());
 
-        let storage = StorageService::open(&database).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &database,
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let lease = storage
             .acquire_managed_command_workspace("conversation", "run")
             .unwrap();
@@ -126,7 +138,11 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let fixture = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let first = storage
             .acquire_managed_command_workspace("seed", "seed")
             .unwrap();

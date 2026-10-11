@@ -49,7 +49,13 @@ fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identit
         );
     }
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = crate::transport::outbound_channel();
     let response = handle_request(
@@ -73,7 +79,13 @@ fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identit
 #[test]
 fn fork_request_accepts_camel_case_assistant_reply_point() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = crate::transport::outbound_channel();
 
@@ -103,7 +115,13 @@ fn fork_request_accepts_camel_case_assistant_reply_point() {
 #[test]
 fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = crate::transport::outbound_channel();
 
@@ -133,7 +151,13 @@ fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
 #[test]
 fn fork_request_reports_active_command_as_structured_domain_error() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     storage
         .save_conversation(ChatConversationRecord {
@@ -253,7 +277,13 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
 #[test]
 fn fork_request_rejects_retired_or_extra_fields() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
 
     for (id, params) in [

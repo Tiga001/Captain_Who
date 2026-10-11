@@ -1253,29 +1253,31 @@ mod tests {
 
         // Deny SQL access to every column outside the lean projection and its ordering key.
         // This fails even if a full record is loaded and its sensitive fields are later dropped.
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read {
-                table_name: "agent_file_changes",
-                column_name,
-            } if !matches!(
-                column_name,
-                "id" | "conversation_id"
-                    | "project_id"
-                    | "run_id"
-                    | "source_tool_name"
-                    | "file_path"
-                    | "operation"
-                    | "strategy"
-                    | "status"
-                    | "draft_revision"
-                    | "next_mutation_index"
-                    | "created_at"
-            ) =>
-            {
-                Authorization::Deny
-            }
-            _ => Authorization::Allow,
-        }));
+        connection
+            .authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "agent_file_changes",
+                    column_name,
+                } if !matches!(
+                    column_name,
+                    "id" | "conversation_id"
+                        | "project_id"
+                        | "run_id"
+                        | "source_tool_name"
+                        | "file_path"
+                        | "operation"
+                        | "strategy"
+                        | "status"
+                        | "draft_revision"
+                        | "next_mutation_index"
+                        | "created_at"
+                ) =>
+                {
+                    Authorization::Deny
+                }
+                _ => Authorization::Allow,
+            }))
+            .unwrap();
 
         let states = list_file_change_runtime_states_for_run(&connection, "run-1").unwrap();
         assert_eq!(states.len(), 1);

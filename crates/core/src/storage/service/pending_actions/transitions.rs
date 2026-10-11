@@ -13,8 +13,15 @@ impl StorageService {
         updated_at: i64,
     ) -> Result<(), String> {
         let _timing = crate::performance::Span::new("approval", "command_commit");
-        let mut connection = self.state.connection()?;
-        let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "approval");
+        let estimated_bytes = pending_text_bytes(&[
+            action_id,
+            run_id,
+            conversation_id.unwrap_or_default(),
+            assistant_message_id.unwrap_or_default(),
+            renderer_action_id,
+        ]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "approval");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -56,6 +63,7 @@ impl StorageService {
         drop(commit_timing);
         crate::performance::record("sqlite.committed", "approval", std::time::Duration::ZERO, 0);
         Ok(())
+        })?
     }
 
     pub fn transition_pending_agent_action(
@@ -66,9 +74,11 @@ impl StorageService {
         agent_input_json: &str,
         updated_at: i64,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        let affected = pending_action_repository::transition_pending_action(
-            &connection,
+        let estimated_bytes =
+            pending_text_bytes(&[action_id, expected_status, status, agent_input_json]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let affected = pending_action_repository::transition_pending_action(
+            connection,
             action_id,
             expected_status,
             status,
@@ -82,6 +92,7 @@ impl StorageService {
             ));
         }
         Ok(())
+        })?
     }
 
     /// Resolves the approval notification in the same transaction that makes the approval stop
@@ -146,8 +157,16 @@ impl StorageService {
         updated_at: i64,
         reject_stopped_run: bool,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[
+            action_id,
+            expected_status,
+            status,
+            agent_input_json,
+            run_id,
+            renderer_action_id,
+        ]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let affected = if reject_stopped_run {
@@ -185,6 +204,7 @@ impl StorageService {
             .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)
+        })?
     }
 
     /// Atomically makes a cancelled approval non-actionable and revokes every nonterminal
@@ -203,8 +223,15 @@ impl StorageService {
         renderer_action_id: &str,
         updated_at: i64,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[
+            action_id,
+            expected_status,
+            agent_input_json,
+            run_id,
+            renderer_action_id,
+        ]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let affected = pending_action_repository::transition_pending_action(
@@ -235,6 +262,7 @@ impl StorageService {
         )
         .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)
+        })?
     }
 
     /// Marks one exact child Wake as approval-paused only while its owning action is still
@@ -295,81 +323,95 @@ impl StorageService {
         conversation_id: &str,
         assistant_message_id: &str,
         claim_token: &str,
-        clock: impl Fn() -> i64,
+        clock: impl Fn() -> i64 + Send,
     ) -> Result<AgentWakeApprovalWaitOutcome, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let marked_at = clock();
-        let running = agent_graph_repository::transition_agent_wake_in_connection(
-            &transaction,
+        let estimated_bytes = pending_text_bytes(&[
             wake_id,
-            crate::AgentWakeStatus::Running,
-            crate::AgentWakeStatus::Running,
-            Some(claim_token),
-            marked_at,
-        )
-        .map_err(|error| error.to_string())?;
-        if running.run_id.as_deref() != Some(run_id)
-            || running.assistant_message_id.as_deref() != Some(assistant_message_id)
-        {
-            return Err(
-                "approval wait transition does not own the dispatched child Turn".to_string(),
-            );
-        }
-        let tree_stopped = transaction
-            .query_row(
-                "SELECT EXISTS(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            claim_token,
+        ]);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Control,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let marked_at = clock();
+                let running = agent_graph_repository::transition_agent_wake_in_connection(
+                    &transaction,
+                    wake_id,
+                    crate::AgentWakeStatus::Running,
+                    crate::AgentWakeStatus::Running,
+                    Some(claim_token),
+                    marked_at,
+                )
+                .map_err(|error| error.to_string())?;
+                if running.run_id.as_deref() != Some(run_id)
+                    || running.assistant_message_id.as_deref() != Some(assistant_message_id)
+                {
+                    return Err(
+                        "approval wait transition does not own the dispatched child Turn"
+                            .to_string(),
+                    );
+                }
+                let tree_stopped = transaction
+                    .query_row(
+                        "SELECT EXISTS(
                      SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
                  )",
-                [run_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(storage_error)?;
-        let lease_deadline = running.lease_expires_at;
-        let outcome = if tree_stopped {
-            AgentWakeApprovalWaitOutcome::TreeStopped(running)
-        } else {
-            let pending_count: i64 = transaction
-                .query_row(
-                    "SELECT COUNT(*)
+                        [run_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(storage_error)?;
+                let lease_deadline = running.lease_expires_at;
+                let outcome = if tree_stopped {
+                    AgentWakeApprovalWaitOutcome::TreeStopped(running)
+                } else {
+                    let pending_count: i64 = transaction
+                        .query_row(
+                            "SELECT COUNT(*)
                      FROM agent_pending_actions
                      WHERE run_id = ?1
                        AND conversation_id = ?2
                        AND assistant_message_id = ?3
                        AND status = 'pending'
                        AND target_status IS NULL",
-                    rusqlite::params![run_id, conversation_id, assistant_message_id],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            match pending_count {
-                0 => AgentWakeApprovalWaitOutcome::RunningAfterApproval(running),
-                1 => {
-                    let waiting = agent_graph_repository::transition_agent_wake_in_connection(
-                        &transaction,
-                        wake_id,
-                        crate::AgentWakeStatus::Running,
-                        crate::AgentWakeStatus::WaitingForApproval,
-                        Some(claim_token),
-                        marked_at,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    AgentWakeApprovalWaitOutcome::Waiting(waiting)
-                }
-                count => {
-                    return Err(format!(
+                            rusqlite::params![run_id, conversation_id, assistant_message_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(storage_error)?;
+                    match pending_count {
+                        0 => AgentWakeApprovalWaitOutcome::RunningAfterApproval(running),
+                        1 => {
+                            let waiting =
+                                agent_graph_repository::transition_agent_wake_in_connection(
+                                    &transaction,
+                                    wake_id,
+                                    crate::AgentWakeStatus::Running,
+                                    crate::AgentWakeStatus::WaitingForApproval,
+                                    Some(claim_token),
+                                    marked_at,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            AgentWakeApprovalWaitOutcome::Waiting(waiting)
+                        }
+                        count => {
+                            return Err(format!(
                         "approval wait transition found {count} pending actions for one child Turn"
                     ));
+                        }
+                    }
+                };
+                if lease_deadline.is_none_or(|deadline| clock() >= deadline) {
+                    return Err("Wake lease expired before approval wait commit".to_string());
                 }
-            }
-        };
-        if lease_deadline.is_none_or(|deadline| clock() >= deadline) {
-            return Err("Wake lease expired before approval wait commit".to_string());
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(outcome)
+                transaction.commit().map_err(storage_error)?;
+                Ok(outcome)
+            },
+        )?
     }
 
     /// Atomically accepts one Skill-script approval and, for a delegated Turn, resumes its exact
@@ -387,12 +429,44 @@ impl StorageService {
         child_wake: Option<(&str, crate::AgentWakeStatus, &str)>,
         committed_at: i64,
     ) -> Result<(), String> {
+        // The decision timestamp remains an audit fact. Lease authority must include time spent
+        // waiting for the writer and cannot be extended by a backwards wall-clock adjustment.
+        let started = std::time::Instant::now();
+        let started_at = now_ms().max(committed_at);
+        self.commit_pending_skill_script_approval_execution_with_clock(
+            action_id,
+            executing_agent_input_json,
+            approved_audit,
+            child_wake,
+            committed_at,
+            || {
+                let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                now_ms().max(started_at.saturating_add(elapsed))
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_pending_skill_script_approval_execution_with_clock(
+        &self,
+        action_id: &str,
+        executing_agent_input_json: &str,
+        approved_audit: &AgentActionAuditRecord,
+        child_wake: Option<(&str, crate::AgentWakeStatus, &str)>,
+        committed_at: i64,
+        clock: impl Fn() -> i64 + Send,
+    ) -> Result<(), String> {
         validate_manual_approval_execution_audit(action_id, approved_audit, committed_at)?;
         serde_json::from_str::<serde_json::Value>(executing_agent_input_json)
             .map_err(|_| "manual approval execution checkpoint is not valid JSON".to_string())?;
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[action_id, executing_agent_input_json])
+            .saturating_add(pending_audit_bytes(approved_audit))
+            .saturating_add(child_wake.map_or(0, |(wake_id, _, claim_token)| {
+                pending_text_bytes(&[wake_id, claim_token])
+            }));
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let pending = pending_action_repository::load_pending_action(&transaction, action_id)
@@ -442,6 +516,7 @@ impl StorageService {
         agent_action_audit_repository::upsert_action_audit_record(&transaction, approved_audit)
             .map_err(storage_error)?;
 
+        let mut child_wake_lease_deadline = None;
         if let Some((wake_id, expected_wake_status, claim_token)) = child_wake {
             if !matches!(
                 expected_wake_status,
@@ -460,6 +535,13 @@ impl StorageService {
                 committed_at,
             )
             .map_err(|error| error.to_string())?;
+            let deadline = resumed
+                .lease_expires_at
+                .ok_or_else(|| "manual approval child Wake has no active lease".to_string())?;
+            if clock() >= deadline {
+                return Err("Wake lease expired before Skill-script approval execution".into());
+            }
+            child_wake_lease_deadline = Some(deadline);
             if resumed.run_id.as_deref() != Some(pending.run_id.as_str())
                 || resumed.assistant_message_id.as_deref()
                     != pending.assistant_message_id.as_deref()
@@ -506,8 +588,12 @@ impl StorageService {
             }
         }
 
+        if child_wake_lease_deadline.is_some_and(|deadline| clock() >= deadline) {
+            return Err("Wake lease expired before Skill-script approval commit".into());
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(())
+        })?
     }
 
     pub fn set_pending_agent_action_target_status(
@@ -517,9 +603,10 @@ impl StorageService {
         target_status: &str,
         updated_at: i64,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        let affected = pending_action_repository::set_pending_action_target_status(
-            &connection,
+        let estimated_bytes = pending_text_bytes(&[action_id, expected_status, target_status]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let affected = pending_action_repository::set_pending_action_target_status(
+            connection,
             action_id,
             expected_status,
             target_status,
@@ -532,6 +619,7 @@ impl StorageService {
             ));
         }
         Ok(())
+        })?
     }
 
     /// Atomically retires a claimed action when its model continuation cannot reach Runtime.
@@ -596,8 +684,18 @@ impl StorageService {
             }
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[
+            action_id,
+            expected_status,
+            expected_target_status,
+            conversation_id,
+            assistant_message_id,
+            failure_message,
+        ])
+        .saturating_add(estimated_json_bytes(&(trace, model_context_items))?)
+        .saturating_add(usage.map_or(0, pending_usage_bytes));
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Control, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let pending_record =
@@ -696,5 +794,6 @@ impl StorageService {
         )
         .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)
+        })?
     }
 }

@@ -254,9 +254,11 @@ fn runtime_snapshot_projects_envelopes_and_run_states_in_one_query() {
             reads.fetch_add(1, Ordering::Relaxed);
         }
         Authorization::Allow
-    }));
+    }))
+    .unwrap();
     let snapshot = runtime_snapshot(&c, "instance", None).unwrap();
-    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
     assert_eq!(trace_reads.load(Ordering::Relaxed), 1);
     assert_eq!(
         serde_json::to_value(&snapshot.inputs).unwrap(),

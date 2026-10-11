@@ -49,7 +49,11 @@ fn context_profile_follows_spawn_followup_and_reopened_wake_instead_of_global_se
         .unwrap()
         .deferred_wake
         .unwrap();
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     let connection = reopened.state.connection().unwrap();
     for wake in [&child.initial_wake, &followup] {
         let actual: String = connection
@@ -242,7 +246,11 @@ fn assert_parent_result_wake_context_profile(admitted: bool) {
         Some(settlement.result_message.message_id.as_str())
     );
 
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .load_agent_prompt_preferences()
@@ -421,7 +429,11 @@ fn collaboration_policy_wake_admission_preserves_tree_scope_after_database_reope
         .unwrap();
 
     // A separate connection models recovery after the producing Host's memory is gone.
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     let connection = reopened.state.connection().unwrap();
     connection
         .execute(
@@ -1493,7 +1505,11 @@ fn release_profile_tree_mailbox_event_contention_and_restart_recovery() {
         assert_eq!(claimed.agent_id, *target);
 
         let started = Instant::now();
-        let reopened = StorageService::open(&database_path).unwrap();
+        let reopened = StorageService::open_with_model_credentials(
+            &database_path,
+            fixture.service.model_credentials.clone(),
+        )
+        .unwrap();
         let recovered_at = claimed_at + 60_001;
         let recovered = reopened
             .recover_agent_wakes_at(&format!("release-recovery-{restart}"), recovered_at)
@@ -1590,7 +1606,11 @@ fn release_profile_tree_mailbox_event_contention_and_restart_recovery() {
     let event_catchup_micros = event_catchup_started.elapsed().as_micros();
     assert_eq!(observed_events, event_count);
 
-    let reopened = StorageService::open(&database_path).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &database_path,
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     assert_eq!(reopened.list_agent_tree("agent-root").unwrap().len(), 64);
     assert!(
         reopened
@@ -1663,7 +1683,11 @@ fn multi_workspace_snapshot_follows_spawn_followup_and_reopened_wake() {
         .unwrap()
         .deferred_wake
         .unwrap();
-    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture._directory.path().join("storage.sqlite"),
+        fixture.service.model_credentials.clone(),
+    )
+    .unwrap();
     for wake in [&child.initial_wake, &followup] {
         assert_eq!(
             reopened

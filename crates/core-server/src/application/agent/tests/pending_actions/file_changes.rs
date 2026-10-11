@@ -9,7 +9,11 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
     const PRIVATE_WHOLE_FILE_MARKER: &str = "PRIVATE_FILE_CHANGE_CONTENT_MUST_STAY_HOST_SIDE";
 
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &fixture.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -164,7 +168,13 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
 #[test]
 fn file_change_pending_checkpoint_requires_exact_canonical_pending_action_id() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-file-change-checkpoint-id";
     let conversation_id = "conversation-file-change-checkpoint-id";
@@ -272,7 +282,13 @@ fn file_change_pending_checkpoint_requires_exact_canonical_pending_action_id() {
 #[test]
 fn cancelled_file_change_with_durable_abort_never_rolls_back_to_pending() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-file-change-cancel-failure".to_string(),

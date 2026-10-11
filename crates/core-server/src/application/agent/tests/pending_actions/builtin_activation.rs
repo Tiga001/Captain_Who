@@ -175,8 +175,13 @@ fn auto_activation_test_action(
 fn auto_activation_has_durable_non_replayable_receipt_and_cancellation_revokes_grant() {
     for cancel_during_approval in [false, true] {
         let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("auto-activation.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("auto-activation.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let provider = auto_activation_test_provider();
         let runtime =
             mycopilot_core::BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap();
@@ -237,7 +242,11 @@ fn auto_activation_has_durable_non_replayable_receipt_and_cancellation_revokes_g
 fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(
-        StorageService::open(&fixture.path().join("builtin-capability-binding.sqlite")).unwrap(),
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("builtin-capability-binding.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
     );
     save_test_pending_provider(
         &storage,
@@ -468,7 +477,13 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
 async fn builtin_capability_approval_waits_past_its_proposal_window_and_can_still_be_approved() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-capability-expiry.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

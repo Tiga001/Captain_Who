@@ -4,7 +4,13 @@ use super::*;
 #[test]
 fn automatic_builtin_sensitive_journal_is_durable_cancelable_and_non_replayable() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -105,8 +111,13 @@ fn automatic_builtin_sensitive_journal_is_durable_cancelable_and_non_replayable(
 async fn automatic_builtin_sensitive_execution_claims_before_invoke_and_never_replays() {
     for cancelled in [false, true] {
         let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         save_test_pending_provider(
             &storage,
             "test-model",
@@ -186,7 +197,13 @@ async fn automatic_builtin_sensitive_execution_claims_before_invoke_and_never_re
 #[test]
 fn builtin_sensitive_result_commit_failure_terminalizes_and_notifies_once() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -310,7 +327,13 @@ fn builtin_sensitive_result_commit_failure_terminalizes_and_notifies_once() {
 #[test]
 fn builtin_sensitive_post_commit_error_adopts_receipt_and_emits_safe_result() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

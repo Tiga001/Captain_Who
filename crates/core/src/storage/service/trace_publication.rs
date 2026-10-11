@@ -21,6 +21,7 @@ struct CommittedPublication {
     revision: i64,
     publication: ConversationTracePublication,
     validation: ConversationTraceValidationState,
+    retained_bytes: usize,
 }
 
 impl StorageService {
@@ -40,148 +41,204 @@ impl StorageService {
         let previous = cursor.committed.take();
         #[cfg(test)]
         let lock_started = std::time::Instant::now();
-        let mut connection = self.state.connection()?;
-        #[cfg(test)]
-        crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
-        #[cfg(test)]
-        let transaction_started = std::time::Instant::now();
-        let _transaction_timing =
-            crate::performance::Span::new("sqlite.transaction", "trace_publication");
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
+        let retained_bytes = publication_retained_bytes(previous.as_ref(), publication)?;
+        let bytes = retained_bytes
+            .saturating_add(conversation_id.len())
+            .saturating_add(assistant_message_id.len())
+            .saturating_add(run_id.len());
         let database_instance = self.state.instance_identity.clone();
-        let current_revision =
-            journal_revision(&transaction, conversation_id, assistant_message_id, run_id)?;
-        let hot = previous.filter(|previous| {
-            previous.conversation_id == conversation_id
-                && previous.assistant_message_id == assistant_message_id
-                && previous.run_id == run_id
-                && Arc::ptr_eq(&previous.database_instance, &database_instance)
-                && current_revision.as_ref() == Some(&(previous.epoch.clone(), previous.revision))
-                && ((publication
-                    .parent
-                    .as_ref()
-                    .is_some_and(|parent| Arc::ptr_eq(parent, &previous.publication.identity))
-                    && publication.prefix_trace_count == previous.publication.trace_items.len()
-                    && publication.prefix_model_count == previous.publication.model_items.len())
-                    || Arc::ptr_eq(&publication.identity, &previous.publication.identity))
-        });
-        // Guidance rows have their own state machine outside the trace journal. Keep the old
-        // cross-journal check without reloading their (potentially large) content. A changed or
-        // missing row must go through the complete transactional replay/conflict path.
-        let hot = match hot {
-            Some(previous) if guidance_prefix_is_applied(&transaction, &previous.publication)? => {
-                Some(previous)
-            }
-            _ => None,
-        };
-        let (outcome, validation) = if let Some(mut previous) = hot {
-            if updated_at < created_at {
-                return Err("conversation trace commit time cannot precede created_at".into());
-            }
-            if previous.publication.is_truncated() && !publication.is_truncated() {
-                return Err("conversation trace truncated state cannot be cleared".into());
-            }
-            let trace_count = previous.publication.trace_items.len();
-            let model_count = previous.publication.model_items.len();
-            previous.validation.append(
-                publication.trace_items[trace_count..]
-                    .iter()
-                    .map(AsRef::as_ref),
-                ConversationTurnTraceTerminalStatus::InProgress,
-            )?;
-            validate_model_suffix(publication, model_count)?;
-            let changed = trace_count != publication.trace_items.len()
-                || model_count != publication.model_items.len()
-                || previous.publication.is_truncated() != publication.is_truncated();
-            for item in &publication.trace_items[trace_count..] {
-                conversation_trace_repository::insert_trace_item(
-                    &transaction,
-                    assistant_message_id,
-                    item,
-                )
-                .map_err(storage_error)?;
-            }
-            conversation_model_context_repository::insert_validated_suffix(
-                &transaction,
-                assistant_message_id,
-                publication.model_items[model_count..]
-                    .iter()
-                    .map(AsRef::as_ref),
-            )
-            .map_err(storage_error)?;
-            // Async guidance requires both its exact trace and model-context proof. Publish
-            // both journals before changing delivery state, within the same transaction.
-            for item in &publication.trace_items[trace_count..] {
-                apply_guidance(&transaction, item, updated_at)?;
-            }
-            if changed {
-                transaction.execute("UPDATE conversation_turn_traces SET truncated=?1, updated_at=?2 WHERE assistant_message_id=?3",
-                    params![publication.is_truncated(), updated_at, assistant_message_id]).map_err(storage_error)?;
-            }
-            provider_continuation_repository::promote_staged_trace_projections_in_connection(
-                &transaction,
-                conversation_id,
-                assistant_message_id,
-                run_id,
-                updated_at,
-            )
-            .map_err(storage_error)?;
-            (
-                ConversationTraceAppendOutcome {
-                    changed,
-                    previous_trace: None,
-                    previous_model_context_items: Vec::new(),
-                    previous_publication: Some(previous.publication),
-                },
-                previous.validation,
-            )
-        } else {
-            let trace =
-                publication.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
-            let outcome = messages::append_trace_with_previous_projection_in_transaction(
-                &transaction,
-                &trace,
-                &publication.model_context_items,
-                created_at,
-                updated_at,
-            )?;
-            let mut validation = ConversationTraceValidationState::default();
-            validation.append(
-                publication.trace_items.iter().map(AsRef::as_ref),
-                ConversationTurnTraceTerminalStatus::InProgress,
-            )?;
-            (outcome, validation)
-        };
-        let (epoch, revision) =
-            journal_revision(&transaction, conversation_id, assistant_message_id, run_id)?
-                .ok_or_else(|| {
-                    "committed Trace publication has no active journal revision".to_string()
-                })?;
-        let commit_timing = crate::performance::Span::new("sqlite.commit", "trace_publication");
-        transaction.commit().map_err(storage_error)?;
-        drop(commit_timing);
-        crate::performance::record(
-            "sqlite.committed",
-            "trace_publication",
-            std::time::Duration::ZERO,
-            0,
-        );
-        #[cfg(test)]
-        crate::storage::trace_performance_metrics::transaction(transaction_started.elapsed());
-        cursor.committed = Some(CommittedPublication {
-            conversation_id: conversation_id.to_owned(),
-            assistant_message_id: assistant_message_id.to_owned(),
-            run_id: run_id.to_owned(),
-            database_instance,
-            epoch,
-            revision,
-            publication: publication.clone(),
-            validation,
-        });
-        Ok(outcome)
+        self.state.write_sync(
+            bytes,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                #[cfg(test)]
+                crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
+                #[cfg(test)]
+                let transaction_started = std::time::Instant::now();
+                let _transaction_timing =
+                    crate::performance::Span::new("sqlite.transaction", "trace_publication");
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let current_revision =
+                    journal_revision(&transaction, conversation_id, assistant_message_id, run_id)?;
+                let hot = previous.filter(|previous| {
+                    previous.conversation_id == conversation_id
+                        && previous.assistant_message_id == assistant_message_id
+                        && previous.run_id == run_id
+                        && Arc::ptr_eq(&previous.database_instance, &database_instance)
+                        && current_revision.as_ref() == Some(&(previous.epoch.clone(), previous.revision))
+                        && ((publication
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| Arc::ptr_eq(parent, &previous.publication.identity))
+                            && publication.prefix_trace_count == previous.publication.trace_items.len()
+                            && publication.prefix_model_count == previous.publication.model_items.len())
+                            || Arc::ptr_eq(&publication.identity, &previous.publication.identity))
+                });
+                // Guidance rows have their own state machine outside the trace journal. Keep the old
+                // cross-journal check without reloading their (potentially large) content. A changed or
+                // missing row must go through the complete transactional replay/conflict path.
+                let hot = match hot {
+                    Some(previous) if guidance_prefix_is_applied(&transaction, &previous.publication)? => {
+                        Some(previous)
+                    }
+                    _ => None,
+                };
+                let (outcome, validation) = if let Some(mut previous) = hot {
+                    if updated_at < created_at {
+                        return Err("conversation trace commit time cannot precede created_at".into());
+                    }
+                    if previous.publication.is_truncated() && !publication.is_truncated() {
+                        return Err("conversation trace truncated state cannot be cleared".into());
+                    }
+                    let trace_count = previous.publication.trace_items.len();
+                    let model_count = previous.publication.model_items.len();
+                    previous.validation.append(
+                        publication.trace_items[trace_count..]
+                            .iter()
+                            .map(AsRef::as_ref),
+                        ConversationTurnTraceTerminalStatus::InProgress,
+                    )?;
+                    validate_model_suffix(publication, model_count)?;
+                    let changed = trace_count != publication.trace_items.len()
+                        || model_count != publication.model_items.len()
+                        || previous.publication.is_truncated() != publication.is_truncated();
+                    for item in &publication.trace_items[trace_count..] {
+                        conversation_trace_repository::insert_trace_item(
+                            &transaction,
+                            assistant_message_id,
+                            item,
+                        )
+                        .map_err(storage_error)?;
+                    }
+                    conversation_model_context_repository::insert_validated_suffix(
+                        &transaction,
+                        assistant_message_id,
+                        publication.model_items[model_count..]
+                            .iter()
+                            .map(AsRef::as_ref),
+                    )
+                    .map_err(storage_error)?;
+                    // Async guidance requires both its exact trace and model-context proof. Publish
+                    // both journals before changing delivery state, within the same transaction.
+                    for item in &publication.trace_items[trace_count..] {
+                        apply_guidance(&transaction, item, updated_at)?;
+                    }
+                    if changed {
+                        transaction.execute("UPDATE conversation_turn_traces SET truncated=?1, updated_at=?2 WHERE assistant_message_id=?3",
+                            params![publication.is_truncated(), updated_at, assistant_message_id]).map_err(storage_error)?;
+                    }
+                    provider_continuation_repository::promote_staged_trace_projections_in_connection(
+                        &transaction,
+                        conversation_id,
+                        assistant_message_id,
+                        run_id,
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                    (
+                        ConversationTraceAppendOutcome {
+                            changed,
+                            previous_trace: None,
+                            previous_model_context_items: Vec::new(),
+                            previous_publication: Some(previous.publication),
+                        },
+                        previous.validation,
+                    )
+                } else {
+                    let trace =
+                        publication.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
+                    let outcome = messages::append_trace_with_previous_projection_in_transaction(
+                        &transaction,
+                        &trace,
+                        &publication.model_context_items,
+                        created_at,
+                        updated_at,
+                    )?;
+                    let mut validation = ConversationTraceValidationState::default();
+                    validation.append(
+                        publication.trace_items.iter().map(AsRef::as_ref),
+                        ConversationTurnTraceTerminalStatus::InProgress,
+                    )?;
+                    (outcome, validation)
+                };
+                let (epoch, revision) =
+                    journal_revision(&transaction, conversation_id, assistant_message_id, run_id)?
+                        .ok_or_else(|| {
+                            "committed Trace publication has no active journal revision".to_string()
+                        })?;
+                let commit_timing = crate::performance::Span::new("sqlite.commit", "trace_publication");
+                transaction.commit().map_err(storage_error)?;
+                drop(commit_timing);
+                crate::performance::record(
+                    "sqlite.committed",
+                    "trace_publication",
+                    std::time::Duration::ZERO,
+                    0,
+                );
+                #[cfg(test)]
+                crate::storage::trace_performance_metrics::transaction(transaction_started.elapsed());
+                cursor.committed = Some(CommittedPublication {
+                    conversation_id: conversation_id.to_owned(),
+                    assistant_message_id: assistant_message_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                    database_instance,
+                    epoch,
+                    revision,
+                    publication: publication.clone(),
+                    validation,
+                    retained_bytes,
+                });
+                Ok(outcome)
+            },
+        )?
     }
+}
+
+/// Retain the immutable prefix estimate along with the publication cursor. A hot append only
+/// sizes its new bodies; admission must not turn the incremental Trace path back into an O(n²)
+/// full-history serialization loop. This estimate grants no journal/lineage authority: all of
+/// those checks still run inside the write transaction, including the cold fallback.
+fn publication_retained_bytes(
+    previous: Option<&CommittedPublication>,
+    publication: &ConversationTracePublication,
+) -> Result<usize, String> {
+    let (mut bytes, trace_start, model_start) = match previous {
+        Some(previous) if Arc::ptr_eq(&publication.identity, &previous.publication.identity) => {
+            return Ok(previous.retained_bytes);
+        }
+        Some(previous)
+            if publication
+                .parent
+                .as_ref()
+                .is_some_and(|parent| Arc::ptr_eq(parent, &previous.publication.identity))
+                && publication.prefix_trace_count == previous.publication.trace_items.len()
+                && publication.prefix_model_count == previous.publication.model_items.len() =>
+        {
+            (
+                previous.retained_bytes,
+                publication.prefix_trace_count,
+                publication.prefix_model_count,
+            )
+        }
+        _ => (std::mem::size_of::<ConversationTracePublication>(), 0, 0),
+    };
+    for item in &publication.trace_items[trace_start..] {
+        bytes = bytes
+            .saturating_add(std::mem::size_of_val(item))
+            .saturating_add(crate::storage::write_size::estimated_json_bytes(
+                item.as_ref(),
+            )?);
+    }
+    for item in &publication.model_items[model_start..] {
+        bytes = bytes
+            .saturating_add(std::mem::size_of_val(item))
+            .saturating_add(crate::storage::write_size::estimated_json_bytes(
+                item.as_ref(),
+            )?);
+    }
+    Ok(bytes)
 }
 
 fn journal_revision(

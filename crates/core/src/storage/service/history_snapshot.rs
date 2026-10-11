@@ -103,44 +103,42 @@ impl std::ops::Deref for ConversationHistorySnapshot {
         &self.payload
     }
 }
+/// Small raw presentation rows captured with the history version in one SQLite snapshot.
+/// Applying these overlays can clone many messages, so it happens after returning the connection.
+struct HistoryPresentationRefresh {
+    conversation_revision: i64,
+    presentation_revision: i64,
+    ui_revision: i64,
+    metadata: Option<ChatConversationMetaRecord>,
+    agent_runs: Option<std::collections::HashMap<String, Option<String>>>,
+    ui_states: Option<std::collections::HashMap<String, String>>,
+}
+
 impl ConversationHistorySnapshot {
-    fn with_current_presentation(
-        self: &Arc<Self>,
+    fn load_presentation_refresh(
+        &self,
         connection: &Connection,
         conversation_revision: i64,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<HistoryPresentationRefresh, String> {
         let (presentation_revision, ui_revision) =
             message_presentation_revisions(connection, &self.conversation.id)?;
-        if self.conversation_revision == conversation_revision
-            && self.presentation_revision == presentation_revision
-            && self.ui_revision == ui_revision
-        {
-            return Ok(self.clone());
-        }
-        let mut refreshed = self.as_ref().clone();
-        if self.conversation_revision != conversation_revision {
-            let metadata =
+        let metadata = if self.conversation_revision != conversation_revision {
+            Some(
                 chat_repository::get_conversation_meta(connection, &self.conversation.id)
                     .map_err(storage_error)?
-                    .ok_or_else(|| "历史上下文的会话已不存在。".to_string())?;
-            // Refresh the small metadata wrapper without rescanning decoded history payloads.
-            refreshed.estimated_bytes = refreshed
-                .estimated_bytes
-                .saturating_sub(serialized_size(&self.conversation.metadata)?.saturating_mul(2))
-                .saturating_add(serialized_size(&metadata)?.saturating_mul(2));
-            refreshed.conversation.metadata = metadata;
-            refreshed.conversation_revision = conversation_revision;
-        }
-        if self.presentation_revision != presentation_revision {
-            // The indexed query reads only changed agent JSON, without loading trace/model
-            // payloads. Copy-on-write messages keep previously returned snapshots immutable.
+                    .ok_or_else(|| "历史上下文的会话已不存在。".to_string())?,
+            )
+        } else {
+            None
+        };
+        let agent_runs = if self.presentation_revision != presentation_revision {
             let mut statement = connection
                 .prepare(
                     "SELECT id, agent_run_json FROM messages
                  WHERE conversation_id = ?1 AND presentation_revision > ?2",
                 )
                 .map_err(storage_error)?;
-            let changes = statement
+            let rows = statement
                 .query_map(
                     rusqlite::params![self.conversation.id, self.presentation_revision],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
@@ -148,9 +146,61 @@ impl ConversationHistorySnapshot {
                 .map_err(storage_error)?
                 .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
                 .map_err(storage_error)?;
+            Some(rows)
+        } else {
+            None
+        };
+        let ui_states = if self.ui_revision != ui_revision {
+            let mut statement = connection
+                .prepare(
+                    "SELECT ui.message_id, ui.ui_state_json FROM chat_message_ui_states ui
+                 JOIN messages message ON message.id = ui.message_id
+                 WHERE message.conversation_id = ?1",
+                )
+                .map_err(storage_error)?;
+            let rows = statement
+                .query_map([&self.conversation.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_error)?
+                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+                .map_err(storage_error)?;
+            Some(rows)
+        } else {
+            None
+        };
+        Ok(HistoryPresentationRefresh {
+            conversation_revision,
+            presentation_revision,
+            ui_revision,
+            metadata,
+            agent_runs,
+            ui_states,
+        })
+    }
+
+    fn with_presentation_refresh(
+        self: &Arc<Self>,
+        refresh: HistoryPresentationRefresh,
+    ) -> Result<Arc<Self>, String> {
+        if self.conversation_revision == refresh.conversation_revision
+            && self.presentation_revision == refresh.presentation_revision
+            && self.ui_revision == refresh.ui_revision
+        {
+            return Ok(self.clone());
+        }
+        let mut refreshed = self.as_ref().clone();
+        if let Some(metadata) = refresh.metadata {
+            refreshed.estimated_bytes = refreshed
+                .estimated_bytes
+                .saturating_sub(serialized_size(&self.conversation.metadata)?.saturating_mul(2))
+                .saturating_add(serialized_size(&metadata)?.saturating_mul(2));
+            refreshed.conversation.metadata = metadata;
+            refreshed.conversation_revision = refresh.conversation_revision;
+        }
+        if let Some(changes) = refresh.agent_runs {
             if !changes.is_empty() {
-                let messages = Arc::make_mut(&mut refreshed.conversation.messages);
-                for message in messages {
+                for message in Arc::make_mut(&mut refreshed.conversation.messages) {
                     if let Some(agent_run_json) = changes.get(&message.id) {
                         refreshed.estimated_bytes = refreshed
                             .estimated_bytes
@@ -162,25 +212,9 @@ impl ConversationHistorySnapshot {
                     }
                 }
             }
-            refreshed.presentation_revision = presentation_revision;
+            refreshed.presentation_revision = refresh.presentation_revision;
         }
-        if self.ui_revision != ui_revision {
-            // UI state is a separate overlay, including for immutable fork/snapshot messages.
-            // Read its small rows only when its watermark changes; missing rows mean deletion.
-            let mut statement = connection
-                .prepare(
-                    "SELECT ui.message_id, ui.ui_state_json FROM chat_message_ui_states ui
-                 JOIN messages message ON message.id = ui.message_id
-                 WHERE message.conversation_id = ?1",
-                )
-                .map_err(storage_error)?;
-            let states = statement
-                .query_map([&self.conversation.id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(storage_error)?
-                .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
-                .map_err(storage_error)?;
+        if let Some(states) = refresh.ui_states {
             for message in Arc::make_mut(&mut refreshed.conversation.messages) {
                 let ui_state_json = states.get(&message.id).cloned();
                 refreshed.estimated_bytes = refreshed
@@ -189,7 +223,7 @@ impl ConversationHistorySnapshot {
                     .saturating_add(serialized_size(&ui_state_json)?.saturating_mul(2));
                 message.ui_state_json = ui_state_json;
             }
-            refreshed.ui_revision = ui_revision;
+            refreshed.ui_revision = refresh.ui_revision;
         }
         Ok(Arc::new(refreshed))
     }
@@ -365,7 +399,7 @@ impl StorageService {
         &self,
         version: &ConversationHistoryVersion,
     ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let current = history_version_in_connection(
             &transaction,
@@ -377,12 +411,12 @@ impl StorageService {
     }
 
     /// Returns one transactionally captured raw history. Active turns are readable but never
-    /// cached. Decode and hash validation happen without holding the shared database mutex.
+    /// cached. Decode and hash validation happen after releasing the read snapshot and pooled connection.
     pub fn load_conversation_history_snapshot(
         &self,
         conversation_id: &str,
     ) -> Result<Option<Arc<ConversationHistorySnapshot>>, String> {
-        let mut connection = self.state.connection()?;
+        let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let Some((version, conversation_revision)) = history_version_in_connection(
             &transaction,
@@ -401,15 +435,21 @@ impl StorageService {
         .map_err(storage_error)?
         .is_some();
         if !active {
-            let mut cache = self
+            let cached = self
                 .history_snapshot_cache
                 .lock()
-                .map_err(|_| "历史上下文缓存状态不可用。".to_string())?;
-            if let Some(snapshot) = cache.get(&version) {
-                let snapshot =
-                    snapshot.with_current_presentation(&transaction, conversation_revision)?;
-                cache.insert(snapshot.clone());
+                .map_err(|_| "历史上下文缓存状态不可用。".to_string())?
+                .get(&version);
+            if let Some(snapshot) = cached {
+                let refresh =
+                    snapshot.load_presentation_refresh(&transaction, conversation_revision)?;
                 transaction.commit().map_err(storage_error)?;
+                drop(connection);
+                let snapshot = snapshot.with_presentation_refresh(refresh)?;
+                self.history_snapshot_cache
+                    .lock()
+                    .map_err(|_| "历史上下文缓存状态不可用。".to_string())?
+                    .insert(snapshot.clone());
                 return Ok(Some(snapshot));
             }
         }
@@ -492,10 +532,11 @@ impl StorageService {
             version,
             estimated_bytes,
         });
-        // Never let a slow preparation overwrite newer committed history. The cache lock is
-        // taken only while holding the short DB transaction, matching the hot lookup order.
+        // Recheck against a fresh read snapshot after decoding; never reuse the earlier SQLite
+        // snapshot for read-after-write validation. The shared cache remains keyed by the
+        // database instance and complete history version, independently of the pooled connection.
         if !active {
-            let mut connection = self.state.connection()?;
+            let mut connection = self.state.read_connection()?;
             let transaction = connection.transaction().map_err(storage_error)?;
             if let Some((_, revision)) = history_version_in_connection(
                 &transaction,
@@ -504,16 +545,19 @@ impl StorageService {
             )?
             .filter(|(version, _)| version == &snapshot.version)
             {
-                // Presentation may change while the large bodies are decoded. Refresh raw
-                // agent JSON and admission metadata together under the final read transaction.
-                snapshot = snapshot.with_current_presentation(&transaction, revision)?;
-                let _ = self
-                    .history_snapshot_cache
+                // Capture only raw overlay rows under the new snapshot, then release the
+                // connection before copy-on-write message updates and byte accounting.
+                let refresh = snapshot.load_presentation_refresh(&transaction, revision)?;
+                transaction.commit().map_err(storage_error)?;
+                drop(connection);
+                snapshot = snapshot.with_presentation_refresh(refresh)?;
+                self.history_snapshot_cache
                     .lock()
                     .map_err(|_| "历史上下文缓存状态不可用。".to_string())?
                     .insert(snapshot.clone());
+            } else {
+                transaction.commit().map_err(storage_error)?;
             }
-            transaction.commit().map_err(storage_error)?;
         }
         Ok(Some(snapshot))
     }

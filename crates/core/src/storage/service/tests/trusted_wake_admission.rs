@@ -100,7 +100,7 @@ fn prepare_wake_with_remaining_lease(service: &StorageService, remaining_ms: i64
 fn admit(
     service: &StorageService,
     prepared: PreparedWake,
-    check: Option<&dyn Fn() -> Result<(), String>>,
+    check: Option<&(dyn Fn() -> Result<(), String> + Sync)>,
 ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
     service.save_conversation_and_begin_turn_with_execution_access(
         prepared.candidate,
@@ -492,16 +492,15 @@ fn trusted_wake_expiry_before_commit_rolls_back_messages_trace_and_dispatch_bind
     let wake_id = prepared.trusted.wake_id.clone();
     let revision = prepared.revision;
     let deadline = lease_deadline(&service, &wake_id);
-    let checks = Cell::new(0);
+    let checks = std::sync::atomic::AtomicUsize::new(0);
     let check = || {
-        checks.set(checks.get() + 1);
-        if checks.get() == 2 {
+        if checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
             sleep_until(deadline);
         }
         Ok(())
     };
     let error = admit(&service, prepared, Some(&check)).unwrap_err();
-    assert_eq!(checks.get(), 2);
+    assert_eq!(checks.load(std::sync::atomic::Ordering::Relaxed), 2);
     assert!(error.contains("before Turn admission commit"), "{error}");
     assert_not_admitted(&service, &wake_id, revision);
     assert_eq!(

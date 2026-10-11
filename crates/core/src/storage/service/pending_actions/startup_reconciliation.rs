@@ -16,8 +16,9 @@ impl StorageService {
             return Ok(false);
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[action_id, expected_status]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
@@ -491,6 +492,7 @@ impl StorageService {
             .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(true)
+        })?
     }
 
     /// Settles the hidden dispatch journal for one automatically authorized MCP invocation.
@@ -520,141 +522,157 @@ impl StorageService {
             return Err("invalid automatic MCP journal terminal transition".to_string());
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
-            .map_err(storage_error)?
-        else {
-            return Ok(false);
-        };
-        if record.status != expected_status
-            || !matches!(
-                record.action_type.as_str(),
-                "mcp_tool_call" | "builtin_mcp_tool_approval"
-            )
-        {
-            return Ok(false);
-        }
-        let message_owner = match (
-            record.conversation_id.as_deref(),
-            record.assistant_message_id.as_deref(),
-        ) {
-            (Some(conversation_id), Some(assistant_message_id)) => {
-                Some((conversation_id, assistant_message_id))
-            }
-            (None, None) => None,
-            _ => {
-                return Err("automatic MCP journal has an incomplete conversation owner".to_string())
-            }
-        };
-        let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
-            .map_err(|_| "automatic MCP journal contains an invalid frozen action".to_string())?;
-        let action_type = record.action_type.clone();
-        match action {
-            AgentProposedAction::McpToolCall { approval } => {
-                if action_type != "mcp_tool_call" {
-                    return Err("automatic MCP journal action type is inconsistent".to_string());
-                }
-                let identity = &approval.identity;
-                let provenance = &identity.provenance;
-                let expected_storage_id = format!(
-                    "v2:{}:{}:{}",
-                    identity.run_id.len(),
-                    identity.run_id,
-                    identity.action_id
-                );
-                if approval.approval_mode != crate::AgentMcpApprovalMode::Auto
-                    || approval.call.approval_status != crate::AgentApprovalStatus::Approved
-                    || record.action_id != expected_storage_id
-                    || record.run_id != identity.run_id
-                    || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
-                    || record.tool_name != provenance.model_tool_name
-                    || approval.call.id != identity.call_id
-                    || approval.call.tool != provenance.model_tool_name
-                    || approval.summary.server_id != provenance.server_id
-                    || approval.summary.scope != provenance.scope
-                    || approval.summary.raw_tool_name != provenance.raw_tool_name
-                    || approval.summary.model_tool_name != provenance.model_tool_name
-                    || !approval.summary.external
+        let estimated_bytes = pending_text_bytes(&[action_id, expected_status])
+            .saturating_add(estimated_json_bytes(&invocation)?);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let Some(record) =
+                    pending_action_repository::load_pending_action(&transaction, action_id)
+                        .map_err(storage_error)?
+                else {
+                    return Ok(false);
+                };
+                if record.status != expected_status
+                    || !matches!(
+                        record.action_type.as_str(),
+                        "mcp_tool_call" | "builtin_mcp_tool_approval"
+                    )
                 {
-                    return Err(
-                        "automatic MCP journal rejected a drifted typed identity".to_string()
-                    );
+                    return Ok(false);
                 }
-                if let Some(invocation) = invocation {
-                    let lifecycle_matches_outcome = match outcome {
-                        McpAutoActionJournalTerminalOutcome::Completed => {
-                            invocation.state == crate::AgentMcpToolInvocationState::Completed
+                let message_owner = match (
+                    record.conversation_id.as_deref(),
+                    record.assistant_message_id.as_deref(),
+                ) {
+                    (Some(conversation_id), Some(assistant_message_id)) => {
+                        Some((conversation_id, assistant_message_id))
+                    }
+                    (None, None) => None,
+                    _ => {
+                        return Err("automatic MCP journal has an incomplete conversation owner"
+                            .to_string())
+                    }
+                };
+                let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
+                    .map_err(|_| {
+                        "automatic MCP journal contains an invalid frozen action".to_string()
+                    })?;
+                let action_type = record.action_type.clone();
+                match action {
+                    AgentProposedAction::McpToolCall { approval } => {
+                        if action_type != "mcp_tool_call" {
+                            return Err(
+                                "automatic MCP journal action type is inconsistent".to_string()
+                            );
                         }
-                        McpAutoActionJournalTerminalOutcome::Cancelled => {
-                            invocation.state == crate::AgentMcpToolInvocationState::Cancelled
+                        let identity = &approval.identity;
+                        let provenance = &identity.provenance;
+                        let expected_storage_id = format!(
+                            "v2:{}:{}:{}",
+                            identity.run_id.len(),
+                            identity.run_id,
+                            identity.action_id
+                        );
+                        if approval.approval_mode != crate::AgentMcpApprovalMode::Auto
+                            || approval.call.approval_status != crate::AgentApprovalStatus::Approved
+                            || record.action_id != expected_storage_id
+                            || record.run_id != identity.run_id
+                            || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+                            || record.tool_name != provenance.model_tool_name
+                            || approval.call.id != identity.call_id
+                            || approval.call.tool != provenance.model_tool_name
+                            || approval.summary.server_id != provenance.server_id
+                            || approval.summary.scope != provenance.scope
+                            || approval.summary.raw_tool_name != provenance.raw_tool_name
+                            || approval.summary.model_tool_name != provenance.model_tool_name
+                            || !approval.summary.external
+                        {
+                            return Err("automatic MCP journal rejected a drifted typed identity"
+                                .to_string());
                         }
-                        McpAutoActionJournalTerminalOutcome::OutcomeUnknown => {
-                            invocation.state == crate::AgentMcpToolInvocationState::OutcomeUnknown
-                        }
-                        McpAutoActionJournalTerminalOutcome::Failed => matches!(
-                            invocation.state,
-                            crate::AgentMcpToolInvocationState::Failed
-                                | crate::AgentMcpToolInvocationState::Expired
-                                | crate::AgentMcpToolInvocationState::PayloadUnavailable
-                                | crate::AgentMcpToolInvocationState::PolicyDenied
-                        ),
-                    };
-                    if !lifecycle_matches_outcome {
-                        return Err(
+                        if let Some(invocation) = invocation {
+                            let lifecycle_matches_outcome = match outcome {
+                                McpAutoActionJournalTerminalOutcome::Completed => {
+                                    invocation.state
+                                        == crate::AgentMcpToolInvocationState::Completed
+                                }
+                                McpAutoActionJournalTerminalOutcome::Cancelled => {
+                                    invocation.state
+                                        == crate::AgentMcpToolInvocationState::Cancelled
+                                }
+                                McpAutoActionJournalTerminalOutcome::OutcomeUnknown => {
+                                    invocation.state
+                                        == crate::AgentMcpToolInvocationState::OutcomeUnknown
+                                }
+                                McpAutoActionJournalTerminalOutcome::Failed => matches!(
+                                    invocation.state,
+                                    crate::AgentMcpToolInvocationState::Failed
+                                        | crate::AgentMcpToolInvocationState::Expired
+                                        | crate::AgentMcpToolInvocationState::PayloadUnavailable
+                                        | crate::AgentMcpToolInvocationState::PolicyDenied
+                                ),
+                            };
+                            if !lifecycle_matches_outcome {
+                                return Err(
                             "automatic MCP journal lifecycle projection contradicts settlement"
                                 .to_string(),
                         );
+                            }
+                            if let Some((conversation_id, assistant_message_id)) = message_owner {
+                                chat_repository::upsert_message_mcp_invocation_event(
+                                    &transaction,
+                                    conversation_id,
+                                    assistant_message_id,
+                                    &approval,
+                                    invocation,
+                                    updated_at,
+                                )
+                                .map_err(storage_error)?;
+                            }
+                        }
                     }
-                    if let Some((conversation_id, assistant_message_id)) = message_owner {
-                        chat_repository::upsert_message_mcp_invocation_event(
-                            &transaction,
-                            conversation_id,
-                            assistant_message_id,
-                            &approval,
-                            invocation,
-                            updated_at,
-                        )
-                        .map_err(storage_error)?;
+                    AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                        if action_type != "builtin_mcp_tool_approval" || invocation.is_some() {
+                            return Err(
+                                "automatic MCP journal action type is inconsistent".to_string()
+                            );
+                        }
+                        crate::validate_builtin_mcp_tool_approval_shape(&approval).map_err(
+                            |_| "automatic built-in MCP journal shape is invalid".to_string(),
+                        )?;
+                        let identity = &approval.identity;
+                        let expected_storage_id = format!(
+                            "v2:{}:{}:{}",
+                            identity.run_id.len(),
+                            identity.run_id,
+                            identity.action_id
+                        );
+                        if approval.approval_status != crate::AgentApprovalStatus::Approved
+                            || record.action_id != expected_storage_id
+                            || record.run_id != identity.run_id
+                            || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+                            || record.tool_name != identity.model_name
+                        {
+                            return Err(
+                                "automatic built-in MCP journal rejected a drifted typed identity"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    _ => {
+                        return Err("automatic MCP journal action type is inconsistent".to_string());
                     }
                 }
-            }
-            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
-                if action_type != "builtin_mcp_tool_approval" || invocation.is_some() {
-                    return Err("automatic MCP journal action type is inconsistent".to_string());
-                }
-                crate::validate_builtin_mcp_tool_approval_shape(&approval)
-                    .map_err(|_| "automatic built-in MCP journal shape is invalid".to_string())?;
-                let identity = &approval.identity;
-                let expected_storage_id = format!(
-                    "v2:{}:{}:{}",
-                    identity.run_id.len(),
-                    identity.run_id,
-                    identity.action_id
-                );
-                if approval.approval_status != crate::AgentApprovalStatus::Approved
-                    || record.action_id != expected_storage_id
-                    || record.run_id != identity.run_id
-                    || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
-                    || record.tool_name != identity.model_name
-                {
-                    return Err(
-                        "automatic built-in MCP journal rejected a drifted typed identity"
-                            .to_string(),
-                    );
-                }
-            }
-            _ => {
-                return Err("automatic MCP journal action type is inconsistent".to_string());
-            }
-        }
 
-        let terminal_status = outcome.pending_status();
-        let affected = transaction
-            .execute(
-                "
+                let terminal_status = outcome.pending_status();
+                let affected = transaction
+                    .execute(
+                        "
                 UPDATE agent_pending_actions
                 SET status = ?3,
                     target_status = ?3,
@@ -665,22 +683,26 @@ impl StorageService {
                   AND status = ?2
                   AND action_type = ?5
                 ",
-                rusqlite::params![
-                    action_id,
-                    expected_status,
-                    terminal_status,
+                        rusqlite::params![
+                            action_id,
+                            expected_status,
+                            terminal_status,
+                            updated_at,
+                            action_type
+                        ],
+                    )
+                    .map_err(storage_error)?;
+                if affected != 1 {
+                    return Ok(false);
+                }
+                resolve_pending_approval_notification_in_transaction(
+                    &transaction,
+                    &record,
                     updated_at,
-                    action_type
-                ],
-            )
-            .map_err(storage_error)?;
-        if affected != 1 {
-            return Ok(false);
-        }
-        resolve_pending_approval_notification_in_transaction(&transaction, &record, updated_at)?;
-        transaction
-            .execute(
-                "
+                )?;
+                transaction
+                    .execute(
+                        "
                 UPDATE agent_action_audit
                 SET status = ?2,
                     action_json = '{}',
@@ -692,23 +714,25 @@ impl StorageService {
                     completed_at = COALESCE(completed_at, ?5)
                 WHERE action_id = ?1
                 ",
-                rusqlite::params![
-                    action_id,
-                    terminal_status,
-                    outcome.error_code(),
-                    outcome.safe_reason(),
-                    updated_at
-                ],
-            )
-            .map_err(storage_error)?;
-        transaction
-            .execute(
-                "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
-                [action_id],
-            )
-            .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(true)
+                        rusqlite::params![
+                            action_id,
+                            terminal_status,
+                            outcome.error_code(),
+                            outcome.safe_reason(),
+                            updated_at
+                        ],
+                    )
+                    .map_err(storage_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
+                        [action_id],
+                    )
+                    .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(true)
+            },
+        )?
     }
 
     /// Atomically terminalizes one startup MCP action without retaining action arguments.
@@ -728,26 +752,32 @@ impl StorageService {
             return Err("invalid MCP startup terminal transition".to_string());
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let request = McpActionTerminalizationRequest {
-            action_id: action_id.to_string(),
-            expected_status: expected_status.to_string(),
-            outcome,
-        };
-        let terminalized =
-            terminalize_mcp_action_in_transaction(&transaction, &request, updated_at)?;
-        if let Some(record) = terminalized.as_ref() {
-            file_change_run_grant_repository::revoke_nonterminal_run_grants(
-                &transaction,
-                &record.run_id,
-                updated_at,
-            )
-            .map_err(storage_error)?;
-        }
-        let changed = terminalized.is_some();
-        transaction.commit().map_err(storage_error)?;
-        Ok(changed)
+        let estimated_bytes = pending_text_bytes(&[action_id, expected_status]);
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Normal,
+            move |connection| {
+                let transaction = connection.transaction().map_err(storage_error)?;
+                let request = McpActionTerminalizationRequest {
+                    action_id: action_id.to_string(),
+                    expected_status: expected_status.to_string(),
+                    outcome,
+                };
+                let terminalized =
+                    terminalize_mcp_action_in_transaction(&transaction, &request, updated_at)?;
+                if let Some(record) = terminalized.as_ref() {
+                    file_change_run_grant_repository::revoke_nonterminal_run_grants(
+                        &transaction,
+                        &record.run_id,
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                }
+                let changed = terminalized.is_some();
+                transaction.commit().map_err(storage_error)?;
+                Ok(changed)
+            },
+        )?
     }
 
     /// Atomically terminalizes a Host-selected set of MCP approvals.
@@ -772,17 +802,32 @@ impl StorageService {
             return Err("invalid or duplicate MCP terminalization request".to_string());
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        for request in requests {
-            if terminalize_mcp_action_in_transaction(&transaction, request, updated_at)?.is_none() {
-                return Err("MCP terminalization batch lost an expected status CAS".to_string());
-            }
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(requests.len())
+        let estimated_bytes = requests.iter().fold(512_usize, |bytes, request| {
+            bytes.saturating_add(pending_text_bytes(&[
+                &request.action_id,
+                &request.expected_status,
+            ]))
+        });
+        self.state.write_sync(
+            estimated_bytes,
+            StorageWriteClass::Control,
+            move |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                for request in requests {
+                    if terminalize_mcp_action_in_transaction(&transaction, request, updated_at)?
+                        .is_none()
+                    {
+                        return Err(
+                            "MCP terminalization batch lost an expected status CAS".to_string()
+                        );
+                    }
+                }
+                transaction.commit().map_err(storage_error)?;
+                Ok(requests.len())
+            },
+        )?
     }
 
     /// Safely retires one current pending row whose private action/resume projection cannot be
@@ -893,8 +938,15 @@ impl StorageService {
         required_provenance: Option<RequiredPendingToolProvenance>,
         builtin_mcp_outcome: Option<McpStartupActionTerminalOutcome>,
     ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
+        let estimated_bytes = pending_text_bytes(&[
+            action_id,
+            expected_status,
+            error_code,
+            reason,
+            expected_action_type.unwrap_or_default(),
+        ]);
+        self.state.write_sync(estimated_bytes, StorageWriteClass::Normal, move |connection| {
+            let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
@@ -1090,6 +1142,6 @@ impl StorageService {
         )?;
         transaction.commit().map_err(storage_error)?;
         Ok(true)
+        })?
     }
-
 }

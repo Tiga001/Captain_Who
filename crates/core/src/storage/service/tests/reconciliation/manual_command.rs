@@ -178,7 +178,11 @@ fn failed_managed_pdf_settlement_preserves_opaque_history_route_across_durable_a
     );
     assert!(service.list_unsettled_file_effects().unwrap().is_empty());
 
-    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .commit_current_manual_settlement(&terminal, "approved", "failed", &trace, 12,)
@@ -508,7 +512,11 @@ fn concurrent_manual_command_settlement_is_exactly_once_across_storage_instances
     );
     first.store_pending_agent_action(pending).unwrap();
     first.upsert_agent_action_audit(approved).unwrap();
-    let second = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let second = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
 
     let first_barrier = std::sync::Arc::clone(&barrier);

@@ -21,22 +21,24 @@ fn attention_is_sparse_metadata_only_and_uses_three_reads_for_a_thousand_chats()
     approval(&connection, "pending-1", "chat", "pending");
     approval(&connection, "pending-2", "chat", "pending");
     approval(&connection, "approved", "empty-1", "approved");
-    connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Read {
-            table_name:
-                "messages"
-                | "conversation_turn_trace_items"
-                | "conversation_model_context_items"
-                | "human_interaction_responses"
-                | "human_interaction_deliveries",
-            ..
-        } => Authorization::Deny,
-        AuthAction::Read {
-            column_name: "questions_json" | "action_json" | "agent_input_json",
-            ..
-        } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }));
+    connection
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name:
+                    "messages"
+                    | "conversation_turn_trace_items"
+                    | "conversation_model_context_items"
+                    | "human_interaction_responses"
+                    | "human_interaction_deliveries",
+                ..
+            } => Authorization::Deny,
+            AuthAction::Read {
+                column_name: "questions_json" | "action_json" | "agent_input_json",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
     STATEMENTS.with(|statements| statements.borrow_mut().clear());
     connection.trace(Some(|sql| {
         STATEMENTS.with(|statements| statements.borrow_mut().push(sql.to_owned()))

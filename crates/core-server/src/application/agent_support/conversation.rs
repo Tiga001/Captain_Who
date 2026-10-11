@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 type AutomationAdmissionWithExecutionAccess<'a> = (
     &'a mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
-    &'a dyn Fn() -> Result<(), AgentServiceError>,
+    &'a (dyn Fn() -> Result<(), AgentServiceError> + Sync),
 );
 
 fn admission_error(message: String) -> AgentServiceError {
@@ -250,7 +250,7 @@ pub(crate) fn prepare_reserved_human_response_turn(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     response: mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
         storage,
@@ -287,7 +287,7 @@ pub(crate) fn prepare_reserved_workflow_turn(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     workflow: mycopilot_core::workflow_execution::Input,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     prepare_reserved_workflow_turn_with_history(
         storage,
@@ -311,7 +311,7 @@ pub(crate) fn prepare_reserved_workflow_turn_with_history(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     workflow: mycopilot_core::workflow_execution::Input,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
     prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
@@ -349,7 +349,7 @@ pub(crate) fn prepare_reserved_human_turn(
     expected_revision: Option<i64>,
     automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     prepare_reserved_human_turn_with_history(
         storage,
@@ -375,7 +375,7 @@ pub(crate) fn prepare_reserved_human_turn_with_history(
     expected_revision: Option<i64>,
     automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
     prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
@@ -411,7 +411,7 @@ pub(crate) fn prepare_reserved_human_rewrite_turn(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     rewrite: HumanConversationTurnRewrite,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     prepare_conversation_turn_from_source(
         storage,
@@ -439,7 +439,7 @@ pub(crate) fn prepare_reserved_continuation_turn(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     continuation: HumanConversationTurnContinuation,
-    check_execution_access: &dyn Fn() -> Result<(), AgentServiceError>,
+    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     prepare_conversation_turn_from_source(
         storage,
@@ -538,7 +538,7 @@ fn prepare_conversation_turn_from_source(
     rewrite: Option<HumanConversationTurnRewrite>,
     automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
-    check_execution_access: Option<&dyn Fn() -> Result<(), AgentServiceError>>,
+    check_execution_access: Option<&(dyn Fn() -> Result<(), AgentServiceError> + Sync)>,
     prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     if rewrite.is_some() && automation_admission.is_some() {
@@ -1013,8 +1013,8 @@ fn prepare_conversation_turn_from_source(
                             .to_string()
                     })
             };
-            let checked_admission =
-                check_execution_access.map(|_| &check_access as &dyn Fn() -> Result<(), String>);
+            let checked_admission = check_execution_access
+                .map(|_| &check_access as &(dyn Fn() -> Result<(), String> + Sync));
             let initial_trace = initial_conversation_trace
                 .clone()
                 .unwrap_or_default()

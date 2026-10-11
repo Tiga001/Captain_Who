@@ -522,3 +522,250 @@ fn stopped_tree_wait_observation_returns_terminalization_signal_without_waiting(
         "the dispatcher owns the following Interrupted settlement"
     );
 }
+
+fn prepare_skill_approval_with_wake_status(
+    status: AgentWakeStatus,
+) -> (Fixture, String, String, String, AgentPendingActionRecord) {
+    let fixture = Fixture::new(Some("model-a"));
+    let (wake_id, claim_token, conversation_id, _) =
+        active_waiting_child(&fixture, "lease-fenced-approval");
+    if status == AgentWakeStatus::Running {
+        fixture
+            .service
+            .transition_agent_wake(
+                &wake_id,
+                AgentWakeStatus::WaitingForApproval,
+                AgentWakeStatus::Running,
+                Some(&claim_token),
+            )
+            .unwrap();
+    }
+    let action = pending_action("lease-fenced-approval", &conversation_id);
+    fixture
+        .service
+        .store_pending_agent_action(action.clone())
+        .unwrap();
+    fixture
+        .service
+        .upsert_agent_action_audit(audit(&action, None, "pending", None))
+        .unwrap();
+    (fixture, wake_id, claim_token, conversation_id, action)
+}
+
+fn assert_skill_approval_remains_pending(
+    service: &StorageService,
+    wake_id: &str,
+    expected_status: AgentWakeStatus,
+    expected_revision: u64,
+    action: &AgentPendingActionRecord,
+) {
+    let wake = service.get_agent_wake(wake_id).unwrap().unwrap();
+    assert_eq!(wake.status, expected_status);
+    assert_eq!(wake.status_revision, expected_revision);
+    let pending = service
+        .get_pending_agent_action(&action.action_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(pending.agent_input_json, action.agent_input_json);
+    assert_eq!(pending.target_status, None);
+    let audit = service
+        .get_agent_action_audit(&action.action_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(audit.decision, None);
+    assert_eq!(audit.status, "pending");
+    let connection = service.state.connection().unwrap();
+    let (run, usage): (String, String) = connection
+        .query_row(
+            "SELECT message.agent_run_json, usage.status FROM messages AS message
+             JOIN agent_usage_records AS usage ON usage.message_id = message.id
+             WHERE message.id = 'approval-assistant'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(usage, "waiting_for_approval");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&run).unwrap()["status"],
+        "waiting_for_approval"
+    );
+}
+
+fn queued_skill_approval_rejects_expired_lease(status: AgentWakeStatus) {
+    let (fixture, wake_id, claim_token, _, action) =
+        prepare_skill_approval_with_wake_status(status);
+    let before = fixture.service.get_agent_wake(&wake_id).unwrap().unwrap();
+    let deadline = before.lease_expires_at.unwrap();
+    let clock = std::sync::atomic::AtomicI64::new(deadline - 1);
+    let (started, waiting) = std::sync::mpsc::sync_channel(0);
+    // Hold the actual writer while another thread submits the approval. Its audit timestamp
+    // precedes the claim deadline; the writer must nevertheless use current lease authority.
+    let connection = fixture.service.state.connection().unwrap();
+    std::thread::scope(|scope| {
+        let approval = scope.spawn(|| {
+            started.send(()).unwrap();
+            fixture
+                .service
+                .commit_pending_skill_script_approval_execution_with_clock(
+                    &action.action_id,
+                    "{}",
+                    &audit(&action, Some("approved"), "approved", Some(30)),
+                    Some((&wake_id, status, &claim_token)),
+                    30,
+                    || clock.load(Ordering::SeqCst),
+                )
+        });
+        waiting.recv().unwrap();
+        clock.store(deadline, Ordering::SeqCst);
+        drop(connection);
+        let error = approval.join().unwrap().unwrap_err();
+        assert!(
+            error.contains("lease") && error.contains("expired"),
+            "{error}"
+        );
+    });
+    assert_skill_approval_remains_pending(
+        &fixture.service,
+        &wake_id,
+        status,
+        before.status_revision,
+        &action,
+    );
+}
+
+#[test]
+fn queued_waiting_skill_approval_rejects_expired_lease_atomically() {
+    queued_skill_approval_rejects_expired_lease(AgentWakeStatus::WaitingForApproval);
+}
+
+#[test]
+fn queued_running_skill_approval_rejects_expired_lease_atomically() {
+    queued_skill_approval_rejects_expired_lease(AgentWakeStatus::Running);
+}
+
+fn skill_approval_expiring_at_commit_rolls_back(status: AgentWakeStatus) {
+    let (fixture, wake_id, claim_token, _, action) =
+        prepare_skill_approval_with_wake_status(status);
+    let before = fixture.service.get_agent_wake(&wake_id).unwrap().unwrap();
+    let deadline = before.lease_expires_at.unwrap();
+    let checks = AtomicUsize::new(0);
+    let error = fixture
+        .service
+        .commit_pending_skill_script_approval_execution_with_clock(
+            &action.action_id,
+            "{}",
+            &audit(&action, Some("approved"), "approved", Some(30)),
+            Some((&wake_id, status, &claim_token)),
+            30,
+            || {
+                if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    deadline - 1
+                } else {
+                    deadline
+                }
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("before Skill-script approval commit"),
+        "{error}"
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+    assert_skill_approval_remains_pending(
+        &fixture.service,
+        &wake_id,
+        status,
+        before.status_revision,
+        &action,
+    );
+}
+
+#[test]
+fn waiting_skill_approval_expiring_at_commit_rolls_back_every_fact() {
+    skill_approval_expiring_at_commit_rolls_back(AgentWakeStatus::WaitingForApproval);
+}
+
+#[test]
+fn running_skill_approval_expiring_at_commit_rolls_back_every_fact() {
+    skill_approval_expiring_at_commit_rolls_back(AgentWakeStatus::Running);
+}
+
+#[test]
+fn queued_wake_transition_rejects_expired_claim() {
+    let fixture = Fixture::new(Some("model-a"));
+    let child = fixture
+        .service
+        .create_child_agent(&spawn_input("queued-expiry", "queued-expiry"))
+        .unwrap();
+    let claim_token = "queued-expiry-claim";
+    let claimed = fixture
+        .service
+        .claim_next_agent_wake(&child.agent.agent_id, claim_token)
+        .unwrap()
+        .unwrap();
+    let deadline = claimed.lease_expires_at.unwrap();
+    let clock = std::sync::atomic::AtomicI64::new(deadline - 1);
+    let (started, waiting) = std::sync::mpsc::sync_channel(0);
+    let connection = fixture.service.state.connection().unwrap();
+    std::thread::scope(|scope| {
+        let transition = scope.spawn(|| {
+            started.send(()).unwrap();
+            fixture.service.transition_agent_wake_with_clock(
+                &claimed.wake_id,
+                AgentWakeStatus::Claimed,
+                AgentWakeStatus::Running,
+                Some(claim_token),
+                || clock.load(Ordering::SeqCst),
+            )
+        });
+        waiting.recv().unwrap();
+        clock.store(deadline, Ordering::SeqCst);
+        drop(connection);
+        let error = transition.join().unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("lease") && error.contains("expired"),
+            "{error}"
+        );
+    });
+    let wake = fixture
+        .service
+        .get_agent_wake(&claimed.wake_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(wake.status, AgentWakeStatus::Claimed);
+    assert_eq!(wake.status_revision, claimed.status_revision);
+}
+
+#[test]
+fn wake_running_noop_rechecks_lease_before_commit() {
+    let (fixture, wake_id, claim_token, _, _) =
+        prepare_skill_approval_with_wake_status(AgentWakeStatus::Running);
+    let before = fixture.service.get_agent_wake(&wake_id).unwrap().unwrap();
+    let deadline = before.lease_expires_at.unwrap();
+    let checks = AtomicUsize::new(0);
+    let error = fixture
+        .service
+        .transition_agent_wake_with_clock(
+            &wake_id,
+            AgentWakeStatus::Running,
+            AgentWakeStatus::Running,
+            Some(&claim_token),
+            || {
+                if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    deadline - 1
+                } else {
+                    deadline
+                }
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("lease expired before transition commit"),
+        "{error}"
+    );
+    let after = fixture.service.get_agent_wake(&wake_id).unwrap().unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.status_revision, before.status_revision);
+}

@@ -6,7 +6,13 @@ use super::*;
 fn builtin_sensitive_startup_terminalization_is_typed_atomic_and_secret_free() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-sensitive-startup.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -233,7 +239,13 @@ fn builtin_sensitive_startup_terminalization_is_typed_atomic_and_secret_free() {
 fn builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-sensitive-reject-crash.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "test-model",

@@ -237,57 +237,64 @@ impl StorageService {
             );
         }
 
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let trace_identity = transaction
-            .query_row(
-                "
+        self.state.write_sync(
+            4096 + usage.conversation_id.len() + usage.message_id.len() + usage.run_id.len(),
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let trace_identity = transaction
+                    .query_row(
+                        "
                 SELECT conversation_id, run_id, terminal_status
                 FROM conversation_turn_traces
                 WHERE assistant_message_id = ?1
                 ",
-                [&usage.message_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(storage_error)?;
-        let Some((trace_conversation_id, trace_run_id, terminal_status)) = trace_identity else {
-            return Err(format!(
-                "waiting-segment Turn trace `{}` does not exist",
-                usage.message_id
-            ));
-        };
-        if trace_conversation_id != usage.conversation_id || trace_run_id != usage.run_id {
-            return Err(format!(
-                "waiting-segment Turn trace `{}` is owned by another conversation or run",
-                usage.message_id
-            ));
-        }
-        match terminal_status.as_str() {
-            "in_progress" => {}
-            "completed" | "failed" | "cancelled" => {
-                transaction.commit().map_err(storage_error)?;
-                return Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal);
-            }
-            _ => {
-                return Err(format!(
-                    "waiting-segment Turn trace `{}` has an invalid terminal status",
-                    usage.message_id
-                ));
-            }
-        }
+                        [&usage.message_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(storage_error)?;
+                let Some((trace_conversation_id, trace_run_id, terminal_status)) = trace_identity
+                else {
+                    return Err(format!(
+                        "waiting-segment Turn trace `{}` does not exist",
+                        usage.message_id
+                    ));
+                };
+                if trace_conversation_id != usage.conversation_id || trace_run_id != usage.run_id {
+                    return Err(format!(
+                        "waiting-segment Turn trace `{}` is owned by another conversation or run",
+                        usage.message_id
+                    ));
+                }
+                match terminal_status.as_str() {
+                    "in_progress" => {}
+                    "completed" | "failed" | "cancelled" => {
+                        transaction.commit().map_err(storage_error)?;
+                        return Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "waiting-segment Turn trace `{}` has an invalid terminal status",
+                            usage.message_id
+                        ));
+                    }
+                }
 
-        usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted)
+                usage_repository::upsert_usage_record(&transaction, usage)
+                    .map_err(storage_error)?;
+                transaction.commit().map_err(storage_error)?;
+                Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted)
+            },
+        )?
     }
 
     pub fn upsert_chat_messages(
@@ -296,15 +303,20 @@ impl StorageService {
         messages: Vec<ChatMessageRecord>,
         position_offset: i64,
     ) -> Result<Vec<ChatMessageRecord>, String> {
-        let mut connection = self.state.connection()?;
-        ensure_conversation_exists(&connection, conversation_id)?;
-        chat_repository::upsert_messages(
-            &mut connection,
-            conversation_id,
-            &messages,
-            position_offset,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(&messages)? + conversation_id.len(),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                ensure_conversation_exists(connection, conversation_id)?;
+                chat_repository::upsert_messages(
+                    connection,
+                    conversation_id,
+                    &messages,
+                    position_offset,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn get_assistant_message_created_at(
@@ -312,7 +324,8 @@ impl StorageService {
         conversation_id: &str,
         message_id: &str,
     ) -> Result<Option<i64>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         chat_repository::get_assistant_message_created_at(&connection, conversation_id, message_id)
             .map_err(storage_error)
     }
@@ -323,14 +336,19 @@ impl StorageService {
         created_at: i64,
         completed_at: i64,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        conversation_trace_repository::replace_trace(
-            &mut connection,
-            trace,
-            created_at,
-            completed_at,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(trace)?,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                conversation_trace_repository::replace_trace(
+                    connection,
+                    trace,
+                    created_at,
+                    completed_at,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn append_in_progress_conversation_turn_trace(
@@ -339,14 +357,16 @@ impl StorageService {
         created_at: i64,
         updated_at: i64,
     ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
-        conversation_trace_repository::append_in_progress_trace(
-            &mut connection,
-            trace,
-            created_at,
-            updated_at,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(trace)?,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                conversation_trace_repository::append_in_progress_trace(
+                    connection, trace, created_at, updated_at,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     /// Atomically appends an in-progress trace and advances every included guidance journal row
@@ -377,25 +397,32 @@ impl StorageService {
     ) -> Result<ConversationTraceAppendOutcome, String> {
         #[cfg(test)]
         let lock_started = std::time::Instant::now();
-        let mut connection = self.state.connection()?;
-        #[cfg(test)]
-        crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
-        #[cfg(test)]
-        let transaction_started = std::time::Instant::now();
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let outcome = append_trace_with_previous_projection_in_transaction(
-            &transaction,
-            trace,
-            model_context_items,
-            created_at,
-            updated_at,
-        )?;
-        transaction.commit().map_err(storage_error)?;
-        #[cfg(test)]
-        crate::storage::trace_performance_metrics::transaction(transaction_started.elapsed());
-        Ok(outcome)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(&(trace, model_context_items))?,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                #[cfg(test)]
+                crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
+                #[cfg(test)]
+                let transaction_started = std::time::Instant::now();
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(storage_error)?;
+                let outcome = append_trace_with_previous_projection_in_transaction(
+                    &transaction,
+                    trace,
+                    model_context_items,
+                    created_at,
+                    updated_at,
+                )?;
+                transaction.commit().map_err(storage_error)?;
+                #[cfg(test)]
+                crate::storage::trace_performance_metrics::transaction(
+                    transaction_started.elapsed(),
+                );
+                Ok(outcome)
+            },
+        )?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -557,7 +584,7 @@ impl StorageService {
                     .saturating_add(started.elapsed().as_millis().min(i64::MAX as u128) as i64),
             )
         };
-        let mut connection = self.state.connection()?;
+        self.state.write_sync(crate::storage::write_size::estimated_json_bytes(&(trace, model_context_items))? + content.len() + 8192, crate::storage::StorageWriteClass::Control, |connection| {
         let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "terminal");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -784,13 +811,15 @@ impl StorageService {
         drop(commit_timing);
         crate::performance::record("sqlite.committed", "terminal", std::time::Duration::ZERO, 0);
         Ok(())
+        })?
     }
 
     pub fn get_conversation_turn_trace(
         &self,
         assistant_message_id: &str,
     ) -> Result<Option<ConversationTurnTrace>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         conversation_trace_repository::get_trace_for_message(&connection, assistant_message_id)
             .map_err(storage_error)
     }
@@ -799,7 +828,8 @@ impl StorageService {
         &self,
         assistant_message_id: &str,
     ) -> Result<Option<u64>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         conversation_trace_repository::get_trace_next_sequence_for_message(
             &connection,
             assistant_message_id,
@@ -811,7 +841,8 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<ConversationTurnTrace>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         let mut traces = conversation_trace_repository::list_traces_for_conversation(
             &connection,
             conversation_id,
@@ -831,7 +862,8 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<conversation_trace_repository::ConversationTurnIdentity>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         conversation_trace_repository::get_in_progress_turn_identity(&connection, conversation_id)
             .map_err(storage_error)
     }
@@ -840,7 +872,8 @@ impl StorageService {
         &self,
         assistant_message_id: &str,
     ) -> Result<Option<ConversationModelContextLog>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         conversation_model_context_repository::get_log_for_message(
             &connection,
             assistant_message_id,
@@ -852,7 +885,8 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<ConversationModelContextLog>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         let mut logs = conversation_model_context_repository::list_logs_for_conversation(
             &connection,
             conversation_id,
@@ -871,7 +905,8 @@ impl StorageService {
     pub fn list_in_progress_conversation_turn_traces(
         &self,
     ) -> Result<Vec<ConversationTurnTrace>, String> {
-        let connection = self.state.connection()?;
+        let connection = self.state.read_connection()?;
+        let connection = connection.unchecked_transaction().map_err(storage_error)?;
         conversation_trace_repository::list_in_progress_traces(&connection).map_err(storage_error)
     }
 
@@ -880,9 +915,14 @@ impl StorageService {
         conversation_id: &str,
         message: ChatMessageStateRecord,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        chat_repository::update_message_state(&connection, conversation_id, &message)
-            .map_err(storage_error)
+        self.state.write_sync(
+            crate::storage::write_size::estimated_json_bytes(&message)? + conversation_id.len(),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                chat_repository::update_message_state(connection, conversation_id, &message)
+                    .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn save_chat_message_ui_state(
@@ -891,14 +931,19 @@ impl StorageService {
         message_id: &str,
         ui_state_json: Option<&str>,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        chat_repository::update_message_ui_state(
-            &connection,
-            conversation_id,
-            message_id,
-            ui_state_json,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            conversation_id.len() + message_id.len() + ui_state_json.map_or(0, str::len),
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                chat_repository::update_message_ui_state(
+                    connection,
+                    conversation_id,
+                    message_id,
+                    ui_state_json,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     pub fn update_chat_message_status_and_content(
@@ -909,16 +954,21 @@ impl StorageService {
         status: Option<&str>,
         updated_at: i64,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        chat_repository::update_message_status_and_content(
-            &connection,
-            conversation_id,
-            message_id,
-            content,
-            status,
-            updated_at,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            conversation_id.len() + message_id.len() + content.len() + 1024,
+            crate::storage::StorageWriteClass::Normal,
+            |connection| {
+                chat_repository::update_message_status_and_content(
+                    connection,
+                    conversation_id,
+                    message_id,
+                    content,
+                    status,
+                    updated_at,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 
     /// Commits a late `WaitingForApproval` projection only while its exact Turn is active.
@@ -961,7 +1011,7 @@ impl StorageService {
             }
         }
 
-        let mut connection = self.state.connection()?;
+        self.state.write_sync(conversation_id.len() + assistant_message_id.len() + run_id.len() + pending_action_storage_id.len() + content.len() + 4096, crate::storage::StorageWriteClass::Control, |connection| {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -1134,6 +1184,7 @@ impl StorageService {
         }
         transaction.commit().map_err(storage_error)?;
         Ok(AgentWaitingForApprovalPersistenceOutcome::Persisted)
+        })?
     }
 
     pub fn update_chat_message_run_terminal_state(
@@ -1145,17 +1196,22 @@ impl StorageService {
         run_status: &str,
         completed_at: i64,
     ) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        chat_repository::update_message_run_terminal_state(
-            &connection,
-            conversation_id,
-            message_id,
-            run_id,
-            message_status,
-            run_status,
-            completed_at,
-            None,
-        )
-        .map_err(storage_error)
+        self.state.write_sync(
+            conversation_id.len() + message_id.len() + run_id.len() + 1024,
+            crate::storage::StorageWriteClass::Control,
+            |connection| {
+                chat_repository::update_message_run_terminal_state(
+                    connection,
+                    conversation_id,
+                    message_id,
+                    run_id,
+                    message_status,
+                    run_status,
+                    completed_at,
+                    None,
+                )
+                .map_err(storage_error)
+            },
+        )?
     }
 }

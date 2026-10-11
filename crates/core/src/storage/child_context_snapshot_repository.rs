@@ -60,6 +60,43 @@ pub(crate) struct ChildContextSnapshotPlan {
     created_at: i64,
 }
 
+impl ChildContextSnapshotPlan {
+    pub(crate) fn estimated_bytes(&self) -> Result<usize, String> {
+        use super::conversation_fork_repository::estimated_serialized_bytes;
+        let mut bytes = 4096usize;
+        for message in &self.messages {
+            bytes = bytes.saturating_add(estimated_serialized_bytes(&message.record)?);
+        }
+        for trace in &self.traces {
+            bytes = bytes.saturating_add(estimated_serialized_bytes(&trace.trace)?);
+            bytes = bytes.saturating_add(estimated_serialized_bytes(&trace.model_context_items)?);
+        }
+        for diff in &self.turn_diffs {
+            bytes = bytes.saturating_add(4096);
+            for file in &diff.record.files {
+                bytes = bytes
+                    .saturating_add(file.path.len())
+                    .saturating_add(128)
+                    .saturating_add(file.before.text().map_or(0, str::len))
+                    .saturating_add(file.after.text().map_or(0, str::len));
+            }
+        }
+        for summary in &self.summaries {
+            bytes = bytes.saturating_add(estimated_serialized_bytes(&summary.summary)?);
+        }
+        bytes = bytes.saturating_add(
+            1024usize.saturating_mul(
+                self.attachments
+                    .len()
+                    .saturating_add(self.archives.len())
+                    .saturating_add(self.artifact_grants.len())
+                    .saturating_add(self.id_replacements.len()),
+            ),
+        );
+        Ok(bytes)
+    }
+}
+
 /// Builds a collaboration-owned snapshot of complete settled logical turns.
 ///
 /// Candidate logical turns use the same settled assistant boundary as the existing Conversation
@@ -338,13 +375,16 @@ pub(crate) fn build_child_context_snapshot_plan(
         &run_id_map,
     )?;
     let summaries = if matches!(fork_turns, AgentForkTurns::All) {
-        context_compaction_repository::list_active_summary_chain(connection, source_conversation_id)
-            .map_err(|error| ConversationForkError::Other(error.to_string()))?
-            .into_iter()
-            .take_while(|version| {
-                source_message_ids.contains(&version.lineage.introduced_by_assistant_message_id)
-            })
-            .collect()
+        context_compaction_repository::list_active_summary_chain_readonly(
+            connection,
+            source_conversation_id,
+        )
+        .map_err(|error| ConversationForkError::Other(error.to_string()))?
+        .into_iter()
+        .take_while(|version| {
+            source_message_ids.contains(&version.lineage.introduced_by_assistant_message_id)
+        })
+        .collect()
     } else {
         Vec::new()
     };

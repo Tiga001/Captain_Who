@@ -4,7 +4,13 @@ use super::*;
 fn ordinary_send_preflight_skips_history_decoding_and_has_no_transition_authority() {
     let fixture = tempdir().unwrap();
     let path = fixture.path().join("ordinary-send.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let id = "ordinary-send";
     let conversation = conversation_with_completed_history(id, Some("model-1"));
@@ -300,7 +306,13 @@ pub(super) fn persist_completed_history(
 #[test]
 fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(None))
         .unwrap();
@@ -368,7 +380,13 @@ fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
 #[test]
 fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_without_writes() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(None))
         .unwrap();
@@ -624,7 +642,13 @@ async fn wait_for_provider_transition_completed(
 #[test]
 fn conversation_history_without_a_frozen_source_model_fails_closed() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(None))
         .unwrap();
@@ -664,7 +688,13 @@ fn conversation_history_without_a_frozen_source_model_fails_closed() {
 #[test]
 fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(Some(
             mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
@@ -740,7 +770,13 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
 #[tokio::test]
 async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_epoch() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(Some(
             mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
@@ -865,7 +901,13 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
     ] {
         let fixture = tempdir().unwrap();
         let database_path = fixture.path().join("storage.sqlite");
-        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &database_path,
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let mut settings = two_model_settings(
             target_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_flash_default),
         );
@@ -985,7 +1027,13 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
 async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_generic_epoch() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-to-generic-transition.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let mut settings = two_model_settings(None);
     settings.models[0].provider_profile_config =
         mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
@@ -1073,7 +1121,13 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
 #[tokio::test]
 async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_id() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let initial_settings = test_model_settings();
     storage
         .save_model_settings(initial_settings.clone())
@@ -1151,7 +1205,13 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
 #[tokio::test]
 async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_model_settings(two_model_settings(Some(
             mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
@@ -1288,3 +1348,5 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
         Some("model-2")
     );
 }
+
+mod shutdown;

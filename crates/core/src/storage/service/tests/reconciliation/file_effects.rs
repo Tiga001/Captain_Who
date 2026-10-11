@@ -363,7 +363,11 @@ fn startup_reconciliation_fail_closes_an_approved_command_with_only_a_terminal_s
     // the command or infer success from the Session alone; it retires the action as failed and
     // retains the failed audit for inspection. The exact terminal Session proves that no process
     // remains active, so it safely releases only the runtime FileEffect fence.
-    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .load_agent_command_session(conversation_id, session_id)
@@ -427,7 +431,11 @@ fn outcome_unknown_command_session_keeps_the_interrupted_file_effect_fence() {
         None,
     );
 
-    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert_eq!(
         reopened
             .reconcile_interrupted_pending_agent_actions(42)
@@ -653,7 +661,11 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
         );
     }
     drop(connection);
-    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
     assert!(reopened
         .get_conversation_model_context_log("assistant-settled-command")

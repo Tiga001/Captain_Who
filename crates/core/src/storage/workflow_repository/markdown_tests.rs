@@ -573,7 +573,11 @@ fn markdown_export_avoids_unrelated_catalog_activity_and_model_tables() {
     use crate::storage::service::StorageService;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("isolated-export.sqlite");
-    let storage = StorageService::open(&path).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let source = definition();
     storage
         .workflow_request(Request::Save {

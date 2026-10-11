@@ -272,7 +272,8 @@ fn dashboard_full_hours_do_not_read_either_raw_ledger() {
             ..
         } => Authorization::Deny,
         _ => Authorization::Allow,
-    }));
+    }))
+    .unwrap();
     assert!(usage_repository::usage_dashboard(&c, &input(0, HOUR_MS, 1)).is_ok());
     assert!(usage_repository::usage_dashboard(&c, &input(1, HOUR_MS, 1)).is_err());
 }

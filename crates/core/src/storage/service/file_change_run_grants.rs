@@ -80,7 +80,7 @@ fn run_grant_repository_error(error: rusqlite::Error) -> FileChangeRunGrantServi
         rusqlite::Error::InvalidParameterName(_)
         | rusqlite::Error::FromSqlConversionFailure(..)
         | rusqlite::Error::IntegralValueOutOfRange(..)
-        | rusqlite::Error::Utf8Error(_)
+        | rusqlite::Error::Utf8Error(..)
         | rusqlite::Error::InvalidColumnIndex(_)
         | rusqlite::Error::InvalidColumnName(_)
         | rusqlite::Error::InvalidColumnType(..) => FileChangeRunGrantServiceError::InvalidState,
@@ -584,7 +584,11 @@ mod tests {
     fn sqlite_failures_stop_at_the_typed_safe_run_grant_boundary() {
         let root = tempdir().unwrap();
         let database_path = root.path().join("storage.sqlite");
-        let storage = StorageService::open(&database_path).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         rusqlite::Connection::open(&database_path)
             .unwrap()
             .execute_batch("DROP TABLE agent_file_change_run_grants")

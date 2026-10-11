@@ -12,7 +12,11 @@ impl StorageService {
         after_root_sequence: u64,
         maximum: usize,
     ) -> Result<Vec<AgentCollaborationEventRecord>, AgentCollaborationEventError> {
-        let connection = self.state.connection().map_err(unavailable)?;
+        let pooled_connection = self.state.read_connection().map_err(unavailable)?;
+        // Event rows and their separately loaded activities must share one committed cut.
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
         agent_collaboration_event_repository::list_root_events(
             &connection,
             root_agent_id,
@@ -26,7 +30,11 @@ impl StorageService {
         after_global_sequence: u64,
         maximum: usize,
     ) -> Result<Vec<AgentCollaborationEventRecord>, AgentCollaborationEventError> {
-        let connection = self.state.connection().map_err(unavailable)?;
+        let pooled_connection = self.state.read_connection().map_err(unavailable)?;
+        // Event rows and their separately loaded activities must share one committed cut.
+        let connection = pooled_connection
+            .unchecked_transaction()
+            .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
         agent_collaboration_event_repository::list_global_events(
             &connection,
             after_global_sequence,
@@ -37,7 +45,7 @@ impl StorageService {
     pub fn latest_global_agent_collaboration_event_sequence(
         &self,
     ) -> Result<u64, AgentCollaborationEventError> {
-        let connection = self.state.connection().map_err(unavailable)?;
+        let connection = self.state.read_connection().map_err(unavailable)?;
         agent_collaboration_event_repository::latest_global_sequence(&connection)
     }
 
@@ -45,7 +53,7 @@ impl StorageService {
         &self,
         root_agent_id: &str,
     ) -> Result<u64, AgentCollaborationEventError> {
-        let connection = self.state.connection().map_err(unavailable)?;
+        let connection = self.state.read_connection().map_err(unavailable)?;
         agent_collaboration_event_repository::latest_root_sequence(&connection, root_agent_id)
     }
 
@@ -54,7 +62,7 @@ impl StorageService {
         root_agent_id: &str,
         agent_id: &str,
     ) -> Result<Option<i64>, AgentCollaborationEventError> {
-        let connection = self.state.connection().map_err(unavailable)?;
+        let connection = self.state.read_connection().map_err(unavailable)?;
         agent_collaboration_event_repository::latest_agent_activity_at(
             &connection,
             root_agent_id,

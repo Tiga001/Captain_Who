@@ -341,6 +341,14 @@ pub fn get_active_summary(
     connection: &Connection,
     conversation_id: &str,
 ) -> Result<Option<ContextCompactionSummary>, ContextCompactionRepositoryError> {
+    get_active_summary_with_invalidation(connection, conversation_id, true)
+}
+
+fn get_active_summary_with_invalidation(
+    connection: &Connection,
+    conversation_id: &str,
+    invalidate: bool,
+) -> Result<Option<ContextCompactionSummary>, ContextCompactionRepositoryError> {
     let summary_id = connection
         .query_row(
             "SELECT summary_id
@@ -381,10 +389,12 @@ pub fn get_active_summary(
         }
         // Raw history remains authoritative. An edit, delete or rollback invalidates only the
         // derived summaries; later requests immediately fall back to the remaining raw log.
-        connection.execute(
-            "DELETE FROM context_compaction_summaries WHERE conversation_id = ?1",
-            [conversation_id],
-        )?;
+        if invalidate {
+            connection.execute(
+                "DELETE FROM context_compaction_summaries WHERE conversation_id = ?1",
+                [conversation_id],
+            )?;
+        }
         return Ok(None);
     }
     Ok(Some(summary))
@@ -1769,7 +1779,27 @@ pub(crate) fn list_active_summary_chain(
     connection: &Connection,
     conversation_id: &str,
 ) -> Result<Vec<ContextCompactionSummaryVersion>, ContextCompactionRepositoryError> {
-    let Some(mut current) = get_active_summary(connection, conversation_id)? else {
+    list_active_summary_chain_with_invalidation(connection, conversation_id, true)
+}
+
+/// Snapshot inspection keeps the same prefix/continuity/released-provider validation, but
+/// omits invalid derived summaries without deleting them on a read-only connection. Existing
+/// writer recovery and subsequent writes still perform the normal invalidation cleanup.
+pub(crate) fn list_active_summary_chain_readonly(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<ContextCompactionSummaryVersion>, ContextCompactionRepositoryError> {
+    list_active_summary_chain_with_invalidation(connection, conversation_id, false)
+}
+
+fn list_active_summary_chain_with_invalidation(
+    connection: &Connection,
+    conversation_id: &str,
+    invalidate: bool,
+) -> Result<Vec<ContextCompactionSummaryVersion>, ContextCompactionRepositoryError> {
+    let Some(mut current) =
+        get_active_summary_with_invalidation(connection, conversation_id, invalidate)?
+    else {
         return Ok(Vec::new());
     };
     let mut newest_first = Vec::new();

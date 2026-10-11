@@ -402,5 +402,5 @@ async fn final_execution_refusal_stops_observation_renewal_and_same_claim_reatta
         "same-run",
         "same-assistant"
     ));
-    service.shutdown_blocking_work().await;
+    service.shutdown_blocking_work().await.unwrap();
 }

@@ -63,6 +63,7 @@ pub mod usage_repository;
 pub mod workflow_execution_repository;
 pub mod workflow_repository;
 pub mod world_state_repository;
+mod write_size;
 
 pub use database_instance_lock::acquire_database_instance_lock;
 pub use database_snapshot::create_verified_sqlite_snapshot;
@@ -70,10 +71,13 @@ pub use provider_transition_repository::{
     ProviderTransitionCompatibleCommitOutcome, ProviderTransitionTerminalRecord,
 };
 
-use rusqlite::{hooks::Action, Connection};
-use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+mod commit_notifications;
+mod execution;
+mod state;
+pub use execution::StorageWriteClass;
+pub use state::{StorageConnectionGuard, StorageReadGuard, StorageState, WalCheckpoint};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 /// Durable event journals remain the source of truth. These process-local signals only remove
@@ -116,114 +120,12 @@ impl StorageEventNotifications {
         self.sender(stream).subscribe()
     }
 
-    fn notify_table_inserted(&self, table: &str) {
-        let stream = match table {
-            "agent_collaboration_events" => StorageEventStream::AgentCollaboration,
-            "automation_events" => StorageEventStream::Automation,
-            "notification_change_events" => StorageEventStream::Notification,
-            _ => return,
-        };
-        self.sender(stream)
-            .send_modify(|sequence| *sequence = sequence.saturating_add(1));
-    }
-
     fn sender(&self, stream: StorageEventStream) -> &watch::Sender<u64> {
         match stream {
             StorageEventStream::AgentCollaboration => &self.inner.agent_collaboration,
             StorageEventStream::Automation => &self.inner.automation,
             StorageEventStream::Notification => &self.inner.notification,
         }
-    }
-}
-
-pub struct StorageState {
-    connection: Mutex<Connection>,
-    event_notifications: StorageEventNotifications,
-    // A cursor may outlive this connection. Retaining this allocation prevents identity ABA and
-    // keeps an opened database's identity stable when StorageService is moved in memory.
-    instance_identity: Arc<()>,
-}
-
-/// Transparently retains the existing single-connection lock and releases it before recording.
-pub struct StorageConnectionGuard<'a> {
-    guard: Option<MutexGuard<'a, Connection>>,
-    timing: Option<(std::time::Instant, Duration)>,
-    operation: &'static str,
-}
-
-impl std::ops::Deref for StorageConnectionGuard<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
-        self.guard.as_deref().expect("connection guard is live")
-    }
-}
-
-impl std::ops::DerefMut for StorageConnectionGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Connection {
-        self.guard.as_deref_mut().expect("connection guard is live")
-    }
-}
-
-impl Drop for StorageConnectionGuard<'_> {
-    fn drop(&mut self) {
-        let held = self.timing.map(|(start, waited)| (start.elapsed(), waited));
-        drop(self.guard.take());
-        if let Some((held, waited)) = held {
-            crate::performance::record("sqlite.wait", "connection", waited, 0);
-            crate::performance::record("sqlite.hold", "connection", held, 0);
-            crate::performance::record("sqlite.operation_wait", self.operation, waited, 0);
-            crate::performance::record("sqlite.operation_hold", self.operation, held, 0);
-        }
-    }
-}
-
-impl StorageState {
-    pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Some(parent) = database_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let connection = Connection::open(database_path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        migrations::run_migrations(&connection)?;
-
-        let event_notifications = StorageEventNotifications::default();
-        let hook_notifications = event_notifications.clone();
-        connection.update_hook(Some(
-            move |action: Action, _database: &str, table: &str, _row_id: i64| {
-                if action == Action::SQLITE_INSERT {
-                    hook_notifications.notify_table_inserted(table);
-                }
-            },
-        ));
-
-        Ok(Self {
-            connection: Mutex::new(connection),
-            event_notifications,
-            instance_identity: Arc::new(()),
-        })
-    }
-
-    #[track_caller]
-    pub fn connection(&self) -> Result<StorageConnectionGuard<'_>, String> {
-        let started = crate::performance::enabled().then(std::time::Instant::now);
-        let guard = self
-            .connection
-            .lock()
-            .map_err(|_| "数据库连接状态不可用。".to_string())?;
-        Ok(StorageConnectionGuard {
-            guard: Some(guard),
-            timing: started.map(|start| (std::time::Instant::now(), start.elapsed())),
-            operation: if started.is_some() {
-                diagnostic_storage_operation(std::panic::Location::caller().file())
-            } else {
-                "other"
-            },
-        })
-    }
-
-    pub fn event_notifications(&self) -> StorageEventNotifications {
-        self.event_notifications.clone()
     }
 }
 
