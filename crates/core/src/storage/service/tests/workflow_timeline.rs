@@ -195,6 +195,8 @@ fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
         service
             .state
             .configure_read_connections_for_test(|connection| connection.trace(None));
+        // The same trace proves there is no builtin apply_patch source. FileChange recovery
+        // must skip its SQL/EXISTS query rather than re-reading bodies for this mail-only view.
         assert_eq!(
             HISTORY_QUERY_COUNTS.with(std::cell::Cell::get),
             [1, 1, 1],

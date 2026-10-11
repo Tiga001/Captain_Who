@@ -80,6 +80,8 @@ import type {
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
   StorageProjectRecord,
+  StorageReadToolFileContext,
+  StorageReadToolFileContextRequest,
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import {
@@ -130,6 +132,8 @@ import {
   parseStorageModelSettingsUpdateRecord,
   parseStorageRunningConversationSummaries,
   STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD,
+  STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD,
+  parseStorageReadToolFileContext,
   SKILLS_INSTALL_LOCAL_METHOD,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
@@ -594,6 +598,19 @@ export class CoreServerStorageApi {
         { conversationId }
       )
     )
+  }
+
+  loadReadToolFileContext(
+    input: StorageReadToolFileContextRequest
+  ): Promise<StorageReadToolFileContext | null> {
+    // Only one call's path proof crosses the pipe. Keep large snapshots on their existing
+    // serial queue; this fresh exact read follows Core's Conversation ordering instead.
+    return this.rpc
+      .request<unknown, StorageReadToolFileContextRequest>(
+        STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD,
+        input
+      )
+      .then(parseStorageReadToolFileContext)
   }
 
   forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord> {

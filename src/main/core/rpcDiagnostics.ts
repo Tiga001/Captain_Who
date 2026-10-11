@@ -6,6 +6,7 @@ const METHODS = new Set([
   'core.ping',
   'core.shutdown',
   'storage.loadConversation',
+  'storage.loadReadToolFileContext',
   'storage.loadConversations',
   'storage.loadConversationMetas',
   'storage.saveChatMessageState',

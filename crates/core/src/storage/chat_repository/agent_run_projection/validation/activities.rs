@@ -92,7 +92,8 @@ pub(super) fn current_read_activity_is_safe(
             activity["status"].as_str(),
             Some("running" | "completed" | "failed" | "cancelled")
         )
-        && bounded_string(&activity["path"], 16 * 1_024, false)
+        // A failed read can have no usable path; this is a display receipt, not file authority.
+        && bounded_string(&activity["path"], 16 * 1_024, true)
         && bounded_string(&activity["fileName"], 4_096, false)
         && safe_integer(&activity["updatedAt"])
         && optional_bounded_string(activity, "extension", 1_024, true)

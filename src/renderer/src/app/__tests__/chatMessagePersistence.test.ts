@@ -16,12 +16,18 @@ function assistantMessage(content: string, status: ChatMessage['status'] = 'pend
   }
 }
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
+function deferred(): {
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: unknown) => void
+} {
   let resolve!: () => void
-  const promise = new Promise<void>((nextResolve) => {
+  let reject!: (error: unknown) => void
+  const promise = new Promise<void>((nextResolve, nextReject) => {
     resolve = nextResolve
+    reject = nextReject
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 afterEach(() => {
@@ -29,6 +35,63 @@ afterEach(() => {
 })
 
 describe('ChatMessagePersistenceQueue', () => {
+  it('rejects a failed flush and retains the newest snapshot for an explicit retry', async () => {
+    const firstSave = deferred()
+    const save = vi.fn().mockReturnValueOnce(firstSave.promise).mockResolvedValue(undefined)
+    const pending = new Map<string, PendingMessageSave>()
+    const onError = vi.fn()
+    const queue = new ChatMessagePersistenceQueue({ save }, pending, onError)
+    queue.persistNow('conversation-1', assistantMessage('old'))
+    const flush = queue.flushAll()
+    const error = new Error('disk write failed')
+    const rejected = expect(flush).rejects.toBe(error)
+    queue.persistNow('conversation-1', assistantMessage('newest', 'sent'))
+    firstSave.reject(error)
+    await rejected
+
+    expect(onError).toHaveBeenCalledWith(error)
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(pending.get('conversation-1:assistant-1')?.message.content).toBe('newest')
+    await queue.flushAll()
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(save.mock.calls[1][0].message.content).toBe('newest')
+    expect(pending.size).toBe(0)
+  })
+
+  it('retries the same message identity after a committed write loses its acknowledgement', async () => {
+    const firstSave = deferred()
+    const durable = new Map<string, string>()
+    const save = vi.fn(async (payload: PendingMessageSave) => {
+      durable.set(payload.message.id, payload.message.content)
+      if (save.mock.calls.length === 1) await firstSave.promise
+    })
+    const queue = new ChatMessagePersistenceQueue({ save }, new Map(), vi.fn())
+    queue.persistNow('conversation-1', assistantMessage('committed'))
+    const rejected = expect(queue.flushAll()).rejects.toThrow('ACK lost')
+    firstSave.reject(new Error('ACK lost'))
+    await rejected
+    expect(durable.size).toBe(1)
+    await queue.flushAll()
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(save.mock.calls[1][0]).toEqual(save.mock.calls[0][0])
+    expect(durable.size).toBe(1)
+  })
+
+  it('lets another conversation flush while failed work remains pending', async () => {
+    const error = new Error('conversation-1 unavailable')
+    const save = vi.fn(async (payload: PendingMessageSave) => {
+      if (payload.conversationId === 'conversation-1') throw error
+    })
+    const pending = new Map<string, PendingMessageSave>()
+    const queue = new ChatMessagePersistenceQueue({ save }, pending, vi.fn())
+    queue.persistNow('conversation-1', assistantMessage('failed'))
+    await expect(queue.flushConversation('conversation-1')).rejects.toBe(error)
+    queue.persistNow('conversation-2', assistantMessage('independent'))
+    await queue.flushConversation('conversation-2')
+    expect(pending.size).toBe(1)
+    expect(pending.get('conversation-1:assistant-1')?.message.content).toBe('failed')
+  })
+
   it('periodically checkpoints a continuous 80ms render stream instead of trailing forever', async () => {
     vi.useFakeTimers()
     const save = vi.fn().mockResolvedValue(undefined)

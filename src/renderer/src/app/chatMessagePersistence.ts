@@ -81,6 +81,10 @@ export class ChatMessagePersistenceQueue {
     return this.flushAll()
   }
 
+  hasWork(): boolean {
+    return this.allKeys().length > 0
+  }
+
   private async flushMatchingKeys(
     matches: (key: string, payload: PendingMessageSave | undefined) => boolean
   ): Promise<void> {
@@ -153,7 +157,13 @@ export class ChatMessagePersistenceQueue {
         try {
           await this.adapter.save(payload)
         } catch (error) {
+          // A newer snapshot accepted during the failed write supersedes this one. Otherwise
+          // retain the exact identity/payload so an explicit flush can retry a lost ACK safely.
+          if (!this.pendingSaves.has(key)) this.pendingSaves.set(key, payload)
+          this.checkpointDue.delete(key)
+          this.cancelCheckpointTimer(key)
           this.onError(error)
+          throw error
         }
       }
     })()
@@ -165,5 +175,8 @@ export class ChatMessagePersistenceQueue {
       if (this.checkpointDue.has(key)) this.ensureDrain(key)
     })
     this.drains.set(key, tracked)
+    // Background checkpoints report through onError. An explicit flush awaits tracked itself
+    // and must reject instead of mistaking an empty drain registry for a durable write.
+    void tracked.catch(() => undefined)
   }
 }

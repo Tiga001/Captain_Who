@@ -7,6 +7,9 @@ import type {
   AgentConversationTurnOutput,
   AgentConversationTurnRewriteInput,
   AgentEvent,
+  AgentActionExecutionOutput,
+  AgentProposedAction,
+  AgentApprovalScope,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AutomationEvent,
@@ -29,7 +32,6 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
-import { CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS } from '../chatMessagePersistence'
 import type { ComposerCommand } from '../../features/chat/components/ComposerCommands'
 import type {
   RightSidebarModuleNavigationRequest,
@@ -50,6 +52,9 @@ const testState = vi.hoisted(() => ({
   notificationOpenRequestListeners: new Set<(request: NotificationOpenRequest) => void>(),
   markNotificationsSeen: vi.fn(async () => undefined),
   cancelAgentRun: vi.fn(),
+  approveAgentAction: vi.fn(),
+  rejectAgentAction: vi.fn(),
+  cancelAgentAction: vi.fn(),
   collaborationRootIds: [] as Array<string | null>,
   deleteChatMessages: vi.fn(),
   forkConversation: vi.fn(),
@@ -216,8 +221,8 @@ vi.mock('../../features/agentCollaboration/useCollaborationStore', () => ({
 }))
 
 vi.mock('../../features/agent/agentClient', () => ({
-  approveAgentAction: vi.fn(),
-  cancelAgentAction: vi.fn(),
+  approveAgentAction: testState.approveAgentAction,
+  cancelAgentAction: testState.cancelAgentAction,
   cancelAgentRun: testState.cancelAgentRun,
   getContextWindowSnapshot: testState.getContextWindowSnapshot,
   getManualContextCompactionStatus: testState.getManualContextCompactionStatus,
@@ -233,7 +238,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   onAgentEvent: testState.onAgentEvent,
   onProviderTransition: testState.onProviderTransition,
   preflightProviderTransition: testState.preflightProviderTransition,
-  rejectAgentAction: vi.fn(),
+  rejectAgentAction: testState.rejectAgentAction,
   readAgentFileChange: vi.fn(),
   rewriteConversationTurn: testState.rewriteConversationTurn,
   startConversationTurn: testState.startConversationTurn,
@@ -440,6 +445,9 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     composerDraft,
     conversation,
     onComposerDraftChange,
+    onApproveAgentAction,
+    onRejectAgentAction,
+    onCancelAgentAction,
     onContinueInNewTask,
     onEditLastUserMessage,
     onGuideQueuedMessage,
@@ -462,6 +470,13 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     commands?: readonly ComposerCommand[]
     composerDraft: ChatComposerDraft
     conversation: ChatConversation
+    onApproveAgentAction?: (
+      messageId: string,
+      action: AgentProposedAction,
+      scope: AgentApprovalScope
+    ) => unknown
+    onRejectAgentAction?: (messageId: string, action: AgentProposedAction) => unknown
+    onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => unknown
     onComposerDraftChange: (draft: ChatComposerDraft) => void
     onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void
     onEditLastUserMessage: (messageId: string, content: string) => Promise<void>
@@ -511,6 +526,25 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       </output>
       <output data-testid="conversation-message-contents">
         {conversation.messages.map((message) => message.content).join('|')}
+      </output>
+      {(['approve', 'reject', 'cancel'] as const).map((operation) => (
+        <button
+          key={operation}
+          onClick={() => {
+            const message = conversation.messages.at(-1)
+            const action = message?.agentRun?.approvals[0]
+            if (!message || !action) return
+            if (operation === 'approve')
+              void onApproveAgentAction?.(message.id, action, 'singleAction')
+            if (operation === 'reject') void onRejectAgentAction?.(message.id, action)
+            if (operation === 'cancel') void onCancelAgentAction?.(message.id, action)
+          }}
+        >
+          {operation}-pending-action
+        </button>
+      ))}
+      <output data-testid="agent-run-projection">
+        {JSON.stringify(conversation.messages.at(-1)?.agentRun)}
       </output>
       <output data-testid="approval-count">
         {conversation.messages.at(-1)?.agentRun?.approvals.length ?? 0}
@@ -1178,6 +1212,9 @@ beforeEach(() => {
     showContextWindowUsage: false
   })
   testState.saveChatMessageState.mockReset().mockResolvedValue(undefined)
+  testState.approveAgentAction.mockReset()
+  testState.rejectAgentAction.mockReset()
+  testState.cancelAgentAction.mockReset()
   testState.agentEventListeners.clear()
   testState.providerTransitionListeners.clear()
   testState.providerTransitionSequence = 0
@@ -3553,7 +3590,7 @@ describe('running conversation guidance queue', () => {
     expect(testState.startProviderTransition).not.toHaveBeenCalled()
   })
 
-  it('waits for the terminal read and state save before preflighting the next queued message', async () => {
+  it('waits for the authoritative terminal read without a Renderer state write before the next queued message', async () => {
     loadQueue([
       queuedMessage('queue-first', 'first', 10),
       queuedMessage('queue-second', 'after durable settlement', 20)
@@ -3564,14 +3601,8 @@ describe('running conversation guidance queue', () => {
     const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
     const terminal = storedConversationWithRun(input.assistantMessageId!, 'run-1', 'completed')
     const terminalRead = deferred<ChatConversation>()
-    const terminalSave = deferred<void>()
     testState.loadConversation.mockReturnValueOnce(terminalRead.promise)
-    testState.saveChatMessageState.mockImplementation(async (_conversationId, message) => {
-      const saved = message as ChatMessage
-      if (saved.id === input.assistantMessageId && saved.agentRun?.status === 'completed') {
-        await terminalSave.promise
-      }
-    })
+    testState.saveChatMessageState.mockImplementation(() => new Promise<void>(() => undefined))
     const readsBeforeDone = testState.loadConversation.mock.calls.length
 
     finishRun('run-1')
@@ -3582,21 +3613,10 @@ describe('running conversation guidance queue', () => {
     await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('queue-second')
 
     terminalRead.resolve(terminal)
-    await expect
-      .poll(() =>
-        testState.saveChatMessageState.mock.calls.some(([, message]) => {
-          const saved = message as ChatMessage
-          return saved.id === input.assistantMessageId && saved.agentRun?.status === 'completed'
-        })
-      )
-      .toBe(true)
-    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
-    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
-
-    terminalSave.resolve()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
     await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
     expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(2)
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
     expect(testState.startConversationTurn.mock.calls[1]?.[0].content).toBe(
       'after durable settlement'
     )
@@ -4557,7 +4577,7 @@ describe('unified activated Skill inventory', () => {
       .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
   })
 
-  it('merges and persists model activation without turning it into an explicit edit selection', async () => {
+  it('merges Core model activation without writing it back or making it an explicit edit selection', async () => {
     mockSuccessfulTurnStarts()
     const screen = await renderSelectedConversation()
 
@@ -4577,23 +4597,10 @@ describe('unified activated Skill inventory', () => {
     await expect
       .element(screen.getByTestId('activated-skill-ids'))
       .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
     await expect
-      .poll(() =>
-        testState.saveChatMessageState.mock.calls.some(
-          (call) =>
-            (call[1] as ChatConversation['messages'][number]).agentRun?.activatedSkills?.length ===
-            2
-        )
-      )
-      .toBe(true)
-    const persistedMessage = testState.saveChatMessageState.mock.calls
-      .map((call) => call[1] as ChatConversation['messages'][number])
-      .find((candidate) => candidate.agentRun?.activatedSkills?.length === 2)
-
-    expect(persistedMessage?.agentRun?.skillActivationRevision).toBe(
-      'activation-sha256-v1:explicit-and-model'
-    )
-    expect(persistedMessage?.agentRun?.explicitSkillSelections).toEqual([skillSelection])
+      .element(screen.getByTestId('agent-run-projection'))
+      .toHaveTextContent('activation-sha256-v1:explicit-and-model')
 
     emitAgentEvent({
       type: 'done',
@@ -4665,15 +4672,10 @@ describe('unified activated Skill inventory', () => {
     await expect
       .element(screen.getByTestId('activated-skill-ids'))
       .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
     await expect
-      .poll(() =>
-        testState.saveChatMessageState.mock.calls.some(
-          (call) =>
-            (call[1] as ChatConversation['messages'][number]).agentRun?.skillActivationRevision ===
-            'activation-sha256-v1:explicit-and-model'
-        )
-      )
-      .toBe(true)
+      .element(screen.getByTestId('agent-run-projection'))
+      .toHaveTextContent('activation-sha256-v1:explicit-and-model')
   })
 
   it('restores early workspace Skill resource activity from the authoritative terminal message', async () => {
@@ -4721,11 +4723,9 @@ describe('unified activated Skill inventory', () => {
       emitAgentEvent({ type: 'message', runId: 'run-1', content: `buffered-${index}` })
     }
 
-    const saveCountBeforeBinding = testState.saveChatMessageState.mock.calls.length
     start.resolve(successfulTurnOutput(input, 1))
-    await expect
-      .poll(() => testState.saveChatMessageState.mock.calls.length)
-      .toBeGreaterThan(saveCountBeforeBinding)
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
     await expect.element(screen.getByTestId('activated-skill-ids')).toHaveTextContent('')
 
     const authoritative = storedConversationWithRun(assistantMessageId, 'run-1', 'completed')
@@ -4773,15 +4773,9 @@ describe('unified activated Skill inventory', () => {
       .element(screen.getByTestId('activated-skill-ids'))
       .toHaveTextContent(explicitSkillSummary.id)
     await expect
-      .poll(() =>
-        testState.saveChatMessageState.mock.calls.some((call) =>
-          (call[1] as ChatMessage).agentRun?.toolCalls.some(
-            (toolCall) =>
-              toolCall.id === 'read-workspace-resource' && toolCall.tool === 'skills_read_resource'
-          )
-        )
-      )
-      .toBe(true)
+      .element(screen.getByTestId('agent-run-projection'))
+      .toHaveTextContent('read-workspace-resource')
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
   })
 })
 
@@ -4844,13 +4838,11 @@ describe('Host-owned turn acceptance', () => {
     await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
   })
 
-  it('keeps optimistic messages local while Host accepts the turn before a delayed metadata save', async () => {
+  it('keeps optimistic messages local and lets Host admission own the turn metadata', async () => {
     prepareDraft()
     const start = deferred<AgentConversationTurnOutput>()
     testState.startConversationTurn.mockReturnValueOnce(start.promise)
     const screen = await renderSelectedConversation()
-    const metadata = deferred<void>()
-    testState.saveConversationMeta.mockReturnValueOnce(metadata.promise)
 
     await screen.getByRole('button', { name: 'submit-draft-content' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
@@ -4863,19 +4855,37 @@ describe('Host-owned turn acceptance', () => {
     expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
     expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.saveConversationMeta).not.toHaveBeenCalled()
     const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
     expect(input.attachments).toEqual([submittedAttachment])
     start.resolve(successfulTurnOutput(input, 1))
 
     await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
-    metadata.resolve()
-    await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBe(1)
-    expect(testState.saveChatMessageState.mock.calls[0]?.[1]).toMatchObject({
-      id: input.assistantMessageId,
-      createdAt: 21,
-      agentRun: { runId: 'run-1', status: 'running' }
-    })
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.saveConversationMeta).not.toHaveBeenCalled()
+    await expect.element(screen.getByTestId('agent-run-projection')).toHaveTextContent('run-1')
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+  })
+
+  it('waits for queued metadata from an unconfirmed send before the next single send preflight', async () => {
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    const metadata = deferred<void>()
+    testState.saveConversationMeta.mockReturnValueOnce(metadata.promise)
+    start.reject(new Error('admission response unavailable'))
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.poll(() => testState.saveConversationMeta.mock.calls.length).toBe(1)
+    mockSuccessfulTurnStarts()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+    metadata.resolve()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(2)
+    expect(testState.saveConversationMeta).toHaveBeenCalledTimes(1)
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
   })
 
   it('persists the rejected local pair with its input and attachments without overwriting a newer draft', async () => {
@@ -4892,6 +4902,10 @@ describe('Host-owned turn acceptance', () => {
 
     await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
     await expect.poll(() => testState.upsertChatMessages.mock.calls.length).toBe(1)
+    expect(testState.saveConversationMeta).toHaveBeenCalled()
+    expect(testState.saveConversationMeta.mock.invocationCallOrder[0]).toBeLessThan(
+      testState.upsertChatMessages.mock.invocationCallOrder[0]
+    )
     // A transport failure can hide a successful Host start. Never send an unbound
     // failed state over its authoritative assistant; the insert-only fallback is safe.
     expect(testState.saveChatMessageState).not.toHaveBeenCalled()
@@ -5535,16 +5549,198 @@ describe('edited turn Skill recovery', () => {
   })
 })
 
-describe('streaming message persistence checkpoints', () => {
-  it('keeps 80ms message rendering while coalescing full saves and flushing terminal state', async () => {
+describe('Core-owned action decisions', () => {
+  const action: AgentProposedAction = {
+    type: 'command',
+    command: {
+      id: 'round5-approval',
+      command: 'echo fake',
+      riskLevel: 'read_only',
+      observe: null,
+      cwd: null,
+      timeoutMs: 1000,
+      approvalStatus: 'required',
+      reason: null
+    }
+  }
+  function execution(status: 'approved' | 'rejected'): AgentActionExecutionOutput {
+    return {
+      actionId: 'round5-approval',
+      actionType: 'command',
+      toolName: 'run_command',
+      status,
+      agentOutput: {
+        runId: 'run-1',
+        status: 'running',
+        content: '',
+        events: [],
+        toolDefinitions: [],
+        proposedActions: []
+      }
+    }
+  }
+  it('upgrades a legacy pending run only after an accepted decision ACK', async () => {
+    const stored = storedConversationWithRun('assistant-legacy', 'run-1', 'running')
+    stored.messages.at(-1)!.agentRun!.status = 'waiting_for_approval'
+    stored.messages.at(-1)!.agentRun!.approvals = [action]
+    testState.persistedConversations.set(stored.id, stored)
+    testState.cancelAgentAction.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('1')
+    await screen.getByRole('button', { name: 'cancel-pending-action' }).click()
+    await expect.poll(() => testState.cancelAgentAction.mock.calls.length).toBe(1)
+    await expect.poll(() => consoleWarn.mock.calls.length).toBe(1)
+    emitAgentEvent({
+      type: 'message',
+      runId: 'run-1',
+      content: 'Legacy still owns this checkpoint.'
+    })
+    await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBeGreaterThan(0)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    testState.saveChatMessageState.mockClear()
+    await screen.getByRole('button', { name: 'cancel-pending-action' }).click()
+    await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('0')
+    emitAgentEvent({ type: 'message', runId: 'run-1', content: 'Core owns the accepted decision.' })
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('Core owns the accepted decision.')
+    window.dispatchEvent(new Event('pagehide'))
+    await new Promise((resolve) => window.setTimeout(resolve, 350))
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    consoleWarn.mockRestore()
+  })
+
+  it.each(['approve', 'reject', 'cancel'] as const)(
+    'sends %s without a message save and settles only after the authoritative ACK',
+    async (operation) => {
+      mockSuccessfulTurnStarts()
+      const decision = deferred<AgentActionExecutionOutput | boolean>()
+      const invoke =
+        operation === 'approve'
+          ? testState.approveAgentAction
+          : operation === 'reject'
+            ? testState.rejectAgentAction
+            : testState.cancelAgentAction
+      invoke.mockReturnValueOnce(decision.promise)
+      testState.saveChatMessageState.mockImplementation(() => new Promise<void>(() => undefined))
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      emitAgentEvent({ type: 'approval_required', runId: 'run-1', action })
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('1')
+      await screen.getByRole('button', { name: `${operation}-pending-action` }).click()
+      await expect.poll(() => invoke.mock.calls.length).toBe(1)
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('1')
+      expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+      decision.resolve(
+        operation === 'cancel' ? true : execution(operation === 'approve' ? 'approved' : 'rejected')
+      )
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('0')
+      expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+      expect(testState.saveConversationMeta).not.toHaveBeenCalled()
+      expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(['lost_ack', 'not_accepted'] as const)(
+    'keeps the original pending identity after %s and allows the exact decision to retry',
+    async (outcome) => {
+      mockSuccessfulTurnStarts()
+      const decision = deferred<boolean>()
+      testState.cancelAgentAction.mockReturnValueOnce(decision.promise).mockResolvedValueOnce(true)
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      emitAgentEvent({ type: 'approval_required', runId: 'run-1', action })
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('1')
+      await screen.getByRole('button', { name: 'cancel-pending-action' }).click()
+      await expect.poll(() => testState.cancelAgentAction.mock.calls.length).toBe(1)
+      if (outcome === 'lost_ack') decision.reject(new Error('decision ACK lost'))
+      else decision.resolve(false)
+      await expect
+        .poll(() => consoleError.mock.calls.length + consoleWarn.mock.calls.length)
+        .toBe(1)
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('1')
+      await screen.getByRole('button', { name: 'cancel-pending-action' }).click()
+      await expect.element(screen.getByTestId('approval-count')).toHaveTextContent('0')
+      expect(testState.cancelAgentAction.mock.calls).toEqual([
+        ['run-1', 'round5-approval'],
+        ['run-1', 'round5-approval']
+      ])
+      expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+      consoleError.mockRestore()
+      consoleWarn.mockRestore()
+    }
+  )
+})
+
+describe('Core-owned streaming message persistence', () => {
+  it('upgrades a legacy run on Started after Core installs its checkpoint generation', async () => {
+    const stored = storedConversationWithRun('assistant-legacy', 'run-legacy', 'running')
+    testState.persistedConversations.set(stored.id, stored)
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    emitAgentEvent({ type: 'started', runId: 'run-legacy', toolDefinitions: [] })
+    emitAgentEvent({
+      type: 'message',
+      runId: 'run-legacy',
+      content: 'Resumed with Core ownership.'
+    })
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('Resumed with Core ownership.')
+    window.dispatchEvent(new Event('pagehide'))
+    await new Promise((resolve) => window.setTimeout(resolve, 350))
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'restores a running projection with Core ownership %s while retaining legacy saves',
+    async (coreOwned) => {
+      const stored = storedConversationWithRun('assistant-restored', 'run-restored', 'running')
+      const assistant = stored.messages.at(-1)!
+      if (coreOwned)
+        assistant.agentRun!.coreCheckpoint = {
+          generation: '11111111-1111-4111-8111-111111111111',
+          sequence: 2,
+          fingerprint: 'a'.repeat(64)
+        }
+      testState.persistedConversations.set(stored.id, stored)
+      const screen = await renderSelectedConversation()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      emitAgentEvent({
+        type: 'message_delta',
+        runId: 'run-restored',
+        streamId: 'restored-stream',
+        delta: 'Recovered live text.'
+      })
+      await expect
+        .element(screen.getByTestId('conversation-message-contents'))
+        .toHaveTextContent('Recovered live text.')
+      window.dispatchEvent(new Event('pagehide'))
+      if (coreOwned) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350))
+        expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+      } else {
+        await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBeGreaterThan(0)
+        expect(
+          (testState.saveChatMessageState.mock.calls.at(-1)?.[1] as ChatMessage).content
+        ).toContain('Recovered live text.')
+      }
+    }
+  )
+
+  it('keeps 80ms rendering with no Renderer serialization or save RPC through terminal state', async () => {
     mockSuccessfulTurnStarts()
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
-    await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBeGreaterThan(0)
-    await Promise.resolve()
-    testState.saveChatMessageState.mockClear()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
 
     vi.useFakeTimers()
     for (let index = 1; index <= 9; index += 1) {
@@ -5560,8 +5756,8 @@ describe('streaming message persistence checkpoints', () => {
     await expect
       .element(screen.getByTestId('conversation-message-contents'))
       .toHaveTextContent('123456789')
-    expect(testState.saveChatMessageState).toHaveBeenCalledTimes(2)
-    expect(CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS).toBe(300)
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.saveConversationMeta).not.toHaveBeenCalled()
 
     emitAgentEvent({
       type: 'done',
@@ -5574,14 +5770,12 @@ describe('streaming message persistence checkpoints', () => {
     vi.useRealTimers()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    await expect
-      .poll(() => {
-        const lastMessage = testState.saveChatMessageState.mock.calls.at(-1)?.[1] as
-          ChatMessage | undefined
-        return lastMessage?.agentRun?.status
-      })
-      .toBe('completed')
-    expect(testState.saveChatMessageState).toHaveBeenCalledTimes(3)
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.saveConversationMeta).not.toHaveBeenCalled()
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
   })
 })
 
@@ -5868,10 +6062,8 @@ describe('authoritative run cancellation and conversation forking', () => {
     cancellation.resolve(true)
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    const persistedTerminal = testState.saveChatMessageState.mock.calls
-      .map((call) => call[1] as ChatConversation['messages'][number])
-      .find((message) => message.agentRun?.runId === 'run-1' && message.status === 'sent')
-    expect(persistedTerminal?.agentRun?.status).toBe('cancelled')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('cancelled')
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
   })
 
   it('binds a run before cancelling when stop is requested during the start RPC', async () => {

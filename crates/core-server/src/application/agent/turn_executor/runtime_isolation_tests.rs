@@ -70,7 +70,7 @@ mod runtime_isolation_tests {
         }
     }
 
-    async fn assert_terminal_worker_isolation(close_after_reservation: bool, hold_admission: bool) {
+    async fn assert_terminal_worker_isolation(close_after_reservation: bool, hold_recovery: bool) {
         let directory = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             StorageService::open_with_model_credentials(
@@ -123,8 +123,8 @@ mod runtime_isolation_tests {
             )))
             .unwrap();
         let mut service = AgentService::new_authorized_for_test(storage.clone());
-        if hold_admission {
-            // One physical worker makes a retained admission lock a deterministic deadlock.
+        if hold_recovery {
+            // One physical worker exposes a completion job that waits for receipt recovery.
             service.blocking_work.completion =
                 crate::application::blocking_executor::BlockingExecutor::new(
                     "completion",
@@ -191,7 +191,40 @@ mod runtime_isolation_tests {
         if close_after_reservation {
             service.blocking_work.completion.close();
         }
-        let admission = hold_admission.then(|| service.conversation_admission.lock().unwrap());
+        let (recovery_release, recovery_task) = if hold_recovery {
+            // Exact-Run recovery no longer takes conversation admission. Occupy its existing
+            // bounded worker before terminal settlement so the recovery barrier is real,
+            // independent of whether the async delivery task happens to run before try_recv.
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let release = ReleaseWorker(Some(release));
+            let task = service
+                .blocking_work
+                .recovery
+                .submit(0, move || {
+                    entered_tx
+                        .send(
+                            std::thread::current()
+                                .name()
+                                .unwrap_or("unnamed")
+                                .to_string(),
+                        )
+                        .unwrap();
+                    released.recv_timeout(Duration::from_secs(10)).unwrap();
+                })
+                .unwrap();
+            let thread = tokio::time::timeout(Duration::from_secs(10), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                thread.starts_with("blocking-recovery-"),
+                "receipt recovery blocker ran on {thread}"
+            );
+            (Some(release), Some(task))
+        } else {
+            (None, None)
+        };
         reply.send(()).unwrap();
         let thread = tokio::time::timeout(Duration::from_secs(10), entered_rx)
             .await
@@ -225,7 +258,7 @@ mod runtime_isolation_tests {
         }
         drop(release);
         let mut held_completion_capacity = Vec::new();
-        if hold_admission {
+        if hold_recovery {
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if storage
@@ -242,9 +275,9 @@ mod runtime_isolation_tests {
             })
             .await
             .unwrap();
-            // Global receipt recovery still awaits admission, but a durable completed Turn must
-            // release its exact owner already. Otherwise a later start incorrectly rejects the
-            // completed conversation as active while unrelated admissions keep arriving.
+            // Exact-Run receipt recovery still awaits its worker, but a durable completed Turn
+            // must release its exact owner already. Otherwise a later start incorrectly rejects
+            // the completed conversation as active while unrelated recovery jobs are running.
             // The sole completion worker must also remain available for unrelated settlement.
             tokio::time::timeout(
                 Duration::from_secs(1),
@@ -257,7 +290,7 @@ mod runtime_isolation_tests {
                 !service
                     .has_conversation_turn_occupancy(&started_turn.conversation_id)
                     .unwrap(),
-                "global workflow recovery must not extend completed Turn occupancy"
+                "receipt recovery must not extend completed Turn occupancy"
             );
             assert!(!service
                 .cancellations
@@ -271,14 +304,17 @@ mod runtime_isolation_tests {
                 );
             }
             // Retain every remaining completion slot until Done. Receipt recovery must finish
-            // on its own worker after admission releases; a per-Turn completion retry loop would
+            // on its own worker after that worker releases; a per-Turn completion retry loop would
             // need another slot and deadlock here. The one retained slot is the handoff budget.
             for _ in 0..107 {
                 held_completion_capacity
                     .push(service.blocking_work.completion.try_reserve(0).unwrap());
             }
         }
-        drop(admission);
+        drop(recovery_release);
+        if let Some(task) = recovery_task {
+            task.wait().await.unwrap();
+        }
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let notification = receiver.recv().await.unwrap();
@@ -321,7 +357,7 @@ mod runtime_isolation_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn admission_recovery_wait_does_not_occupy_completion_worker() {
+    async fn receipt_recovery_wait_does_not_occupy_completion_worker() {
         assert_terminal_worker_isolation(false, true).await;
     }
 

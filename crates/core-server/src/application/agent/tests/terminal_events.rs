@@ -7,6 +7,17 @@ use mycopilot_core::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+// These databases belong only to isolated terminal fixtures. An explicit fake backend
+// also keeps release-mode tests from falling through to production credential setup.
+fn open_terminal_fixture_storage(
+    path: &std::path::Path,
+) -> Result<StorageService, Box<dyn std::error::Error>> {
+    StorageService::open_with_model_credentials(
+        path,
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+}
+
 struct ReleaseTerminalWorker(Option<std::sync::mpsc::Sender<()>>);
 
 impl Drop for ReleaseTerminalWorker {
@@ -53,7 +64,8 @@ async fn assert_completed_done_admits_next_turn(require_approval: bool) {
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("ready.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("ready.sqlite")).unwrap());
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
@@ -396,7 +408,8 @@ fn command_session_archive_content(
 #[test]
 fn automatic_server_path_requires_explicit_approval_for_guarded_writes() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let input = command_test_input(fixture.path());
 
@@ -427,7 +440,8 @@ fn automatic_server_path_requires_explicit_approval_for_guarded_writes() {
 #[test]
 fn automatic_command_streams_bounded_output_with_stable_call_identity() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let conversation_id = "conversation-live-command";
     let assistant_message_id = "assistant-live-command";
     storage
@@ -515,7 +529,7 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
 fn automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_exit() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("fast-large-automatic.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(open_terminal_fixture_storage(&database_path).unwrap());
     let conversation_id = "conversation-fast-large-automatic";
     let assistant_message_id = "assistant-fast-large-automatic";
     storage
@@ -661,7 +675,8 @@ fn automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_ex
 #[test]
 fn automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommitted() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let conversation_id = "conversation-running-audit-failure";
     let assistant_message_id = "assistant-running-audit-failure";
     storage
@@ -741,7 +756,8 @@ fn automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommi
 #[test]
 fn explicit_run_cancel_interrupts_handed_off_command_after_active_control_is_retired() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let conversation_id = "conversation-running-post-commit";
     let assistant_message_id = "assistant-running-post-commit";
     storage
@@ -856,7 +872,8 @@ fn explicit_run_cancel_interrupts_handed_off_command_after_active_control_is_ret
 #[test]
 fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let conversation_id = "conversation-action-scoped-session-cancel";
     let assistant_message_id = "assistant-action-scoped-session-cancel";
     storage
@@ -979,7 +996,8 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
 #[test]
 fn nonzero_automatic_command_persists_office_artifacts_in_tool_result_audit() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage.clone());
     let mut input = command_test_input(fixture.path());
     input
@@ -1051,7 +1069,8 @@ fn nonzero_automatic_command_persists_office_artifacts_in_tool_result_audit() {
 #[test]
 fn automatic_command_requires_durable_execution_claim_before_side_effects() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
     let mut input = command_test_input(fixture.path());
     input
@@ -1086,7 +1105,8 @@ fn automatic_command_requires_durable_execution_claim_before_side_effects() {
 #[test]
 fn automatic_command_final_audit_failure_preserves_and_then_replays_effect_evidence() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     input
@@ -1165,7 +1185,8 @@ fn automatic_command_final_audit_failure_preserves_and_then_replays_effect_evide
 #[test]
 fn automatic_command_reconciles_a_terminal_receipt_after_post_commit_error() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     input
@@ -1243,7 +1264,8 @@ fn automatic_command_reconciles_a_terminal_receipt_after_post_commit_error() {
 #[test]
 fn command_completion_waits_for_a_failed_project_deletion_then_persists_evidence() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -1406,7 +1428,8 @@ fn project_deletion_timeout_preserves_late_command_observation() {
 #[test]
 fn durable_command_session_receipt_allows_deletion_after_action_audit_is_indeterminate() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -1469,7 +1492,8 @@ fn durable_command_session_receipt_allows_deletion_after_action_audit_is_indeter
 #[test]
 fn settled_effect_in_another_run_cannot_clear_an_unsettled_identity() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -1501,7 +1525,8 @@ fn settled_effect_in_another_run_cannot_clear_an_unsettled_identity() {
 #[test]
 fn conversation_deletion_rejects_unsettled_effects_without_a_project() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -1527,7 +1552,8 @@ fn conversation_deletion_rejects_unsettled_effects_without_a_project() {
 #[test]
 fn successful_conversation_deletion_tombstone_rejects_stale_file_effect_context() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -1567,7 +1593,8 @@ fn successful_conversation_deletion_tombstone_rejects_stale_file_effect_context(
 #[test]
 fn message_deletion_waits_for_a_durable_file_effect_receipt() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-message-effect".to_string(),
@@ -1644,7 +1671,8 @@ fn message_deletion_waits_for_a_durable_file_effect_receipt() {
 #[test]
 fn message_deletion_rejects_an_unsettled_file_effect_and_preserves_the_owner() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-message-unsettled".to_string(),
@@ -1707,7 +1735,8 @@ fn message_deletion_rejects_an_unsettled_file_effect_and_preserves_the_owner() {
 #[test]
 fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_memory() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-message-pending".to_string(),
@@ -1923,7 +1952,8 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
 #[test]
 fn restart_restores_executing_auto_command_as_project_deletion_blocker() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_project(ProjectRecord::with_primary_folder(
             "project-restart-unsettled".to_string(),
@@ -2002,7 +2032,8 @@ fn restart_restores_executing_auto_command_as_project_deletion_blocker() {
 #[test]
 fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_project(ProjectRecord::with_primary_folder(
             "project-restart-manual".to_string(),
@@ -2179,7 +2210,8 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
 #[test]
 fn successful_project_deletion_tombstone_rejects_old_command_context() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
@@ -2217,7 +2249,8 @@ fn successful_project_deletion_tombstone_rejects_old_command_context() {
 #[test]
 fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observation() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage =
+        Arc::new(open_terminal_fixture_storage(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-command-audit-failure";
     let call_id = "manual-command-audit-failure";
@@ -2562,8 +2595,8 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     // The archive and its Trace pointer survive a process boundary and remain directly readable.
     drop(service);
     drop(storage);
-    let restarted =
-        StorageService::open(&fixture.path().join("storage.sqlite")).expect("restart storage");
+    let restarted = open_terminal_fixture_storage(&fixture.path().join("storage.sqlite"))
+        .expect("restart storage");
     let restarted_trace = restarted
         .get_conversation_turn_trace("assistant-manual-command")
         .unwrap()
@@ -2782,7 +2815,7 @@ fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
 fn runtime_terminal_error_keeps_its_durable_trace_sequence_across_commit_and_reload() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("runtime-error-sequence.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(open_terminal_fixture_storage(&database_path).unwrap());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let conversation_id = "conversation-runtime-error-sequence";
     let assistant_message_id = "assistant-runtime-error-sequence";
@@ -2859,7 +2892,7 @@ fn runtime_terminal_error_keeps_its_durable_trace_sequence_across_commit_and_rel
     drop(service);
     drop(storage);
 
-    let reopened = StorageService::open(&database_path).unwrap();
+    let reopened = open_terminal_fixture_storage(&database_path).unwrap();
     let conversation = reopened
         .load_conversation(conversation_id)
         .unwrap()

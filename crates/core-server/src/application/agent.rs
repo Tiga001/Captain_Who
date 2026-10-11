@@ -151,6 +151,17 @@ pub use manual_context_compaction::{
     AgentManualContextCompactionStatusInput,
 };
 mod run_lifecycle;
+mod runtime_checkpoint;
+mod runtime_checkpoint_activities;
+#[cfg(test)]
+mod runtime_checkpoint_child_tests;
+#[cfg(test)]
+mod runtime_checkpoint_failure_tests;
+#[cfg(test)]
+mod runtime_checkpoint_human_tests;
+#[cfg(test)]
+mod runtime_checkpoint_tests;
+mod runtime_checkpoint_web_read;
 mod steering;
 mod turn;
 mod turn_executor;

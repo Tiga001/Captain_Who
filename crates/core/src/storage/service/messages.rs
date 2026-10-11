@@ -1,6 +1,48 @@
 use super::*;
 use crate::storage::human_interaction_repository;
 
+/// Stop and approval handoff may carry no segment answer. Once Core owns the presentation,
+/// that absence must not erase text already acknowledged by its checkpoint writer. Read the
+/// exact Turn inside the caller's transaction; this is never a fallback for legacy writes or
+/// a source of model-context messages.
+fn confirmed_checkpoint_content_for_empty_output(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+    message_id: &str,
+    run_id: &str,
+    content: &str,
+) -> Result<Option<String>, String> {
+    if !content.is_empty() {
+        return Ok(None);
+    }
+    let stored = connection
+        .query_row(
+            "SELECT content, agent_run_json FROM messages
+             WHERE conversation_id = ?1 AND id = ?2 AND role = 'assistant'",
+            rusqlite::params![conversation_id, message_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let Some((confirmed_content, Some(raw))) = stored else {
+        return Ok(None);
+    };
+    let projection = serde_json::from_str::<serde_json::Value>(&raw).ok();
+    // Core checkpoint patches defer tool identity to the durable Trace. Only content is read
+    // here: no deferred tool identity or cached approval fact is accepted as authority.
+    let validated = chat_repository::has_core_checkpoint(Some(&raw))
+        && projection
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|run| {
+                run.get("runId").and_then(serde_json::Value::as_str) == Some(run_id)
+                    && chat_repository::current_agent_run_projection_is_safe_for_trace_rebuild(
+                        run, run_id,
+                    )
+            });
+    Ok(validated.then_some(confirmed_content))
+}
+
 /// A stale owner may only observe a fully identical committed terminal fact. This path performs
 /// no writes, including usage, notification, receipt or grant writes; partial equality is refused.
 #[allow(clippy::too_many_arguments)]
@@ -598,6 +640,18 @@ impl StorageService {
                     .into(),
             );
         }
+        let confirmed_content = if run_status == "cancelled"
+            && trace.terminal_status == crate::ConversationTurnTraceTerminalStatus::Cancelled
+            && trace.conversation_id == conversation_id
+            && trace.assistant_message_id == message_id
+        {
+            confirmed_checkpoint_content_for_empty_output(
+                &transaction, conversation_id, message_id, &trace.run_id, content,
+            )?
+        } else {
+            None
+        };
+        let content = confirmed_content.as_deref().unwrap_or(content);
         if trusted_wake.is_some()
             && notification.is_none()
             && exact_terminal_replay(
@@ -1148,6 +1202,10 @@ impl StorageService {
             }
         }
 
+        let confirmed_content = confirmed_checkpoint_content_for_empty_output(
+            &transaction, conversation_id, assistant_message_id, run_id, content,
+        )?;
+        let content = confirmed_content.as_deref().unwrap_or(content);
         let updated_messages = transaction
             .execute(
                 "

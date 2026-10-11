@@ -532,6 +532,27 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
+        mycopilot_protocol_rs::STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD => {
+            let input = match parse_params::<mycopilot_protocol_rs::StorageReadToolFileContextRequest>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            // Preserve the same read authorization as the full Conversation route. The narrow
+            // response is proof for the Host's existing path checks, never a new file grant.
+            match agent_service.authorize_user_conversation_write(&input.conversation_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.load_read_tool_file_context(
+                        &input.conversation_id,
+                        &input.assistant_message_id,
+                        &input.call_id,
+                    ),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
         STORAGE_FORK_CONVERSATION_METHOD => {
             let input = match parse_params::<ForkConversationRequest>(request.params) {
                 Ok(input) => input,

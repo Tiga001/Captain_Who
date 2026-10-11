@@ -9,6 +9,10 @@ pub fn agent_event_notification(event: AgentEvent) -> Value {
 pub(crate) struct RendererSafeAgentEvent(Value);
 
 impl RendererSafeAgentEvent {
+    pub(crate) fn into_projection(self) -> Value {
+        self.0
+    }
+
     pub(crate) fn new(event: &AgentEvent) -> Self {
         let mut params = json!(event);
         redact_renderer_mcp_binding_fields(&mut params);

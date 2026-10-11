@@ -684,6 +684,7 @@ impl AgentService {
                                                     conversation_id,
                                                     assistant_message_id,
                                                     &message,
+                                                    (code.as_deref() == Some("pending_action_persistence_failed")).then_some(partial_response.as_str()),
                                                     usage.clone(),
                                                     &conversation_turn_trace,
                                                     model_context_items.as_deref(),

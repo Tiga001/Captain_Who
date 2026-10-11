@@ -176,6 +176,39 @@ describe('full conversation read scheduling', () => {
     active.resolve(conversation('chat'))
     await history
   })
+
+  it('reads exact file proof independently without sharing an active or completed snapshot', async () => {
+    const active = deferred<StorageChatConversationRecord>()
+    const proof = {
+      conversationId: 'chat',
+      projectId: null,
+      assistantMessageId: 'assistant',
+      messageFound: true,
+      runId: 'run',
+      call: null,
+      callIdentity: null,
+      resultPath: null
+    }
+    rpcRequest.mockImplementation((method: string) => {
+      if (method === 'storage.loadConversation') return active.promise
+      return Promise.resolve(proof)
+    })
+    const server = new CoreServer()
+    const history = server.loadConversation('large-history')
+    const input = { conversationId: 'chat', assistantMessageId: 'assistant', callId: 'read' }
+    const first = server.loadReadToolFileContext(input)
+    const next = server.loadReadToolFileContext(input)
+    expect(first).not.toBe(next)
+    await expect(first).resolves.toEqual(proof)
+    await expect(next).resolves.toEqual(proof)
+    expect(rpcRequest.mock.calls).toEqual([
+      ['storage.loadConversation', { conversationId: 'large-history' }],
+      ['storage.loadReadToolFileContext', input],
+      ['storage.loadReadToolFileContext', input]
+    ])
+    active.resolve(conversation('large-history'))
+    await history
+  })
 })
 
 describe('observer page read scheduling', () => {

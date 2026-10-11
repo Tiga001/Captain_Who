@@ -82,17 +82,13 @@ export function mapConversationMetaToStorage(
 
 function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
   const storedRun = parsePersistedAgentRunJson(message.agentRunJson)
-  const agentRun =
-    storedRun &&
-    (storedRun.status === 'completed' ||
-      storedRun.status === 'failed' ||
-      storedRun.status === 'cancelled')
-      ? settleAgentRunToolActivities(
-          storedRun,
-          storedRun.status,
-          storedRun.completedAt ?? message.createdAt
-        )
-      : storedRun
+  const agentRun = storedRun
+    ? settleAgentRunToolActivities(
+        storedRun,
+        storedRun.status,
+        storedRun.completedAt ?? message.createdAt
+      )
+    : storedRun
 
   return {
     id: message.id,

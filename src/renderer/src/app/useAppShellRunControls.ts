@@ -90,7 +90,9 @@ export function useAppShellRunControls({
     }
     if (stopRequestedRunIdsRef.current.has(runId)) return
 
-    void flushRunMessagePersistence(activeConversationId, pendingMessage.id, runId)
+    void flushRunMessagePersistence(activeConversationId, pendingMessage.id, runId).catch(
+      () => undefined
+    )
 
     // The backend emits terminal Done only after the assistant message and trace have been
     // committed atomically. Keep the binding alive and let that event authoritatively settle the
@@ -188,7 +190,9 @@ export function useAppShellRunControls({
           attachments: submittedMessage.attachments,
           folderReferences: submittedMessage.folderReferences ?? []
         })
-      void flushRunMessagePersistence(conversationId, assistantMessage.id, runId)
+      void flushRunMessagePersistence(conversationId, assistantMessage.id, runId).catch(
+        () => undefined
+      )
       projectSubmission()
 
       void send()

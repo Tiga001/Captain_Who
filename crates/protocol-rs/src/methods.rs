@@ -158,6 +158,7 @@ pub const STORAGE_LOAD_CONVERSATION_METAS_METHOD: &str = "storage.loadConversati
 pub const STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD: &str =
     "storage.loadRunningConversationSummaries";
 pub const STORAGE_LOAD_CONVERSATION_METHOD: &str = "storage.loadConversation";
+pub const STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD: &str = "storage.loadReadToolFileContext";
 pub const STORAGE_SAVE_CONVERSATION_META_METHOD: &str = "storage.saveConversationMeta";
 pub const STORAGE_DELETE_CONVERSATION_METHOD: &str = "storage.deleteConversation";
 pub const STORAGE_DELETE_CHAT_MESSAGES_METHOD: &str = "storage.deleteChatMessages";

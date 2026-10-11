@@ -117,6 +117,25 @@ function decisionResult(
 }
 
 describe('useCollaborationApprovals', () => {
+  it('bounds an in-flight durable invalidation burst to one read and one latest trailing read', async () => {
+    const pending = deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
+    clients.list
+      .mockReset()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({
+        schemaVersion: 1,
+        approvals: [approval('completed')]
+      })
+    const screen = await render(<Harness sequence={1} />)
+    await vi.waitFor(() => expect(clients.list).toHaveBeenCalledTimes(1))
+    for (let sequence = 2; sequence <= 21; sequence++)
+      await screen.rerender(<Harness sequence={sequence} />)
+    expect(clients.list).toHaveBeenCalledTimes(1)
+    pending.resolve({ schemaVersion: 1, approvals: [approval('pending')] })
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('completed')
+    expect(clients.list).toHaveBeenCalledTimes(2)
+  })
+
   it('refreshes from an externally supplied durable sequence without creating a subscription', async () => {
     clients.list.mockReset()
     clients.decide.mockReset()
@@ -278,11 +297,13 @@ describe('useCollaborationApprovals', () => {
     await expect.element(screen.getByTestId('status')).toHaveTextContent('loading')
     await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
 
-    // A notification can start another list before the decision-triggered reload completes.
+    // Notifications share one trailing reload while the decision-triggered read is pending.
     await screen.rerender(<Harness sequence={2} />)
-    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+    expect(clients.list).toHaveBeenCalledTimes(2)
     await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
     refresh.resolve({ schemaVersion: 1, approvals: projections })
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+    expect(clients.list).toHaveBeenCalledTimes(3)
     await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
   })
 

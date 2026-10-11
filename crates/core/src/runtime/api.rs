@@ -475,6 +475,7 @@ pub struct AgentUserInputSuspension {
     pub questions: crate::human_interaction::HumanInteractionToolInput,
     pub checkpoint: AgentRunCheckpoint,
     pub segment_usage: Option<crate::AgentUsage>,
+    pub finish_reason: Option<String>,
 }
 
 pub trait AgentHumanInteractionRuntimeHost: Send + Sync {

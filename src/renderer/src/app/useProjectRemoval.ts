@@ -172,7 +172,11 @@ export function useProjectRemoval({
                   cancelledAt
                 )
               }
-              enqueueChatMessageStateSave(conversation.id, cancelledMessage)
+              // A bound run is cancelled and persisted by Core. A failed project removal
+              // cannot authorize overwriting that durable outcome with this local fallback.
+              if (!message.agentRun?.runId) {
+                enqueueChatMessageStateSave(conversation.id, cancelledMessage)
+              }
               return cancelledMessage
             })
           }

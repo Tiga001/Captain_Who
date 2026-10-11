@@ -437,7 +437,11 @@ mod tests {
     fn task_name_resolution_is_exact_tree_scoped_and_never_falls_back_to_ids_or_paths() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Arc::new(
-            StorageService::open(&directory.path().join("name-resolution.sqlite")).unwrap(),
+            StorageService::open_with_model_credentials(
+                &directory.path().join("name-resolution.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
         );
         storage.save_model_settings(model_settings()).unwrap();
         save_root(&storage, "project-a", "root-a", "conversation-root-a");
@@ -506,8 +510,13 @@ mod tests {
     #[test]
     fn durable_nodes_authorize_root_writes_observer_reads_and_tree_management_without_leaks() {
         let directory = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("authorization.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("authorization.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         storage.save_model_settings(model_settings()).unwrap();
         save_root(&storage, "project-a", "root-a", "conversation-root-a");
         let child = spawn(&storage, "root-a", "child-a");

@@ -1,6 +1,8 @@
 use super::*;
 
+mod file_change_projection;
 pub(super) mod fork_staging;
+pub(super) mod skill_installation_projection;
 
 #[derive(Debug, Clone)]
 struct AgentTreeDeletionScope {

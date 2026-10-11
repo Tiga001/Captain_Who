@@ -14,6 +14,7 @@ class CollaborationEventGapError extends Error {}
 interface CollaborationRecoveryCheckpoint {
   activities: readonly CollaborationTimelineActivity[]
   agentInvalidationSequences: Readonly<Record<string, number>>
+  approvalInvalidationSequence: number
   cursor: number
   tree: AgentTreeSnapshot
 }
@@ -23,6 +24,8 @@ export interface CollaborationStoreSnapshot {
   activities: readonly CollaborationTimelineActivity[]
   /** Latest validated durable invalidation sequence for each Agent in this root tree. */
   agentInvalidationSequences: Readonly<Record<string, number>>
+  /** Only pending-action mutations invalidate the root's approval projection. */
+  approvalInvalidationSequence: number
   error: boolean
   hydrationRevision: number
   loading: boolean
@@ -45,7 +48,9 @@ export class CollaborationStore {
   private eventCursor = 0
   private generation = 0
   private readonly listeners = new Set<() => void>()
-  private runningCatchUp: Promise<void> | null = null
+  private runningRefresh: Promise<void> | null = null
+  /** false requests full recovery; it dominates a later checkpoint-resume request. */
+  private pendingHydration: boolean | null = null
   /** Only completed, cursor-validated recovery is reusable after navigation. */
   private recoveryCheckpoint: CollaborationRecoveryCheckpoint | null = null
   private snapshot: CollaborationStoreSnapshot
@@ -67,6 +72,7 @@ export class CollaborationStore {
     this.snapshot = {
       activities: [],
       agentInvalidationSequences: {},
+      approvalInvalidationSequence: 0,
       error: false,
       hydrationRevision: 0,
       loading: true,
@@ -92,14 +98,24 @@ export class CollaborationStore {
     void this.hydrate(true)
   }
 
-  async hydrate(resumeCheckpoint = false): Promise<void> {
-    if (this.destroyed || this.paused) return
-    const generation = ++this.generation
+  hydrate(resumeCheckpoint = false): Promise<void> {
+    if (this.destroyed || this.paused) return Promise.resolve()
+    // Fence publication immediately, but wait for the current RPC to finish before issuing
+    // another one. Reconnect storms retain one full-recovery request, never one task per event.
+    this.generation += 1
+    const alreadyQueued = this.pendingHydration !== null
+    this.pendingHydration = (this.pendingHydration ?? true) && resumeCheckpoint
+    if (!resumeCheckpoint) this.recoveryCheckpoint = null
+    if (!alreadyQueued) this.publish({ error: false, loading: true, transmissions: [] })
+    return this.runRefresh()
+  }
+
+  private async hydrateNow(resumeCheckpoint: boolean): Promise<void> {
+    const generation = this.generation
     const previousCheckpoint = resumeCheckpoint ? this.recoveryCheckpoint : null
     if (!resumeCheckpoint) this.recoveryCheckpoint = null
     this.clearTransmissionTimer()
     this.pendingGuidanceTransmissions.clear()
-    this.publish({ error: false, loading: true, transmissions: [] })
     try {
       const initialTree = await this.source.getTree({ rootConversationId: this.rootConversationId })
       if (!this.isCurrent(generation)) return
@@ -109,6 +125,7 @@ export class CollaborationStore {
         this.publish({
           activities: [],
           agentInvalidationSequences: {},
+          approvalInvalidationSequence: 0,
           error: false,
           hydrationRevision: this.snapshot.hydrationRevision + 1,
           loading: false,
@@ -148,7 +165,9 @@ export class CollaborationStore {
         generation,
         checkpoint?.cursor ?? 0,
         checkpoint?.activities ?? [],
-        checkpoint?.agentInvalidationSequences
+        checkpoint?.agentInvalidationSequences,
+        false,
+        checkpoint?.approvalInvalidationSequence
       )
       if (!this.isCurrent(generation)) return
       let tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
@@ -158,18 +177,22 @@ export class CollaborationStore {
       let cursor = replay.cursor
       let activities = replay.activities
       let invalidationSequences = replay.invalidationSequences
+      let approvalInvalidationSequence = replay.approvalInvalidationSequence
       while (tree.lastSequence > cursor) {
         const next = await this.replayDurableEvents(
           generation,
           cursor,
           activities,
-          invalidationSequences
+          invalidationSequences,
+          false,
+          approvalInvalidationSequence
         )
         if (!this.isCurrent(generation)) return
         if (next.cursor === cursor) throw new CollaborationEventGapError('Event log gap')
         cursor = next.cursor
         activities = next.activities
         invalidationSequences = next.invalidationSequences
+        approvalInvalidationSequence = next.approvalInvalidationSequence
         tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
         if (!this.isCurrent(generation)) return
         if (!tree || tree.rootConversationId !== this.rootConversationId)
@@ -178,10 +201,17 @@ export class CollaborationStore {
       if (tree.lastSequence < cursor) throw new Error('Stale collaboration snapshot')
       this.eventCursor = cursor
       const agentInvalidationSequences = seedAgentInvalidationSequences(invalidationSequences, tree)
-      this.recoveryCheckpoint = { activities, agentInvalidationSequences, cursor, tree }
+      this.recoveryCheckpoint = {
+        activities,
+        agentInvalidationSequences,
+        approvalInvalidationSequence,
+        cursor,
+        tree
+      }
       this.publish({
         activities,
         agentInvalidationSequences,
+        approvalInvalidationSequence,
         error: false,
         hydrationRevision: this.snapshot.hydrationRevision + 1,
         loading: false,
@@ -210,6 +240,7 @@ export class CollaborationStore {
     this.paused = true
     this.generation += 1
     this.catchUpRequested = false
+    this.pendingHydration = null
     this.unsubscribe?.()
     this.unsubscribe = null
     this.unsubscribeResync?.()
@@ -222,6 +253,7 @@ export class CollaborationStore {
     this.publish({
       activities: [],
       agentInvalidationSequences: {},
+      approvalInvalidationSequence: 0,
       loading: true,
       tree: null,
       transmissions: []
@@ -283,11 +315,33 @@ export class CollaborationStore {
   private requestCatchUp(): void {
     if (this.destroyed || this.paused || !this.snapshot.tree) return
     this.catchUpRequested = true
-    if (this.runningCatchUp) return
-    this.runningCatchUp = this.catchUp().finally(() => {
-      this.runningCatchUp = null
-      if (this.catchUpRequested) this.requestCatchUp()
-    })
+    void this.runRefresh()
+  }
+
+  private runRefresh(): Promise<void> {
+    if (this.runningRefresh) return this.runningRefresh
+    this.runningRefresh = Promise.resolve()
+      .then(async () => {
+        while (!this.destroyed && !this.paused) {
+          if (this.pendingHydration !== null) {
+            const resume = this.pendingHydration
+            this.pendingHydration = null
+            await this.hydrateNow(resume)
+          } else if (this.catchUpRequested && this.snapshot.tree) {
+            await this.catchUp()
+          } else break
+        }
+      })
+      .finally(() => {
+        this.runningRefresh = null
+        if (
+          !this.destroyed &&
+          !this.paused &&
+          (this.pendingHydration !== null || (this.catchUpRequested && this.snapshot.tree))
+        )
+          void this.runRefresh()
+      })
+    return this.runningRefresh
   }
 
   private async catchUp(): Promise<void> {
@@ -297,6 +351,7 @@ export class CollaborationStore {
       let cursor = this.eventCursor
       let activities = [...this.snapshot.activities]
       let agentInvalidationSequences = { ...this.snapshot.agentInvalidationSequences }
+      let approvalInvalidationSequence = this.snapshot.approvalInvalidationSequence
       let transmissions: AgentTreeTransmission[] = []
 
       try {
@@ -306,13 +361,15 @@ export class CollaborationStore {
             cursor,
             activities,
             agentInvalidationSequences,
-            true
+            true,
+            approvalInvalidationSequence
           )
           if (!this.isCurrent(generation) || !this.snapshot.tree) return
           const previousCursor = cursor
           cursor = replay.cursor
           activities = replay.activities
           agentInvalidationSequences = replay.invalidationSequences
+          approvalInvalidationSequence = replay.approvalInvalidationSequence
           transmissions = [...transmissions, ...replay.transmissions].slice(-MAX_TREE_TRANSMISSIONS)
           const tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
           if (!this.isCurrent(generation)) return
@@ -322,6 +379,7 @@ export class CollaborationStore {
             this.publish({
               activities: [],
               agentInvalidationSequences: {},
+              approvalInvalidationSequence: 0,
               error: false,
               hydrationRevision: this.snapshot.hydrationRevision + 1,
               loading: false,
@@ -347,12 +405,14 @@ export class CollaborationStore {
           this.recoveryCheckpoint = {
             activities,
             agentInvalidationSequences: validatedInvalidationSequences,
+            approvalInvalidationSequence,
             cursor,
             tree
           }
           this.publish({
             activities,
             agentInvalidationSequences: validatedInvalidationSequences,
+            approvalInvalidationSequence,
             error: false,
             loading: false,
             tree,
@@ -380,16 +440,19 @@ export class CollaborationStore {
     startCursor: number,
     initialActivities: readonly CollaborationTimelineActivity[],
     initialInvalidationSequences: Readonly<Record<string, number>> = {},
-    collectTransmissions = false
+    collectTransmissions = false,
+    initialApprovalInvalidationSequence = 0
   ): Promise<{
     activities: CollaborationTimelineActivity[]
     cursor: number
     invalidationSequences: Record<string, number>
+    approvalInvalidationSequence: number
     transmissions: AgentTreeTransmission[]
   }> {
     let cursor = startCursor
     let activities = [...initialActivities]
     const invalidationSequences = { ...initialInvalidationSequences }
+    let approvalInvalidationSequence = initialApprovalInvalidationSequence
     let transmissions: AgentTreeTransmission[] = []
     for (;;) {
       const page = await this.source.listEvents({
@@ -398,13 +461,21 @@ export class CollaborationStore {
         rootConversationId: this.rootConversationId
       })
       if (!this.isCurrent(generation))
-        return { activities, cursor, invalidationSequences, transmissions }
+        return {
+          activities,
+          cursor,
+          invalidationSequences,
+          approvalInvalidationSequence,
+          transmissions
+        }
       if (page.rootConversationId !== this.rootConversationId) throw new Error('Wrong root')
       for (const event of page.events) {
         if (event.rootConversationId !== this.rootConversationId || event.sequence !== cursor + 1) {
           throw new CollaborationEventGapError('Event log gap')
         }
         cursor = event.sequence
+        if (event.kind === 'approval_projected' || event.kind === 'approval_updated')
+          approvalInvalidationSequence = event.sequence
         if (
           event.agentId === event.rootAgentId &&
           event.runId &&
@@ -444,7 +515,14 @@ export class CollaborationStore {
       }
       activities = boundActivities(activities)
       transmissions = transmissions.slice(-MAX_TREE_TRANSMISSIONS)
-      if (!page.hasMore) return { activities, cursor, invalidationSequences, transmissions }
+      if (!page.hasMore)
+        return {
+          activities,
+          cursor,
+          invalidationSequences,
+          approvalInvalidationSequence,
+          transmissions
+        }
       if (page.events.length === 0) throw new CollaborationEventGapError('Event log gap')
     }
   }

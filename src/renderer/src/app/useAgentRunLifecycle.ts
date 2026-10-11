@@ -120,6 +120,33 @@ export function useAgentRunLifecycle({
   const previousActiveConversationIdRef = useRef(activeConversationId)
   const commandSessionHydrationMountedRef = useRef(true)
   const terminalReconciliationsRef = useRef(new Map<string, Promise<void>>())
+  const coreOwnedRunBindingsRef = useRef(new Map<string, ActiveRunBinding>())
+  const markCoreOwnedRun = useCallback(
+    (conversationId: string, messageId: string, runId: string) => {
+      // Prune on ownership changes rather than scanning history on each streaming delta.
+      for (const [ownedRunId, binding] of coreOwnedRunBindingsRef.current) {
+        const stillLoaded = conversationsRef.current
+          .find((conversation) => conversation.id === binding.conversationId)
+          ?.messages.some(
+            (message) =>
+              message.id === binding.pendingMessageId && message.agentRun?.runId === ownedRunId
+          )
+        if (!stillLoaded) coreOwnedRunBindingsRef.current.delete(ownedRunId)
+      }
+      coreOwnedRunBindingsRef.current.set(runId, { conversationId, pendingMessageId: messageId })
+    },
+    [conversationsRef]
+  )
+  const isCoreOwnedMessage = useCallback((conversationId: string, message: ChatMessage) => {
+    const run = message.agentRun
+    if (!run?.runId) return false
+    const binding = coreOwnedRunBindingsRef.current.get(run.runId)
+    return Boolean(
+      run.coreCheckpoint ||
+      (binding?.conversationId === conversationId && binding.pendingMessageId === message.id)
+    )
+  }, [])
+
   const supersededGuidanceIdsRef = useRef(new Set<string>())
 
   const supersedeRejectedGuidance = useCallback(
@@ -190,10 +217,16 @@ export function useAgentRunLifecycle({
       conversationId: string,
       messageId: string,
       updater: (message: ChatMessage) => ChatMessage,
-      options: { checkpoint?: boolean; persist?: boolean; touchConversation?: boolean } = {}
+      options: {
+        checkpoint?: boolean
+        persist?: boolean
+        touchConversation?: boolean
+        coreOwnedRunId?: string
+      } = {}
     ) => {
       let messageToSave: ChatMessage | null = null
       let conversationMetaToSave: ChatConversation | null = null
+      let coreOwned = false
       const timestamp = Date.now()
 
       const nextConversations = conversationsRef.current.map((conversation) => {
@@ -203,7 +236,13 @@ export function useAgentRunLifecycle({
           ...conversation,
           messages: conversation.messages.map((message) => {
             if (message.id !== messageId) return message
+            if (options.coreOwnedRunId && message.agentRun?.runId === options.coreOwnedRunId) {
+              markCoreOwnedRun(conversationId, messageId, options.coreOwnedRunId)
+            }
             messageToSave = updater(message)
+            coreOwned =
+              isCoreOwnedMessage(conversationId, message) ||
+              isCoreOwnedMessage(conversationId, messageToSave)
             return messageToSave
           }),
           updatedAt: options.touchConversation
@@ -217,14 +256,14 @@ export function useAgentRunLifecycle({
 
       setConversations(nextConversations)
 
-      if (messageToSave && options.persist !== false) {
+      if (messageToSave && !coreOwned && options.persist !== false) {
         if (options.checkpoint) {
           enqueueChatMessageCheckpoint(conversationId, messageToSave)
         } else {
           enqueueChatMessageStateSave(conversationId, messageToSave)
         }
       }
-      if (options.touchConversation && conversationMetaToSave) {
+      if (!coreOwned && options.touchConversation && conversationMetaToSave) {
         enqueueConversationMetaSave(conversationMetaToSave)
       }
     },
@@ -233,6 +272,8 @@ export function useAgentRunLifecycle({
       enqueueChatMessageCheckpoint,
       enqueueChatMessageStateSave,
       enqueueConversationMetaSave,
+      isCoreOwnedMessage,
+      markCoreOwnedRun,
       setConversations
     ]
   )
@@ -277,10 +318,12 @@ export function useAgentRunLifecycle({
           })
         )
 
-        // Fence every older renderer write with the reconciled terminal message. The fallback is
-        // retained for tests and defensive compatibility if storage cannot return the committed row.
-        if (messageToSave) enqueueChatMessageStateSave(conversationId, messageToSave)
-        await flushConversationMessageStateSaves(conversationId)
+        // Core has committed the terminal projection before Done. This read only restores the
+        // complete UI trace; legacy messages retain their old Renderer persistence boundary.
+        if (messageToSave && !isCoreOwnedMessage(conversationId, messageToSave)) {
+          enqueueChatMessageStateSave(conversationId, messageToSave)
+          await flushConversationMessageStateSaves(conversationId)
+        }
       })
       terminalReconciliationsRef.current.set(conversationId, reconciliation)
       void reconciliation
@@ -292,13 +335,18 @@ export function useAgentRunLifecycle({
         .catch((error) => console.error('Failed to reconcile terminal Run', error))
       return reconciliation
     },
-    [enqueueChatMessageStateSave, flushConversationMessageStateSaves, setConversations]
+    [
+      enqueueChatMessageStateSave,
+      flushConversationMessageStateSaves,
+      isCoreOwnedMessage,
+      setConversations
+    ]
   )
 
   const waitForRunSettlement = useCallback(
     async (conversationId: string) => {
-      // The terminal read can enqueue one final state fence after Done. Drain it before obtaining
-      // any model-transition authority whose revision would otherwise be invalidated by that write.
+      // Finish authoritative UI reconciliation before the next turn, and drain any legacy
+      // message writes before obtaining model-transition authority for the next revision.
       while (terminalReconciliationsRef.current.has(conversationId)) {
         await terminalReconciliationsRef.current.get(conversationId)
       }
@@ -493,9 +541,15 @@ export function useAgentRunLifecycle({
   const flushRunMessagePersistence = useCallback(
     (conversationId: string, messageId: string, runId?: string) => {
       if (runId) flushPendingMessageDelta(runId, 'immediate')
+      const message = conversationsRef.current
+        .find((conversation) => conversation.id === conversationId)
+        ?.messages.find((candidate) => candidate.id === messageId)
+      // Decisions and Stop depend on Core's durable boundary. Pending local UI state and
+      // unrelated legacy saves must not delay those RPCs for a Core-owned run.
+      if (message && isCoreOwnedMessage(conversationId, message)) return Promise.resolve()
       return flushChatMessageStateSave(conversationId, messageId)
     },
-    [flushChatMessageStateSave, flushPendingMessageDelta]
+    [conversationsRef, flushChatMessageStateSave, flushPendingMessageDelta, isCoreOwnedMessage]
   )
 
   useEffect(() => {
@@ -504,7 +558,7 @@ export function useAgentRunLifecycle({
     if (!previousConversationId || previousConversationId === activeConversationId) return
 
     flushPendingMessageDeltas(previousConversationId)
-    void flushConversationMessageStateSaves(previousConversationId)
+    void flushConversationMessageStateSaves(previousConversationId).catch(() => undefined)
   }, [activeConversationId, flushConversationMessageStateSaves, flushPendingMessageDeltas])
 
   useEffect(() => {
@@ -517,7 +571,7 @@ export function useAgentRunLifecycle({
         [...conversationIds].map((conversationId) =>
           flushConversationMessageStateSaves(conversationId)
         )
-      )
+      ).catch(() => undefined)
     }
     const flushWhenHidden = () => {
       if (document.visibilityState === 'hidden') flush()
@@ -853,6 +907,11 @@ export function useAgentRunLifecycle({
       }
       if (!isCommandSessionEvent && cancelledPendingMessageIdSet.has(assistantMessageId)) return
 
+      // Started is published only after Core installs its durable checkpoint generation.
+      if (agentEvent.type === 'started') {
+        markCoreOwnedRun(conversationId, assistantMessageId, agentEvent.runId)
+      }
+
       if (
         agentEvent.type === 'state' &&
         (agentEvent.state.status === 'failed' || agentEvent.state.status === 'cancelled')
@@ -1020,6 +1079,7 @@ export function useAgentRunLifecycle({
       flushPendingMessageDelta,
       locallyUnconfirmedStoppedRunIdSet,
       pendingGuidancePayloadMap,
+      markCoreOwnedRun,
       reconcileTerminalRunFromStorage,
       waitForRunSettlement,
       removeQueuedMessageByClientId,
@@ -1313,7 +1373,7 @@ export function useAgentRunLifecycle({
     cancelledRunIdSet,
     contextWindowIndicatorEnabled,
     conversationsRef,
-    enqueueChatMessageStateSave,
+    markCoreOwnedRun,
     handleBoundAgentEvent,
     locallyUnconfirmedStoppedRunIdSet,
     reconcileFailedSkillActivation,

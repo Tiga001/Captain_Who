@@ -181,6 +181,20 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+it('serializes active snapshot invalidations and replays the latest window stream exactly once', async () => {
+  const first = deferred<AgentObserverConversation>()
+  mocks.load.mockReturnValueOnce(first.promise).mockResolvedValue(streamingObserver('A', 1))
+  const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={1} />)
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(1))
+  for (let version = 2; version <= 21; version++)
+    await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={version} />)
+  mocks.observerEvent?.(sequencedDelta('B', 2))
+  expect(mocks.load).toHaveBeenCalledTimes(1)
+  first.resolve(streamingObserver('stale', 0))
+  await expect.element(screen.getByText('AB', { exact: true })).toBeVisible()
+  expect(mocks.load).toHaveBeenCalledTimes(2)
+})
+
 it('rejects a stale child response after a rapid observer switch', async () => {
   const first = deferred<AgentObserverConversation | null>()
   const second = deferred<AgentObserverConversation | null>()

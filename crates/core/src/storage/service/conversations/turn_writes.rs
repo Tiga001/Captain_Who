@@ -46,6 +46,50 @@ impl StorageService {
                 let transaction = connection.transaction().map_err(storage_error)?;
                 chat_repository::save_conversation_in_connection(&transaction, &conversation)
                     .map_err(storage_error)?;
+                // A stale Renderer full-save may have been fenced from Core-owned messages.
+                // Return their committed fields from this same writer cut, never acknowledge
+                // the rejected presentation as if it had replaced the Core checkpoint.
+                let has_core_messages = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?1
+                     AND CASE WHEN json_valid(agent_run_json)
+                         THEN json_type(agent_run_json, '$.coreCheckpoint')='object'
+                         ELSE 0 END)",
+                        [&conversation.id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(storage_error)?;
+                if has_core_messages {
+                    let stored = chat_repository::get_active_persisted_conversation(
+                        &transaction,
+                        &conversation.id,
+                    )
+                    .map_err(storage_error)?
+                    .ok_or("Saved conversation is unavailable")?;
+                    let mut submitted = conversation
+                        .messages
+                        .into_iter()
+                        .map(|message| (message.id.clone(), message))
+                        .collect::<HashMap<_, _>>();
+                    conversation.messages = stored
+                        .messages
+                        .into_iter()
+                        .filter_map(|mut message| {
+                            let input = submitted.remove(&message.id);
+                            if chat_repository::has_core_checkpoint(
+                                message.agent_run_json.as_deref(),
+                            ) {
+                                // Attachments are persisted through their separate API, as before.
+                                if let Some(input) = input {
+                                    message.attachments = input.attachments;
+                                }
+                                Some(message)
+                            } else {
+                                input
+                            }
+                        })
+                        .collect();
+                }
                 transaction.commit().map_err(storage_error)?;
                 crate::storage::human_interaction_repository::attach_message_projections(
                     connection,

@@ -348,7 +348,8 @@ export function useAppShellMessageSubmission({
         }
       }
       setConversationsWithRef(nextConversations)
-      enqueueConversationMetaSave(conversationToSave)
+      // Turn admission already commits this metadata with the exact submitted message pair.
+      // Keep the optimistic projection local; a second write can race Core's preparation revision.
       if (behavior.activate) {
         activeConversationIdRef.current = conversationId
         setScrollTargetMessageId(null)
@@ -391,6 +392,10 @@ export function useAppShellMessageSubmission({
                 : item
             )
           )
+          const refusedConversation = conversationsRef.current.find(
+            (item) => item.id === conversationId
+          )
+          if (refusedConversation) enqueueConversationMetaSave(refusedConversation)
           if (!behavior.preserveComposerContent) {
             // A refused turn never took ownership of this local input. Recover it even
             // after an account switch; only account-specific guidance needs the old login.
@@ -445,6 +450,7 @@ export function useAppShellMessageSubmission({
           !failedAssistant.agentRun?.runId &&
           ['failed', 'cancelled'].includes(failedAssistant.agentRun?.status ?? '')
         ) {
+          // The local failure projection already queued its metadata before returning.
           enqueueChatMessagesUpsert(
             conversationId,
             [currentConversation.messages[userIndex], failedAssistant],

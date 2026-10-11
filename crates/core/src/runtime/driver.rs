@@ -1731,6 +1731,7 @@ impl AgentRuntime {
                                 questions,
                                 checkpoint,
                                 segment_usage: usage.clone(),
+                                finish_reason: finish_reason.clone(),
                             })
                         })();
                         let admission = suspended.and_then(|suspension| {
@@ -2317,6 +2318,7 @@ impl AgentRuntime {
                             action: Box::new(action.clone()),
                             checkpoint: Box::new(checkpoint),
                             segment_usage: usage.clone(),
+                            segment_finish_reason: finish_reason.clone(),
                         });
                         event_stream.emit(state_event(
                             &run_id,

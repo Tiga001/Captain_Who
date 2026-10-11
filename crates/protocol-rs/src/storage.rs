@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 pub const STORAGE_MODEL_DISPLAY_NAME_MAX_BYTES: usize = 512;
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageReadToolFileContextRequest {
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub call_id: String,
+}
+
 /// Stable, safe recovery metadata for a rejected model-settings save.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

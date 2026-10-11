@@ -440,8 +440,32 @@ fn conversation_detail_projection_query_count_is_independent_of_history_length()
     );
     assert_eq!(
         many_selects.len(),
-        15,
+        // The terminal-inclusive Skill decision/audit overlay adds one batched query. Its
+        // receipt may exist without a runtime ToolCall, so it cannot use the FileChange gate.
+        16,
         "unexpected detail SQL: {many_selects:#?}"
+    );
+    assert_eq!(
+        many_selects
+            .iter()
+            .filter(|sql| sql.contains("FROM agent_pending_actions AS pending"))
+            .count(),
+        1,
+        "Skill installation recovery must remain one query for the whole conversation"
+    );
+    assert!(
+        !many_selects
+            .iter()
+            .any(|sql| sql.contains("FROM agent_file_changes AS change")),
+        "history without a builtin apply_patch source cannot have a proven FileChange overlay"
+    );
+    assert_eq!(
+        many_selects
+            .iter()
+            .filter(|sql| sql.contains("FROM conversation_turn_trace_items AS item"))
+            .count(),
+        1,
+        "ordinary detail must not re-read Trace bodies for an impossible FileChange overlay"
     );
     for table in [
         "conversation_turn_trace_items",
@@ -482,6 +506,122 @@ fn conversation_detail_projection_query_count_is_independent_of_history_length()
             run["timeline"][0]["attachments"].as_array().unwrap().len(),
             1
         );
+    }
+}
+
+#[test]
+fn conversation_file_change_overlay_query_requires_a_builtin_patch_in_loaded_trace() {
+    for source in ["builtin_patch", "other_builtin", "extension_patch"] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let conversation_id = "projection-patch";
+        let message_id = "projection-patch-assistant";
+        let run_id = "projection-patch-run";
+        save_projection_conversation(
+            &service,
+            conversation_id,
+            message_id,
+            current_projection_with_suffix(Some(run_id), "retained partial text"),
+        );
+        let tool = if source == "other_builtin" {
+            "read_file"
+        } else {
+            "apply_patch"
+        };
+        let provenance = if source == "extension_patch" {
+            crate::AgentToolIdentity::RuntimeExtension {
+                extension_id: "synthetic-extension".into(),
+                tool_name: tool.into(),
+            }
+        } else {
+            crate::AgentToolIdentity::Builtin {
+                tool_name: tool.into(),
+            }
+        };
+        let mut trace = empty_projection_trace(conversation_id, message_id, run_id);
+        trace.items.push(crate::ConversationTurnTraceItem::ToolCall {
+            sequence: 0, call_id: "source-call".into(), tool: tool.into(), provenance,
+            operation: serde_json::json!({"request":{"action":"begin","operation":"create","filePath":"synthetic.txt"}}),
+            approval_status: crate::AgentApprovalStatus::NotRequired, truncated: false,
+        });
+        service
+            .replace_conversation_turn_trace(&trace, 2, 2)
+            .unwrap();
+        let change = crate::storage::models::AgentFileChangeRecord {
+            schema_version: 1,
+            id: "synthetic-change".into(),
+            conversation_id: conversation_id.into(),
+            project_id: None,
+            run_id: run_id.into(),
+            source_tool_name: "apply_patch".into(),
+            source_tool_call_id: "source-call".into(),
+            source_tool_arguments_digest: "digest".into(),
+            permission_revision: "permission".into(),
+            tool_set_revision: "tools".into(),
+            provider_wire_revision: "wire".into(),
+            observation_id: "observation".into(),
+            observation_json: "{}".into(),
+            file_path: "synthetic.txt".into(),
+            operation: "create".into(),
+            strategy: None,
+            status: "applied".into(),
+            base_revision: None,
+            base_content: "private base".into(),
+            content: "private draft".into(),
+            draft_revision: 1,
+            next_mutation_index: 0,
+            additions: 7,
+            deletions: 0,
+            line_count: 7,
+            byte_count: 20,
+            mutation_count: 0,
+            stats_final: true,
+            summary: None,
+            final_action_id: Some("action".into()),
+            final_action_arguments_digest: Some("action-digest".into()),
+            final_permission_revision: Some("permission".into()),
+            final_tool_set_revision: Some("tools".into()),
+            final_provider_wire_revision: Some("wire".into()),
+            created_at: 2,
+            updated_at: 3,
+            expires_at: 100,
+        };
+        {
+            let connection = service.state.connection().unwrap();
+            crate::storage::file_change_repository::insert_file_change(&connection, &change)
+                .unwrap();
+        }
+        let (loaded, selects) = trace_storage_selects(&service, || {
+            service.load_conversation(conversation_id).unwrap().unwrap()
+        });
+        let run: serde_json::Value = serde_json::from_str(
+            loaded
+                .messages
+                .last()
+                .unwrap()
+                .agent_run_json
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        let file_change_queries = selects
+            .iter()
+            .filter(|sql| sql.contains("FROM agent_file_changes AS change"))
+            .count();
+        assert_eq!(
+            file_change_queries,
+            usize::from(source == "builtin_patch"),
+            "{source}: {selects:#?}"
+        );
+        if source == "builtin_patch" {
+            assert_eq!(run["fileChanges"][0]["transactionId"], "synthetic-change");
+            assert_eq!(run["fileChanges"][0]["status"], "applied");
+            assert_eq!(run["fileChanges"][0]["additions"], 7);
+            assert_eq!(run["fileChanges"].as_array().unwrap().len(), 1);
+            assert!(!run.to_string().contains("private"));
+        } else {
+            assert_eq!(run["fileChanges"], serde_json::json!([]));
+        }
     }
 }
 

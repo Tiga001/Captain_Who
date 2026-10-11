@@ -999,6 +999,9 @@ mod tests {
         ));
         assert!(is_blocking_read_method(STORAGE_LOAD_CONVERSATION_METHOD));
         assert!(is_blocking_read_method(
+            mycopilot_protocol_rs::STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD
+        ));
+        assert!(is_blocking_read_method(
             mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
         ));
         for method in [

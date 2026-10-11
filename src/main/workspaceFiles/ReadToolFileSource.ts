@@ -2,12 +2,15 @@ import type {
   AgentEvent,
   AgentObserverEventEnvelope,
   ReadToolFileRequest,
-  StorageChatConversationRecord
+  StorageReadToolFileContext,
+  StorageReadToolFileContextRequest
 } from '@mycopilot/protocol'
 import { resolveProjectFileReference } from '../projects/projectFilePaths'
 
 interface Source {
-  loadConversation(id: string): Promise<StorageChatConversationRecord | null>
+  loadReadToolFileContext(
+    input: StorageReadToolFileContextRequest
+  ): Promise<StorageReadToolFileContext | null>
   loadProjects: Parameters<typeof resolveProjectFileReference>[0]['loadProjects']
   resolveRunWorkspacePath: Parameters<
     typeof resolveProjectFileReference
@@ -30,7 +33,6 @@ const READ_TOOLS = new Set(['read_file', 'read_word', 'read_spreadsheet', 'read_
 const unavailable = () => new Error('The referenced read file is not available.')
 const record = (value: unknown): RecordValue =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as RecordValue) : {}
-const records = (value: unknown): RecordValue[] => (Array.isArray(value) ? value.map(record) : [])
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 
 interface LiveRun {
@@ -105,42 +107,47 @@ export class ReadToolFileSource {
       /[\0\r\n]/.test(input.filePath)
     )
       throw unavailable()
-    const conversation = await this.source.loadConversation(input.conversationId)
-    if (!conversation || conversation.id !== input.conversationId) throw unavailable()
-    if ((conversation.projectId ?? null) !== (input.projectId ?? null)) throw unavailable()
-    const message = conversation.messages.find(
-      (candidate) => candidate.id === input.assistantMessageId && candidate.role === 'assistant'
+    const stored = await this.source.loadReadToolFileContext({
+      conversationId: input.conversationId,
+      assistantMessageId: input.assistantMessageId,
+      callId: input.callId
+    })
+    if (
+      !stored ||
+      stored.conversationId !== input.conversationId ||
+      stored.assistantMessageId !== input.assistantMessageId
     )
-    let stored: RecordValue = {}
-    try {
-      stored = record(JSON.parse(message?.agentRunJson ?? '{}'))
-    } catch {
       throw unavailable()
-    }
+    if (stored.projectId !== (input.projectId ?? null)) throw unavailable()
     const live = [...this.live.entries()].find(
       ([runId, run]) =>
         (run.conversationId === input.conversationId &&
           run.assistantMessageId === input.assistantMessageId) ||
-        (message && runId === stored.runId)
+        (stored.messageFound && runId === stored.runId)
     )?.[1]
-    if (!message && !live) throw unavailable()
+    if (!stored.messageFound && !live) throw unavailable()
     const call =
       live?.calls.get(input.callId) ??
-      records(stored.toolCalls).find((candidate) => candidate.id === input.callId)
+      (stored.call?.id === input.callId
+        ? {
+            id: stored.call.id,
+            tool: stored.call.tool,
+            args: { path: stored.call.path, filePath: stored.call.filePath }
+          }
+        : undefined)
     if (!call || !READ_TOOLS.has(text(call.tool))) throw unavailable()
-    const marker = records(stored.timeline).find(
-      (candidate) => candidate.type === 'tool_call' && candidate.callId === input.callId
-    )
     if (
-      marker?.identity !== undefined &&
-      (record(marker.identity).type !== 'builtin' || record(marker.identity).toolName !== call.tool)
+      stored.callIdentity !== null &&
+      (stored.callIdentity.type !== 'builtin' || stored.callIdentity.toolName !== call.tool)
     )
       throw unavailable()
-    const results = [...records(stored.toolResults), ...(live?.results.values() ?? [])]
-    const result = [...results].reverse().find((candidate) => candidate.callId === input.callId)
+    const liveResult = live?.results.get(input.callId)
     const args = record(call.args)
     const filePath = input.filePath.trim()
-    const knownPaths = [text(record(result?.result).path), text(args.path) || text(args.filePath)]
+    const knownPaths = [
+      text(liveResult ? record(liveResult.result).path : stored.resultPath),
+      text(args.path) || text(args.filePath)
+    ]
     if (!knownPaths.some((path) => path && path === filePath)) throw unavailable()
 
     if (filePath.startsWith('@attachments/')) {
@@ -157,7 +164,7 @@ export class ReadToolFileSource {
     }
     return {
       path: await resolveProjectFileReference(this.source, {
-        projectId: conversation.projectId,
+        projectId: stored.projectId,
         assistantMessageId: input.assistantMessageId,
         filePath
       })

@@ -6,6 +6,7 @@ pub(crate) use running_conversations::list_running_conversation_summaries;
 pub(crate) use agent_run_projection::{
     canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,
     current_agent_run_projection_is_safe_for_trace_rebuild,
+    current_checkpoint_collection_entry_is_safe, current_core_checkpoint_is_safe,
     discard_legacy_collaboration_activities, settle_completed_message_streams,
 };
 #[cfg(test)]
@@ -23,6 +24,22 @@ use crate::storage::{
 use crate::{AgentMcpToolApproval, AgentMcpToolInvocationEvent};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
+
+pub(crate) fn has_core_checkpoint(raw: Option<&str>) -> bool {
+    raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|run| run.get("coreCheckpoint").cloned())
+        .is_some_and(|checkpoint| current_core_checkpoint_is_safe(&checkpoint))
+}
+
+fn reject_renderer_checkpoint_marker(raw: Option<&str>) -> rusqlite::Result<()> {
+    if raw
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|run| run.get("coreCheckpoint").is_some())
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
 
 /// Persists one Renderer-safe MCP lifecycle card from the Host-authenticated frozen approval.
 ///
@@ -659,6 +676,7 @@ pub(crate) fn append_turn_messages_in_connection(
     )?;
     save_conversation_metadata_in_connection(connection, conversation)?;
     for (offset, message) in new_messages.iter().enumerate() {
+        reject_renderer_checkpoint_marker(message.agent_run_json.as_deref())?;
         connection.execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
@@ -777,6 +795,20 @@ pub(crate) fn save_conversation_in_connection(
             return Err(rusqlite::Error::InvalidQuery);
         }
         let is_new_message = existing_identity.is_none();
+        let existing_projection = connection
+            .query_row(
+                "SELECT agent_run_json FROM messages WHERE conversation_id=?1 AND id=?2",
+                params![&conversation.id, &message.id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        if has_core_checkpoint(existing_projection.as_deref()) {
+            // A full Renderer snapshot may predate the Core checkpoint or omit its marker.
+            // Metadata/UI have separate APIs; the Run's accepted message is Core-owned.
+            continue;
+        }
+        reject_renderer_checkpoint_marker(message.agent_run_json.as_deref())?;
         if let Some(existing) = immutable_graph_message(connection, &conversation.id, &message.id)?
         {
             if existing.role != message.role
@@ -878,6 +910,18 @@ pub(crate) fn save_conversation_in_connection(
                 && !workflow_message_ids.contains(message_id)
         })
         .collect::<Vec<_>>();
+    let mut core_owned = HashSet::new();
+    for message_id in &removed_message_ids {
+        let raw = connection.query_row(
+            "SELECT agent_run_json FROM messages WHERE conversation_id=?1 AND id=?2",
+            params![&conversation.id, message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        if has_core_checkpoint(raw.as_deref()) {
+            core_owned.insert(message_id.clone());
+        }
+    }
+    removed_message_ids.retain(|id| !core_owned.contains(id));
     if agent_bound && !removed_message_ids.is_empty() {
         let mut retained_graph_projections = HashSet::new();
         for message_id in &removed_message_ids {
@@ -1053,6 +1097,7 @@ pub fn upsert_messages(
             stored.push(existing);
             continue;
         }
+        reject_renderer_checkpoint_marker(message.agent_run_json.as_deref())?;
         let position = if agent_bound {
             let position = next_agent_position;
             next_agent_position = next_agent_position.saturating_add(1);
@@ -1618,6 +1663,10 @@ pub fn update_message_state(
     let Some((existing_status, existing_content, existing_run_json, created_at)) = existing else {
         return Ok(());
     };
+    if has_core_checkpoint(existing_run_json.as_deref()) {
+        return Ok(());
+    }
+    reject_renderer_checkpoint_marker(message.agent_run_json.as_deref())?;
     let admitted_run_id = connection
         .query_row(
             "SELECT run_id FROM conversation_turn_traces

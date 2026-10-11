@@ -812,6 +812,7 @@ pub(super) fn is_blocking_read_method(method: &str) -> bool {
             | mycopilot_protocol_rs::STORAGE_LOAD_RUNNING_CONVERSATION_SUMMARIES_METHOD
             | mycopilot_protocol_rs::HUMAN_INTERACTION_GET_ATTENTION_METHOD
             | STORAGE_LOAD_CONVERSATION_METHOD
+            | mycopilot_protocol_rs::STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD
             | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
             | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
             | mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD

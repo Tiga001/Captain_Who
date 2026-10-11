@@ -22,6 +22,23 @@ fn attach_message_guidance_timelines(
     attach_message_guidance_timelines_in_scope(connection, conversations, false)
 }
 
+/// Reuses the ordinary history authority rules for a narrowly selected message set. The caller
+/// owns the read transaction; no metadata, Trace, or legacy projection comes from another cut.
+pub(super) fn project_selected_read_tool_messages(
+    connection: &rusqlite::Connection,
+    conversation: &mut ChatConversationRecord,
+) -> Result<(), String> {
+    let evidence = attach_message_guidance_timelines_in_scope(
+        connection,
+        std::slice::from_mut(conversation),
+        true,
+    )?;
+    chat_repository::retain_user_facing_root_messages(connection, conversation)
+        .map_err(storage_error)?;
+    evidence.retain_workflow_top_level_messages(conversation);
+    Ok(())
+}
+
 fn attach_message_guidance_timelines_in_scope(
     connection: &rusqlite::Connection,
     conversations: &mut [ChatConversationRecord],
@@ -219,6 +236,35 @@ fn attach_message_guidance_timelines_in_scope(
                     );
             }
         }
+        // Installation decisions may be committed through pending actions/audit without a
+        // matching runtime ToolCall. The trace header is necessary, but tool-name filtering
+        // would lose valid external approval recovery; keep one batched query per conversation.
+        if !traces.is_empty() {
+            skill_installation_projection::attach_skill_installation_history(
+                connection,
+                conversation,
+            )?;
+        }
+        // FileChange's SQL proof requires this exact builtin source in the same Trace. Reuse
+        // the bodies already read above to avoid an otherwise empty query (and its EXISTS
+        // Trace read) for ordinary history. The helper still verifies call/run identity in SQL.
+        let has_file_change_source = conversation.messages.iter().any(|message| {
+            message.role == "assistant"
+                && traces.get(&message.id).is_some_and(|record| {
+                    record.trace.items.iter().any(|item| {
+                        matches!(item,
+                            crate::ConversationTurnTraceItem::ToolCall {
+                                tool,
+                                provenance: crate::AgentToolIdentity::Builtin { tool_name },
+                                ..
+                            } if tool == "apply_patch" && tool_name == "apply_patch"
+                        )
+                    })
+                })
+        });
+        if has_file_change_source {
+            file_change_projection::attach_file_change_history(connection, conversation)?;
+        }
     }
     Ok(evidence)
 }
@@ -351,6 +397,9 @@ fn project_guidance_timeline(
             .cloned()
             .expect("canonical AgentRun projection is an object")
     };
+    if let Some(trace) = trace.filter(|_| run.contains_key("coreCheckpoint")) {
+        retain_checkpoint_web_read_receipts(&mut run, trace);
+    }
     // Recover the terminal reason from the backend-owned trace, not a renderer snapshot.
     // RuntimeError codes are durable and intentionally excluded from model context.
     let terminal_interruption = trace
@@ -865,6 +914,228 @@ fn project_guidance_timeline(
     }
 
     Ok(serde_json::Value::Object(run))
+}
+
+/// Runtime checkpoints retain the untruncated safe inputs needed by web/read presentation.
+/// Their schema was checked above, but a checkpoint is never a Tool identity or execution ACK.
+/// Only the current Trace can bind a call, grant its approval state, or confirm its result.
+fn retain_checkpoint_web_read_receipts(
+    run: &mut serde_json::Map<String, serde_json::Value>,
+    trace: &ConversationTurnTrace,
+) {
+    fn selected(tool: &str) -> bool {
+        matches!(
+            tool,
+            "web_search"
+                | "web_fetch"
+                | "read_file"
+                | "read_image"
+                | "read_word"
+                | "read_spreadsheet"
+                | "read_presentation"
+        )
+    }
+    let calls = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                provenance: crate::AgentToolIdentity::Builtin { tool_name },
+                approval_status,
+                ..
+            } if selected(tool) && tool_name == tool => {
+                Some((call_id.as_str(), (tool.as_str(), approval_status)))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let results = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolResult {
+                call_id,
+                tool,
+                success,
+                observation,
+                ..
+            } if calls
+                .get(call_id.as_str())
+                .is_some_and(|(bound_tool, _)| *bound_tool == tool) =>
+            {
+                Some((call_id.as_str(), (tool.as_str(), *success, observation)))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    if let Some(items) = run
+        .get_mut("toolCalls")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        items.retain_mut(|item| {
+            let tool = item["tool"].as_str().unwrap_or_default();
+            if !selected(tool) {
+                return true;
+            }
+            let Some((bound_tool, approval)) = calls.get(item["id"].as_str().unwrap_or_default())
+            else {
+                return false;
+            };
+            if *bound_tool != tool {
+                return false;
+            }
+            item["approvalStatus"] =
+                serde_json::to_value(approval).expect("approval status serializes");
+            true
+        });
+    }
+    if let Some(items) = run
+        .get_mut("toolResults")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        items.retain_mut(|item| {
+            let tool = item["tool"].as_str().unwrap_or_default();
+            if !selected(tool) {
+                return true;
+            }
+            let Some((bound_tool, success, observation)) =
+                results.get(item["callId"].as_str().unwrap_or_default())
+            else {
+                return false;
+            };
+            if *bound_tool != tool || item["ok"].as_bool() != Some(*success) {
+                return false;
+            }
+            if let (Some(base), Some(display)) =
+                (observation.as_object(), item["result"].as_object())
+            {
+                // Preserve normal Trace metadata too. The checkpoint only supplies the richer
+                // fields needed for the existing display and cannot erase the bounded receipt.
+                let mut merged = base.clone();
+                merged.extend(display.clone());
+                item["result"] = merged.into();
+            }
+            true
+        });
+    }
+    // A result event may precede its Trace commit. Never restore a completed receipt after a
+    // crash when only the call was durable. The ordinary terminal mapper settles this activity.
+    if let Some(items) = run
+        .get_mut("readActivities")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        items.retain_mut(|item| {
+            let id = item["callId"].as_str().unwrap_or_default();
+            if !calls
+                .get(id)
+                .is_some_and(|(tool, _)| Some(*tool) == item["tool"].as_str())
+            {
+                return false;
+            }
+            let result = results.get(id).copied();
+            item["status"] = match result {
+                Some((_, true, _)) => "completed",
+                Some((_, false, _)) => "failed",
+                None => "running",
+            }
+            .into();
+            if !matches!(result, Some((_, false, _))) {
+                item.as_object_mut().unwrap().remove("error");
+            }
+            true
+        });
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_web_read_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn full_presentation_inputs_survive_trace_truncation_but_not_wrong_identity() {
+        let mut run: serde_json::Value = serde_json::from_str(
+            &chat_repository::canonical_agent_run_lifecycle_projection(
+                None, "run", "running", 1, 1, None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        run["coreCheckpoint"] = json!({"generation":"f382038f-1dcc-40ef-bd80-1cb4887ac440","sequence":1,"fingerprint":"a".repeat(64)});
+        run["toolCalls"] = json!([
+            {"id":"web","tool":"web_search","args":{"query":"complete query"},"approvalStatus":"approved","reason":null},
+            {"id":"forged","tool":"web_search","args":{"query":"forged query"},"approvalStatus":"approved","reason":null}
+        ]);
+        let full_answer = "complete answer ".repeat(500);
+        run["toolResults"] = json!([
+            {"callId":"web","tool":"web_search","ok":true,"result":{"answer":full_answer}},
+            {"callId":"forged","tool":"web_search","ok":true,"result":{"answer":"forged"}}
+        ]);
+        let record = conversation_trace_repository::ConversationTurnTraceRecord {
+            completed_at: None,
+            trace: ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: "run".into(),
+                conversation_id: "conversation".into(),
+                assistant_message_id: "assistant".into(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+                terminal_error: None,
+                truncated: true,
+                items: vec![
+                    ConversationTurnTraceItem::ToolCall {
+                        sequence: 0,
+                        call_id: "web".into(),
+                        tool: "web_search".into(),
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "web_search".into(),
+                        },
+                        operation: json!({"query":"complete query"}),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolResult {
+                        sequence: 1,
+                        call_id: "web".into(),
+                        tool: "web_search".into(),
+                        status:
+                            crate::conversation_trace::ConversationTraceToolResultStatus::Succeeded,
+                        success: true,
+                        observation: json!({"answer":"short history summary","historyMetadata":"retained"}),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        error: None,
+                        truncated: true,
+                        archive: Default::default(),
+                    },
+                ],
+            },
+        };
+        let projected = project_guidance_timeline(
+            Some(&run.to_string()),
+            Some(&record),
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(projected["toolCalls"].as_array().unwrap().len(), 1);
+        assert_eq!(projected["toolCalls"][0]["approvalStatus"], "not_required");
+        assert_eq!(projected["toolResults"].as_array().unwrap().len(), 1);
+        assert_eq!(projected["toolResults"][0]["result"]["answer"], full_answer);
+        assert_eq!(
+            projected["toolResults"][0]["result"]["historyMetadata"],
+            "retained"
+        );
+        assert_eq!(projected["timeline"][0]["identity"]["type"], "builtin");
+
+        let mut incorrect = run.as_object().unwrap().clone();
+        incorrect["toolResults"][0]["ok"] = false.into();
+        retain_checkpoint_web_read_receipts(&mut incorrect, &record.trace);
+        assert!(incorrect["toolResults"].as_array().unwrap().is_empty());
+    }
 }
 
 fn timeline_item_is_rebuilt_from_durable_state(

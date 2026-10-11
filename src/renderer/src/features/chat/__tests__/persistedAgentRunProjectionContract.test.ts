@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   parsePersistedAgentRunJson,
+  stringifyPersistedAgentRun,
   STORED_AGENT_RUN_CORRUPTION_ERROR
 } from '../../storage/persistedAgentRun'
 
@@ -34,6 +35,56 @@ function applyRejectedMutation(mutation: RejectedMutation): Record<string, unkno
 }
 
 describe('persisted Agent run Rust-to-Renderer projection contract', () => {
+  it('preserves an opaque Core checkpoint through parsing and safe serialization', () => {
+    const coreCheckpoint = {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: 0,
+      fingerprint: 'a'.repeat(64)
+    }
+    const projection = { ...fixture.expectedCanonical, coreCheckpoint }
+    const parsed = parsePersistedAgentRunJson(JSON.stringify(projection))
+    expect(parsed?.coreCheckpoint).toEqual(coreCheckpoint)
+    expect(JSON.parse(stringifyPersistedAgentRun(parsed)!)).toHaveProperty(
+      'coreCheckpoint',
+      coreCheckpoint
+    )
+    expect(parsePersistedAgentRunJson(JSON.stringify(fixture.expectedCanonical))).toBeDefined()
+  })
+
+  it.each([
+    { generation: 'invalid', sequence: 0, fingerprint: 'a'.repeat(64) },
+    {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: -1,
+      fingerprint: 'a'.repeat(64)
+    },
+    {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: 0.5,
+      fingerprint: 'a'.repeat(64)
+    },
+    {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: 0,
+      fingerprint: 'a'.repeat(63)
+    },
+    {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: 0,
+      fingerprint: 'g'.repeat(64)
+    },
+    {
+      generation: '01a12a4f-5137-7e90-b173-44145df4714e',
+      sequence: 0,
+      fingerprint: 'a'.repeat(64),
+      extra: true
+    }
+  ])('rejects malformed Core checkpoint %#', (coreCheckpoint) => {
+    expect(() =>
+      parsePersistedAgentRunJson(JSON.stringify({ ...fixture.expectedCanonical, coreCheckpoint }))
+    ).toThrow(STORED_AGENT_RUN_CORRUPTION_ERROR)
+  })
+
   it.each(['output_limit_reached', 'empty_response', 'stream_interrupted'])(
     'preserves durable interruption %s',
     (reason) => {

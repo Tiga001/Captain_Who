@@ -941,6 +941,36 @@ fn prepare_conversation_turn_from_source(
         }
         _ => None,
     };
+    // Selected Skills are part of accepting this Turn, not a later stream checkpoint. Keep
+    // their safe display identities in the same transaction as the message pair and Trace so
+    // a crash before the Runtime starts cannot silently remove them from edit/resend.
+    // The complete empty projection shape is required by lifecycle canonicalization.
+    let initial_skill_projection = if input.skills.is_empty() {
+        None
+    } else {
+        let mut projection = serde_json::json!({
+            "runId": run_id,
+            "status": "running",
+            "startedAt": assistant_created_at,
+            "toolDefinitions": [],
+            "toolCalls": [],
+            "toolResults": [],
+            "webSearchActivities": [],
+            "readActivities": [],
+            "approvals": [],
+            "fileChangeProposals": [],
+            "fileChanges": [],
+            "mcpInvocations": [],
+            "messageStreamCheckpoints": {},
+            "timeline": [],
+            "explicitSkillSelections": input.skills,
+            "activatedSkills": prepared_skills.summaries,
+        });
+        if let Some(revision) = &prepared_skills.revision {
+            projection["skillActivationRevision"] = revision.clone().into();
+        }
+        Some(projection.to_string())
+    };
     let assistant_message = ChatMessageRecord {
         human_interaction_response: None,
         id: assistant_message_id.clone(),
@@ -951,7 +981,7 @@ fn prepare_conversation_turn_from_source(
         status: Some("pending".to_string()),
         attachments: Vec::new(),
         folder_references_json: None,
-        agent_run_json: None,
+        agent_run_json: initial_skill_projection,
         ui_state_json: None,
     };
 

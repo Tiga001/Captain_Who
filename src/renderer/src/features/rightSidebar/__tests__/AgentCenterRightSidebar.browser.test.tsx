@@ -1053,6 +1053,7 @@ function snapshot(
     agentInvalidationSequences: Object.fromEntries(
       tree.agents.map((agent) => [agent.agentId, tree.lastSequence])
     ),
+    approvalInvalidationSequence: 0,
     error: false,
     hydrationRevision: 1,
     loading: false,

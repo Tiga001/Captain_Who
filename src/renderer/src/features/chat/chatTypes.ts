@@ -240,6 +240,12 @@ export interface ChatAgentInterruptionView {
 }
 
 export interface ChatAgentRunView {
+  /** Core-issued identity of a durable checkpoint; Renderer must preserve it as opaque data. */
+  coreCheckpoint?: {
+    generation: string
+    sequence: number
+    fingerprint: string
+  }
   /** Host-persisted fact that the user explicitly interrupted this turn. */
   userInterrupted?: boolean
   runId: string | null

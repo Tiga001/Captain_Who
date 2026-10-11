@@ -364,7 +364,7 @@ export function AppShell() {
   )
   const collaborationApprovals = useCollaborationApprovals({
     enabled: collaborationChildren.length > 0,
-    invalidationSequence: collaborationTree?.lastSequence ?? 0,
+    invalidationSequence: `${collaborationSnapshot?.hydrationRevision ?? 0}:${collaborationSnapshot?.approvalInvalidationSequence ?? 0}`,
     rootConversationId: collaborationTree?.rootConversationId ?? null
   })
   const activeDraftId = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID

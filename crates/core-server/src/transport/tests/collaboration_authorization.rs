@@ -124,7 +124,13 @@ fn attachment(storage: &StorageService, id: &str) -> AgentInputAttachment {
 #[test]
 fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("rpc.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("rpc.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(model_settings()).unwrap();
     storage
         .save_project(ProjectRecord::with_primary_folder(
@@ -230,6 +236,10 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
         (
             STORAGE_LOAD_CONVERSATION_METHOD,
             serde_json::json!({ "conversationId": child_conversation }),
+        ),
+        (
+            mycopilot_protocol_rs::STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD,
+            serde_json::json!({ "conversationId": child_conversation, "assistantMessageId": "assistant", "callId": "read" }),
         ),
         (
             STORAGE_SAVE_CONVERSATION_META_METHOD,

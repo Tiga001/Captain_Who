@@ -324,16 +324,24 @@ impl AgentService {
         conversation_id: &str,
         assistant_message_id: &str,
         message: &str,
+        partial_response: Option<&str>,
         usage: Option<AgentUsage>,
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
         trusted_wake: Option<&mycopilot_core::TrustedAgentWakeTurnAdmission>,
     ) -> Result<Option<AgentUsage>, String> {
+        let content = partial_response
+            .filter(|text| !text.is_empty())
+            .unwrap_or(message);
         self.persist_assistant_failure_projection(
             conversation_id,
             assistant_message_id,
-            message,
-            Some("error"),
+            content,
+            Some(if partial_response.is_some_and(|text| !text.is_empty()) {
+                "sent"
+            } else {
+                "error"
+            }),
             message,
             usage,
             conversation_turn_trace,

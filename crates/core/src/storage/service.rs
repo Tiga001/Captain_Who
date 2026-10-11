@@ -83,6 +83,8 @@ mod notifications;
 mod pending_actions;
 mod provider_continuations;
 mod provider_transitions;
+mod read_tool_file_context;
+mod runtime_checkpoints;
 mod settings;
 mod trace_publication;
 mod trace_reconciliation;
@@ -94,6 +96,7 @@ mod world_state;
 
 use attachments::*;
 pub use command_sessions::AgentCommandSessionLifecycleAppendOutcome;
+pub use conversations::skill_installation_projection::project_checkpoint_activity;
 pub use file_change_run_grants::FileChangeRunGrantServiceError;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};
 #[cfg(any(test, debug_assertions))]
@@ -119,6 +122,10 @@ pub use pending_actions::{
     AgentPendingActionSettlementInspection, AgentWakeApprovalWaitOutcome,
     McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,
     McpStartupActionTerminalOutcome,
+};
+pub use read_tool_file_context::{ReadToolFileCall, ReadToolFileContext, ReadToolFileIdentity};
+pub use runtime_checkpoints::{
+    CoreRuntimeCheckpoint, CoreRuntimeCheckpointOutcome, CoreRuntimeCheckpointState,
 };
 pub use settings::ModelProviderCredentialReconciliationReport;
 #[cfg(test)]

@@ -14,7 +14,7 @@ type UpdateAssistantMessage = (
   conversationId: string,
   messageId: string,
   updater: (message: ChatMessage) => ChatMessage,
-  options?: { persist?: boolean; touchConversation?: boolean }
+  options?: { persist?: boolean; touchConversation?: boolean; coreOwnedRunId?: string }
 ) => void
 
 interface UseAgentActionDecisionHandlersOptions {
@@ -80,7 +80,7 @@ export function useAgentActionDecisionHandlers({
                   messageId,
                   (message) =>
                     applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
-                  { touchConversation: true }
+                  { touchConversation: true, coreOwnedRunId: runId }
                 )
               )
             },
@@ -146,7 +146,7 @@ export function useAgentActionDecisionHandlers({
                       message,
                       action
                     ),
-                  { touchConversation: true }
+                  { touchConversation: true, coreOwnedRunId: runId }
                 )
               )
             },
@@ -207,7 +207,7 @@ export function useAgentActionDecisionHandlers({
                   conversationId,
                   messageId,
                   (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
-                  { touchConversation: true }
+                  { touchConversation: true, coreOwnedRunId: runId }
                 )
               )
             },

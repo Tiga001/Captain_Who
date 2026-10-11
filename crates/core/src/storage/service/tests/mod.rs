@@ -11,6 +11,7 @@ mod attachment_image_cache;
 mod attachment_imports;
 mod attachments;
 mod conversations;
+mod core_checkpoint_content;
 mod guidance;
 mod history_snapshot;
 mod ignored_history;

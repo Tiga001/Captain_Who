@@ -13,6 +13,8 @@ struct StoredBlockingHumanInput {
     notifications: CoreServerNotificationSender,
     predecessor: Option<HumanInteractionSyncBinding>,
     approval_predecessor: Option<(PendingActionRecord, PendingActionStatus)>,
+    checkpoint_slot: Arc<Mutex<Option<Arc<super::runtime_checkpoint::RuntimeCheckpoint>>>>,
+    usage_staged: Arc<AtomicBool>,
 }
 
 impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInput {
@@ -104,7 +106,7 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             suspension.segment_usage,
             None,
         );
-        let admission = HumanInteractionSyncAdmission {
+        let mut admission = HumanInteractionSyncAdmission {
             owner: HostHumanInteractionOwner {
                 agent_id: root.agent_id,
                 conversation_id: suspension.conversation_id.clone(),
@@ -138,6 +140,24 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             return Err(fail("question execution segment was retired".into()));
         }
         drop(cancellations);
+        let checkpoint = self
+            .checkpoint_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let checkpoint = match checkpoint {
+            Some(checkpoint) => checkpoint,
+            None => {
+                restore_run_usage_state(&self.service, &suspension.run_id, &previous_usage);
+                return Err(fail("runtime checkpoint owner missing".into()));
+            }
+        };
+        checkpoint.set_waiting_finish_reason(suspension.finish_reason.as_deref());
+        if let Err(error) = checkpoint.flush() {
+            restore_run_usage_state(&self.service, &suspension.run_id, &previous_usage);
+            return Err(fail(error));
+        }
+        admission.content = checkpoint.content();
         let snapshot = match self
             .service
             .storage
@@ -149,6 +169,8 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
                 return Err(fail(error.to_string()));
             }
         };
+        self.usage_staged.store(true, Ordering::Release);
+        checkpoint.seal_waiting();
         if let Some((previous, target)) = &self.approval_predecessor {
             if let Some(current) = self
                 .service

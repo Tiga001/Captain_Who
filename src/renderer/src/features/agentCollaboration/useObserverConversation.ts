@@ -8,6 +8,7 @@ import {
 } from './collaborationClient'
 import { mapObserverConversationToChat } from './observerConversationAdapter'
 import type { ObserverConversationCache } from './observerConversationCache'
+import { TrailingRefresh } from './trailingRefresh'
 import {
   applyObserverCommandEvent,
   applyObserverEnvelopeWithCursor,
@@ -67,6 +68,9 @@ export function useObserverConversation({
   rootConversationId
 }: UseObserverConversationInput): ObserverConversationState {
   const scopeKey = `${cache?.identity ?? ''}\u0000${rootAgentId}\u0000${rootConversationId}\u0000${agentId}\u0000${conversationId}`
+  // Navigation creates an independent queue; only reads within this exact scope serialize.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const refreshQueue = useMemo(() => new TrailingRefresh(), [scopeKey])
   const requestGenerationRef = useRef(0)
   const arrivalSequenceRef = useRef(0)
   const activeLoadWindowRef = useRef<ObserverLoadWindow | null>(null)
@@ -365,13 +369,20 @@ export function useObserverConversation({
           }))
         })
 
+    const requestLoad = () => {
+      void refreshQueue.request(async () => {
+        // Superseded windows may still have an RPC in flight. Let that read finish, then only
+        // start the latest authorized scope's window, retaining its complete live-event journal.
+        if (!cancelled) await load()
+      })
+    }
     // Coalesce rapid durable invalidations while a visible snapshot and its live subscription
     // remain available. First opens start immediately; retries keep the last readable snapshot.
     const refreshTimer =
       stateRef.current.scopeKey === scopeKey && stateRef.current.conversation
-        ? setTimeout(() => void load(), 75)
+        ? setTimeout(requestLoad, 75)
         : null
-    if (refreshTimer === null) void load()
+    if (refreshTimer === null) requestLoad()
 
     return () => {
       cancelled = true
@@ -384,6 +395,7 @@ export function useObserverConversation({
     conversationId,
     invalidationVersion,
     reloadVersion,
+    refreshQueue,
     rootAgentId,
     rootConversationId,
     scope,

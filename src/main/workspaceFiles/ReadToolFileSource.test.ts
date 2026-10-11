@@ -5,7 +5,9 @@ import type {
   AgentEvent,
   AgentObserverEventEnvelope,
   ReadToolFileRequest,
-  StorageChatConversationRecord
+  StorageChatConversationRecord,
+  StorageReadToolFileContext,
+  StorageReadToolFileContextRequest
 } from '@mycopilot/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReadToolFileSource } from './ReadToolFileSource'
@@ -39,7 +41,40 @@ describe('read tool file preview authority', () => {
   }
   function createSource() {
     return {
-      loadConversation: vi.fn(async () => stored),
+      loadReadToolFileContext: vi.fn(
+        async (input: StorageReadToolFileContextRequest): Promise<StorageReadToolFileContext> => {
+          const message = stored.messages.find(
+            (message) => message.id === input.assistantMessageId && message.role === 'assistant'
+          )
+          const run = JSON.parse(message?.agentRunJson ?? '{}')
+          const call = run.toolCalls?.find((call) => call.id === input.callId)
+          const identity = run.timeline?.find(
+            (item) => item.type === 'tool_call' && item.callId === input.callId
+          )?.identity
+          return {
+            conversationId: stored.id,
+            projectId: stored.projectId ?? null,
+            assistantMessageId: input.assistantMessageId,
+            messageFound: !!message,
+            runId: run.runId ?? null,
+            call: call
+              ? {
+                  id: call.id,
+                  tool: call.tool,
+                  path: call.args?.path ?? null,
+                  filePath: call.args?.filePath ?? null
+                }
+              : null,
+            callIdentity:
+              identity === undefined
+                ? null
+                : { type: identity?.type ?? null, toolName: identity?.toolName ?? null },
+            resultPath:
+              run.toolResults?.findLast((result) => result.callId === input.callId)?.result?.path ??
+              null
+          }
+        }
+      ),
       loadProjects: vi.fn(async () => []),
       resolveRunWorkspacePath: vi.fn(async () => filePath),
       resolveRunAttachmentFile: vi.fn(async () => ({
@@ -106,6 +141,11 @@ describe('read tool file preview authority', () => {
   it('previews an authorized outside file while directory browsing stays inside the workspace', async () => {
     const preview = await service.readPreview(request())
     expect(preview.text?.content).toBe('# Outside workspace')
+    expect(source.loadReadToolFileContext).toHaveBeenCalledExactlyOnceWith({
+      conversationId: 'conversation',
+      assistantMessageId: 'assistant',
+      callId: 'read'
+    })
     expect(source.resolveRunWorkspacePath).toHaveBeenCalledWith({
       projectId: 'project',
       assistantMessageId: 'assistant',

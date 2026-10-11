@@ -1,5 +1,5 @@
 import { actionDiagnostics } from '../../diagnostics/actionDiagnostics'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CollaborationApprovalDecisionResult,
   CollaborationApprovalProjection,
@@ -7,11 +7,12 @@ import type {
 } from '@mycopilot/protocol'
 import { decideCollaborationApproval, listCollaborationApprovals } from './collaborationClient'
 import type { CollaborationApprovalDecisionHandler } from './ProjectedApprovalDecisionCard'
+import { TrailingRefresh } from './trailingRefresh'
 
 export interface UseCollaborationApprovalsOptions {
   enabled?: boolean
   /** Root-local durable sequence supplied by the shared collaboration store. */
-  invalidationSequence: number
+  invalidationSequence: number | string
   rootConversationId: string | null
 }
 
@@ -42,6 +43,9 @@ export function useCollaborationApprovals({
   const inFlightRef = useRef(new Set<string>())
   const decisionStatusesRef = useRef(new Map<string, CollaborationApprovalStatus>())
   const rootConversationIdRef = useRef(rootConversationId)
+  // A new root must not wait for a slow read belonging to the previous root.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const refreshQueue = useMemo(() => new TrailingRefresh(), [enabled, rootConversationId])
 
   useEffect(() => {
     rootConversationIdRef.current = rootConversationId
@@ -70,53 +74,57 @@ export function useCollaborationApprovals({
     []
   )
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     // A decision may finish after navigation and still hold this root's refresh callback.
     // Ignore it before touching either the active scope or its request generation.
-    if (rootConversationIdRef.current !== rootConversationId) return
+    if (rootConversationIdRef.current !== rootConversationId) return Promise.resolve()
     const generation = ++generationRef.current
-    setApprovalsRootConversationId((currentRootConversationId) => {
-      if (currentRootConversationId !== rootConversationId) {
+    return refreshQueue.request(async () => {
+      // A queued read can be superseded by navigation or a newer invalidation before it starts.
+      if (generationRef.current !== generation) return
+      setApprovalsRootConversationId((currentRootConversationId) => {
+        if (currentRootConversationId !== rootConversationId) {
+          setApprovals([])
+          setError(null)
+        }
+        return rootConversationId
+      })
+      if (!enabled || !rootConversationId) {
         setApprovals([])
         setError(null)
-      }
-      return rootConversationId
-    })
-    if (!enabled || !rootConversationId) {
-      setApprovals([])
-      setError(null)
-      setLoading(false)
-      return
-    }
-
-    setLoading(true)
-    try {
-      const projection = await listCollaborationApprovals({ rootConversationId })
-      if (
-        generationRef.current !== generation ||
-        rootConversationIdRef.current !== rootConversationId
-      ) {
+        setLoading(false)
         return
       }
-      setApprovals(
-        projection.approvals.map((approval) => {
-          const acknowledgedStatus = decisionStatusesRef.current.get(
-            approvalScopeKey(rootConversationId, approval.approvalId)
-          )
-          return approval.status === 'pending' && acknowledgedStatus
-            ? { ...approval, status: acknowledgedStatus }
-            : approval
-        })
-      )
-      setApprovalsRootConversationId(rootConversationId)
-      setError(null)
-    } catch (loadError) {
-      if (generationRef.current !== generation) return
-      setError(loadError instanceof Error ? loadError.message : String(loadError))
-    } finally {
-      if (generationRef.current === generation) setLoading(false)
-    }
-  }, [enabled, rootConversationId])
+
+      setLoading(true)
+      try {
+        const projection = await listCollaborationApprovals({ rootConversationId })
+        if (
+          generationRef.current !== generation ||
+          rootConversationIdRef.current !== rootConversationId
+        ) {
+          return
+        }
+        setApprovals(
+          projection.approvals.map((approval) => {
+            const acknowledgedStatus = decisionStatusesRef.current.get(
+              approvalScopeKey(rootConversationId, approval.approvalId)
+            )
+            return approval.status === 'pending' && acknowledgedStatus
+              ? { ...approval, status: acknowledgedStatus }
+              : approval
+          })
+        )
+        setApprovalsRootConversationId(rootConversationId)
+        setError(null)
+      } catch (loadError) {
+        if (generationRef.current !== generation) return
+        setError(loadError instanceof Error ? loadError.message : String(loadError))
+      } finally {
+        if (generationRef.current === generation) setLoading(false)
+      }
+    })
+  }, [enabled, refreshQueue, rootConversationId])
 
   useEffect(() => {
     void refresh()

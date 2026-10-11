@@ -1,12 +1,24 @@
 use super::*;
 
+mod admission;
+
+fn open_skill_test_storage(path: &Path) -> Arc<StorageService> {
+    Arc::new(
+        StorageService::open_with_model_credentials(
+            path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
     const INSTRUCTIONS: &str = "SKILL_SERVER_MARKER: inspect evidence before editing.";
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     write_test_skill(&workspace, INSTRUCTIONS);
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_project(ProjectRecord::with_primary_folder(
@@ -63,7 +75,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_project(ProjectRecord::with_primary_folder(
@@ -179,7 +191,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
 #[test]
 fn bundled_skill_activates_without_a_project_in_turn_and_preview_paths() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     let skills = Arc::new(SkillsService::new().with_bundled_source().unwrap());
     let descriptor = skills.list().unwrap().skills()[0].clone();
@@ -232,7 +244,7 @@ fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation
     const PDF_REFERENCE_MARKER: &str =
         "Visual appearance and logical form data are separate correctness surfaces.";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     let skills = SkillsService::new().with_bundled_source().unwrap();
     let input = AgentConversationTurnInput {
@@ -293,7 +305,7 @@ fn trusted_pdf_skill_discloses_full_instructions_only_after_activation() {
     const PDF_REFERENCE_MARKER: &str =
         "Visual appearance and logical form data are separate correctness surfaces.";
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     let skills = SkillsService::new().with_bundled_source().unwrap();
     let descriptor = skills
@@ -363,7 +375,7 @@ fn trusted_pdf_skill_discloses_full_instructions_only_after_activation() {
 #[test]
 fn omitted_model_context_window_uses_the_same_backend_default_for_turn_and_preview() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     let mut settings = test_model_settings();
     settings.models[0].context_window_tokens = None;
     storage.save_model_settings(settings).unwrap();
@@ -419,7 +431,7 @@ fn omitted_model_context_window_uses_the_same_backend_default_for_turn_and_previ
 #[test]
 fn disabled_global_skill_is_rejected_by_turn_and_preview_paths() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     let skills = Arc::new(SkillsService::new().with_bundled_source().unwrap());
     let descriptor = skills.list().unwrap().skills()[0].clone();
@@ -480,7 +492,7 @@ fn workspace_skill_without_a_project_is_rejected_explicitly() {
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     write_test_skill(&workspace, "WORKSPACE_ONLY_SKILL_MARKER");
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     let skills = Arc::new(SkillsService::new());
     let descriptor = skills
@@ -577,7 +589,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         ))
         .unwrap();
     assert_eq!(installed.outcome(), SkillInstallationOutcome::Installed);
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_project(ProjectRecord::with_primary_folder(
@@ -1160,7 +1172,7 @@ fn stale_skill_selection_fails_before_conversation_mutation() {
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     write_test_skill(&workspace, "first revision");
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_project(ProjectRecord::with_primary_folder(
@@ -1215,7 +1227,7 @@ fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
     let workspace_b = fixture.path().join("workspace-b");
     fs::create_dir_all(&workspace_a).unwrap();
     write_test_skill(&workspace_b, "SKILL_PROJECT_B_MARKER");
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     storage.save_model_settings(test_model_settings()).unwrap();
     for (id, name, path) in [
         ("project-a", "Project A", &workspace_a),
@@ -1307,7 +1319,7 @@ fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
 #[test]
 fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = open_skill_test_storage(&fixture.path().join("storage.sqlite"));
     let mut settings = test_model_settings();
     settings.api_url.clear();
     settings.api_token.clear();

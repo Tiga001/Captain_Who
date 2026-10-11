@@ -84,6 +84,7 @@ fn approval_event(run_id: &str) -> AgentEvent {
         action: Box::new(action),
         checkpoint: Box::new(checkpoint),
         segment_usage: None,
+        segment_finish_reason: None,
     }
 }
 
@@ -174,7 +175,13 @@ fn mixed_events(index: usize) -> Vec<AgentEvent> {
 
 async fn mixed_transport_sample(children: usize) {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("test.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::try_new(storage).unwrap();
     let identities: Vec<_> = (0..children).map(child_identity).collect();
     let streams: Vec<_> = (0..children).map(mixed_events).collect();

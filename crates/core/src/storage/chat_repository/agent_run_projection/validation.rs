@@ -50,7 +50,39 @@ const CURRENT_AGENT_RUN_KEYS: &[&str] = &[
     "activatedSkills",
     "skillActivationRevision",
     "explicitSkillSelections",
+    "coreCheckpoint",
 ];
+
+/// Core-owned projection fence. Renderer writes may carry it back but never install one.
+pub(crate) fn current_core_checkpoint_is_safe(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|checkpoint| {
+        exact_keys(checkpoint, &["generation", "sequence", "fingerprint"])
+            && checkpoint["generation"]
+                .as_str()
+                .is_some_and(current_uuid_is_safe)
+            && safe_integer(&checkpoint["sequence"])
+            && checkpoint["fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| {
+                    fingerprint.len() == 64
+                        && fingerprint
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+    })
+}
+
+pub(crate) fn current_checkpoint_collection_entry_is_safe(
+    field: &str,
+    value: &serde_json::Value,
+) -> bool {
+    value.as_object().is_some_and(|entry| match field {
+        "readActivities" => current_read_activity_is_safe(entry),
+        "fileChanges" => current_file_change_snapshot_is_safe(entry),
+        "skillInstallations" => current_skill_installation_is_safe(entry),
+        _ => false,
+    })
+}
 
 fn exact_keys(object: &serde_json::Map<String, serde_json::Value>, allowed: &[&str]) -> bool {
     object.len() == allowed.len() && object.keys().all(|key| allowed.contains(&key.as_str()))
@@ -414,6 +446,9 @@ fn current_agent_run_projection_is_safe_with_trace_policy(
         "timeline",
     ];
     if !only_allowed_keys(run, CURRENT_AGENT_RUN_KEYS)
+        || !run
+            .get("coreCheckpoint")
+            .is_none_or(current_core_checkpoint_is_safe)
         || !REQUIRED.iter().all(|field| run.contains_key(*field))
         || !run.get("runId").is_some_and(|value| {
             value.is_null()
@@ -736,7 +771,18 @@ pub(crate) fn canonical_agent_run_lifecycle_projection(
             discard_legacy_collaboration_activities(&mut run);
             run
         })
-        .filter(|run| current_agent_run_projection_is_safe(run, run_id))
+        .filter(|run| {
+            if run
+                .get("coreCheckpoint")
+                .is_some_and(current_core_checkpoint_is_safe)
+            {
+                // Core read-only tool checkpoints are rebound to Trace identities on history
+                // load. Lifecycle settlement must retain their full, shape-validated display.
+                current_agent_run_projection_is_safe_for_trace_rebuild(run, run_id)
+            } else {
+                current_agent_run_projection_is_safe(run, run_id)
+            }
+        })
         .unwrap_or_default();
 
     run.insert("runId".to_string(), run_id.into());

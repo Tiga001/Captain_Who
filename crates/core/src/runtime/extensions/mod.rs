@@ -924,6 +924,7 @@ mod tests {
                 conversation_trace_truncated: false,
             }),
             segment_usage: None,
+            segment_finish_reason: None,
         };
 
         let serialized = serde_json::to_string(&event).unwrap();

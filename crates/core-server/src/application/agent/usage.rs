@@ -651,6 +651,7 @@ mod terminal_usage_preview_tests {
                 "preview-chat",
                 "preview-assistant",
                 "old owner",
+                None,
                 Some(segment_usage(20)),
                 &trace,
                 Some(&[]),

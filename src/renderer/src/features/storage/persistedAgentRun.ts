@@ -52,6 +52,7 @@ const TERMINAL_RUN_STATUSES = new Set<ChatAgentRunView['status']>([
   'cancelled'
 ])
 const STORED_RUN_KEYS = [
+  'coreCheckpoint',
   'runId',
   'status',
   'startedAt',
@@ -190,7 +191,7 @@ function isReadActivity(record: Record<string, unknown>): boolean {
     isBoundedString(record.tool, 1024) &&
     ['file', 'image', 'word', 'presentation', 'spreadsheet'].includes(record.kind as string) &&
     ['running', 'completed', 'failed', 'cancelled'].includes(record.status as string) &&
-    isBoundedString(record.path, 16 * 1024) &&
+    isBoundedString(record.path, 16 * 1024, true) &&
     isBoundedString(record.fileName, 4096) &&
     isSafeInteger(record.updatedAt) &&
     isOptionalBoundedString(record, 'extension', 1024, true) &&
@@ -348,6 +349,22 @@ function isCollaborationTimelineActivity(value: unknown): boolean {
 export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undefined {
   if (!isRecord(value) || !hasExactKeys(value, REQUIRED_STORED_RUN_KEYS, STORED_RUN_KEYS)) {
     return undefined
+  }
+  if (hasOwn(value, 'coreCheckpoint')) {
+    const checkpoint = value.coreCheckpoint
+    if (
+      !isRecord(checkpoint) ||
+      !hasExactKeys(checkpoint, ['generation', 'sequence', 'fingerprint']) ||
+      typeof checkpoint.generation !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        checkpoint.generation
+      ) ||
+      !isSafeInteger(checkpoint.sequence) ||
+      typeof checkpoint.fingerprint !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(checkpoint.fingerprint)
+    ) {
+      return undefined
+    }
   }
   // Legacy parent-owned projections cannot be attributed to a dispatcher. Drop only those
   // projections; the surrounding final answer, tools and current activities remain readable.

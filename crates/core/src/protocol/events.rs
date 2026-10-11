@@ -357,6 +357,9 @@ pub enum AgentEvent {
         /// approval payload without any private accounting field.
         #[serde(skip)]
         segment_usage: Option<AgentUsage>,
+        /// Internal presentation barrier input; the public Done payload remains unchanged.
+        #[serde(skip)]
+        segment_finish_reason: Option<String>,
     },
     FileChangeProposed {
         run_id: String,

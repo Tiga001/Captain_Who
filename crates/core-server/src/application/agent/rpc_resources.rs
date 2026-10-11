@@ -238,6 +238,7 @@ impl AgentService {
             | STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD
             | STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD
             | STORAGE_LOAD_CONVERSATION_METHOD
+            | STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD
             | AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
             | AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD
             | AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD => {
@@ -487,6 +488,11 @@ mod tests {
                 .unwrap(),
             RpcResourceScope::Resources { .. }
         ));
+        assert_eq!(
+            service.rpc_resource_scope(STORAGE_LOAD_READ_TOOL_FILE_CONTEXT_METHOD, Some(&json!({"conversationId":"actual","assistantMessageId":"message","callId":"read"}))).unwrap(),
+            service.rpc_resource_scope(STORAGE_LOAD_CONVERSATION_METHOD, Some(&json!({"conversationId":"actual"}))).unwrap(),
+            "a narrow proof read retains the exact Conversation ordering boundary"
+        );
         assert_eq!(
             service.rpc_resource_scope("unknown.read", None).unwrap(),
             RpcResourceScope::Global

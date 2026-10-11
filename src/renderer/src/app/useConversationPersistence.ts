@@ -8,6 +8,7 @@ import {
 } from '../features/storage/storageClient'
 import type { PendingMessageSave } from './AppShellSupport'
 import { ChatMessagePersistenceQueue } from './chatMessagePersistence'
+import { PersistenceDrain } from './persistenceDrain'
 
 type PendingMessageUpsert = {
   messages: ChatMessage[]
@@ -21,109 +22,99 @@ type PendingMessageUiStateSave = {
 }
 
 export function useConversationPersistence() {
-  const [conversationSaveQueues] = useState(() => new Map<string, Promise<void>>())
   const [pendingConversationSaves] = useState(() => new Map<string, ChatConversation>())
   const pendingConversationSavesRef = useRef(pendingConversationSaves)
-  const [messageUpsertQueues] = useState(() => new Map<string, Promise<void>>())
   const [pendingMessageUpserts] = useState(() => new Map<string, PendingMessageUpsert[]>())
   const pendingMessageUpsertsRef = useRef(pendingMessageUpserts)
   const [pendingMessageSaves] = useState(() => new Map<string, PendingMessageSave>())
   const pendingMessageSavesRef = useRef(pendingMessageSaves)
-  const messageUiStateSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingMessageUiStateSavesRef = useRef<Map<string, PendingMessageUiStateSave>>(new Map())
+  const [pendingMessageUiStateSaves] = useState(() => new Map<string, PendingMessageUiStateSave>())
+
+  // Conversation metadata, insertion and state writes stay ordered only within their scope.
+  // Failed writes retain their payload and reject flush; another enqueue or flush retries them.
+  const [conversationSaveQueue] = useState(
+    () =>
+      new PersistenceDrain(
+        () => pendingConversationSaves.keys(),
+        (key) => pendingConversationSaves.has(key),
+        async (conversationId) => {
+          while (true) {
+            const payload = pendingConversationSaves.get(conversationId)
+            if (!payload) return
+            pendingConversationSaves.delete(conversationId)
+            try {
+              await saveConversationMeta(payload)
+            } catch (error) {
+              if (!pendingConversationSaves.has(conversationId)) {
+                pendingConversationSaves.set(conversationId, payload)
+              }
+              console.error('Failed to save conversation metadata to SQLite', error)
+              throw error
+            }
+          }
+        }
+      )
+  )
 
   const waitForConversationSaves = useCallback(
-    async (conversationId: string) => {
-      while (true) {
-        const pendingSave = conversationSaveQueues.get(conversationId)
-        if (!pendingSave) return
-        await pendingSave
-      }
-    },
-    [conversationSaveQueues]
+    (conversationId: string) => conversationSaveQueue.flush(conversationId),
+    [conversationSaveQueue]
+  )
+
+  const [messageUpsertQueue] = useState(
+    () =>
+      new PersistenceDrain(
+        () => pendingMessageUpserts.keys(),
+        (key) => pendingMessageUpserts.has(key),
+        async (conversationId) => {
+          while (true) {
+            const pendingUpserts = pendingMessageUpserts.get(conversationId)
+            const payload = pendingUpserts?.[0]
+            if (!payload) return
+            if (pendingUpserts.length > 1) {
+              pendingMessageUpserts.set(conversationId, pendingUpserts.slice(1))
+            } else {
+              pendingMessageUpserts.delete(conversationId)
+            }
+            try {
+              await waitForConversationSaves(conversationId)
+              await upsertChatMessages(conversationId, payload.messages, payload.positionOffset)
+            } catch (error) {
+              // Inserts preserve FIFO order, including accepted requests behind this failure.
+              pendingMessageUpserts.set(conversationId, [
+                payload,
+                ...(pendingMessageUpserts.get(conversationId) ?? [])
+              ])
+              console.error('Failed to upsert chat messages to SQLite', error)
+              throw error
+            }
+          }
+        }
+      )
   )
 
   const waitForMessageUpserts = useCallback(
-    async (conversationId: string) => {
-      while (true) {
-        const pendingUpsert = messageUpsertQueues.get(conversationId)
-        if (!pendingUpsert) return
-        await pendingUpsert
-      }
-    },
-    [messageUpsertQueues]
+    (conversationId: string) => messageUpsertQueue.flush(conversationId),
+    [messageUpsertQueue]
   )
 
-  // Conversation metadata, message insertion, and message-state updates use independent queues.
-  // Waiting at each boundary preserves storage ordering without blocking unrelated conversations.
   const enqueueConversationMetaSave = useCallback(
     (conversation: ChatConversation) => {
-      const conversationId = conversation.id
-      pendingConversationSaves.set(conversationId, conversation)
-
-      if (conversationSaveQueues.has(conversationId)) {
-        return
-      }
-
-      const drainSaves = async () => {
-        while (true) {
-          const payload = pendingConversationSaves.get(conversationId)
-          if (!payload) return
-
-          pendingConversationSaves.delete(conversationId)
-          try {
-            await saveConversationMeta(payload)
-          } catch (error) {
-            console.error('Failed to save conversation metadata to SQLite', error)
-          }
-        }
-      }
-
-      const nextSave = drainSaves().finally(() => {
-        conversationSaveQueues.delete(conversationId)
-      })
-      conversationSaveQueues.set(conversationId, nextSave)
+      pendingConversationSaves.set(conversation.id, conversation)
+      conversationSaveQueue.start(conversation.id)
     },
-    [conversationSaveQueues, pendingConversationSaves]
+    [conversationSaveQueue, pendingConversationSaves]
   )
 
   const enqueueChatMessagesUpsert = useCallback(
     (conversationId: string, messages: ChatMessage[], positionOffset: number) => {
-      const pendingUpserts = pendingMessageUpserts.get(conversationId) ?? []
-      pendingMessageUpserts.set(conversationId, [...pendingUpserts, { messages, positionOffset }])
-
-      if (messageUpsertQueues.has(conversationId)) {
-        return
-      }
-
-      const drainUpserts = async () => {
-        while (true) {
-          const pendingUpserts = pendingMessageUpserts.get(conversationId) ?? []
-          const payload = pendingUpserts[0]
-          if (!payload) return
-
-          const remainingUpserts = pendingUpserts.slice(1)
-          if (remainingUpserts.length > 0) {
-            pendingMessageUpserts.set(conversationId, remainingUpserts)
-          } else {
-            pendingMessageUpserts.delete(conversationId)
-          }
-
-          try {
-            await waitForConversationSaves(conversationId)
-            await upsertChatMessages(conversationId, payload.messages, payload.positionOffset)
-          } catch (error) {
-            console.error('Failed to upsert chat messages to SQLite', error)
-          }
-        }
-      }
-
-      const nextUpsert = drainUpserts().finally(() => {
-        messageUpsertQueues.delete(conversationId)
-      })
-      messageUpsertQueues.set(conversationId, nextUpsert)
+      pendingMessageUpserts.set(conversationId, [
+        ...(pendingMessageUpserts.get(conversationId) ?? []),
+        { messages, positionOffset }
+      ])
+      messageUpsertQueue.start(conversationId)
     },
-    [messageUpsertQueues, pendingMessageUpserts, waitForConversationSaves]
+    [messageUpsertQueue, pendingMessageUpserts]
   )
 
   const [messagePersistenceQueue] = useState(
@@ -143,14 +134,18 @@ export function useConversationPersistence() {
 
   const enqueueChatMessageStateSave = useCallback(
     (conversationId: string, message: ChatMessage) => {
-      messagePersistenceQueue.persistNow(conversationId, message)
+      if (!message.agentRun?.coreCheckpoint) {
+        messagePersistenceQueue.persistNow(conversationId, message)
+      }
     },
     [messagePersistenceQueue]
   )
 
   const enqueueChatMessageCheckpoint = useCallback(
     (conversationId: string, message: ChatMessage) => {
-      messagePersistenceQueue.scheduleCheckpoint(conversationId, message)
+      if (!message.agentRun?.coreCheckpoint) {
+        messagePersistenceQueue.scheduleCheckpoint(conversationId, message)
+      }
     },
     [messagePersistenceQueue]
   )
@@ -166,61 +161,80 @@ export function useConversationPersistence() {
     [messagePersistenceQueue]
   )
 
-  const sealAndFlushChatMessageStateSaves = useCallback(
-    () => messagePersistenceQueue.sealAndFlushAll(),
-    [messagePersistenceQueue]
+  const [messageUiStateSaveQueue] = useState(
+    () =>
+      new PersistenceDrain(
+        () => pendingMessageUiStateSaves.keys(),
+        (key) => pendingMessageUiStateSaves.has(key),
+        async (key) => {
+          while (true) {
+            const payload = pendingMessageUiStateSaves.get(key)
+            if (!payload) return
+            pendingMessageUiStateSaves.delete(key)
+            try {
+              await waitForConversationSaves(payload.conversationId)
+              await waitForMessageUpserts(payload.conversationId)
+              await messagePersistenceQueue.flushMessage(payload.conversationId, payload.messageId)
+              await saveChatMessageUiState(
+                payload.conversationId,
+                payload.messageId,
+                payload.uiState
+              )
+            } catch (error) {
+              if (!pendingMessageUiStateSaves.has(key)) pendingMessageUiStateSaves.set(key, payload)
+              console.error('Failed to save chat message UI state to SQLite', error)
+              throw error
+            }
+          }
+        }
+      )
   )
 
   const waitForMessageStateSaves = useCallback(
     async (conversationId: string) => {
+      const matches = (key: string) => key.startsWith(`${conversationId}:`)
       while (true) {
         await messagePersistenceQueue.flushConversation(conversationId)
-        const pendingUiStateSaves = [...messageUiStateSaveQueuesRef.current.entries()]
-          .filter(([key]) => key.startsWith(`${conversationId}:`))
-          .map(([, pendingSave]) => pendingSave)
-        if (pendingUiStateSaves.length === 0) return
-        await Promise.allSettled(pendingUiStateSaves)
+        if (!messageUiStateSaveQueue.hasMatching(matches)) return
+        await messageUiStateSaveQueue.flushMatching(matches)
       }
     },
-    [messagePersistenceQueue]
+    [messagePersistenceQueue, messageUiStateSaveQueue]
   )
+
+  const sealAndFlushChatMessageStateSaves = useCallback(async () => {
+    const all = () => true
+    while (true) {
+      await Promise.all([
+        messagePersistenceQueue.sealAndFlushAll(),
+        conversationSaveQueue.flushMatching(all),
+        messageUpsertQueue.flushMatching(all),
+        messageUiStateSaveQueue.flushMatching(all)
+      ])
+      if (
+        !messagePersistenceQueue.hasWork() &&
+        !conversationSaveQueue.hasMatching(all) &&
+        !messageUpsertQueue.hasMatching(all) &&
+        !messageUiStateSaveQueue.hasMatching(all)
+      ) {
+        return
+      }
+    }
+  }, [conversationSaveQueue, messagePersistenceQueue, messageUiStateSaveQueue, messageUpsertQueue])
 
   const enqueueChatMessageUiStateSave = useCallback(
     (conversationId: string, messageId: string, uiState: ChatMessageUiState | undefined) => {
       const key = `${conversationId}:${messageId}`
-      pendingMessageUiStateSavesRef.current.set(key, { conversationId, messageId, uiState })
-
-      if (messageUiStateSaveQueuesRef.current.has(key)) {
-        return
-      }
-
-      const drainSaves = async () => {
-        while (true) {
-          const payload = pendingMessageUiStateSavesRef.current.get(key)
-          if (!payload) return
-
-          pendingMessageUiStateSavesRef.current.delete(key)
-          try {
-            await waitForConversationSaves(payload.conversationId)
-            await waitForMessageUpserts(payload.conversationId)
-            await messagePersistenceQueue.flushMessage(payload.conversationId, payload.messageId)
-            await saveChatMessageUiState(payload.conversationId, payload.messageId, payload.uiState)
-          } catch (error) {
-            console.error('Failed to save chat message UI state to SQLite', error)
-          }
-        }
-      }
-
-      const nextSave = drainSaves().finally(() => {
-        messageUiStateSaveQueuesRef.current.delete(key)
-      })
-      messageUiStateSaveQueuesRef.current.set(key, nextSave)
+      pendingMessageUiStateSaves.set(key, { conversationId, messageId, uiState })
+      messageUiStateSaveQueue.start(key)
     },
-    [messagePersistenceQueue, waitForConversationSaves, waitForMessageUpserts]
+    [messageUiStateSaveQueue, pendingMessageUiStateSaves]
   )
 
   useEffect(() => {
-    const flush = () => void messagePersistenceQueue.flushAll()
+    // Lifecycle notifications cannot await a durable result. The queue retains failures and
+    // reports them through its adapter; explicit action/quit boundaries still receive rejection.
+    const flush = () => void messagePersistenceQueue.flushAll().catch(() => undefined)
     const flushWhenHidden = () => {
       if (document.visibilityState === 'hidden') flush()
     }

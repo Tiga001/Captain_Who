@@ -44,7 +44,7 @@ interface UseRequestAssistantResponseOptions {
   cancelledRunIdSet: Set<string>
   contextWindowIndicatorEnabled: boolean
   conversationsRef: MutableRefObject<ChatConversation[]>
-  enqueueChatMessageStateSave: UseAgentRunLifecycleOptions['enqueueChatMessageStateSave']
+  markCoreOwnedRun: (conversationId: string, messageId: string, runId: string) => void
   handleBoundAgentEvent: (
     conversationId: string,
     assistantMessageId: string,
@@ -77,7 +77,7 @@ export function useRequestAssistantResponse({
   cancelledRunIdSet,
   contextWindowIndicatorEnabled,
   conversationsRef,
-  enqueueChatMessageStateSave,
+  markCoreOwnedRun,
   handleBoundAgentEvent,
   locallyUnconfirmedStoppedRunIdSet,
   reconcileFailedSkillActivation,
@@ -199,6 +199,13 @@ export function useRequestAssistantResponse({
               throw error
             })
 
+        // A successful admission (including exact-pair recovery after a lost ACK) is the
+        // Core persistence boundary. Register before replaying any buffered runtime events.
+        markCoreOwnedRun(
+          startOutput.conversationId,
+          startOutput.assistantMessageId,
+          startOutput.runId
+        )
         let rewrittenConversation: ChatConversation | null = recoveredConversation
         if (
           rewrite ||
@@ -372,9 +379,6 @@ export function useRequestAssistantResponse({
             : conversation
         )
         setConversations(nextConversations)
-        if (resolvedAssistantMessage && !rewriteAlreadySettled && !recoveredConversation) {
-          enqueueChatMessageStateSave(resolvedConversationId, resolvedAssistantMessage)
-        }
 
         if (resolvedConversationId !== conversationId) {
           setActiveConversationId((currentActiveConversationId) =>
@@ -512,7 +516,7 @@ export function useRequestAssistantResponse({
       cancelledRunIdSet,
       conversationsRef,
       contextWindowIndicatorEnabled,
-      enqueueChatMessageStateSave,
+      markCoreOwnedRun,
       handleBoundAgentEvent,
       locallyUnconfirmedStoppedRunIdSet,
       reconcileFailedSkillActivation,

@@ -115,6 +115,104 @@ async function settle(): Promise<void> {
 }
 
 describe('CollaborationStore', () => {
+  it('serializes resync with an active catch-up and coalesces a reconnect burst', async () => {
+    const root = 'root-conversation'
+    let notify!: (event: CollaborationEventEnvelope) => void
+    let resync!: () => void
+    let release!: (page: CollaborationEventsPage) => void
+    let sequence = 1
+    let active = 0
+    let peak = 0
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => {
+        active += 1
+        peak = Math.max(peak, active)
+        await Promise.resolve()
+        active -= 1
+        return tree(root, sequence)
+      }),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(root, durableEventsThrough(root, afterSequence, sequence))
+      ),
+      subscribe: (handler) => {
+        notify = handler
+        return () => {}
+      },
+      subscribeResync: (handler) => {
+        resync = handler
+        return () => {}
+      }
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    vi.mocked(source.getTree).mockClear()
+    vi.mocked(source.listEvents).mockImplementationOnce(() => {
+      active += 1
+      peak = Math.max(peak, active)
+      return new Promise((resolve) => {
+        release = (value) => {
+          active -= 1
+          resolve(value)
+        }
+      })
+    })
+    sequence = 2
+    notify(event(root, 2))
+    await vi.waitFor(() => expect(release).toBeDefined())
+    for (let i = 0; i < 100; i++) resync()
+    expect(source.getTree).not.toHaveBeenCalled()
+    release(page(root, [event(root, 2)]))
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    expect(source.getTree).toHaveBeenCalledTimes(2)
+    expect(peak).toBe(1)
+    expect(store.getSnapshot().tree?.lastSequence).toBe(2)
+    expect(store.getSnapshot().hydrationRevision).toBe(2)
+    store.destroy()
+  })
+
+  it('invalidates approvals only for durable approval mutations and full recovery', async () => {
+    const root = 'root-conversation'
+    let notify!: (event: CollaborationEventEnvelope) => void
+    let resync!: () => void
+    const log: CollaborationEventEnvelope[] = [event(root, 1)]
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree(root, log.length)),
+      listEvents: vi.fn(async ({ afterSequence }) => page(root, log.slice(afterSequence))),
+      subscribe: (handler) => {
+        notify = handler
+        return () => {}
+      },
+      subscribeResync: (handler) => {
+        resync = handler
+        return () => {}
+      }
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    for (const kind of [
+      'turn_updated',
+      'mailbox_enqueued',
+      'wake_updated',
+      'approval_projected',
+      'turn_updated',
+      'approval_updated'
+    ] as const) {
+      const entry = { ...event(root, log.length + 1), kind }
+      log.push(entry)
+      notify(entry)
+      await vi.waitFor(() => expect(store.getSnapshot().tree?.lastSequence).toBe(entry.sequence))
+      expect(store.getSnapshot().approvalInvalidationSequence).toBe(
+        entry.sequence < 5 ? 0 : entry.sequence < 7 ? 5 : 7
+      )
+    }
+    resync()
+    await vi.waitFor(() => expect(store.getSnapshot().hydrationRevision).toBe(2))
+    expect(store.getSnapshot().approvalInvalidationSequence).toBe(7)
+    store.destroy()
+  })
+
   it('revalidates a paused root and resumes from its completed cursor without replaying old transfers', async () => {
     const root = 'root-conversation'
     const events = [
@@ -164,6 +262,7 @@ describe('CollaborationStore', () => {
     store.start()
     expect(store.getSnapshot().tree).toBeNull()
     expect(source.listEvents).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(releaseTree).toBeDefined())
     releaseTree?.(treeSnapshot())
     await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
     expect(vi.mocked(source.listEvents).mock.calls.map(([input]) => input.afterSequence)).toEqual([
@@ -630,6 +729,7 @@ describe('CollaborationStore', () => {
     expect(store.getSnapshot()).toEqual({
       activities: [],
       agentInvalidationSequences: {},
+      approvalInvalidationSequence: 0,
       error: false,
       hydrationRevision: 1,
       loading: false,

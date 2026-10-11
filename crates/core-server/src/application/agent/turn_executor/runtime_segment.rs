@@ -48,6 +48,8 @@ impl AgentService {
         let emitter_terminal_event_gate = terminal_event_gate.clone();
         let pending_store_failure = Arc::new(Mutex::new(None::<String>));
         let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
+        let segment_usage_staged = Arc::new(AtomicBool::new(false));
+        let emitter_segment_usage_staged = segment_usage_staged.clone();
         let waiting_pending_action_storage_id = Arc::new(Mutex::new(None::<String>));
         let emitter_waiting_pending_action_storage_id =
             Arc::clone(&waiting_pending_action_storage_id);
@@ -56,18 +58,33 @@ impl AgentService {
         let final_response_collaboration_boundary = Arc::new(Mutex::new(None::<u64>));
         let emitter_final_response_collaboration_boundary =
             Arc::clone(&final_response_collaboration_boundary);
+        let checkpoint_slot = Arc::new(Mutex::new(
+            None::<Arc<super::runtime_checkpoint::RuntimeCheckpoint>>,
+        ));
+        let emitter_checkpoint = checkpoint_slot.clone();
         let emitter: AgentEventEmitter = Arc::new(move |event| {
+            if let Some(checkpoint) = emitter_checkpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                checkpoint.record(&event);
+            }
             if let AgentEvent::ApprovalRequired {
                 run_id,
                 action,
                 checkpoint,
                 segment_usage,
+                segment_finish_reason,
             } = &event
             {
                 // The approval becomes externally actionable as soon as its pending row and
                 // notification commit. Account for the producing Runtime segment first so a fast
                 // approval continuation or interrupt cannot terminalize the shared logical Run
                 // without these tokens.
+                // The accumulator merges before its durable write. Even an error must not add
+                // this same segment again while constructing its eventual failure projection.
+                emitter_segment_usage_staged.store(true, Ordering::Release);
                 match emitter_service.stage_waiting_segment_usage(run_id, segment_usage.clone()) {
                     Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted) => {}
                     Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal) => {
@@ -87,6 +104,26 @@ impl AgentService {
                             .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(format!(
                             "无法在发布待审批操作前持久化当前模型调用用量：{error}"
                         ));
+                        return;
+                    }
+                }
+                if let Some(runtime_checkpoint) = emitter_checkpoint
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
+                    runtime_checkpoint.set_waiting_finish_reason(segment_finish_reason.as_deref());
+                    if let Err(error) = runtime_checkpoint.flush() {
+                        if invalidate_mcp_payload_on_pending_store_failure {
+                            emitter_service.invalidate_mcp_pending_payload(action);
+                        }
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(format!(
+                            "Runtime checkpoint before pending decision failed: {error}"
+                        ));
+                        emitter_cancellation_token.cancel();
+                        emitter_terminal_event_gate.discard();
                         return;
                     }
                 }
@@ -157,6 +194,13 @@ impl AgentService {
                         return;
                     }
                 };
+                if let Some(checkpoint) = emitter_checkpoint
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
+                    checkpoint.seal_waiting();
+                }
                 if let Some(binding) = emitter_human_binding.as_ref() {
                     if let Err(error) = emitter_service
                         .storage
@@ -425,6 +469,8 @@ impl AgentService {
                 let cancellation_token = cancellation_token.clone();
                 let steer_input = steer_input.clone();
                 let notifications = notifications.clone();
+                let checkpoint_slot = checkpoint_slot.clone();
+                let human_usage_staged = segment_usage_staged.clone();
                 reservation
                     .submit(move || -> AgentResult<AgentRuntimeHostServices> {
                         let prepared = (|| -> AgentResult<AgentRuntimeHostServices> {
@@ -512,6 +558,8 @@ impl AgentService {
                                     notifications: notifications.clone(),
                                     predecessor: human_binding.clone(),
                                     approval_predecessor: human_approval_predecessor,
+                                    checkpoint_slot: checkpoint_slot.clone(),
+                                    usage_staged: human_usage_staged.clone(),
                                 },
                             ));
                             host_services = host_services.with_human_interaction_policy(Arc::new(
@@ -631,6 +679,20 @@ impl AgentService {
                                 return Err(AgentError::cancelled());
                             }
                         }
+                        if prepared.is_ok() {
+                            let _publication = service.run_publication.lock_conversation(&run_id);
+                            let owns_generation = service.cancellations.lock().unwrap_or_else(|e| e.into_inner())
+                                .get(&run_id).is_some_and(|current| current.shares_state_with(&cancellation_token));
+                            if !owns_generation || cancellation_token.is_cancelled() {
+                                return Err(AgentError::cancelled());
+                            }
+                            let initial = service.storage.begin_runtime_checkpoint(&conversation_id, &assistant_message_id, &run_id)
+                                .map_err(AgentError::new)?.ok_or_else(AgentError::cancelled)?;
+                            let checkpoint = super::runtime_checkpoint::RuntimeCheckpoint::new(
+                                service.storage.clone(), conversation_id.clone(), assistant_message_id.clone(),
+                                run_id.clone(), initial, &agent_input).map_err(AgentError::new)?;
+                            *checkpoint_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(checkpoint);
+                        }
                         prepared
                     })
                     .wait()
@@ -660,6 +722,13 @@ impl AgentService {
             }
         };
         let mut runtime_input = agent_input;
+        let checkpoint = checkpoint_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("successful preparation installs the exact Runtime checkpoint owner");
+        let (stop_checkpoint_timer, checkpoint_timer) =
+            checkpoint.start_timer(self.blocking_work.maintenance.clone());
         if let Some((resume, _)) = human_input_resume {
             host_services = host_services.with_user_input_resume(resume);
             runtime_input.resume_checkpoint = None;
@@ -674,6 +743,20 @@ impl AgentService {
             host_services,
         )
         .await;
+        let _ = stop_checkpoint_timer.send(());
+        let checkpoint_result = match checkpoint_timer.await {
+            Ok(()) => {
+                checkpoint
+                    .flush_async(&self.blocking_work.maintenance)
+                    .await
+            }
+            Err(error) => Err(format!("Runtime checkpoint worker failed: {error}")),
+        };
+        if let Err(error) = checkpoint_result {
+            *pending_store_failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(error);
+        }
         let result = match pending_store_failure
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -681,7 +764,12 @@ impl AgentService {
         {
             Some(error) => {
                 terminal_event_gate.discard();
-                Err(pending_action_persistence_error(error))
+                Err(segment_checkpoint_error(
+                    error,
+                    &result,
+                    segment_usage_staged.load(Ordering::Acquire),
+                    &checkpoint.content(),
+                ))
             }
             None => result,
         };
@@ -697,6 +785,53 @@ impl AgentService {
             final_response_collaboration_boundary,
         }
     }
+}
+
+fn segment_checkpoint_error(
+    message: String,
+    result: &AgentResult<AgentChatOutput>,
+    usage_staged: bool,
+    checkpoint_content: &str,
+) -> AgentError {
+    let (usage, trace, content) = match result {
+        Ok(output) => (
+            if usage_staged
+                || matches!(
+                    output.status,
+                    AgentRunStatus::WaitingForApproval | AgentRunStatus::WaitingForUserInput
+                )
+            {
+                None
+            } else {
+                output.usage.clone()
+            },
+            output.conversation_turn_trace.clone(),
+            output.content.clone(),
+        ),
+        Err(error) => (
+            if usage_staged {
+                None
+            } else {
+                error.usage().cloned()
+            },
+            error.conversation_turn_trace().cloned(),
+            error.partial_response().unwrap_or_default().to_string(),
+        ),
+    };
+    let content = if content.is_empty() {
+        checkpoint_content.to_string()
+    } else {
+        content
+    };
+    let mut failure = pending_action_persistence_error(message)
+        .with_usage(usage)
+        .with_partial_response(content);
+    if let Some(mut trace) = trace {
+        trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
+        trace.terminal_error = Some(failure.to_string());
+        failure = failure.with_conversation_turn_trace(trace);
+    }
+    failure
 }
 
 /// Host callbacks can return typed cancellation at any sampling/preflight boundary, before the
