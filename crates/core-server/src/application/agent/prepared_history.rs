@@ -157,7 +157,7 @@ impl AgentService {
     ) -> Result<Option<Arc<PreparedHistory>>, String> {
         #[cfg(debug_assertions)]
         let started = Instant::now();
-        let Some(source) = self.storage.load_conversation_history_snapshot(id)? else {
+        let Some(source) = self.storage.load_conversation_model_history_snapshot(id)? else {
             self.prepared_histories
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -198,7 +198,7 @@ impl AgentService {
                 if entry.history.source.version == source.version
                     && entry.history.excluded_message_ids == excluded
                 {
-                    let history = if Arc::ptr_eq(&entry.history.source, &source) {
+                    let history = if entry.history.source.shares_source_with(&source) {
                         entry.history.clone()
                     } else {
                         Arc::new(PreparedHistory {
@@ -207,9 +207,8 @@ impl AgentService {
                             excluded_message_ids: entry.history.excluded_message_ids.clone(),
                         })
                     };
-                    // Metadata, run display JSON or independent message UI state may refresh
-                    // the raw source without changing the model version. Keep those reads fresh
-                    // while preserving the measured history and assembled message allocation.
+                    // Admission metadata can refresh without changing model history. Renderer
+                    // display JSON/UI state is not part of this dedicated model-only source.
                     cache.insert(history.clone());
                     return Ok(Some(history));
                 }
@@ -224,9 +223,9 @@ impl AgentService {
                 miss_reason = "尚未预热或缓存已淘汰";
             }
         }
-        let conversation = source.conversation.to_record();
-        let messages = conversation_history_messages_with_model_context(
-            &conversation,
+        let messages = conversation_history_messages_from_model_rows(
+            &source.conversation.id,
+            &source.conversation.messages,
             &source.traces,
             &source.model_context_logs,
             source.compaction_summary.as_ref(),

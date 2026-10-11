@@ -107,6 +107,64 @@ fn checkpoint_replays_lost_ack_and_rejects_divergent_or_skipped_sequence() {
 }
 
 #[test]
+fn checked_checkpoint_begin_rechecks_live_owner_and_rolls_back_generation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_directory, service, _) = fixture();
+    let initial = begin(&service);
+    let previous = stored(&service);
+    let checks = AtomicUsize::new(0);
+    let result =
+        service.begin_runtime_checkpoint_checked("conversation", "assistant", "run", None, || {
+            if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err("synthetic segment owner retired before commit".into())
+            }
+        });
+    assert!(matches!(
+        result,
+        Err(CoreRuntimeCheckpointBeginError::Fenced(_))
+    ));
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+    assert_eq!(stored(&service), previous);
+    assert_eq!(
+        stored(&service).1["coreCheckpoint"]["generation"],
+        initial.generation
+    );
+}
+
+#[test]
+fn checkpoint_fingerprint_streaming_matches_existing_json_bytes() {
+    let (_directory, service, _) = fixture();
+    let initial = begin(&service);
+    let mut input = checkpoint(
+        &initial,
+        serde_json::json!({
+            "todo": [{"id":"中文\\\"\n", "text":"🧪 café", "nested":[null, true, 2.5]}],
+            "firstResponseAt": 2,
+        }),
+    );
+    input.content = "正文\n\t\\\"\u{0000}🧪".repeat(1024);
+    let patch: Map<String, Value> = serde_json::from_str(&input.projection_json).unwrap();
+    let old_bytes = serde_json::to_vec(&(
+        &input.conversation_id,
+        &input.assistant_message_id,
+        &input.run_id,
+        &input.generation,
+        input.expected_sequence,
+        input.sequence,
+        &input.content,
+        &patch,
+    ))
+    .unwrap();
+    assert_eq!(
+        checkpoint_fingerprint(&input, &patch).unwrap(),
+        format!("{:x}", Sha256::digest(old_bytes))
+    );
+}
+
+#[test]
 fn checkpoint_failed_commit_keeps_sequence_retryable_and_does_not_ack() {
     let (_directory, service, _) = fixture();
     let initial = begin(&service);

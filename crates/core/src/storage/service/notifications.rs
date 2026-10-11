@@ -17,6 +17,15 @@ fn notification_job_bytes(parts: &[&str], identifiers: &[String]) -> usize {
         })
 }
 
+fn notification_clock() -> impl Fn() -> i64 + Send {
+    let started = std::time::Instant::now();
+    let started_at = now_ms();
+    move || {
+        let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        now_ms().max(started_at.saturating_add(elapsed))
+    }
+}
+
 impl StorageService {
     pub fn enqueue_notification_event(
         &self,
@@ -52,20 +61,34 @@ impl StorageService {
     pub fn claim_pending_notification_batches(
         &self,
         claim_token: &str,
-        now: i64,
         lease_duration_ms: i64,
         limit: usize,
+    ) -> Result<Vec<NotificationBatchRecord>, String> {
+        self.claim_pending_notification_batches_with_clock(
+            claim_token,
+            lease_duration_ms,
+            limit,
+            notification_clock(),
+        )
+    }
+
+    fn claim_pending_notification_batches_with_clock(
+        &self,
+        claim_token: &str,
+        lease_duration_ms: i64,
+        limit: usize,
+        clock: impl Fn() -> i64 + Send,
     ) -> Result<Vec<NotificationBatchRecord>, String> {
         self.state.write_sync(
             notification_job_bytes(&[claim_token], &[]),
             StorageWriteClass::Normal,
             |connection| {
-                notification_repository::claim_pending_notification_batches(
+                notification_repository::claim_pending_notification_batches_with_clock(
                     connection,
                     claim_token,
-                    now,
                     lease_duration_ms,
                     limit,
+                    clock,
                 )
                 .map_err(storage_error)
             },
@@ -76,17 +99,29 @@ impl StorageService {
         &self,
         batch_id: &str,
         claim_token: &str,
-        now: i64,
+    ) -> Result<Option<NotificationBatchRecord>, String> {
+        self.validate_claimed_notification_batch_with_clock(
+            batch_id,
+            claim_token,
+            notification_clock(),
+        )
+    }
+
+    fn validate_claimed_notification_batch_with_clock(
+        &self,
+        batch_id: &str,
+        claim_token: &str,
+        clock: impl Fn() -> i64 + Send,
     ) -> Result<Option<NotificationBatchRecord>, String> {
         self.state.write_sync(
             notification_job_bytes(&[batch_id, claim_token], &[]),
             StorageWriteClass::Control,
             |connection| {
-                notification_repository::validate_claimed_notification_batch(
+                notification_repository::validate_claimed_notification_batch_with_clock(
                     connection,
                     batch_id,
                     claim_token,
-                    now,
+                    clock,
                 )
                 .map_err(storage_error)
             },
@@ -326,3 +361,6 @@ impl StorageService {
             .map_err(storage_error)
     }
 }
+
+#[cfg(test)]
+mod tests;

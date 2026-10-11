@@ -45,6 +45,12 @@ test('baseline build is bounded and isolated; old filter cannot narrow the reque
   assert.equal(env.CARGO_BUILD_JOBS, '4')
   assert.equal(env.CARGO_INCREMENTAL, '0')
   assert.equal(env.CAPTAIN_PERFORMANCE_DIAGNOSTICS, '1')
+  assert.equal(
+    baselineEnvironment(parseOptions(['--diagnostics', 'off'], '/repo'), {}, '/repo')
+      .CAPTAIN_PERFORMANCE_DIAGNOSTICS,
+    '0'
+  )
+  assert.throws(() => parseOptions(['--diagnostics', 'maybe'], '/repo'))
   assert.equal(env.BACKEND_BASELINE_FILTER, undefined)
   assert.equal(env.CARGO_PROFILE_RELEASE_DEBUG, '0')
   assert.throws(
@@ -259,4 +265,116 @@ test('result inspection reports valid JSON with invalid correctness as integrity
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('soak parameters are explicit, bounded, and cannot alter the old matrix', () => {
+  const options = parseOptions(
+    ['--mode', 'soak', '--duration-seconds', '600', '--units', '20', '--interval-ms', '1000'],
+    '/repo'
+  )
+  assert.equal(options.durationSeconds, 600)
+  assert.equal(options.intervalMs, 1000)
+  const environment = baselineEnvironment(options, {}, '/repo')
+  assert.equal(environment.BACKEND_BASELINE_DURATION_SECONDS, '600')
+  assert.equal(environment.BACKEND_BASELINE_UNITS, '20')
+  for (const args of [
+    ['--mode', 'full', '--units', '20'],
+    ['--mode', 'soak', '--duration-seconds', '1801'],
+    ['--mode', 'soak', '--interval-ms', '249'],
+    ['--mode', 'soak', '--units', '21']
+  ])
+    assert.throws(() => parseOptions(args, '/repo'))
+})
+
+test('raw RPC outcomes must agree with aggregate metrics and recovery', () => {
+  const record = {
+    operation: 'agent.startConversationTurn',
+    response: { result: { runId: 'r' } },
+    responded_us: 1
+  }
+  const value = {
+    ...validCase(),
+    raw: { rpcs: { 1: record } },
+    metrics: { 'agent.startConversationTurn': { offered: 1, success_response: 1 } },
+    recovery: { root_terminal_statuses: { Completed: 5 }, post_reopen_in_progress: 0 }
+  }
+  assert.deepEqual(validateBaselineCase(value), [])
+  assert.ok(
+    validateBaselineCase({
+      ...value,
+      raw: { rpcs: { 1: { ...record, response: null } } }
+    }).includes('missing_rpc_response')
+  )
+  assert.ok(
+    validateBaselineCase({
+      ...value,
+      metrics: { 'agent.startConversationTurn': { offered: 2, success_response: 1 } }
+    }).includes('rpc_count_mismatch:agent.startConversationTurn')
+  )
+  assert.ok(
+    validateBaselineCase({ ...value, unexpected_rpc_errors: [{}] }).includes(
+      'unexpected_rpc_errors'
+    )
+  )
+  assert.ok(
+    validateBaselineCase({
+      ...value,
+      recovery: { ...value.recovery, post_reopen_in_progress: 1 }
+    }).includes('recovery_unfinished')
+  )
+})
+
+test('version two requires planned work and accepted starts to match the raw evidence', () => {
+  const value = {
+    ...validCase(),
+    format_version: 2,
+    case: { work: 'text', units: 1, roots: 1, waves: 1 },
+    root_starts_durably_accepted: 1,
+    recovered_root_turns: 1,
+    recovery: { root_terminal_statuses: { Completed: 1 }, post_reopen_in_progress: 0 },
+    raw: {
+      rpcs: {
+        1: {
+          operation: 'agent.startConversationTurn',
+          response: { result: { runId: 'r' } },
+          dispatch_admitted: true,
+          responded_us: 1
+        }
+      }
+    },
+    metrics: {
+      'agent.startConversationTurn': {
+        offered: 1,
+        success_response: 1,
+        dispatch_admitted: 1,
+        rejected_or_error: 0,
+        no_response: 0
+      }
+    }
+  }
+  assert.deepEqual(validateBaselineCase(value), [])
+  assert.ok(
+    validateBaselineCase({ ...value, root_starts_durably_accepted: 5 }).includes(
+      'accepted_start_count_mismatch'
+    )
+  )
+  assert.ok(
+    validateBaselineCase({ ...value, case: { ...value.case, waves: 2 } }).includes(
+      'planned_start_count_mismatch'
+    )
+  )
+  assert.ok(
+    validateBaselineCase({ ...value, metrics: {} }).includes(
+      'missing_operation:agent.startConversationTurn'
+    )
+  )
+  const mixed = {
+    ...value,
+    fixed_wave_interval_ms: 2000,
+    case: { ...value.case, work: 'mixed' },
+    raw: { rpcs: { 1: { ...value.raw.rpcs[1], provider_key: 'root-0-wave-3' } } }
+  }
+  assert.ok(validateBaselineCase(mixed).includes('mixed_missing_controls:agent.approveAction'))
+  assert.ok(validateBaselineCase(mixed).includes('planned_background_read_count_mismatch'))
+  assert.ok(validateBaselineCase({ ...value, raw: {} }).includes('missing_raw_rpcs'))
 })

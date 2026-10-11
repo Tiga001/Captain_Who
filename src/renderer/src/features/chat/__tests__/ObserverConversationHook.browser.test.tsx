@@ -195,6 +195,58 @@ it('serializes active snapshot invalidations and replays the latest window strea
   expect(mocks.load).toHaveBeenCalledTimes(2)
 })
 
+it('publishes recent snapshots during uninterrupted same-scope invalidations', async () => {
+  const reads = Array.from({ length: 4 }, () => deferred<AgentObserverConversation>())
+  for (const read of reads) mocks.load.mockReturnValueOnce(read.promise)
+  const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={1} />)
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(1))
+  for (let index = 0; index < 3; index++) {
+    await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={index + 2} />)
+    reads[index].resolve(observer('child-a', `progress-${index}`))
+    await expect.element(screen.getByText(`progress-${index}`, { exact: true })).toBeVisible()
+    await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(index + 2))
+  }
+  reads[3].resolve(observer('child-a', 'latest snapshot'))
+  await expect.element(screen.getByText('latest snapshot')).toBeVisible()
+})
+
+it('bounds the visible-snapshot coalescing delay while invalidations keep arriving', async () => {
+  mocks.load
+    .mockResolvedValueOnce(observer('child-a', 'initial'))
+    .mockResolvedValue(observer('child-a', 'progress during notifications'))
+  const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={1} />)
+  await expect.element(screen.getByText('initial')).toBeVisible()
+  vi.useFakeTimers()
+  try {
+    for (let version = 2; version <= 4; version++) {
+      await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={version} />)
+      await vi.advanceTimersByTimeAsync(30)
+    }
+    expect(mocks.load).toHaveBeenCalledTimes(2)
+  } finally {
+    vi.useRealTimers()
+  }
+  await expect.element(screen.getByText('progress during notifications')).toBeVisible()
+})
+
+it('keeps independent live suffixes for overlapping active and trailing reads', async () => {
+  const active = deferred<AgentObserverConversation>()
+  const trailing = deferred<AgentObserverConversation>()
+  mocks.load.mockReturnValueOnce(active.promise).mockReturnValueOnce(trailing.promise)
+  const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={1} />)
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(1))
+  await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={2} />)
+  mocks.observerEvent?.(sequencedDelta('B', 2))
+  mocks.observerEvent?.(sequencedDelta('C', 3))
+  active.resolve(streamingObserver('A', 1))
+  await expect.element(screen.getByText('ABC', { exact: true })).toBeVisible()
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
+  mocks.observerEvent?.(sequencedDelta('D', 4))
+  trailing.resolve(streamingObserver('AB', 2))
+  await expect.element(screen.getByText('ABCD', { exact: true })).toBeVisible()
+  expect(mocks.load).toHaveBeenCalledTimes(2)
+})
+
 it('rejects a stale child response after a rapid observer switch', async () => {
   const first = deferred<AgentObserverConversation | null>()
   const second = deferred<AgentObserverConversation | null>()
@@ -747,6 +799,30 @@ function historyPage(conversationId: string, id: string, content: string, hasMor
   page.history = { hasMore, beforeMessageId: hasMore ? id : null }
   return page
 }
+
+it('prioritizes a queued recent snapshot over further old history pages', async () => {
+  const old = deferred<AgentObserverConversation | null>()
+  const refreshed = deferred<AgentObserverConversation | null>()
+  mocks.load
+    .mockResolvedValueOnce(historyPage('child-a', 'recent', 'initial recent', true))
+    .mockReturnValueOnce(old.promise)
+    .mockReturnValueOnce(refreshed.promise)
+  const screen = await render(<PageProbe invalidationVersion={1} />)
+  await expect.element(screen.getByText('initial recent')).toBeVisible()
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
+  await screen.rerender(<PageProbe invalidationVersion={2} />)
+  old.resolve(historyPage('child-a', 'older', 'old page', true))
+  await vi.waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(3))
+  expect(mocks.load).toHaveBeenLastCalledWith({
+    rootConversationId: 'root-conversation',
+    conversationId: 'child-a',
+    messageLimit: 40
+  })
+  refreshed.resolve(historyPage('child-a', 'recent', 'fresh recent', false))
+  await expect.element(screen.getByText('fresh recent')).toBeVisible()
+  expect(screen.container.textContent).not.toContain('old page')
+  expect(mocks.load).toHaveBeenCalledTimes(3)
+})
 
 it('shows the recent page before old history and preserves live deltas during background paging', async () => {
   const old = deferred<AgentObserverConversation | null>()

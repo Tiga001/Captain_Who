@@ -16,7 +16,17 @@ const defaultTarget = '/tmp/captain-backend-baseline-20261011-target'
 
 export function parseOptions(args, root = repositoryRoot) {
   const values = new Map()
-  const supported = new Set(['--mode', '--filter', '--waves', '--output-dir', '--binary'])
+  const supported = new Set([
+    '--mode',
+    '--filter',
+    '--waves',
+    '--output-dir',
+    '--binary',
+    '--duration-seconds',
+    '--units',
+    '--interval-ms',
+    '--diagnostics'
+  ])
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index]
     if (!supported.has(key)) throw new Error(`Unknown option: ${key}`)
@@ -27,12 +37,28 @@ export function parseOptions(args, root = repositoryRoot) {
     values.set(key, value)
   }
   const mode = values.get('--mode') ?? 'smoke'
-  if (!['smoke', 'full'].includes(mode)) throw new Error('--mode must be smoke or full')
+  const diagnostics = values.get('--diagnostics') ?? 'on'
+  if (!['on', 'off'].includes(diagnostics)) throw new Error('--diagnostics must be on or off')
+  if (!['smoke', 'full', 'soak'].includes(mode))
+    throw new Error('--mode must be smoke, full or soak')
   const rawWaves = values.get('--waves')
   if (rawWaves !== undefined && (!/^\d+$/u.test(rawWaves) || +rawWaves < 1 || +rawWaves > 900))
     throw new Error('--waves must be an integer from 1 to 900')
+  const integer = (key, fallback, minimum, maximum) => {
+    const raw = values.get(key)
+    if (raw !== undefined && (!/^\d+$/u.test(raw) || +raw < minimum || +raw > maximum))
+      throw new Error(`${key} must be an integer from ${minimum} to ${maximum}`)
+    if (raw !== undefined && mode !== 'soak') throw new Error(`${key} requires soak mode`)
+    return raw === undefined ? fallback : +raw
+  }
+  const units = integer('--units', 20, 1, 50)
+  if (![1, 5, 10, 20, 50].includes(units)) throw new Error('--units must be 1/5/10/20/50')
   return {
     mode,
+    diagnostics,
+    durationSeconds: integer('--duration-seconds', 600, 10, 1800),
+    intervalMs: integer('--interval-ms', 2000, 250, 10000),
+    units,
     filter: values.get('--filter') ?? null,
     waves: rawWaves === undefined ? (mode === 'smoke' ? 1 : 3) : +rawWaves,
     binary: values.has('--binary') ? resolve(root, values.get('--binary')) : null,
@@ -59,10 +85,13 @@ export function baselineEnvironment(options, parent = process.env, root = reposi
     CARGO_INCREMENTAL: '0',
     CARGO_PROFILE_RELEASE_DEBUG: '0',
     CARGO_PROFILE_TEST_DEBUG: '0',
-    CAPTAIN_PERFORMANCE_DIAGNOSTICS: '1',
+    CAPTAIN_PERFORMANCE_DIAGNOSTICS: options.diagnostics === 'off' ? '0' : '1',
     BACKEND_BASELINE_OUTPUT: join(options.outputDir, 'cases.jsonl'),
     BACKEND_BASELINE_MODE: options.mode,
     BACKEND_BASELINE_WAVES: String(options.waves),
+    BACKEND_BASELINE_DURATION_SECONDS: String(options.durationSeconds),
+    BACKEND_BASELINE_INTERVAL_MS: String(options.intervalMs),
+    BACKEND_BASELINE_UNITS: String(options.units),
     RUST_TEST_THREADS: '1'
   }
   // A stale parent filter must not silently narrow a requested full run.
@@ -183,6 +212,9 @@ function metadataEnvironment(environment) {
     'BACKEND_BASELINE_MODE',
     'BACKEND_BASELINE_WAVES',
     'BACKEND_BASELINE_FILTER',
+    'BACKEND_BASELINE_DURATION_SECONDS',
+    'BACKEND_BASELINE_INTERVAL_MS',
+    'BACKEND_BASELINE_UNITS',
     'RUST_TEST_THREADS'
   ]
   return Object.fromEntries(
@@ -348,11 +380,90 @@ export function validateBaselineCase(value) {
   }
   const terminalTotal = entries.reduce((sum, [, amount]) => sum + (count(amount) ? amount : 0), 0)
   if (terminalTotal !== accepted) errors.push('root_terminal_count_mismatch')
-  if (value?.control_rejections_observed === false) {
+  if (value?.control_rejections_observed === false && value?.case?.work !== 'mixed') {
     const expected = value?.case?.work === 'stop' ? 'Cancelled' : 'Completed'
     if ((terminals?.[expected] ?? 0) !== accepted) errors.push('unexpected_root_terminal_status')
   }
 
+  if (value?.format_version >= 2 && (!value?.raw?.rpcs || typeof value.raw.rpcs !== 'object'))
+    errors.push('missing_raw_rpcs')
+  if (value?.raw?.rpcs) {
+    const records = Object.values(value.raw.rpcs)
+    if (records.some((record) => !record.response || record.responded_us == null))
+      errors.push('missing_rpc_response')
+    for (const [operation, metrics] of Object.entries(value.metrics ?? {})) {
+      const matching = records.filter((record) => record.operation === operation)
+      const successful = matching.filter((record) => record.response?.result !== undefined)
+      if (metrics.offered !== matching.length || metrics.success_response !== successful.length)
+        errors.push(`rpc_count_mismatch:${operation}`)
+    }
+    if ((value.unexpected_rpc_errors?.length ?? 0) > 0) errors.push('unexpected_rpc_errors')
+    if ((value.raw.errors?.length ?? 0) > 0) errors.push('runtime_errors')
+    if (value.shutdown_timed_out === true) errors.push('shutdown_timeout')
+    if (value.recovery?.post_reopen_in_progress !== 0) errors.push('recovery_unfinished')
+    if (value.format_version >= 2) {
+      const starts = records.filter((record) => record.operation === 'agent.startConversationTurn')
+      if (starts.length !== value.case.roots * value.case.waves)
+        errors.push('planned_start_count_mismatch')
+      if (starts.filter((record) => record.response?.result?.runId).length !== accepted)
+        errors.push('accepted_start_count_mismatch')
+      const operations = new Set(records.map((record) => record.operation))
+      for (const operation of operations) {
+        const matching = records.filter((record) => record.operation === operation)
+        const metrics = value.metrics?.[operation]
+        if (!metrics) {
+          errors.push(`missing_operation:${operation}`)
+          continue
+        }
+        if (
+          metrics.dispatch_admitted !==
+            matching.filter((record) => record.dispatch_admitted).length ||
+          metrics.rejected_or_error !==
+            matching.filter((record) => record.response?.error !== undefined).length ||
+          metrics.no_response !== matching.filter((record) => !record.response).length
+        )
+          errors.push(`outcome_count_mismatch:${operation}`)
+      }
+      if (
+        records.some(
+          (record) =>
+            record.operation === 'storage.loadConversation' &&
+            !record.response?.error &&
+            (record.response?.result?.id !== `baseline-${record.owner}` ||
+              !Number.isSafeInteger(record.response?.result?.messages))
+        )
+      )
+        errors.push('invalid_background_read')
+    }
+    if (value.case?.work === 'mixed') {
+      const expectedReads =
+        Math.floor(((value.case.waves - 1) * value.fixed_wave_interval_ms) / 500) + 1
+      if (
+        records.filter((record) => record.operation === 'storage.loadConversation').length !==
+        expectedReads
+      )
+        errors.push('planned_background_read_count_mismatch')
+      const acceptedWaves = records.filter(
+        (record) =>
+          record.operation === 'agent.startConversationTurn' && record.response?.result?.runId
+      )
+      for (const [waveKind, operation] of [
+        [3, 'agent.approveAction'],
+        [4, 'agent.cancelRun']
+      ]) {
+        const expected = acceptedWaves.filter(
+          (record) => Number(record.provider_key?.split('-wave-')[1]) % 5 === waveKind
+        ).length
+        const offered = records.filter((record) => record.operation === operation).length
+        if (offered !== expected) errors.push(`mixed_missing_controls:${operation}`)
+      }
+      const stopped = records.filter(
+        (record) => record.operation === 'agent.cancelRun' && record.response?.result !== undefined
+      ).length
+      if (value.control_rejections_observed === false && (terminals?.Cancelled ?? 0) !== stopped)
+        errors.push('mixed_cancel_count_mismatch')
+    }
+  }
   if (value?.case?.work === 'tree') {
     const units = value.case.units
     const roots = value.case.roots

@@ -1106,3 +1106,181 @@ fn wal_project_folders_and_metadata_are_read_from_one_snapshot() {
     assert_eq!(fresh.name, "new project name");
     assert_eq!(fresh.folders[0].alias, "new folder alias");
 }
+
+#[test]
+fn model_history_snapshot_omits_display_columns_without_changing_model_facts_or_budget() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seeded_history(&service, "history");
+    let display = serde_json::json!({"toolDefinitions": [{"name": "synthetic", "description": "large display only schema ".repeat(65536)}]}).to_string();
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET agent_run_json=?1 WHERE id='history-assistant'",
+            [&display],
+        )
+        .unwrap();
+    service
+        .save_chat_message_ui_state(
+            "history",
+            "history-assistant",
+            Some(r#"{"favorited":true}"#),
+        )
+        .unwrap();
+    let raw = service
+        .load_conversation_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    // This denies even reading the column, so clearing JSON after a broad query cannot pass.
+    service
+        .state
+        .configure_read_connections_for_test(|connection| {
+            connection
+                .authorizer(Some(|context: AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        AuthAction::Read {
+                            table_name: "messages",
+                            column_name: "agent_run_json"
+                        } | AuthAction::Read {
+                            table_name: "chat_message_ui_states",
+                            ..
+                        }
+                    ) {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+                .unwrap();
+        });
+    let model = service
+        .load_conversation_model_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    assert_eq!(model.version, raw.version);
+    assert_eq!(model.conversation_revision, raw.conversation_revision);
+    let mut expected = raw.conversation.to_record();
+    for message in &mut expected.messages {
+        message.agent_run_json = None;
+        message.ui_state_json = None;
+    }
+    assert_eq!(
+        serde_json::to_value(model.conversation.to_append_record()).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&model.traces).unwrap(),
+        serde_json::to_value(&raw.traces).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&model.model_context_logs).unwrap(),
+        serde_json::to_value(&raw.model_context_logs).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&model.compaction_summary).unwrap(),
+        serde_json::to_value(&raw.compaction_summary).unwrap()
+    );
+    assert!(model.estimated_bytes * 100 < raw.estimated_bytes);
+    let raw_payload =
+        crate::storage::write_size::estimated_json_bytes(&raw.conversation.to_record()).unwrap();
+    let model_payload =
+        crate::storage::write_size::estimated_json_bytes(&model.conversation.to_append_record())
+            .unwrap();
+    assert!(
+        model_payload * 100 < raw_payload,
+        "append admission accounts the retained narrow record, not historical presentation bytes"
+    );
+    let hit = service
+        .load_conversation_model_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    assert!(model.shares_source_with(&hit));
+    // Writer-side direct check proves no display mutation or FTS rebuild was used.
+    let persisted: String = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE id='history-assistant'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, display);
+}
+
+#[test]
+fn model_history_snapshot_refreshes_metadata_and_fences_a_concurrent_trace_change() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seeded_history(&service, "history");
+    let old = service
+        .load_conversation_model_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    let external = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    external.execute("UPDATE messages SET agent_run_json='{\"toolDefinitions\":[]}' WHERE id='history-assistant'", []).unwrap();
+    let current = service
+        .load_conversation_model_history_snapshot("history")
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.version, current.version);
+    assert!(current.conversation_revision > old.conversation_revision);
+    assert!(Arc::ptr_eq(
+        &old.conversation.messages,
+        &current.conversation.messages
+    ));
+    assert!(Arc::ptr_eq(&old.payload, &current.payload));
+    assert_eq!(current.conversation.messages[1].agent_run_json, None);
+    let mut candidate = current.conversation.to_append_record();
+    let mut assistant = candidate.messages.last().unwrap().clone();
+    assistant.id = "new-assistant".into();
+    assistant.status = Some("pending".into());
+    candidate.messages.push(assistant.clone());
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "new-run",
+        "history",
+        &assistant.id,
+    );
+    external.execute("UPDATE conversation_turn_traces SET completed_at=completed_at+1 WHERE assistant_message_id='history-assistant'", []).unwrap();
+    assert_eq!(
+        service.conversation_revision("history").unwrap(),
+        Some(current.conversation_revision)
+    );
+    let error = service
+        .append_conversation_and_begin_turn_with_history_version(
+            candidate,
+            Some(current.conversation_revision),
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
+            &[],
+            &[assistant],
+            &trace,
+            3,
+            3,
+            None,
+            Some(&current.version),
+        )
+        .unwrap_err();
+    assert!(error.contains("Conversation changed"), "{error}");
+    assert!(service
+        .get_conversation_turn_trace("new-assistant")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        service
+            .load_conversation_for_turn("history")
+            .unwrap()
+            .0
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+}

@@ -1159,7 +1159,14 @@ fn mcp_approval_payload_store(storage: Arc<StorageService>) -> Arc<dyn McpApprov
     durable_mcp_payload_store_or_process_only(repository, mcp_approval_credential_store())
 }
 
+#[cfg(test)]
+static ACCEPTANCE_STDIO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn uses_development_image_generation_credentials() -> bool {
+    #[cfg(test)]
+    if ACCEPTANCE_STDIO.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
     #[cfg(target_os = "macos")]
     {
         !macos_core_server_has_stable_signing_identity()
@@ -1417,4 +1424,22 @@ mod mcp_payload_bootstrap_tests {
         );
         reconciler.shutdown().await.unwrap();
     }
+}
+
+// Explicit isolated test process only. The regular executable cannot select this entry or
+// enable test-support HTTP; production bootstrap/request-loop/Host transport stay unchanged.
+#[cfg(test)]
+#[test]
+#[ignore = "isolated Electron acceptance driver supplies temporary application data and fake provider"]
+fn acceptance_stdio_server() {
+    let root = std::env::var_os("MYCOPILOT_APP_DATA_ROOT").expect("explicit temporary data root");
+    let root = std::fs::canonicalize(root).expect("existing test data root");
+    let temporary = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    assert!(root.starts_with(temporary));
+    assert!(root.components().any(|part| part
+        .as_os_str()
+        .to_string_lossy()
+        .starts_with("captain-acceptance-")));
+    ACCEPTANCE_STDIO.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::main().expect("isolated real stdio server");
 }

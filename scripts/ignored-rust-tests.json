@@ -105,6 +105,13 @@
       "owner": "playwright-runtime",
       "reason": "Requires the managed Playwright Electron fixture wrapper.",
       "runner": "src/main/core/managedPlaywrightBridge.electron.test.ts"
+    },
+    {
+      "file": "crates/core-server/src/transport/bootstrap.rs",
+      "name": "acceptance_stdio_server",
+      "owner": "core-runtime",
+      "reason": "Explicit isolated Electron acceptance process; uses real stdio loop with temporary data and loopback fake provider.",
+      "status": "manual"
     }
   ]
 }

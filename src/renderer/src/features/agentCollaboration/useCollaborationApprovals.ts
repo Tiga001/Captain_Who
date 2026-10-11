@@ -43,13 +43,19 @@ export function useCollaborationApprovals({
   const inFlightRef = useRef(new Set<string>())
   const decisionStatusesRef = useRef(new Map<string, CollaborationApprovalStatus>())
   const rootConversationIdRef = useRef(rootConversationId)
+  const enabledRef = useRef(enabled)
   // A new root must not wait for a slow read belonging to the previous root.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const refreshQueue = useMemo(() => new TrailingRefresh(), [enabled, rootConversationId])
 
   useEffect(() => {
     rootConversationIdRef.current = rootConversationId
-  }, [rootConversationId])
+    enabledRef.current = enabled
+    generationRef.current += 1
+    return () => {
+      generationRef.current += 1
+    }
+  }, [enabled, rootConversationId])
 
   const applyAuthoritativeDecisionStatus = useCallback(
     (decisionRootConversationId: string, result: CollaborationApprovalDecisionResult) => {
@@ -77,10 +83,13 @@ export function useCollaborationApprovals({
   const refresh = useCallback(() => {
     // A decision may finish after navigation and still hold this root's refresh callback.
     // Ignore it before touching either the active scope or its request generation.
-    if (rootConversationIdRef.current !== rootConversationId) return Promise.resolve()
-    const generation = ++generationRef.current
+    if (rootConversationIdRef.current !== rootConversationId || enabledRef.current !== enabled)
+      return Promise.resolve()
+    // Invalidation makes this scope dirty; it does not revoke its already authorized read.
+    // Otherwise notifications arriving faster than RPC completion can starve every snapshot.
+    const generation = generationRef.current
     return refreshQueue.request(async () => {
-      // A queued read can be superseded by navigation or a newer invalidation before it starts.
+      // Navigation, disable and unmount retire both active and queued reads from the old scope.
       if (generationRef.current !== generation) return
       setApprovalsRootConversationId((currentRootConversationId) => {
         if (currentRootConversationId !== rootConversationId) {
@@ -128,9 +137,6 @@ export function useCollaborationApprovals({
 
   useEffect(() => {
     void refresh()
-    return () => {
-      generationRef.current += 1
-    }
   }, [invalidationSequence, refresh])
 
   const decide = useCallback<CollaborationApprovalDecisionHandler>(

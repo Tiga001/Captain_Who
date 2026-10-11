@@ -175,6 +175,12 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
 
     let settled = storage.load_conversation(ID).unwrap().unwrap();
     let previous_revision = storage.load_conversation_for_turn(ID).unwrap().1.unwrap();
+    // The renderer's complete raw snapshot is distinct from the model-only preparation.
+    // Account this deliberate first raw load before asserting subsequent model cache reuse.
+    let terminal_history = storage
+        .load_conversation_history_snapshot(ID)
+        .unwrap()
+        .unwrap();
     let before_metadata_storage = storage.history_snapshot_diagnostics(ID);
     let before_metadata_server = service.prepared_history_diagnostics_for_test(ID);
     assert!(before_metadata_storage.full_loads > 0);
@@ -182,25 +188,35 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
     assert!(before_metadata_storage.model_context_decodes > 0);
     assert!(before_metadata_server.history_assemblies > 0);
     assert!(before_metadata_server.context_rebuilds > 0);
-    let terminal_history = storage
-        .load_conversation_history_snapshot(ID)
-        .unwrap()
-        .unwrap();
     let assistant = settled
         .messages
         .iter()
         .find(|message| message.id == first.assistant_message_id)
         .unwrap();
-    // Simulate the Renderer receiving final usage/display events after the Host has already
-    // committed the authoritative terminal trace and prepared the next-send prefix. Start with
-    // the actual canonical run projection; a fabricated partial run can be rejected/repaired
-    // before storage and would never exercise the late presentation-write regression.
-    let mut renderer_run: Value =
+    // A stale Renderer may still attempt its former final projection write after Core owns the
+    // terminal checkpoint. The complete Core projection must survive unchanged; independent UI
+    // state and metadata remain writable without invalidating the measured model prefix.
+    let core_run: Value =
         serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
-    assert_eq!(renderer_run["runId"], first.run_id);
-    assert_eq!(renderer_run["status"], "completed");
-    renderer_run["finishReason"] = json!("stop");
-    renderer_run["firstResponseAt"] = json!(assistant.created_at + 1);
+    let raw_core_run: Value = serde_json::from_str(
+        terminal_history
+            .conversation
+            .messages
+            .iter()
+            .find(|message| message.id == assistant.id)
+            .unwrap()
+            .agent_run_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(core_run["runId"], first.run_id);
+    assert_eq!(core_run["status"], "completed");
+    assert_eq!(core_run["finishReason"], "stop");
+    assert!(core_run["coreCheckpoint"]["generation"].is_string());
+    let mut renderer_run = core_run.clone();
+    renderer_run["finishReason"] = json!("length");
+    renderer_run["firstResponseAt"] = json!(core_run["firstResponseAt"].as_i64().unwrap() + 1);
     renderer_run["usage"] = serde_json::to_value(mycopilot_core::AgentUsage {
         input_tokens: Some(17),
         output_tokens: Some(5),
@@ -253,9 +269,9 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
         "late Renderer projection writes do not change model-visible history"
     );
     let latest_display = storage.load_conversation(ID).unwrap().unwrap();
-    for messages in [
-        latest_raw.conversation.messages.as_slice(),
-        &latest_display.messages,
+    for (messages, expected_run) in [
+        (latest_raw.conversation.messages.as_slice(), &raw_core_run),
+        (latest_display.messages.as_slice(), &core_run),
     ] {
         let latest_assistant = messages
             .iter()
@@ -263,8 +279,12 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
             .unwrap();
         let latest_run: Value =
             serde_json::from_str(latest_assistant.agent_run_json.as_deref().unwrap()).unwrap();
-        assert_eq!(latest_run["finishReason"], "stop");
-        assert_eq!(latest_run["firstResponseAt"], assistant.created_at + 1);
+        assert_eq!(
+            &latest_run, expected_run,
+            "a stale Renderer write cannot replace any Core-owned projection field"
+        );
+        assert_eq!(latest_assistant.content, assistant.content);
+        assert_eq!(latest_assistant.status, assistant.status);
         assert_eq!(
             serde_json::from_str::<Value>(latest_assistant.ui_state_json.as_deref().unwrap())
                 .unwrap(),
@@ -400,12 +420,13 @@ async fn continuous_warm_send_survives_metadata_and_observers_without_full_histo
         .unwrap();
     let previous_run: Value =
         serde_json::from_str(previous_assistant.agent_run_json.as_deref().unwrap()).unwrap();
-    assert_eq!(previous_run["finishReason"], "stop");
-    assert_eq!(previous_run["firstResponseAt"], assistant.created_at + 1);
+    assert_eq!(previous_run, core_run);
+    assert_eq!(previous_assistant.content, assistant.content);
+    assert_eq!(previous_assistant.status, assistant.status);
     assert_eq!(
         serde_json::from_str::<Value>(previous_assistant.ui_state_json.as_deref().unwrap())
             .unwrap(),
         json!({"favorited": true, "timelineCollapsed": false}),
-        "next-send admission must not overwrite the late Renderer projection with cached state"
+        "next-send admission must preserve the independent late Renderer UI state"
     );
 }

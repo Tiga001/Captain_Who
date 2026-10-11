@@ -292,7 +292,7 @@ fn workflow_claim_preserves_warmed_history_and_reuses_measured_prefix_without_hu
     input.assistant_message_id = Some("warmed-mail-assistant".into());
     let mut expected =
         crate::application::agent_support::conversation_history_messages_with_model_context(
-            &history.source.conversation.to_record(),
+            &history.source.conversation.to_append_record(),
             &history.source.traces,
             &history.source.model_context_logs,
             history.source.compaction_summary.as_ref(),
@@ -307,7 +307,7 @@ fn workflow_claim_preserves_warmed_history_and_reuses_measured_prefix_without_hu
         &service.skills,
         input,
         "warmed-mail-run",
-        Some(history.source.conversation.to_record()),
+        Some(history.source.conversation.to_append_record()),
         Some(history.source.conversation_revision),
         claimed,
         &|| Ok(()),

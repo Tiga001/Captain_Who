@@ -534,6 +534,22 @@ pub(crate) fn get_active_persisted_conversation(
     Ok(conversation)
 }
 
+/// Model history is never a replacement for a complete persisted/renderer conversation.
+/// Only the append-only Turn path may carry these rows into admission: historical display JSON
+/// and UI state are deliberately not selected, while all model and attachment identity is retained.
+pub(crate) fn get_active_model_history_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    let mut conversation = get_conversation_with_messages(connection, conversation_id, |c, id| {
+        list_persisted_messages_for_history(c, id, true)
+    })?;
+    if let Some(conversation) = &mut conversation {
+        retain_active_messages(connection, conversation)?;
+    }
+    Ok(conversation)
+}
+
 fn retain_active_messages(
     connection: &Connection,
     conversation: &mut ChatConversationRecord,
@@ -1945,7 +1961,21 @@ fn list_persisted_messages(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<ChatMessageRecord>> {
-    let mut statement = connection.prepare(
+    list_persisted_messages_for_history(connection, conversation_id, false)
+}
+
+fn list_persisted_messages_for_history(
+    connection: &Connection,
+    conversation_id: &str,
+    model_only: bool,
+) -> rusqlite::Result<Vec<ChatMessageRecord>> {
+    let sql = if model_only {
+        "SELECT message.id, message.role, message.content, message.created_at, message.status,
+             NULL, message.folder_references_json, NULL
+         FROM messages AS message
+         WHERE message.conversation_id = ?1
+         ORDER BY message.position ASC, message.created_at ASC"
+    } else {
         "SELECT
              message.id,
              message.role,
@@ -1959,8 +1989,9 @@ fn list_persisted_messages(
          LEFT JOIN chat_message_ui_states AS ui_state
            ON ui_state.message_id = message.id
          WHERE message.conversation_id = ?1
-         ORDER BY message.position ASC, message.created_at ASC",
-    )?;
+         ORDER BY message.position ASC, message.created_at ASC"
+    };
+    let mut statement = connection.prepare(sql)?;
 
     let mut messages: Vec<ChatMessageRecord> = statement
         .query_map(params![conversation_id], |row| {

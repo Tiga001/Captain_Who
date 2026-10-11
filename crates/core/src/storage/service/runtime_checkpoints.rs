@@ -56,6 +56,20 @@ pub enum CoreRuntimeCheckpointOutcome {
     Retired,
 }
 
+#[derive(Debug)]
+pub enum CoreRuntimeCheckpointBeginError {
+    Fenced(String),
+    Storage(String),
+}
+
+impl std::fmt::Display for CoreRuntimeCheckpointBeginError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fenced(message) | Self::Storage(message) => formatter.write_str(message),
+        }
+    }
+}
+
 impl StorageService {
     /// The caller holds the exact Run's publication gate and validates its current runtime token.
     /// A new generation retires the previous segment without replacing its persisted presentation.
@@ -65,25 +79,64 @@ impl StorageService {
         assistant_message_id: &str,
         run_id: &str,
     ) -> Result<Option<CoreRuntimeCheckpointState>, String> {
-        validate_identity(conversation_id, assistant_message_id, run_id)?;
+        self.begin_runtime_checkpoint_checked(
+            conversation_id,
+            assistant_message_id,
+            run_id,
+            None,
+            || Ok(()),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Recheck the live segment owner after writer admission and before commit. The callback
+    /// only reads short process state; it must not call storage or acquire a publication gate.
+    /// Child authority is always the captured claim, never a replacement read from the Wake.
+    pub fn begin_runtime_checkpoint_checked(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        run_id: &str,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        check_runtime: impl Fn() -> Result<(), String> + Send,
+    ) -> Result<Option<CoreRuntimeCheckpointState>, CoreRuntimeCheckpointBeginError> {
+        use CoreRuntimeCheckpointBeginError::{Fenced, Storage};
+        validate_identity(conversation_id, assistant_message_id, run_id).map_err(Storage)?;
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        let clock = || {
+            let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+            now_ms().max(started_at.saturating_add(elapsed))
+        };
         self.state.write_sync(
             conversation_id.len() + assistant_message_id.len() + run_id.len() + 4096,
             crate::storage::StorageWriteClass::Control,
-            |connection| {
-                let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage_error)?;
-                let Some((content, mut projection)) = active_projection(&transaction, conversation_id, assistant_message_id, run_id)? else { return Ok(None) };
+            move |connection| {
+                let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| Storage(storage_error(error)))?;
+                let validate = || {
+                    check_runtime().map_err(Fenced)?;
+                    if let Some(trusted) = trusted_wake {
+                        agent_graph_repository::validate_agent_wake_execution_fence(
+                            &transaction, trusted, run_id, assistant_message_id, clock,
+                        ).map_err(|error| Fenced(error.to_string()))?;
+                    }
+                    Ok::<_, CoreRuntimeCheckpointBeginError>(())
+                };
+                validate()?;
+                let Some((content, mut projection)) = active_projection(&transaction, conversation_id, assistant_message_id, run_id).map_err(Storage)? else { return Ok(None) };
                 let generation = Uuid::new_v4().to_string();
                 projection.insert("coreCheckpoint".into(), serde_json::json!({
                     "generation": generation, "sequence": 0, "fingerprint": format!("{:x}", Sha256::digest([])),
                 }));
-                let projection_json = serde_json::to_string(&projection).map_err(|error| error.to_string())?;
-                let presentation_call_ids = presentation_call_ids(&transaction, assistant_message_id, &projection_json)?;
+                let projection_json = serde_json::to_string(&projection).map_err(|error| Storage(error.to_string()))?;
+                let presentation_call_ids = presentation_call_ids(&transaction, assistant_message_id, &projection_json).map_err(Storage)?;
                 transaction.execute("UPDATE messages SET agent_run_json=?1 WHERE conversation_id=?2 AND id=?3",
-                    rusqlite::params![projection_json, conversation_id, assistant_message_id]).map_err(storage_error)?;
-                transaction.commit().map_err(storage_error)?;
+                    rusqlite::params![projection_json, conversation_id, assistant_message_id]).map_err(|error| Storage(storage_error(error)))?;
+                validate()?;
+                transaction.commit().map_err(|error| Storage(storage_error(error)))?;
                 Ok(Some(CoreRuntimeCheckpointState { generation, sequence: 0, content, projection_json, presentation_call_ids }))
             },
-        )?
+        ).map_err(Storage)?
     }
 
     /// Commits only the next checkpoint from the current generation. Fingerprints are computed
@@ -108,22 +161,7 @@ impl StorageService {
         if patch.keys().any(|key| !PATCH_KEYS.contains(&key.as_str())) {
             return Err("Runtime checkpoint contains an authoritative or unsupported field".into());
         }
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    &checkpoint.conversation_id,
-                    &checkpoint.assistant_message_id,
-                    &checkpoint.run_id,
-                    &checkpoint.generation,
-                    checkpoint.expected_sequence,
-                    checkpoint.sequence,
-                    &checkpoint.content,
-                    &patch,
-                ))
-                .map_err(|error| error.to_string())?
-            )
-        );
+        let fingerprint = checkpoint_fingerprint(checkpoint, &patch)?;
         self.state.write_sync(
             checkpoint.content.len() + checkpoint.projection_json.len() + 4096,
             crate::storage::StorageWriteClass::Normal,
@@ -232,6 +270,43 @@ fn is_display_read_tool(tool: &str) -> bool {
 
 type ActiveProjection = (String, Map<String, Value>);
 
+struct CheckpointHashWriter(Sha256);
+
+impl std::io::Write for CheckpointHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn checkpoint_fingerprint(
+    checkpoint: &CoreRuntimeCheckpoint,
+    patch: &Map<String, Value>,
+) -> Result<String, String> {
+    // Serialize the identical JSON tuple directly into SHA-256 instead of allocating another
+    // complete content/patch buffer for every checkpoint. ACK replay fingerprints stay unchanged.
+    let mut digest = CheckpointHashWriter(Sha256::new());
+    serde_json::to_writer(
+        &mut digest,
+        &(
+            &checkpoint.conversation_id,
+            &checkpoint.assistant_message_id,
+            &checkpoint.run_id,
+            &checkpoint.generation,
+            checkpoint.expected_sequence,
+            checkpoint.sequence,
+            &checkpoint.content,
+            patch,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", digest.0.finalize()))
+}
+
 fn active_projection(
     connection: &rusqlite::Connection,
     conversation_id: &str,
@@ -270,15 +345,17 @@ fn active_projection(
         .as_ref()
         .and_then(|value| value.get("status"))
         .and_then(Value::as_str)
-        .unwrap_or("running");
-    if matches!(status, "completed" | "failed" | "cancelled") {
+        .unwrap_or("running")
+        .to_owned();
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
         return Ok(None);
     }
-    if let Some(projection) = parsed.as_ref().and_then(Value::as_object) {
+    if let Some(Value::Object(projection)) = parsed {
         if chat_repository::current_agent_run_projection_is_safe_for_trace_rebuild(
-            projection, run_id,
+            &projection,
+            run_id,
         ) {
-            return Ok(Some((content, projection.clone())));
+            return Ok(Some((content, projection)));
         }
         if projection.contains_key("coreCheckpoint") {
             return Err("Stored Core runtime projection is invalid".into());
@@ -287,7 +364,7 @@ fn active_projection(
     let canonical = chat_repository::canonical_agent_run_lifecycle_projection(
         raw.as_deref(),
         run_id,
-        status,
+        &status,
         created_at,
         now_ms(),
         None,

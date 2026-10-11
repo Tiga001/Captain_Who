@@ -12,6 +12,15 @@ use serde::{Deserialize, Serialize};
 
 const MAX_ID_BYTES: usize = 512;
 
+fn notification_response_clock() -> impl Fn() -> i64 {
+    let started = std::time::Instant::now();
+    let started_at = now_ms();
+    move || {
+        let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        now_ms().max(started_at.saturating_add(elapsed))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NotificationServiceError {
     pub(crate) code: &'static str,
@@ -58,6 +67,14 @@ impl<'a> NotificationService<'a> {
         &self,
         input: NotificationBatchesClaimInputDto,
     ) -> Result<NotificationBatchesClaimOutputDto, NotificationServiceError> {
+        self.claim_with_clock(input, notification_response_clock())
+    }
+
+    fn claim_with_clock(
+        &self,
+        input: NotificationBatchesClaimInputDto,
+        clock: impl Fn() -> i64,
+    ) -> Result<NotificationBatchesClaimOutputDto, NotificationServiceError> {
         validate_schema(input.schema_version)?;
         validate_id(&input.claim_token, "claimToken")?;
         if !(5_000..=300_000).contains(&input.lease_duration_ms) {
@@ -72,12 +89,10 @@ impl<'a> NotificationService<'a> {
                 "limit",
             ));
         }
-        let now = now_ms();
         let records = self
             .storage
             .claim_pending_notification_batches(
                 &input.claim_token,
-                now,
                 i64::try_from(input.lease_duration_ms).map_err(|_| {
                     NotificationServiceError::validation(
                         "leaseDurationMs is invalid.",
@@ -87,6 +102,7 @@ impl<'a> NotificationService<'a> {
                 input.limit as usize,
             )
             .map_err(NotificationServiceError::internal)?;
+        let now = clock();
         let settings = self
             .storage
             .load_notification_settings()
@@ -95,6 +111,19 @@ impl<'a> NotificationService<'a> {
             .iter()
             .map(|record| self.batch_dto(record, &settings, now))
             .collect::<Result<Vec<_>, _>>()?;
+        // Settings/items may wait for a read connection after the writer granted the claim.
+        // Do not expose delivery authority already expired while assembling this response.
+        let completed_at = clock().max(now);
+        let batches = records
+            .iter()
+            .zip(batches)
+            .filter(|(record, _)| {
+                record
+                    .claim_expires_at
+                    .is_some_and(|expires| expires > completed_at)
+            })
+            .map(|(_, batch)| batch)
+            .collect();
         Ok(NotificationBatchesClaimOutputDto {
             schema_version: NOTIFICATION_SCHEMA_VERSION,
             claim_token: input.claim_token,
@@ -106,14 +135,22 @@ impl<'a> NotificationService<'a> {
         &self,
         input: NotificationBatchValidateInputDto,
     ) -> Result<NotificationBatchValidateOutputDto, NotificationServiceError> {
+        self.validate_with_clock(input, notification_response_clock())
+    }
+
+    fn validate_with_clock(
+        &self,
+        input: NotificationBatchValidateInputDto,
+        clock: impl Fn() -> i64,
+    ) -> Result<NotificationBatchValidateOutputDto, NotificationServiceError> {
         validate_schema(input.schema_version)?;
         validate_id(&input.batch_id, "batchId")?;
         validate_id(&input.claim_token, "claimToken")?;
-        let now = now_ms();
         let record = self
             .storage
-            .validate_claimed_notification_batch(&input.batch_id, &input.claim_token, now)
+            .validate_claimed_notification_batch(&input.batch_id, &input.claim_token)
             .map_err(NotificationServiceError::internal)?;
+        let now = clock();
         let settings = self
             .storage
             .load_notification_settings()
@@ -122,6 +159,13 @@ impl<'a> NotificationService<'a> {
             .as_ref()
             .map(|value| self.batch_dto(value, &settings, now))
             .transpose()?;
+        let completed_at = clock().max(now);
+        let batch = batch.filter(|_| {
+            record
+                .as_ref()
+                .and_then(|value| value.claim_expires_at)
+                .is_some_and(|expires| expires > completed_at)
+        });
         Ok(NotificationBatchValidateOutputDto {
             schema_version: NOTIFICATION_SCHEMA_VERSION,
             batch_id: input.batch_id,
@@ -709,3 +753,6 @@ fn decode_cursor(v: &str) -> Result<NotificationListCursor, NotificationServiceE
         id: c.id,
     })
 }
+
+#[cfg(test)]
+mod tests;

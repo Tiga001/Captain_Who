@@ -60,14 +60,17 @@ function approval(
 }
 
 function Harness({
+  enabled = true,
   rootConversationId = 'conversation-root',
   sequence
 }: {
+  enabled?: boolean
   rootConversationId?: string
   sequence: number
 }) {
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const controller = useCollaborationApprovals({
+    enabled,
     invalidationSequence: sequence,
     rootConversationId
   })
@@ -117,6 +120,40 @@ function decisionResult(
 }
 
 describe('useCollaborationApprovals', () => {
+  it('applies completed same-root reads while durable invalidations continue', async () => {
+    const reads = Array.from({ length: 4 }, () =>
+      deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
+    )
+    clients.list.mockReset()
+    for (const read of reads) clients.list.mockReturnValueOnce(read.promise)
+    const screen = await render(<Harness sequence={1} />)
+    await vi.waitFor(() => expect(clients.list).toHaveBeenCalledTimes(1))
+    for (let index = 0; index < 3; index++) {
+      await screen.rerender(<Harness sequence={index + 2} />)
+      reads[index].resolve({
+        schemaVersion: 1,
+        approvals: [approval('pending', 'conversation-root', `progress-${index}`)]
+      })
+      await expect.element(screen.getByTestId('approvals')).toHaveTextContent(`progress-${index}`)
+      await vi.waitFor(() => expect(clients.list).toHaveBeenCalledTimes(index + 2))
+    }
+    reads[3].resolve({ schemaVersion: 1, approvals: [approval('completed')] })
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('completed')
+  })
+
+  it('retires active and trailing reads when the approval scope is disabled', async () => {
+    const active = deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
+    clients.list.mockReset().mockReturnValueOnce(active.promise)
+    const screen = await render(<Harness sequence={1} />)
+    await vi.waitFor(() => expect(clients.list).toHaveBeenCalledTimes(1))
+    await screen.rerender(<Harness sequence={2} />)
+    await screen.rerender(<Harness enabled={false} sequence={2} />)
+    active.resolve({ schemaVersion: 1, approvals: [approval('pending')] })
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('empty')
+    expect(clients.list).toHaveBeenCalledTimes(1)
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('0')
+  })
+
   it('bounds an in-flight durable invalidation burst to one read and one latest trailing read', async () => {
     const pending = deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
     clients.list

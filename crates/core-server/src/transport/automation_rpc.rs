@@ -353,7 +353,13 @@ mod tests {
     fn host_notification_rpc_claims_and_acknowledges_the_durable_outbox() {
         let temporary = tempfile::tempdir().unwrap();
         let database_path = temporary.path().join("storage.sqlite");
-        let storage = StorageService::open(&database_path).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &database_path,
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         let project_id = "project-notification".to_string();
         let project = ProjectRecord::with_primary_folder(
@@ -503,7 +509,13 @@ mod tests {
     #[test]
     fn host_notification_rpc_revalidates_the_claim_at_the_native_display_boundary() {
         let temporary = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&temporary.path().join("storage.sqlite")).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &temporary.path().join("storage.sqlite"),
+            std::sync::Arc::new(
+                mycopilot_core::image_generation::InMemoryCredentialStore::default(),
+            ),
+        )
+        .unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         let project_id = "project-notification-validation".to_string();
         storage

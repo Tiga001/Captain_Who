@@ -7,9 +7,11 @@ use std::time::Duration;
 
 /// Creates a transactionally consistent SQLite snapshot and verifies it before returning.
 ///
-/// The source is opened through SQLite rather than copied as bytes, so a hot rollback journal or
-/// WAL is recovered and incorporated by SQLite itself. The caller owns target staging and remains
-/// responsible for publishing it atomically after this function closes every SQLite handle.
+/// The source is opened read-only through SQLite rather than copied as bytes, so readable WAL
+/// commits are incorporated by SQLite itself. A hot rollback journal that requires writes to
+/// recover the source is rejected; this function does not repair or mutate the original database.
+/// The caller owns target staging and remains responsible for publishing it atomically after
+/// this function closes every SQLite handle.
 pub fn create_verified_sqlite_snapshot(source: &Path, target: &Path) -> io::Result<()> {
     validate_snapshot_path(source, SnapshotPathRole::Source)?;
     validate_snapshot_path(target, SnapshotPathRole::EmptyTarget)?;

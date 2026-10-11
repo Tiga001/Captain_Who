@@ -21,6 +21,7 @@ mod notifications;
 mod reconciliation;
 mod run_attachment_files;
 mod settings;
+mod storage_faults;
 mod terminal_message_streams;
 mod trace_reconciliation;
 mod trusted_wake_admission;

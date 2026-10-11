@@ -592,10 +592,28 @@ pub fn claim_pending_notification_batches(
     lease_duration_ms: i64,
     limit: usize,
 ) -> rusqlite::Result<Vec<NotificationBatchRecord>> {
+    claim_pending_notification_batches_with_clock(
+        connection,
+        claim_token,
+        lease_duration_ms,
+        limit,
+        || now,
+    )
+}
+
+pub(crate) fn claim_pending_notification_batches_with_clock(
+    connection: &mut Connection,
+    claim_token: &str,
+    lease_duration_ms: i64,
+    limit: usize,
+    clock: impl Fn() -> i64,
+) -> rusqlite::Result<Vec<NotificationBatchRecord>> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // The writer FIFO and SQLite's own busy wait must not consume a newly granted lease.
+    let now = clock();
     if !valid_id(claim_token) || now < 0 || !(5_000..=300_000).contains(&lease_duration_ms) {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !load_notification_settings(&transaction)?.enabled {
         transaction.execute(
             "UPDATE notification_batches
@@ -629,6 +647,15 @@ pub fn claim_pending_notification_batches(
     let existing = list_notification_batches_by_claim(&transaction, claim_token, now)?;
     if !existing.is_empty() {
         transaction.rollback()?;
+        let checked_at = clock().max(now);
+        let existing = existing
+            .into_iter()
+            .filter(|record| {
+                record
+                    .claim_expires_at
+                    .is_some_and(|expires| expires > checked_at)
+            })
+            .collect();
         return Ok(existing);
     }
     let lease_expires_at = now.saturating_add(lease_duration_ms);
@@ -676,7 +703,17 @@ pub fn claim_pending_notification_batches(
         )?;
     }
     let records = list_notification_batches_by_claim(&transaction, claim_token, now)?;
+    if clock().max(now) >= lease_expires_at {
+        // A slow transaction must not publish already expired delivery authority.
+        transaction.rollback()?;
+        return Ok(Vec::new());
+    }
     transaction.commit()?;
+    // COMMIT itself can wait for durable I/O. A committed claim may already be expired when
+    // that wait ends; keep the durable fact, but never return it as live delivery authority.
+    if clock().max(now) >= lease_expires_at {
+        return Ok(Vec::new());
+    }
     Ok(records)
 }
 
@@ -686,10 +723,20 @@ pub fn validate_claimed_notification_batch(
     claim_token: &str,
     now: i64,
 ) -> rusqlite::Result<Option<NotificationBatchRecord>> {
+    validate_claimed_notification_batch_with_clock(connection, batch_id, claim_token, || now)
+}
+
+pub(crate) fn validate_claimed_notification_batch_with_clock(
+    connection: &mut Connection,
+    batch_id: &str,
+    claim_token: &str,
+    clock: impl Fn() -> i64,
+) -> rusqlite::Result<Option<NotificationBatchRecord>> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = clock();
     if !valid_id(batch_id) || !valid_id(claim_token) || now < 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let Some(record) = query_notification_batch(&transaction, batch_id)? else {
         transaction.rollback()?;
         return Ok(None);
@@ -745,7 +792,11 @@ pub fn validate_claimed_notification_batch(
         return Ok(None);
     }
     transaction.rollback()?;
-    Ok(Some(record))
+    let checked_at = clock().max(now);
+    Ok(record
+        .claim_expires_at
+        .is_some_and(|expires| expires > checked_at)
+        .then_some(record))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,6 +837,8 @@ pub fn acknowledge_notification_batch(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // This records an already attempted native delivery, not permission to start one. Keep a
+    // late receipt while its exact token still owns the claim; a successor token always fences it.
     let changed = if disposition == "delivered" {
         transaction.execute(
             "UPDATE notification_batches

@@ -4,7 +4,13 @@ const ID: &str = "prepared-history-server";
 
 fn fixture() -> (tempfile::TempDir, Arc<StorageService>, AgentService) {
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("history.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("history.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -149,7 +155,7 @@ fn history_warm_admission_preserves_cold_history_and_reuses_measured_prefix() {
     warm_preview(&service);
     let history = service.prepare_cached_history(ID).unwrap().unwrap();
     let expected = conversation_history_messages_with_model_context(
-        &history.source.conversation.to_record(),
+        &history.source.conversation.to_append_record(),
         &history.source.traces,
         &history.source.model_context_logs,
         history.source.compaction_summary.as_ref(),
@@ -165,7 +171,7 @@ fn history_warm_admission_preserves_cold_history_and_reuses_measured_prefix() {
         &service.skills,
         input(),
         "run-warm-server",
-        Some(history.source.conversation.to_record()),
+        Some(history.source.conversation.to_append_record()),
         Some(history.source.conversation_revision),
         None,
         None,
@@ -206,7 +212,7 @@ fn history_warm_baseline_does_not_survive_a_changed_model_budget() {
         &service.skills,
         request,
         "run-warm-new-budget",
-        Some(history.source.conversation.to_record()),
+        Some(history.source.conversation.to_append_record()),
         Some(history.source.conversation_revision),
         None,
         None,
@@ -231,7 +237,7 @@ fn history_warm_same_version_republish_preserves_measured_baseline() {
         &service.skills,
         input(),
         "same-version-late-publish",
-        Some(before_measurement.source.conversation.to_record()),
+        Some(before_measurement.source.conversation.to_append_record()),
         Some(before_measurement.source.conversation_revision),
         None,
         None,
@@ -295,7 +301,7 @@ fn history_warm_authoritative_change_cannot_reuse_old_measured_prefix() {
         &service.skills,
         input(),
         "changed-history-falls-back",
-        Some(current.source.conversation.to_record()),
+        Some(current.source.conversation.to_append_record()),
         Some(current.source.conversation_revision),
         None,
         None,
@@ -312,7 +318,7 @@ fn history_warm_authoritative_change_cannot_reuse_old_measured_prefix() {
 }
 
 #[test]
-fn history_warm_ui_only_updates_refresh_raw_source_without_rebuilding_model_history() {
+fn history_warm_ui_only_updates_leave_model_source_and_history_unchanged() {
     let (_directory, storage, service) = fixture();
     let preview = warm_preview(&service);
     let before = service.prepare_cached_history(ID).unwrap().unwrap();
@@ -337,8 +343,19 @@ fn history_warm_ui_only_updates_refresh_raw_source_without_rebuilding_model_hist
             after.source.conversation.messages[1]
                 .ui_state_json
                 .as_deref(),
-            state,
-            "a same-model-version cache hit must refresh its raw UI source"
+            None,
+            "model-only history never imports renderer UI state"
+        );
+        assert_eq!(
+            storage
+                .load_conversation_for_turn(ID)
+                .unwrap()
+                .0
+                .unwrap()
+                .messages[1]
+                .ui_state_json
+                .as_deref(),
+            state
         );
         assert!(Arc::ptr_eq(&before.messages, &after.messages));
         assert!(service.has_measured_prepared_history_for_test(ID));
@@ -467,6 +484,87 @@ fn history_warm_trace_change_invalidates_materials_and_measured_prefix() {
 }
 
 #[test]
+fn history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas() {
+    let (directory, storage, service) = fixture();
+    let stale = service.prepare_cached_history(ID).unwrap().unwrap();
+    let external = rusqlite::Connection::open(directory.path().join("history.sqlite")).unwrap();
+    external
+        .execute(
+            "UPDATE conversation_turn_traces SET completed_at=completed_at+1 WHERE assistant_message_id='old-assistant'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        storage.conversation_revision(ID).unwrap(),
+        Some(stale.source.conversation_revision),
+        "trace-only changes require the separate model history fence"
+    );
+    assert!(!storage
+        .is_conversation_history_snapshot_current(&stale.source.version)
+        .unwrap());
+    let error = prepare_reserved_human_turn_with_history(
+        &storage,
+        &service.skills,
+        input(),
+        "stale-trace-admission",
+        Some(stale.source.conversation.to_append_record()),
+        Some(stale.source.conversation_revision),
+        None,
+        None,
+        &|| Ok(()),
+        Some(stale),
+    )
+    .err()
+    .expect("stale trace history must reject admission");
+    assert!(
+        error.message().contains("Conversation changed"),
+        "{error:?}"
+    );
+    assert!(storage
+        .get_conversation_turn_trace("new-assistant")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        storage
+            .load_conversation(ID)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+
+    // A new coherent snapshot can still admit the exact same request; no claim or message was
+    // consumed by the stale attempt and its rejection does not prevent ordinary append work.
+    let current = service.prepare_cached_history(ID).unwrap().unwrap();
+    let expected_trace = current.source.traces[0].clone();
+    let prepared = prepare_reserved_human_turn_with_history(
+        &storage,
+        &service.skills,
+        input(),
+        "fresh-trace-admission",
+        Some(current.source.conversation.to_append_record()),
+        Some(current.source.conversation_revision),
+        None,
+        None,
+        &|| Ok(()),
+        Some(current),
+    )
+    .unwrap();
+    assert_eq!(
+        prepared
+            .agent_input
+            .messages
+            .iter()
+            .find(|message| message.message_id.as_deref() == Some("old-assistant"))
+            .unwrap()
+            .conversation_turn_trace
+            .as_ref(),
+        Some(&expected_trace)
+    );
+}
+
+#[test]
 fn history_warm_attachment_change_invalidates_materials_and_measured_prefix() {
     use base64::Engine;
 
@@ -568,7 +666,7 @@ fn assert_terminal_update_rejects_stale_measurement(change_user_prefix: bool) {
         "the unchanged terminal source is eligible for publication"
     );
 
-    let mut changed = old_history.source.conversation.to_record();
+    let mut changed = storage.load_conversation_for_turn(ID).unwrap().0.unwrap();
     let target = if change_user_prefix {
         "old-user"
     } else {
@@ -619,4 +717,95 @@ fn history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assis
 #[test]
 fn history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id() {
     assert_terminal_update_rejects_stale_measurement(false);
+}
+
+#[test]
+fn model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload() {
+    let (directory, storage, service) = fixture();
+    let external = rusqlite::Connection::open(directory.path().join("history.sqlite")).unwrap();
+    let original: String = external
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE id='old-assistant'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut display: serde_json::Value = serde_json::from_str(&original).unwrap();
+    // Enough repeated synthetic schema text to make the old source * 4 estimate exceed the
+    // existing prepared-cache budget. The actual model history remains the exact same bytes.
+    display["toolDefinitions"] = serde_json::json!([{
+        "name": "large_synthetic_schema",
+        "description": "x".repeat(17 * 1024 * 1024),
+        "parameters": {"type": "object", "properties": {}}
+    }]);
+    let display = display.to_string();
+    external
+        .execute(
+            "UPDATE messages SET agent_run_json=?1 WHERE id='old-assistant'",
+            [&display],
+        )
+        .unwrap();
+    let raw = storage
+        .load_conversation_history_snapshot(ID)
+        .unwrap()
+        .unwrap();
+    let expected = conversation_history_messages_with_model_context(
+        &raw.conversation.to_record(),
+        &raw.traces,
+        &raw.model_context_logs,
+        raw.compaction_summary.as_ref(),
+        &[],
+    )
+    .unwrap();
+    let history = service.prepare_cached_history(ID).unwrap().unwrap();
+    assert_eq!(history.source.version, raw.version);
+    assert_eq!(
+        serde_json::to_vec(history.messages.as_ref()).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    assert!(raw.estimated_bytes.saturating_mul(4) > 128 * 1024 * 1024);
+    assert!(history.source.estimated_bytes * 100 < raw.estimated_bytes);
+    let hit = service.prepare_cached_history(ID).unwrap().unwrap();
+    assert!(
+        Arc::ptr_eq(&history, &hit),
+        "model preparation still fits the unchanged cache budget"
+    );
+    let prepared = prepare_reserved_human_turn_with_history(
+        &storage,
+        &service.skills,
+        input(),
+        "narrow-history-append",
+        Some(history.source.conversation.to_append_record()),
+        Some(history.source.conversation_revision),
+        None,
+        None,
+        &|| Ok(()),
+        Some(history),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&prepared.agent_input.messages[..expected.len()]).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    let persisted: String = external
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE id='old-assistant'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        persisted, display,
+        "append admission never rewrites or strips durable display fields"
+    );
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id=?1",
+                [ID],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        4
+    );
 }

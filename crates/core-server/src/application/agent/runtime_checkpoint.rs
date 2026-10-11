@@ -41,7 +41,7 @@ struct Projection {
     sequence: u64,
     // Never discard an unacknowledged request. Even after a lost commit ACK its exact identity
     // and fingerprint must be retried before a later coalesced snapshot can advance the CAS.
-    pending: Option<CoreRuntimeCheckpoint>,
+    pending: Option<Arc<CoreRuntimeCheckpoint>>,
 }
 
 pub(super) struct RuntimeCheckpoint {
@@ -237,7 +237,7 @@ impl RuntimeCheckpoint {
                         .collect();
                     let projection_json =
                         serde_json::to_string(&patch).map_err(|e| e.to_string())?;
-                    projection.pending = Some(CoreRuntimeCheckpoint {
+                    projection.pending = Some(Arc::new(CoreRuntimeCheckpoint {
                         conversation_id: self.conversation_id.clone(),
                         assistant_message_id: self.assistant_message_id.clone(),
                         run_id: self.run_id.clone(),
@@ -246,7 +246,7 @@ impl RuntimeCheckpoint {
                         sequence: projection.sequence + 1,
                         content: projection.content.clone(),
                         projection_json,
-                    });
+                    }));
                     projection.content_dirty = false;
                 }
                 projection.pending.as_ref().unwrap().clone()

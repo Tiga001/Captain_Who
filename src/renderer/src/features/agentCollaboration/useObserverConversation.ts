@@ -8,7 +8,6 @@ import {
 } from './collaborationClient'
 import { mapObserverConversationToChat } from './observerConversationAdapter'
 import type { ObserverConversationCache } from './observerConversationCache'
-import { TrailingRefresh } from './trailingRefresh'
 import {
   applyObserverCommandEvent,
   applyObserverEnvelopeWithCursor,
@@ -47,6 +46,12 @@ type ObserverLoadWindow = {
   scopeKey: string
 }
 
+type PendingObserverLoad = {
+  window: ObserverLoadWindow
+  invalidationVersion: number | string
+  dueAt: number
+}
+
 type ObserverJournalItem =
   | {
       sequence: number
@@ -68,12 +73,14 @@ export function useObserverConversation({
   rootConversationId
 }: UseObserverConversationInput): ObserverConversationState {
   const scopeKey = `${cache?.identity ?? ''}\u0000${rootAgentId}\u0000${rootConversationId}\u0000${agentId}\u0000${conversationId}`
-  // Navigation creates an independent queue; only reads within this exact scope serialize.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const refreshQueue = useMemo(() => new TrailingRefresh(), [scopeKey])
   const requestGenerationRef = useRef(0)
   const arrivalSequenceRef = useRef(0)
-  const activeLoadWindowRef = useRef<ObserverLoadWindow | null>(null)
+  // At most one active read and one trailing read retain live events across their snapshot cut.
+  const loadWindowsRef = useRef(new Set<ObserverLoadWindow>())
+  const requestRefreshRef = useRef<{
+    scopeKey: string
+    request: (invalidationVersion: number | string) => void
+  } | null>(null)
   const overflowInvalidationRef = useRef<number | string | null>(null)
   const [reloadVersion, setReloadVersion] = useState(0)
   const [state, setState] = useState<ScopedObserverConversationState>({
@@ -98,7 +105,7 @@ export function useObserverConversation({
     [agentId, conversationId, rootAgentId, rootConversationId]
   )
   useEffect(() => {
-    activeLoadWindowRef.current = null
+    loadWindowsRef.current.clear()
     overflowInvalidationRef.current = null
     arrivalSequenceRef.current = 0
     const apply = (
@@ -127,7 +134,8 @@ export function useObserverConversation({
       }
       const sequence = ++arrivalSequenceRef.current
       const journalItem: ObserverJournalItem = { sequence, type: 'observer', envelope }
-      appendToActiveLoadWindow(activeLoadWindowRef.current, scopeKey, journalItem)
+      for (const window of loadWindowsRef.current)
+        appendToActiveLoadWindow(window, scopeKey, journalItem)
       setState((current) => {
         if (!current.conversation || current.scopeKey !== scopeKey) return current
         const projected = applyObserverEnvelopeWithCursor(
@@ -154,7 +162,8 @@ export function useObserverConversation({
       if (event.conversationId !== scope.conversationId) return
       const sequence = ++arrivalSequenceRef.current
       const journalItem: ObserverJournalItem = { sequence, type: 'command', event }
-      appendToActiveLoadWindow(activeLoadWindowRef.current, scopeKey, journalItem)
+      for (const window of loadWindowsRef.current)
+        appendToActiveLoadWindow(window, scopeKey, journalItem)
       apply((conversation, scope) => applyObserverCommandEvent(conversation, scope, event))
     })
     return () => {
@@ -167,30 +176,12 @@ export function useObserverConversation({
     const generation = requestGenerationRef.current + 1
     requestGenerationRef.current = generation
     let cancelled = false
-    const blockedOnSameInvalidation = overflowInvalidationRef.current === invalidationVersion
-    if (blockedOnSameInvalidation) return
-    overflowInvalidationRef.current = null
-    const loadWindow: ObserverLoadWindow = {
-      generation,
-      items: [],
-      overflowed: false,
-      scopeKey
-    }
-    activeLoadWindowRef.current = loadWindow
-    setState((current) => {
-      const sameScope = current.scopeKey === scopeKey
-      return {
-        conversation: sameScope ? current.conversation : null,
-        conversationId,
-        error: null,
-        loading: true,
-        rootConversationId,
-        scopeKey,
-        streamPosition: sameScope ? current.streamPosition : null
-      }
-    })
+    let activeRead = false
+    let pendingLoad: PendingObserverLoad | null = null
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    const loadWindows = loadWindowsRef.current
 
-    const load = () =>
+    const load = ({ window: loadWindow, invalidationVersion }: PendingObserverLoad) =>
       loadCollaborationObserverConversation({
         rootConversationId,
         conversationId,
@@ -198,7 +189,7 @@ export function useObserverConversation({
       })
         .then(async (observer) => {
           if (cancelled || requestGenerationRef.current !== generation) return
-          if (activeLoadWindowRef.current === loadWindow) activeLoadWindowRef.current = null
+          loadWindows.delete(loadWindow)
           if (!observer) throw new Error('Observer conversation is unavailable.')
           if (
             observer.rootConversationId !== rootConversationId ||
@@ -288,6 +279,8 @@ export function useObserverConversation({
           while (history?.hasMore && history.beforeMessageId) {
             await new Promise<void>((resolve) => setTimeout(resolve, 32))
             if (cancelled || requestGenerationRef.current !== generation) return
+            // A fresh recent page takes precedence over this read's older history pages.
+            if (pendingLoad) return
             const cursor = history.beforeMessageId
             if (seenCursors.has(cursor)) throw new Error('Observer history cursor did not advance.')
             seenCursors.add(cursor)
@@ -354,7 +347,7 @@ export function useObserverConversation({
         })
         .catch((error: unknown) => {
           if (cancelled || requestGenerationRef.current !== generation) return
-          if (activeLoadWindowRef.current === loadWindow) activeLoadWindowRef.current = null
+          loadWindows.delete(loadWindow)
           setState((current) => ({
             // A same-scope refresh is only an invalidation of freshness, not of the already
             // authorized snapshot. Keep it readable while exposing a retry. Initial loads and
@@ -369,38 +362,79 @@ export function useObserverConversation({
           }))
         })
 
-    const requestLoad = () => {
-      void refreshQueue.request(async () => {
-        // Superseded windows may still have an RPC in flight. Let that read finish, then only
-        // start the latest authorized scope's window, retaining its complete live-event journal.
-        if (!cancelled) await load()
-      })
+    const schedule = () => {
+      if (cancelled || activeRead || !pendingLoad || refreshTimer !== null) return
+      const start = () => {
+        refreshTimer = null
+        if (cancelled || !pendingLoad) return
+        const next = pendingLoad
+        pendingLoad = null
+        activeRead = true
+        setState((current) =>
+          current.scopeKey === scopeKey ? { ...current, loading: true } : current
+        )
+        void load(next).finally(() => {
+          loadWindows.delete(next.window)
+          activeRead = false
+          schedule()
+        })
+      }
+      const delay = pendingLoad.dueAt - performance.now()
+      if (delay <= 0) start()
+      else refreshTimer = setTimeout(start, delay)
     }
-    // Coalesce rapid durable invalidations while a visible snapshot and its live subscription
-    // remain available. First opens start immediately; retries keep the last readable snapshot.
-    const refreshTimer =
-      stateRef.current.scopeKey === scopeKey && stateRef.current.conversation
-        ? setTimeout(requestLoad, 75)
-        : null
-    if (refreshTimer === null) requestLoad()
+    const request = (invalidationVersion: number | string) => {
+      if (cancelled || overflowInvalidationRef.current === invalidationVersion) return
+      overflowInvalidationRef.current = null
+      if (pendingLoad) {
+        pendingLoad.invalidationVersion = invalidationVersion
+      } else {
+        const window: ObserverLoadWindow = {
+          generation,
+          items: [],
+          overflowed: false,
+          scopeKey
+        }
+        loadWindows.add(window)
+        pendingLoad = {
+          window,
+          invalidationVersion,
+          // A fixed window has a bounded wait even when notifications never become quiet.
+          dueAt:
+            performance.now() +
+            (stateRef.current.scopeKey === scopeKey && stateRef.current.conversation ? 75 : 0)
+        }
+      }
+      setState((current) => {
+        const sameScope = current.scopeKey === scopeKey
+        return {
+          conversation: sameScope ? current.conversation : null,
+          conversationId,
+          error: null,
+          loading: true,
+          rootConversationId,
+          scopeKey,
+          streamPosition: sameScope ? current.streamPosition : null
+        }
+      })
+      schedule()
+    }
+    requestRefreshRef.current = { scopeKey, request }
 
     return () => {
       cancelled = true
       if (refreshTimer !== null) clearTimeout(refreshTimer)
-      if (activeLoadWindowRef.current === loadWindow) activeLoadWindowRef.current = null
+      for (const window of loadWindows) {
+        if (window.generation === generation) loadWindows.delete(window)
+      }
+      if (requestRefreshRef.current?.request === request) requestRefreshRef.current = null
     }
-  }, [
-    cache,
-    agentId,
-    conversationId,
-    invalidationVersion,
-    reloadVersion,
-    refreshQueue,
-    rootAgentId,
-    rootConversationId,
-    scope,
-    scopeKey
-  ])
+  }, [cache, agentId, conversationId, rootAgentId, rootConversationId, scope, scopeKey])
+
+  useEffect(() => {
+    if (requestRefreshRef.current?.scopeKey === scopeKey)
+      requestRefreshRef.current.request(invalidationVersion)
+  }, [invalidationVersion, reloadVersion, scopeKey])
 
   if (state.scopeKey !== scopeKey) {
     return { conversation: null, error: null, loading: true, reload }
@@ -444,5 +478,6 @@ function appendToActiveLoadWindow(
     window.overflowed = true
     return
   }
-  window.items.push(item)
+  // Active and trailing windows may observe the same event, but their coalesced suffixes differ.
+  window.items.push({ ...item })
 }

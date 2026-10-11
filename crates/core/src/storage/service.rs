@@ -103,7 +103,7 @@ pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutco
 pub use history_snapshot::ConversationHistorySnapshotDiagnostics;
 pub use history_snapshot::{
     ConversationHistoryPayload, ConversationHistorySnapshot, ConversationHistoryVersion,
-    SharedHistoryConversation,
+    ConversationModelHistorySnapshot, ModelHistoryConversation, SharedHistoryConversation,
 };
 pub use image_generation::{ResolvedGeneratedArtifactInput, ResolvedGeneratedArtifactKind};
 pub use lifecycle::*;
@@ -125,7 +125,8 @@ pub use pending_actions::{
 };
 pub use read_tool_file_context::{ReadToolFileCall, ReadToolFileContext, ReadToolFileIdentity};
 pub use runtime_checkpoints::{
-    CoreRuntimeCheckpoint, CoreRuntimeCheckpointOutcome, CoreRuntimeCheckpointState,
+    CoreRuntimeCheckpoint, CoreRuntimeCheckpointBeginError, CoreRuntimeCheckpointOutcome,
+    CoreRuntimeCheckpointState,
 };
 pub use settings::ModelProviderCredentialReconciliationReport;
 #[cfg(test)]

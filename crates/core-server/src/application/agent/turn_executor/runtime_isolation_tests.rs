@@ -31,6 +31,22 @@ fn run_before_runtime_execution_fence_hook(run_id: &str) {
     }
 }
 
+static BEFORE_RUNTIME_CHECKPOINT: Mutex<Vec<(String, RuntimeTerminalSettlementHook)>> =
+    Mutex::new(Vec::new());
+
+fn run_before_runtime_checkpoint_hook(run_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_RUNTIME_CHECKPOINT.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(id, _)| id == run_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 mod runtime_isolation_tests {
     use super::*;
     use mycopilot_core::storage::models::{ModelConfigRecord, ModelSettingsRecord};
@@ -361,7 +377,11 @@ mod runtime_isolation_tests {
         assert_terminal_worker_isolation(false, true).await;
     }
 
-    async fn assert_stale_claim_is_rejected_before_runtime(replace_token: bool, stop_tree: bool) {
+    async fn assert_stale_claim_is_rejected_before_runtime(
+        replace_token: bool,
+        stop_tree: bool,
+        checkpoint_boundary: bool,
+    ) {
         use mycopilot_core::storage::models::{ChatConversationRecord, ChatMessageRecord};
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("runtime-fence.sqlite");
@@ -505,7 +525,12 @@ mod runtime_isolation_tests {
         let (release, released) = std::sync::mpsc::channel();
         let released = Mutex::new(released);
         let release = ReleaseWorker(Some(release));
-        BEFORE_RUNTIME_EXECUTION_FENCE.lock().unwrap().push((
+        let hooks = if checkpoint_boundary {
+            &BEFORE_RUNTIME_CHECKPOINT
+        } else {
+            &BEFORE_RUNTIME_EXECUTION_FENCE
+        };
+        hooks.lock().unwrap().push((
             turn.run_id.clone(),
             Arc::new(move || {
                 entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
@@ -521,6 +546,7 @@ mod runtime_isolation_tests {
             .unwrap()
             .unwrap();
         let mut replacement_token = None;
+        let mut successor_checkpoint = None;
         if stop_tree {
             storage
                 .begin_agent_tree_run_stop_by_root_agent(
@@ -551,12 +577,59 @@ mod runtime_isolation_tests {
                 .unwrap()
                 .claim_token;
             assert_ne!(replacement_token.as_deref(), Some("original-runtime-claim"));
+            if checkpoint_boundary {
+                // Represent the successor's already-confirmed display owner. The old segment
+                // must neither replace this generation nor reach the fake model.
+                successor_checkpoint = Some(
+                    storage
+                        .begin_runtime_checkpoint(
+                            &turn.conversation_id,
+                            &turn.assistant_message_id,
+                            &turn.run_id,
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .generation,
+                );
+            }
         } else {
-            while mycopilot_core::storage::now_ms() <= lease_deadline {
+            while !checkpoint_boundary && mycopilot_core::storage::now_ms() <= lease_deadline {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
-        drop(release);
+        if checkpoint_boundary {
+            // Occupy the real isolated writer after the original final lease check passed.
+            // The checkpoint job must recheck after this queue wait, not reuse that check.
+            let blocked_storage = storage.clone();
+            let (writer_entered, writer_started) = tokio::sync::oneshot::channel();
+            let (release_writer, writer_released) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                blocked_storage
+                    .coordinate_runtime_control(move || {
+                        writer_entered.send(()).unwrap();
+                        writer_released
+                            .recv_timeout(Duration::from_secs(10))
+                            .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            writer_started.await.unwrap();
+            drop(release);
+            if !replace_token {
+                while mycopilot_core::storage::now_ms() <= lease_deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } else {
+                // Yield to the segment so its synchronous checkpoint call queues behind the
+                // held writer. The ownership assertions below do not rely on this duration.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            release_writer.send(()).unwrap();
+            writer.join().unwrap();
+        } else {
+            drop(release);
+        }
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if !service
@@ -615,6 +688,24 @@ mod runtime_isolation_tests {
                 "the failed old segment must not adopt or erase the replacement claim"
             );
         }
+        if checkpoint_boundary {
+            let stored = storage
+                .load_conversation(&turn.conversation_id)
+                .unwrap()
+                .unwrap();
+            let assistant = stored
+                .messages
+                .iter()
+                .find(|message| message.id == turn.assistant_message_id)
+                .unwrap();
+            let projection: serde_json::Value =
+                serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                projection["coreCheckpoint"]["generation"].as_str(),
+                successor_checkpoint.as_deref(),
+                "an invalid old claim cannot install or replace a checkpoint generation",
+            );
+        }
         service.blocking_work.preparation.shutdown().await;
         service.blocking_work.completion.shutdown().await;
         service.blocking_work.recovery.shutdown().await;
@@ -624,17 +715,27 @@ mod runtime_isolation_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn expired_claim_after_host_preparation_does_not_start_runtime() {
-        assert_stale_claim_is_rejected_before_runtime(false, false).await;
+        assert_stale_claim_is_rejected_before_runtime(false, false, false).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn replaced_claim_after_host_preparation_does_not_start_runtime() {
-        assert_stale_claim_is_rejected_before_runtime(true, false).await;
+        assert_stale_claim_is_rejected_before_runtime(true, false, false).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn durable_tree_stop_after_host_preparation_fences_before_token_delivery() {
-        assert_stale_claim_is_rejected_before_runtime(false, true).await;
+        assert_stale_claim_is_rejected_before_runtime(false, true, false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_writer_wait_expired_claim_preserves_generation_and_never_samples() {
+        assert_stale_claim_is_rejected_before_runtime(false, false, true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_writer_wait_replaced_claim_preserves_successor_and_never_samples() {
+        assert_stale_claim_is_rejected_before_runtime(true, false, true).await;
     }
 
     async fn assert_completion_rejection_closes_steering(control_closed: bool) {

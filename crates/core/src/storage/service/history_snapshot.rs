@@ -80,6 +80,54 @@ impl From<ChatConversationRecord> for SharedHistoryConversation {
     }
 }
 
+/// A model-only read view. Display JSON/UI state is absent from the SQL projection, never deleted
+/// from storage. Its distinct type has no full-record conversion: the explicit conversion below
+/// is solely for append-only Turn admission, which never writes historical message projections.
+#[derive(Debug, Clone)]
+pub struct ModelHistoryConversation {
+    metadata: ChatConversationMetaRecord,
+    pub messages: Arc<Vec<ChatMessageRecord>>,
+}
+impl std::ops::Deref for ModelHistoryConversation {
+    type Target = ChatConversationMetaRecord;
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+impl ModelHistoryConversation {
+    /// The resulting preparation record must only enter ordinary append admission, never full
+    /// save, rewrite, continuation or renderer presentation APIs.
+    pub fn to_append_record(&self) -> ChatConversationRecord {
+        SharedHistoryConversation {
+            metadata: self.metadata.clone(),
+            messages: self.messages.clone(),
+        }
+        .to_record()
+    }
+}
+
+/// Complete model facts plus admission evidence, without historical renderer-only JSON.
+#[derive(Debug, Clone)]
+pub struct ConversationModelHistorySnapshot {
+    pub conversation: ModelHistoryConversation,
+    pub conversation_revision: i64,
+    pub payload: Arc<ConversationHistoryPayload>,
+    pub version: ConversationHistoryVersion,
+    pub estimated_bytes: usize,
+    source: Arc<ConversationHistorySnapshot>,
+}
+impl std::ops::Deref for ConversationModelHistorySnapshot {
+    type Target = ConversationHistoryPayload;
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
+}
+impl ConversationModelHistorySnapshot {
+    pub fn shares_source_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source)
+    }
+}
+
 #[derive(Debug)]
 pub struct ConversationHistoryPayload {
     pub traces: Vec<ConversationTurnTrace>,
@@ -93,6 +141,7 @@ pub struct ConversationHistorySnapshot {
     pub conversation_revision: i64,
     presentation_revision: i64,
     ui_revision: i64,
+    model_only: bool,
     pub payload: Arc<ConversationHistoryPayload>,
     pub version: ConversationHistoryVersion,
     pub estimated_bytes: usize,
@@ -131,7 +180,8 @@ impl ConversationHistorySnapshot {
         } else {
             None
         };
-        let agent_runs = if self.presentation_revision != presentation_revision {
+        let agent_runs = if !self.model_only && self.presentation_revision != presentation_revision
+        {
             let mut statement = connection
                 .prepare(
                     "SELECT id, agent_run_json FROM messages
@@ -150,7 +200,7 @@ impl ConversationHistorySnapshot {
         } else {
             None
         };
-        let ui_states = if self.ui_revision != ui_revision {
+        let ui_states = if !self.model_only && self.ui_revision != ui_revision {
             let mut statement = connection
                 .prepare(
                     "SELECT ui.message_id, ui.ui_state_json FROM chat_message_ui_states ui
@@ -171,8 +221,16 @@ impl ConversationHistorySnapshot {
         };
         Ok(HistoryPresentationRefresh {
             conversation_revision,
-            presentation_revision,
-            ui_revision,
+            presentation_revision: if self.model_only {
+                self.presentation_revision
+            } else {
+                presentation_revision
+            },
+            ui_revision: if self.model_only {
+                self.ui_revision
+            } else {
+                ui_revision
+            },
             metadata,
             agent_runs,
             ui_states,
@@ -249,11 +307,12 @@ impl ConversationHistorySnapshotCache {
     fn get(
         &mut self,
         version: &ConversationHistoryVersion,
+        model_only: bool,
     ) -> Option<Arc<ConversationHistorySnapshot>> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.version.conversation_id == version.conversation_id)?;
+        let index = self.entries.iter().position(|entry| {
+            entry.version.conversation_id == version.conversation_id
+                && entry.model_only == model_only
+        })?;
         let entry = self.entries.remove(index)?;
         if entry.version != *version {
             self.bytes = self.bytes.saturating_sub(entry.estimated_bytes);
@@ -264,7 +323,7 @@ impl ConversationHistorySnapshotCache {
     }
 
     fn insert(&mut self, snapshot: Arc<ConversationHistorySnapshot>) -> bool {
-        self.remove(&snapshot.version.conversation_id);
+        self.remove(&snapshot.version.conversation_id, snapshot.model_only);
         if snapshot.estimated_bytes > MAX_HISTORY_SNAPSHOT_BYTES {
             return false;
         }
@@ -282,12 +341,10 @@ impl ConversationHistorySnapshotCache {
         true
     }
 
-    fn remove(&mut self, conversation_id: &str) {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.version.conversation_id == conversation_id)
-        {
+    fn remove(&mut self, conversation_id: &str, model_only: bool) {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.version.conversation_id == conversation_id && entry.model_only == model_only
+        }) {
             if let Some(entry) = self.entries.remove(index) {
                 self.bytes = self.bytes.saturating_sub(entry.estimated_bytes);
             }
@@ -416,6 +473,37 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<Arc<ConversationHistorySnapshot>>, String> {
+        self.load_history_snapshot(conversation_id, false)
+    }
+
+    /// Dedicated input for model preparation and ordinary append-only admission. It uses the
+    /// same transactional history version/metadata CAS and bounded cache as raw snapshots.
+    pub fn load_conversation_model_history_snapshot(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<Arc<ConversationModelHistorySnapshot>>, String> {
+        Ok(self
+            .load_history_snapshot(conversation_id, true)?
+            .map(|source| {
+                Arc::new(ConversationModelHistorySnapshot {
+                    conversation: ModelHistoryConversation {
+                        metadata: source.conversation.metadata.clone(),
+                        messages: source.conversation.messages.clone(),
+                    },
+                    conversation_revision: source.conversation_revision,
+                    payload: source.payload.clone(),
+                    version: source.version.clone(),
+                    estimated_bytes: source.estimated_bytes,
+                    source,
+                })
+            }))
+    }
+
+    fn load_history_snapshot(
+        &self,
+        conversation_id: &str,
+        model_only: bool,
+    ) -> Result<Option<Arc<ConversationHistorySnapshot>>, String> {
         let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let Some((version, conversation_revision)) = history_version_in_connection(
@@ -439,7 +527,7 @@ impl StorageService {
                 .history_snapshot_cache
                 .lock()
                 .map_err(|_| "历史上下文缓存状态不可用。".to_string())?
-                .get(&version);
+                .get(&version, model_only);
             if let Some(snapshot) = cached {
                 let refresh =
                     snapshot.load_presentation_refresh(&transaction, conversation_revision)?;
@@ -455,10 +543,12 @@ impl StorageService {
         }
         #[cfg(any(test, debug_assertions))]
         self.record_history_snapshot_work(conversation_id, |metrics| metrics.full_loads += 1)?;
-        let Some(mut conversation) =
+        let conversation = if model_only {
+            chat_repository::get_active_model_history_conversation(&transaction, conversation_id)
+        } else {
             chat_repository::get_active_persisted_conversation(&transaction, conversation_id)
-                .map_err(storage_error)?
-        else {
+        };
+        let Some(mut conversation) = conversation.map_err(storage_error)? else {
             return Ok(None);
         };
         let preview_attachments =
@@ -524,6 +614,7 @@ impl StorageService {
             conversation_revision,
             presentation_revision,
             ui_revision,
+            model_only,
             payload: Arc::new(ConversationHistoryPayload {
                 traces,
                 model_context_logs,
@@ -611,6 +702,7 @@ mod cache_tests {
             conversation_revision: 0,
             presentation_revision: 0,
             ui_revision: 0,
+            model_only: false,
             payload: Arc::new(ConversationHistoryPayload {
                 traces: Vec::new(),
                 model_context_logs: Vec::new(),
@@ -634,15 +726,35 @@ mod cache_tests {
         for id in 0..MAX_HISTORY_SNAPSHOTS {
             cache.insert(snapshot(id, 1));
         }
-        assert!(cache.get(&snapshot(0, 1).version).is_some());
+        assert!(cache.get(&snapshot(0, 1).version, false).is_some());
         cache.insert(snapshot(MAX_HISTORY_SNAPSHOTS, 1));
-        assert!(cache.get(&snapshot(1, 1).version).is_none());
-        assert!(cache.get(&snapshot(0, 1).version).is_some());
+        assert!(cache.get(&snapshot(1, 1).version, false).is_none());
+        assert!(cache.get(&snapshot(0, 1).version, false).is_some());
         cache.insert(snapshot(100, MAX_HISTORY_SNAPSHOT_BYTES));
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.bytes, MAX_HISTORY_SNAPSHOT_BYTES);
         assert!(!cache.insert(snapshot(101, MAX_HISTORY_SNAPSHOT_BYTES + 1)));
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.bytes, MAX_HISTORY_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn raw_and_model_snapshots_share_the_existing_cache_limits() {
+        let mut cache = ConversationHistorySnapshotCache::default();
+        let raw = snapshot(0, MAX_HISTORY_SNAPSHOT_BYTES / 2);
+        let mut model = raw.as_ref().clone();
+        model.model_only = true;
+        let model = Arc::new(model);
+        assert!(cache.insert(raw.clone()));
+        assert!(cache.insert(model.clone()));
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.bytes, MAX_HISTORY_SNAPSHOT_BYTES);
+        assert!(cache.get(&raw.version, false).is_some());
+        assert!(cache.get(&model.version, true).is_some());
+        cache.insert(snapshot(1, 1));
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.get(&raw.version, false).is_none());
+        assert!(cache.get(&model.version, true).is_some());
+        assert!(cache.bytes <= MAX_HISTORY_SNAPSHOT_BYTES);
     }
 }

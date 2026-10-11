@@ -423,7 +423,7 @@ impl AgentService {
         };
         let (previous_conversation, expected_revision) = match prepared_history.as_ref() {
             Some(history) => (
-                Some(history.source.conversation.to_record()),
+                Some(history.source.conversation.to_append_record()),
                 Some(history.source.conversation_revision),
             ),
             None => self.storage.load_conversation_for_turn(&conversation_id)?,

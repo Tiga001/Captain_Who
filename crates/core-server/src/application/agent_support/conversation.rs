@@ -66,7 +66,7 @@ pub(crate) struct PreparedConversationTurn {
 /// supplies the new input, current permissions and provider/world-state configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedConversationHistory {
-    pub(crate) source: Arc<mycopilot_core::storage::service::ConversationHistorySnapshot>,
+    pub(crate) source: Arc<mycopilot_core::storage::service::ConversationModelHistorySnapshot>,
     pub(crate) messages: Arc<Vec<AgentChatMessage>>,
     pub(crate) excluded_message_ids: Vec<String>,
 }
@@ -542,6 +542,21 @@ fn prepare_conversation_turn_from_source(
     check_execution_access: Option<&(dyn Fn() -> Result<(), AgentServiceError> + Sync)>,
     prepared_history: Option<Arc<PreparedConversationHistory>>,
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
+    if prepared_history.is_some()
+        && (!matches!(reservation, TurnReservationMode::CommitDurableLease)
+            || rewrite.is_some()
+            || automation_admission.is_some()
+            || !matches!(
+                &source,
+                ConversationTurnInputSource::Human | ConversationTurnInputSource::Workflow(_)
+            ))
+    {
+        return Err(
+            "Model-only history may only enter ordinary append Turn admission."
+                .to_string()
+                .into(),
+        );
+    }
     if rewrite.is_some() && automation_admission.is_some() {
         return Err("an automation Turn cannot be admitted as a rewrite"
             .to_string()
@@ -810,9 +825,17 @@ fn prepare_conversation_turn_from_source(
                     message.id == user_message_id || message.id == assistant_message_id
                 }) =>
         {
-            storage
-                .is_conversation_history_snapshot_current(&history.source.version)?
-                .then_some(history)
+            if !storage.is_conversation_history_snapshot_current(&history.source.version)? {
+                // The conversation revision does not cover trace-only history changes. Falling
+                // back here would discard the snapshot's separate final admission CAS and mix
+                // its old message rows with independently reloaded trace/context facts.
+                return Err(
+                    "Conversation changed after Turn preparation began; retry from fresh history."
+                        .to_string()
+                        .into(),
+                );
+            }
+            Some(history)
         }
         _ => None,
     };
@@ -1406,6 +1429,24 @@ pub(crate) fn conversation_history_messages_with_model_context(
     compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
 ) -> Result<Vec<AgentChatMessage>, String> {
+    conversation_history_messages_from_model_rows(
+        &conversation.id,
+        &conversation.messages,
+        traces,
+        model_context_logs,
+        compaction_summary,
+        excluded_message_ids,
+    )
+}
+
+pub(crate) fn conversation_history_messages_from_model_rows(
+    conversation_id: &str,
+    messages: &[ChatMessageRecord],
+    traces: &[ConversationTurnTrace],
+    model_context_logs: &[mycopilot_core::ConversationModelContextLog],
+    compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
+    excluded_message_ids: &[&str],
+) -> Result<Vec<AgentChatMessage>, String> {
     let workflow_projection_ids = traces
         .iter()
         .flat_map(|trace| &trace.items)
@@ -1425,15 +1466,14 @@ pub(crate) fn conversation_history_messages_with_model_context(
         .map(|log| (log.assistant_message_id.as_str(), log.items.as_slice()))
         .collect::<std::collections::HashMap<_, _>>();
     let covered_boundary = compaction_summary.and_then(|summary| {
-        conversation
-            .messages
+        messages
             .iter()
             .position(|message| message.id == summary.covered_through.message_id())
             .map(|index| (index, &summary.covered_through))
     });
     let completion_is_covered = |message_id: &str| {
         covered_boundary.is_some_and(|(boundary_index, cursor)| {
-            if conversation.messages[..boundary_index].iter().any(|message| message.id == message_id) {
+            if messages[..boundary_index].iter().any(|message| message.id == message_id) {
                 return true;
             }
             cursor.message_id() == message_id
@@ -1466,13 +1506,12 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
             });
         boundary_is_active_trace.then(|| {
-            conversation.messages[..boundary_index]
+            messages[..boundary_index]
                 .iter()
                 .rposition(|message| message.role == "user")
         })?
     });
-    let projected = conversation
-        .messages
+    let projected = messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
@@ -1588,7 +1627,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
                     message.id
                 )
             })?;
-            if raw_trace.conversation_id != conversation.id
+            if raw_trace.conversation_id != conversation_id
                 || raw_trace.assistant_message_id != message.id
             {
                 return Err(format!(

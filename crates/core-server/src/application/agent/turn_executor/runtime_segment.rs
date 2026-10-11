@@ -681,17 +681,44 @@ impl AgentService {
                         }
                         if prepared.is_ok() {
                             let _publication = service.run_publication.lock_conversation(&run_id);
-                            let owns_generation = service.cancellations.lock().unwrap_or_else(|e| e.into_inner())
-                                .get(&run_id).is_some_and(|current| current.shares_state_with(&cancellation_token));
-                            if !owns_generation || cancellation_token.is_cancelled() {
-                                return Err(AgentError::cancelled());
-                            }
-                            let initial = service.storage.begin_runtime_checkpoint(&conversation_id, &assistant_message_id, &run_id)
-                                .map_err(AgentError::new)?.ok_or_else(AgentError::cancelled)?;
+                            #[cfg(test)]
+                            run_before_runtime_checkpoint_hook(&run_id);
+                            let initial = service.storage.begin_runtime_checkpoint_checked(
+                                &conversation_id, &assistant_message_id, &run_id, prepared_wake.as_ref(),
+                                || {
+                                    let owns_generation = service.cancellations.lock().unwrap_or_else(|e| e.into_inner())
+                                        .get(&run_id).is_some_and(|current| current.shares_state_with(&cancellation_token));
+                                    if !owns_generation || cancellation_token.is_cancelled()
+                                        || service.runtime_stopping.load(Ordering::Acquire) {
+                                        Err("Runtime checkpoint no longer owns its live segment.".into())
+                                    } else {
+                                        Ok(())
+                                    }
+                                },
+                            ).map_err(|error| match error {
+                                mycopilot_core::storage::service::CoreRuntimeCheckpointBeginError::Fenced(error) => {
+                                    match prepared_wake.as_ref() {
+                                        Some(trusted) => runtime_wake_fence_error(trusted, error),
+                                        None => AgentError::cancelled(),
+                                    }
+                                }
+                                mycopilot_core::storage::service::CoreRuntimeCheckpointBeginError::Storage(error) => AgentError::new(error),
+                            })?.ok_or_else(AgentError::cancelled)?;
                             let checkpoint = super::runtime_checkpoint::RuntimeCheckpoint::new(
                                 service.storage.clone(), conversation_id.clone(), assistant_message_id.clone(),
                                 run_id.clone(), initial, &agent_input).map_err(AgentError::new)?;
                             *checkpoint_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(checkpoint);
+                            // The checkpoint writer can wait past this claim's deadline. Keep
+                            // this fresh check after all blocking setup, immediately before the
+                            // prepared host returns to the model task.
+                            if let Some(trusted) = prepared_wake.as_ref() {
+                                service.storage.validate_agent_wake_execution_fence(
+                                    trusted, &run_id, &assistant_message_id,
+                                ).map_err(|error| runtime_wake_fence_error(trusted, error))?;
+                            }
+                            if cancellation_token.is_cancelled() {
+                                return Err(AgentError::cancelled());
+                            }
                         }
                         prepared
                     })

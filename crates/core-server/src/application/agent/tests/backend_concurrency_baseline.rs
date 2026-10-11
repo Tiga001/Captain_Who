@@ -17,7 +17,7 @@ use std::sync::{
     Mutex,
 };
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
@@ -31,6 +31,7 @@ const FIXTURE_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 enum Work {
     Text,
     SteadyText,
+    Mixed,
     Approval,
     ApprovalBehindPreparation,
     Stop,
@@ -70,6 +71,7 @@ struct RpcSample {
     responded_us: Option<u64>,
     dispatch_admitted: bool,
     response: Option<Value>,
+    response_bytes: usize,
 }
 #[derive(Default, Serialize)]
 struct Events {
@@ -87,6 +89,9 @@ struct Events {
     output_bytes: usize,
     errors: Vec<Value>,
     timer_lag_us: Vec<u64>,
+    resource_samples: Vec<Value>,
+    #[serde(skip)]
+    ready_stops: Vec<(usize, String, String)>,
 }
 fn us(elapsed: Duration) -> u64 {
     elapsed.as_micros().min(u64::MAX as u128) as u64
@@ -104,6 +109,36 @@ fn quantiles(mut values: Vec<u64>) -> Value {
     json!({"count":values.len(),"p50_us":at(0.50),"p95_us":at(0.95),"p99_us":at(0.99),
         "max_us":values.last(),"p99_reliable":values.len() >= 10_000})
 }
+fn process_io() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        // Local SDK libproc.h / sys/resource.h, RUSAGE_INFO_V4. Counts belong to this process,
+        // not the entire device, and never stand in for fsync latency or NAND writes.
+        unsafe extern "C" {
+            fn proc_pid_rusage(
+                pid: libc::c_int,
+                flavor: libc::c_int,
+                buffer: *mut *mut libc::c_void,
+            ) -> libc::c_int;
+        }
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+        if unsafe {
+            proc_pid_rusage(
+                std::process::id() as libc::c_int,
+                4,
+                info.as_mut_ptr().cast(),
+            )
+        } == 0
+        {
+            let info = unsafe { info.assume_init() };
+            return json!({"source":"proc_pid_rusage_v4","diskio_bytes_read":info.ri_diskio_bytesread,
+                "diskio_bytes_written":info.ri_diskio_byteswritten,"logical_writes":info.ri_logical_writes,
+                "pageins":info.ri_pageins,"resident_bytes":info.ri_resident_size,"physical_footprint_bytes":info.ri_phys_footprint});
+        }
+    }
+    Value::Null
+}
+
 fn usage() -> Value {
     // getrusage maxrss is a process lifetime high-water mark, NOT per-case allocation.
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
@@ -116,7 +151,7 @@ fn usage() -> Value {
     json!({"cpu_user_seconds":time(usage.ru_utime),"cpu_system_seconds":time(usage.ru_stime),
         "process_lifetime_maxrss_raw":usage.ru_maxrss,
         "maxrss_unit":if cfg!(target_os="macos") {"bytes"} else {"KiB"},
-        "block_output_operations":usage.ru_oublock,"block_input_operations":usage.ru_inblock,
+        "process_io":process_io(),"block_output_operations":usage.ru_oublock,"block_input_operations":usage.ru_inblock,
         "voluntary_context_switches":usage.ru_nvcsw,"involuntary_context_switches":usage.ru_nivcsw})
 }
 fn disk_files(path: &Path) -> Value {
@@ -223,6 +258,26 @@ fn marker(request: &Value) -> String {
     }
     "unknown".into()
 }
+fn current_tool_results(request: &Value, current_turn_only: bool) -> Vec<Value> {
+    let messages = request["messages"].as_array().unwrap();
+    let first = if current_turn_only {
+        messages
+            .iter()
+            .rposition(|message| {
+                message["role"] == "user" && text_content(&message["content"]).contains("BASELINE:")
+            })
+            .map_or(0, |index| index + 1)
+    } else {
+        0
+    };
+    messages[first..]
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| message["content"].as_str())
+        .filter_map(|text| serde_json::from_str(text).ok())
+        .collect()
+}
+
 async fn provider_response(stream: &mut tokio::net::TcpStream, request: &Value, case: &Case) {
     let unit = marker(request);
     let owner = unit
@@ -230,17 +285,17 @@ async fn provider_response(stream: &mut tokio::net::TcpStream, request: &Value, 
         .nth(1)
         .and_then(|part| part.parse::<usize>().ok())
         .unwrap_or(0);
-    let needs_approval = matches!(case.work, Work::Approval)
+    let wave = unit
+        .split("-wave-")
+        .nth(1)
+        .and_then(|part| part.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mixed = matches!(case.work, Work::Mixed);
+    let needs_approval = mixed && wave % 5 == 3
+        || matches!(case.work, Work::Approval)
         || matches!(case.work, Work::ApprovalBehindPreparation) && owner == 0
         || matches!(case.work, Work::SlowTool) && owner != 0;
-    let tool_results = request["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "tool")
-        .filter_map(|message| message["content"].as_str())
-        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
-        .collect::<Vec<_>>();
+    let tool_results = current_tool_results(request, mixed);
     if matches!(case.work, Work::Tree) && !unit.contains("child") && tool_results.is_empty() {
         let root = unit.split('-').nth(1).unwrap().parse::<usize>().unwrap();
         let children = (case.units - case.roots) / case.roots
@@ -256,9 +311,16 @@ async fn provider_response(stream: &mut tokio::net::TcpStream, request: &Value, 
             return;
         }
     }
-    if matches!(case.work, Work::Stop) {
+    if matches!(case.work, Work::Stop) || mixed && wave % 5 == 4 {
         // The test cancels an actual live provider stream, never waits 30 seconds to acknowledge.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        if mixed {
+            // Release the controlled provider's connection immediately when Core cancels it.
+            // Keeping every cancelled socket asleep for 120s would measure fixture accumulation.
+            let mut byte = [0u8; 1];
+            let _ = tokio::time::timeout(Duration::from_secs(120), stream.read(&mut byte)).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+        }
         return;
     }
     if (needs_approval || matches!(case.work, Work::SlowTool)) && tool_results.is_empty() {
@@ -301,11 +363,31 @@ async fn provider_response(stream: &mut tokio::net::TcpStream, request: &Value, 
     // Fixed output size/rate independent of concurrency. Child work holds its provider briefly
     // so actual Dispatcher overlap is observable. This is model latency, not a fake DB handler.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    write_text_stream(
-        stream,
-        &format!("Baseline complete. {}", "output ".repeat(32)),
-    )
-    .await;
+    if mixed {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Same complete 243-byte answer as the baseline, delivered over 320ms to exercise ticks.
+        let content = format!("Baseline complete. {}", "output ".repeat(32));
+        for chunk in content.as_bytes().chunks(16) {
+            let frame = json!({"choices":[{"delta":{"content":std::str::from_utf8(chunk).unwrap()},"finish_reason":null}]});
+            stream
+                .write_all(format!("data: {frame}\n\n").as_bytes())
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stream.write_all(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").await.unwrap();
+    } else {
+        write_text_stream(
+            stream,
+            &format!("Baseline complete. {}", "output ".repeat(32)),
+        )
+        .await;
+    }
 }
 async fn provider(
     case: Case,
@@ -406,6 +488,7 @@ fn submit(
                 responded_us: None,
                 dispatch_admitted: false,
                 response: None,
+                response_bytes: 0,
             },
         );
     });
@@ -427,6 +510,7 @@ fn submit(
             Ok(()) => record.dispatch_admitted = true,
             Err(response) => {
                 record.responded_us = Some(us(epoch.elapsed()));
+                record.response_bytes = response.to_string().len();
                 record.response = Some(response);
             }
         }
@@ -446,7 +530,7 @@ fn root_input(unit: usize, wave: usize, case: &Case) -> Value {
         "contextWindowIndicatorEnabled":true,"content":format!("Complete synthetic task. BASELINE:root-{unit}-wave-{wave}"),
         "attachments":[],"folderReferences":[],"skills":[],"userMessageId":format!("input-{unit}-{wave}"),
         "assistantMessageId":format!("output-{unit}-{wave}"),"permissions":AgentPermissions {
-            command:if matches!(case.work,Work::Approval|Work::ApprovalBehindPreparation) || matches!(case.work,Work::SlowTool) && unit != 0 {mycopilot_core::AgentCommandPermission::RequireApproval}else{mycopilot_core::AgentCommandPermission::AutoApprove},
+            command:if matches!(case.work, Work::Mixed) && wave % 5 == 3 || matches!(case.work,Work::Approval|Work::ApprovalBehindPreparation) || matches!(case.work,Work::SlowTool) && unit != 0 {mycopilot_core::AgentCommandPermission::RequireApproval}else{mycopilot_core::AgentCommandPermission::AutoApprove},
             write:AgentWritePermission::WorkspaceOnly,
             command_safety:mycopilot_core::AgentCommandSafetyPolicy::FullAccess,..AgentPermissions::default()}})
 }
@@ -460,7 +544,20 @@ fn expected_load_rejection(operation: &str, response: &Value) -> bool {
                 || error["message"] == "Agent 全局并发上限为 50，请等待正在执行的 Turn 完成。"))
 }
 
+fn mixed_interval_ms(case: &Case) -> u64 {
+    if matches!(case.work, Work::Mixed) {
+        std::env::var("BACKEND_BASELINE_INTERVAL_MS")
+            .ok()
+            .map(|value| value.parse().expect("integer interval"))
+            .unwrap_or(2_000)
+    } else {
+        2_000
+    }
+}
+
 async fn run_case(case: Case) -> Value {
+    let interval_ms = mixed_interval_ms(&case);
+    assert!((250..=10_000).contains(&interval_ms));
     let fixture = tempdir().unwrap();
     let path = fixture.path().join("baseline.sqlite");
     let cold = Instant::now();
@@ -502,8 +599,10 @@ async fn run_case(case: Case) -> Value {
     let service = AgentService::new(storage.clone());
     // Match the Host's finite lease renewal, without extending the production 60s TTL or
     // bypassing admission checks. The fixture renews only for its bounded planned lifetime.
-    let execution_access_coverage_ms =
-        case.waves.saturating_sub(1) as u64 * 2_000 + case.slow_seconds * 1_000 + 25 + 300_000;
+    let execution_access_coverage_ms = case.waves.saturating_sub(1) as u64 * interval_ms
+        + case.slow_seconds * 1_000
+        + 25
+        + 300_000;
     let authorization_started = tokio::time::Instant::now();
     let authorization_deadline =
         authorization_started + Duration::from_millis(execution_access_coverage_ms);
@@ -569,7 +668,39 @@ async fn run_case(case: Case) -> Value {
                 if let Some(id) = value["id"].as_i64() {
                     if let Some(record) = state.rpcs.get_mut(&id) {
                         record.responded_us = Some(us(epoch.elapsed()));
-                        record.response = Some(value);
+                        record.response_bytes = value.to_string().len();
+                        // Bound the harness itself: never retain full growing history responses.
+                        record.response = Some(
+                            if record.operation == "storage.loadConversation"
+                                && value["result"].is_object()
+                            {
+                                json!({"id":id,"result":{"observed":true,"id":value["result"]["id"],"messages":value["result"]["messages"].as_array().map(Vec::len)}})
+                            } else {
+                                value
+                            },
+                        );
+                    }
+                    if let Some(record) = state.rpcs.get(&id) {
+                        if record.operation == AGENT_START_CONVERSATION_TURN_METHOD {
+                            if let Some(key) = record.provider_key.as_ref().filter(|key| {
+                                key.split("-wave-")
+                                    .nth(1)
+                                    .and_then(|wave| wave.parse::<usize>().ok())
+                                    .is_some_and(|wave| wave % 5 == 4)
+                            }) {
+                                if let Some(run) = record
+                                    .response
+                                    .as_ref()
+                                    .and_then(|response| response["result"]["runId"].as_str())
+                                {
+                                    state.ready_stops.push((
+                                        record.owner,
+                                        run.to_owned(),
+                                        key.clone(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                     return;
                 }
@@ -653,9 +784,126 @@ async fn run_case(case: Case) -> Value {
     let start_at = tokio::time::Instant::now() + Duration::from_millis(25);
     let scheduled_epoch = us(epoch.elapsed()) + 25_000;
     let mut next_id = 1_i64;
+    let mut controlled = HashSet::<String>::new();
+    let mut next_read = scheduled_epoch;
+    let mut next_resource = scheduled_epoch;
+    let mut read_owner = 0;
+    let mut drive_mixed = |next_id: &mut i64| {
+        if !matches!(case.work, Work::Mixed) {
+            return;
+        }
+        let now = us(epoch.elapsed());
+        // Read frequency is fixed and independent of response/completion; overload is retained.
+        while now >= next_read
+            && next_read
+                <= scheduled_epoch + case.waves.saturating_sub(1) as u64 * interval_ms * 1_000
+        {
+            submit(
+                &rpc,
+                &storage,
+                &service,
+                &outbound,
+                &events,
+                epoch,
+                *next_id,
+                read_owner,
+                "background_query",
+                next_read,
+                "storage.loadConversation",
+                json!({"conversationId":format!("baseline-{read_owner}")}),
+            );
+            *next_id += 1;
+            read_owner = (read_owner + 1) % case.roots;
+            next_read += 500_000;
+        }
+        for action in service.list_pending_actions() {
+            if controlled.insert(action.run_id.clone()) {
+                let owner = events
+                    .lock()
+                    .unwrap()
+                    .rpcs
+                    .values()
+                    .find(|record| {
+                        record
+                            .response
+                            .as_ref()
+                            .is_some_and(|response| response["result"]["runId"] == action.run_id)
+                    })
+                    .map(|record| record.owner)
+                    .unwrap_or(0);
+                submit(
+                    &rpc,
+                    &storage,
+                    &service,
+                    &outbound,
+                    &events,
+                    epoch,
+                    *next_id,
+                    owner,
+                    "mixed_approval",
+                    now,
+                    AGENT_APPROVE_ACTION_METHOD,
+                    json!({"runId":action.run_id,"actionId":action.action_id,"approvalScope":"singleAction"}),
+                );
+                *next_id += 1;
+            }
+        }
+        let stops = {
+            let mut state = events.lock().unwrap();
+            let pending = std::mem::take(&mut state.ready_stops);
+            let mut ready = Vec::new();
+            for (owner, run, key) in pending {
+                if state.provider_first_us.contains_key(&key) {
+                    ready.push((owner, run));
+                } else {
+                    state.ready_stops.push((owner, run, key));
+                }
+            }
+            ready
+        };
+        for (owner, run) in stops {
+            if controlled.insert(run.clone()) {
+                submit(
+                    &rpc,
+                    &storage,
+                    &service,
+                    &outbound,
+                    &events,
+                    epoch,
+                    *next_id,
+                    owner,
+                    "mixed_stop",
+                    now,
+                    AGENT_CANCEL_RUN_METHOD,
+                    json!({"runId":run}),
+                );
+                *next_id += 1;
+            }
+        }
+        if now >= next_resource {
+            sample(&events, |state| {
+                state.resource_samples.push(json!({"at_us":now,
+                "active_turns":service.turn_concurrency_gate().active(),"disk":disk_files(&path),
+                "usage":usage(),"queues":mycopilot_core::performance::take_queue_snapshot()}))
+            });
+            next_resource += 1_000_000;
+        }
+    };
     for wave in 0..case.waves {
         // Open-loop offers: no response or previous run is awaited before the next scheduled wave.
-        tokio::time::sleep_until(start_at + Duration::from_millis(wave as u64 * 2_000)).await;
+        let deadline = start_at + Duration::from_millis(wave as u64 * interval_ms);
+        if matches!(case.work, Work::Mixed) {
+            while tokio::time::Instant::now() < deadline {
+                drive_mixed(&mut next_id);
+                tokio::time::sleep_until(
+                    deadline.min(tokio::time::Instant::now() + Duration::from_millis(20)),
+                )
+                .await;
+            }
+            drive_mixed(&mut next_id);
+        } else {
+            tokio::time::sleep_until(deadline).await;
+        }
         let phase = if wave == 0 {
             "cold_history"
         } else {
@@ -676,11 +924,28 @@ async fn run_case(case: Case) -> Value {
                 next_id,
                 owner,
                 phase,
-                scheduled_epoch + wave as u64 * 2_000_000,
+                scheduled_epoch + wave as u64 * interval_ms * 1_000,
                 AGENT_START_CONVERSATION_TURN_METHOD,
                 root_input(owner, wave, &case),
             );
             next_id += 1;
+        }
+    }
+    if matches!(case.work, Work::Mixed) {
+        let drain = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            drive_mixed(&mut next_id);
+            let awaiting = {
+                let state = events.lock().unwrap();
+                state.rpcs.values().any(|record| record.response.is_none())
+            };
+            if !awaiting && service.turn_concurrency_gate().active() == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= drain {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
     let starts_responded = until(Duration::from_secs(60), || {
@@ -832,6 +1097,7 @@ async fn run_case(case: Case) -> Value {
     // and perform a separately labelled cleanup later; never pretend every run completed.
     let has_rejected_control = events.lock().unwrap().rpcs.values().any(|r| {
         r.operation != AGENT_START_CONVERSATION_TURN_METHOD
+            && r.operation != "storage.loadConversation"
             && r.response
                 .as_ref()
                 .is_some_and(|v| v.get("error").is_some())
@@ -1003,6 +1269,7 @@ async fn run_case(case: Case) -> Value {
         AGENT_START_CONVERSATION_TURN_METHOD,
         AGENT_APPROVE_ACTION_METHOD,
         AGENT_CANCEL_RUN_METHOD,
+        "storage.loadConversation",
     ] {
         let records = state
             .rpcs
@@ -1036,11 +1303,12 @@ async fn run_case(case: Case) -> Value {
         fairness.insert(owner,json!({"offered":records.len(),"responses":records.iter().filter(|r|r.response.is_some()).count(),
             "scheduled_to_response":quantiles(records.iter().filter_map(|r|r.responded_us.map(|v|v.saturating_sub(r.scheduled_us))).collect())}));
     }
-    let mut report = json!({"kind":"backend_concurrency_case","format_version":1,"case":case,"name":case.name(),
+    let mut report = json!({"kind":"backend_concurrency_case","format_version":2,"case":case,"name":case.name(),
         "boundary":"scheduled Core intake -> production bounded dispatcher -> real handler -> AgentService -> SQLite/local provider/tools -> outbound receipt; no Electron/renderer",
         "build_profile":if cfg!(debug_assertions){"debug"}else{"release"},
         "runtime_workers":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),
-        "fixture_provider_threads":1,"logical_turn_limit":50,"fixed_wave_interval_ms":2_000,
+        "fixture_provider_threads":1,"logical_turn_limit":50,"fixed_wave_interval_ms":interval_ms,
+        "mixed_workload":if matches!(case.work,Work::Mixed) {json!({"stream_chunk_bytes":16,"stream_interval_ms":20,"query_interval_ms":500,"cycle":["text","text","text","approval","stop"]})} else {Value::Null},
         "fixture_context_window_tokens":fixture_context_window_tokens,
         "execution_access_fixture":{"lease_ttl_ms":60_000,"refresh_interval_ms":20_000,
             "planned_coverage_ms":execution_access_coverage_ms,"actual_renewal_task_ms":execution_access_actual_ms,
@@ -1077,7 +1345,7 @@ async fn run_case(case: Case) -> Value {
         .map(|(_, response)| response)
         .collect::<Vec<_>>();
     let measurements = json!({"metrics":metrics,"fairness_by_synthetic_owner":fairness,"stage_metrics":perf,
-        "queue_metrics":queue_metrics,"unexpected_rpc_errors":unexpected,
+        "queue_metrics":queue_metrics,"queue_metrics_scope":if matches!(case.work, Work::Mixed) {"final_window; aggregate all raw.resource_samples windows for case peaks"} else {"whole_case"},"unexpected_rpc_errors":unexpected,
         "timer_lag":quantiles(state.timer_lag_us.clone()),"resources_before":before,"resources_after":after,
         "disk_after":disk,"provider_peak_connections":provider_peak.load(Ordering::SeqCst),
         "outbound":{"peak_bytes":outbound_stats.peak_bytes,"peak_frames":outbound_stats.peak_frames,
@@ -1204,6 +1472,31 @@ fn backend_concurrency_disk_baseline() {
             waves: 31,
         });
     }
+    if std::env::var("BACKEND_BASELINE_MODE").as_deref() == Ok("soak") {
+        let units = std::env::var("BACKEND_BASELINE_UNITS")
+            .ok()
+            .map(|value| value.parse::<usize>().expect("integer units"))
+            .unwrap_or(20);
+        assert!([1, 5, 10, 20, 50].contains(&units));
+        let interval = std::env::var("BACKEND_BASELINE_INTERVAL_MS")
+            .ok()
+            .map(|value| value.parse::<u64>().expect("integer interval"))
+            .unwrap_or(2_000);
+        let duration = std::env::var("BACKEND_BASELINE_DURATION_SECONDS")
+            .ok()
+            .map(|value| value.parse::<u64>().expect("integer duration"))
+            .unwrap_or(600);
+        assert!((10..=1_800).contains(&duration));
+        assert!((250..=10_000).contains(&interval));
+        cases = vec![Case {
+            units,
+            roots: units,
+            history_pairs: 0,
+            work: Work::Mixed,
+            slow_seconds: 0,
+            waves: (duration * 1000 / interval + 1) as usize,
+        }];
+    }
     let selected = cases
         .into_iter()
         .filter(|case| {
@@ -1294,6 +1587,7 @@ fn backend_baseline_payloads_use_current_protocol_contracts() {
     for work in [
         Work::Text,
         Work::SteadyText,
+        Work::Mixed,
         Work::Approval,
         Work::ApprovalBehindPreparation,
         Work::Stop,
@@ -1334,4 +1628,20 @@ fn backend_baseline_only_classifies_explicit_load_rejections() {
         AGENT_START_CONVERSATION_TURN_METHOD,
         &json!({"error":{"code":-32000,"message":"database error"}})
     ));
+}
+
+#[test]
+fn mixed_provider_only_consumes_tool_results_from_the_current_turn() {
+    let mut request = json!({"messages":[
+        {"role":"user","content":"BASELINE:root-0-wave-3"},
+        {"role":"tool","content":"{\"status\":\"completed\"}"},
+        {"role":"user","content":"BASELINE:root-0-wave-8"}
+    ]});
+    assert!(current_tool_results(&request, true).is_empty());
+    assert_eq!(current_tool_results(&request, false).len(), 1);
+    request["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"role":"tool","content":"{\"status\":\"completed\"}"}));
+    assert_eq!(current_tool_results(&request, true).len(), 1);
 }
