@@ -5,6 +5,155 @@ use super::mcp_fixtures::{
 };
 use super::*;
 
+#[test]
+fn mcp_invalidation_waiting_for_writer_releases_unrelated_pending_registry() {
+    use std::sync::{atomic::AtomicUsize, mpsc};
+    use std::time::Duration;
+
+    let directory = tempdir().unwrap();
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::new(InvalidatingMcpInvoker::default()));
+    let server_id = uuid::Uuid::new_v4().to_string();
+    let other_id = uuid::Uuid::new_v4().to_string();
+    let digest = "1".repeat(64);
+    let source = TestMcpActionSource {
+        server_id: &server_id,
+        scope: mycopilot_core::AgentMcpServerScope::User,
+        config_digest: &digest,
+        config_epoch: None,
+        registry_revision: 1,
+        catalog_generation: 1,
+    };
+    let now = now_ms();
+    let first = store_test_mcp_action_for_source(
+        &service,
+        "invalidation-a",
+        PendingActionStatus::Approved,
+        &source,
+        now,
+    );
+    let second = store_test_mcp_action_for_source(
+        &service,
+        "invalidation-b",
+        PendingActionStatus::Executing,
+        &source,
+        now,
+    );
+    let unrelated = store_test_mcp_action_for_source(
+        &service,
+        "invalidation-unrelated",
+        PendingActionStatus::Pending,
+        &TestMcpActionSource {
+            server_id: &other_id,
+            ..source
+        },
+        now,
+    );
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (selected_tx, selected_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let (independent_tx, independent_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            storage
+                .coordinate_runtime_control(move || {
+                    holding_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                    Ok(())
+                })
+                .unwrap()
+        });
+        holding_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let service = &service;
+        let server_id = &server_id;
+        scope.spawn(move || {
+            let matched = AtomicUsize::new(0);
+            let result = service.invalidate_mcp_actions_matching(
+                McpStartupActionTerminalOutcome::PolicyDenied,
+                "test invalidation failed",
+                |approval| {
+                    let selected = approval.identity.provenance.server_id == *server_id;
+                    // Both selected Runs have been discovered and re-read under their complete
+                    // decision reservation. The next blocking boundary is the held writer.
+                    if selected && matched.fetch_add(1, Ordering::SeqCst) == 3 {
+                        selected_tx.send(()).unwrap();
+                    }
+                    selected
+                },
+            );
+            done_tx.send(result).unwrap();
+        });
+        let selected = selected_rx.recv_timeout(Duration::from_secs(2));
+        let unrelated_id = &unrelated.0;
+        scope.spawn(move || {
+            let _decision = service
+                .action_admission
+                .lock_conversation("invalidation-unrelated");
+            let record = service.pending_action_snapshot(unrelated_id);
+            let token = AgentCancellationToken::default();
+            service.register_cancellation("invalidation-unrelated", token.clone());
+            service.unregister_cancellation_if_current("invalidation-unrelated", &token);
+            independent_tx
+                .send(record.map(|record| record.snapshot.status))
+                .unwrap();
+        });
+        let independent = independent_rx.recv_timeout(Duration::from_secs(2));
+        let invalidation_waiting = done_rx.try_recv().is_err();
+        // Always release the controlled writer before asserting, including regression failures.
+        release_tx.send(()).unwrap();
+        assert!(
+            selected.is_ok(),
+            "invalidation did not freeze both Run owners"
+        );
+        assert!(
+            invalidation_waiting,
+            "invalidation must wait for its durable CAS"
+        );
+        assert_eq!(independent.unwrap().unwrap(), PendingActionStatus::Pending);
+        let summary = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.terminalized_before_dispatch, 1);
+        assert_eq!(summary.terminalized_outcome_unknown, 1);
+    });
+    for id in [&first.0, &second.0] {
+        assert_eq!(
+            storage
+                .get_pending_agent_action(id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert!(service.pending_action_snapshot(id).is_err());
+    }
+    assert_eq!(
+        storage
+            .get_pending_agent_action(&unrelated.0)
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+}
+
 #[derive(Clone)]
 struct TestMcpActionSource<'a> {
     server_id: &'a str,

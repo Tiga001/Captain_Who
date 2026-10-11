@@ -82,6 +82,36 @@ fn run_approval_decision_barrier_hook(action_id: &str, decision: AgentApprovalDe
     }
 }
 
+// A deterministic stand-in for slow frozen Provider/attachment validation. Unlike the entry
+// hook, this runs after the decision owns its Run gate and scoped lifecycle activity.
+#[cfg(test)]
+static FROZEN_APPROVAL_HOOKS: Mutex<Vec<(String, ApprovalDecisionBarrierHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_frozen_approval_hook(storage_id: &str, hook: ApprovalDecisionBarrierHook) {
+    FROZEN_APPROVAL_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((storage_id.to_string(), hook));
+}
+
+#[cfg(test)]
+fn run_frozen_approval_hook(storage_id: &str) {
+    let hook = {
+        let mut hooks = FROZEN_APPROVAL_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(id, _)| id == storage_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 struct BuiltinActivationSettlementGuard {
     runtime: BuiltinCapabilityRuntime,
     activation_id: CapabilityActivationId,

@@ -692,10 +692,8 @@ impl AgentService {
             let persisted = persist_terminal_with_bounded_retry(
                 || {
                     let deletion_lifecycle = self
-                        .deletion_lifecycle
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                        .register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id);
+                    if deletion_lifecycle.is_err() {
                         return Err("项目或会话正在移除，无法持久化已取消命令终态。".to_string());
                     }
                     terminal.as_ref().map_err(Clone::clone).and_then(
@@ -715,11 +713,11 @@ impl AgentService {
             let pending_transition = if persisted.is_ok() {
                 persist_terminal_with_bounded_retry(
                     || {
-                        let deletion_lifecycle = self
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                        let deletion_lifecycle = self.register_lifecycle_activity(
+                            &record.agent_input,
+                            &record.snapshot.run_id,
+                        );
+                        if deletion_lifecycle.is_err() {
                             return Err(
                                 "项目或会话正在移除，无法完成已取消命令状态迁移。".to_string()
                             );
@@ -732,11 +730,9 @@ impl AgentService {
             } else {
                 Err("已取消命令终态未持久化，已保留 pending 记录供启动对账。".to_string())
             };
-            let deletion_lifecycle = self
-                .deletion_lifecycle
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if deletion_lifecycle.contains_input(&record.agent_input) {
+            let deletion_lifecycle =
+                self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id);
+            if deletion_lifecycle.is_err() {
                 drop(deletion_lifecycle);
                 self.discard_usage_context(&run_id);
                 if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {

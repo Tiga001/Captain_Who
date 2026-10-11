@@ -471,6 +471,7 @@ pub(crate) fn prepare_agent_wake_turn(
     existing: ChatConversationRecord,
     expected_revision: i64,
     wake_admission: mycopilot_core::TrustedAgentWakeTurnAdmission,
+    check_preparation: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     let model_snapshot = spawn
         .agent
@@ -513,7 +514,7 @@ pub(crate) fn prepare_agent_wake_turn(
         None,
         None,
         None,
-        None,
+        Some(check_preparation),
         None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
@@ -1107,8 +1108,8 @@ fn prepare_conversation_turn_from_source(
             } else if let Some((automation_admission, check_execution_access)) =
                 automation_admission
             {
-                // The AgentService access mutex is still held; recheck expiry after expensive
-                // preparation, immediately before the transaction creates any messages/Trace.
+                // Recheck the frozen preparation/access token after expensive work. Grant and
+                // lifecycle fence publication are ordered with the final writer transaction.
                 check_execution_access()?;
                 match storage
                     .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(

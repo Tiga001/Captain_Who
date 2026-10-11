@@ -471,6 +471,27 @@ impl StorageService {
             .map_err(unavailable)?
     }
 
+    /// Production scheduler claim: one unadmitted preparation per root, while preserving each
+    /// Agent's FIFO and all durable execution/lease checks. The clock starts after queue wait.
+    pub fn claim_next_fair_dispatchable_agent_wake(
+        &self,
+        claim_token: &str,
+    ) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+        self.state
+            .write_sync(
+                agent_job_bytes(&[claim_token]),
+                StorageWriteClass::Normal,
+                |connection| {
+                    agent_graph_repository::claim_next_fair_dispatchable_agent_wake(
+                        connection,
+                        claim_token,
+                        now_ms(),
+                    )
+                },
+            )
+            .map_err(unavailable)?
+    }
+
     pub fn recover_agent_wakes(
         &self,
         recovery_token_prefix: &str,

@@ -3,6 +3,8 @@ const FILE_EFFECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 #[cfg(not(test))]
 const FILE_EFFECT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+use super::preparing::{PreparingRegistry, PreparingScope};
+
 #[cfg(test)]
 type BeforeWaitingPersistenceHook = Arc<dyn Fn() + Send + Sync>;
 
@@ -47,18 +49,72 @@ pub(super) struct FileEffectTracker {
 pub(super) struct DeletionLifecycleState {
     projects: HashSet<String>,
     conversations: HashSet<String>,
+    project_mutations: HashMap<String, usize>,
+    mutations_idle: Arc<Condvar>,
 }
 
-/// Temporarily fences every file-producing continuation for one conversation and, when the
-/// conversation belongs to a project, for that project as well. Conversation-scoped destructive
-/// mutations use the same marker as deletion so a project deletion cannot race a message or
-/// conversation mutation in the opposite lock order.
+/// Fence only the authoritative affected conversations. A project deletion separately fences new
+/// work and waits for already registered local mutations, rather than making one conversation's
+/// file drain block every conversation in that project.
 #[derive(Debug)]
 struct ConversationMutationGuard {
     lifecycle: Arc<Mutex<DeletionLifecycleState>>,
-    conversation_id: String,
+    conversation_ids: Vec<String>,
     project_id: Option<String>,
     retain_conversation_tombstone: bool,
+    preparation: DeletionPreparationFence,
+}
+
+#[derive(Debug)]
+struct ProjectMutationGuard {
+    lifecycle: Arc<Mutex<DeletionLifecycleState>>,
+    project_id: String,
+    conversation_ids: Vec<String>,
+    retain_project_tombstone: bool,
+    preparation: DeletionPreparationFence,
+}
+
+#[derive(Debug)]
+struct DeletionPreparationFence {
+    registry: Arc<PreparingRegistry>,
+    scopes: Vec<PreparingScope>,
+    retain_tombstone: bool,
+}
+
+impl DeletionPreparationFence {
+    fn acquire(
+        registry: Arc<PreparingRegistry>,
+        scopes: Vec<PreparingScope>,
+    ) -> Result<Self, String> {
+        let mut guard = Self {
+            registry,
+            scopes: Vec::with_capacity(scopes.len()),
+            retain_tombstone: false,
+        };
+        for scope in scopes {
+            guard.registry.begin_delete_scope(&scope)?;
+            guard.scopes.push(scope);
+        }
+        Ok(guard)
+    }
+
+    fn wait_idle(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        self.scopes.iter().all(|scope| {
+            self.registry
+                .wait_scope_idle(scope, timeout.saturating_sub(started.elapsed()))
+        })
+    }
+}
+
+impl Drop for DeletionPreparationFence {
+    fn drop(&mut self) {
+        if !self.retain_tombstone {
+            for scope in &self.scopes {
+                self.registry.clear_delete_scope(scope);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -113,34 +169,90 @@ impl DeletionLifecycleState {
 impl ConversationMutationGuard {
     fn acquire(
         lifecycle: Arc<Mutex<DeletionLifecycleState>>,
-        conversation_id: &str,
+        preparing: Arc<PreparingRegistry>,
+        mut conversation_ids: Vec<String>,
         project_id: Option<&str>,
     ) -> Result<Self, String> {
+        conversation_ids.sort();
+        conversation_ids.dedup();
+        if conversation_ids.is_empty() {
+            return Err("Conversation mutation requires a nonempty authoritative scope.".into());
+        }
         let mut state = lifecycle.lock().unwrap_or_else(|error| error.into_inner());
-        if state.conversations.contains(conversation_id)
+        if conversation_ids
+            .iter()
+            .any(|id| state.conversations.contains(id))
             || project_id.is_some_and(|project_id| state.projects.contains(project_id))
         {
             return Err(format!(
-                "conversation `{conversation_id}` already has a destructive mutation in progress"
+                "conversation `{}` already has a destructive mutation in progress",
+                conversation_ids[0]
             ));
         }
 
-        state.conversations.insert(conversation_id.to_string());
+        let preparation = DeletionPreparationFence::acquire(
+            preparing,
+            conversation_ids
+                .iter()
+                .cloned()
+                .map(PreparingScope::Conversation)
+                .collect(),
+        )?;
+        state.conversations.extend(conversation_ids.iter().cloned());
         if let Some(project_id) = project_id {
-            state.projects.insert(project_id.to_string());
+            *state
+                .project_mutations
+                .entry(project_id.to_string())
+                .or_default() += 1;
         }
         drop(state);
 
         Ok(Self {
             lifecycle,
-            conversation_id: conversation_id.to_string(),
+            conversation_ids,
             project_id: project_id.map(ToString::to_string),
             retain_conversation_tombstone: false,
+            preparation,
         })
     }
 
     fn retain_conversation_tombstone(&mut self) {
         self.retain_conversation_tombstone = true;
+        self.preparation.retain_tombstone = true;
+    }
+
+    /// A durable root stop closes descendant creation before the caller re-resolves its full
+    /// tree. Install the additional exact scopes under the same writer boundary as admission.
+    fn extend_conversations(&mut self, mut conversation_ids: Vec<String>) -> Result<(), String> {
+        conversation_ids.retain(|id| !self.conversation_ids.contains(id));
+        conversation_ids.sort();
+        conversation_ids.dedup();
+        if conversation_ids.is_empty() {
+            return Ok(());
+        }
+        let mut state = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if conversation_ids
+            .iter()
+            .any(|id| state.conversations.contains(id))
+        {
+            return Err("Agent tree already has a destructive mutation in progress.".into());
+        }
+        let mut extra = DeletionPreparationFence::acquire(
+            Arc::clone(&self.preparation.registry),
+            conversation_ids
+                .iter()
+                .cloned()
+                .map(PreparingScope::Conversation)
+                .collect(),
+        )?;
+        state.conversations.extend(conversation_ids.iter().cloned());
+        self.preparation.scopes.append(&mut extra.scopes);
+        self.conversation_ids.extend(conversation_ids);
+        self.conversation_ids.sort();
+        Ok(())
     }
 }
 
@@ -151,10 +263,119 @@ impl Drop for ConversationMutationGuard {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(project_id) = self.project_id.as_deref() {
-            state.projects.remove(project_id);
+            if let Some(count) = state.project_mutations.get_mut(project_id) {
+                *count -= 1;
+                if *count == 0 {
+                    state.project_mutations.remove(project_id);
+                }
+            }
         }
         if !self.retain_conversation_tombstone {
-            state.conversations.remove(&self.conversation_id);
+            for conversation_id in &self.conversation_ids {
+                state.conversations.remove(conversation_id);
+            }
+        }
+        let idle = Arc::clone(&state.mutations_idle);
+        drop(state);
+        idle.notify_all();
+    }
+}
+
+impl ProjectMutationGuard {
+    fn acquire(
+        lifecycle: Arc<Mutex<DeletionLifecycleState>>,
+        preparing: Arc<PreparingRegistry>,
+        project_id: &str,
+    ) -> Result<Self, String> {
+        let mut state = lifecycle.lock().unwrap_or_else(|error| error.into_inner());
+        if state.projects.contains(project_id) {
+            return Err(format!(
+                "project `{project_id}` already has a deletion in progress"
+            ));
+        }
+        let preparation = DeletionPreparationFence::acquire(
+            preparing,
+            vec![PreparingScope::Project(project_id.to_string())],
+        )?;
+        state.projects.insert(project_id.to_string());
+        drop(state);
+        Ok(Self {
+            lifecycle,
+            project_id: project_id.into(),
+            conversation_ids: Vec::new(),
+            retain_project_tombstone: false,
+            preparation,
+        })
+    }
+
+    fn wait_local_mutations(&self, timeout: Duration) -> bool {
+        let state = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let idle = Arc::clone(&state.mutations_idle);
+        let (state, _) = idle
+            .wait_timeout_while(state, timeout, |state| {
+                state
+                    .project_mutations
+                    .get(&self.project_id)
+                    .copied()
+                    .unwrap_or(0)
+                    != 0
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        state
+            .project_mutations
+            .get(&self.project_id)
+            .copied()
+            .unwrap_or(0)
+            == 0
+    }
+
+    fn include_conversations(&mut self, mut conversation_ids: Vec<String>) -> Result<(), String> {
+        conversation_ids.sort();
+        conversation_ids.dedup();
+        let mut state = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if conversation_ids
+            .iter()
+            .any(|id| state.conversations.contains(id))
+        {
+            return Err("Project member already has a destructive mutation in progress; retry after settlement.".into());
+        }
+        let mut extra = DeletionPreparationFence::acquire(
+            Arc::clone(&self.preparation.registry),
+            conversation_ids
+                .iter()
+                .cloned()
+                .map(PreparingScope::Conversation)
+                .collect(),
+        )?;
+        state.conversations.extend(conversation_ids.iter().cloned());
+        self.preparation.scopes.append(&mut extra.scopes);
+        self.conversation_ids = conversation_ids;
+        Ok(())
+    }
+
+    fn retain_project_tombstone(&mut self) {
+        self.retain_project_tombstone = true;
+        self.preparation.retain_tombstone = true;
+    }
+}
+
+impl Drop for ProjectMutationGuard {
+    fn drop(&mut self) {
+        if !self.retain_project_tombstone {
+            let mut state = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.projects.remove(&self.project_id);
+            for conversation_id in &self.conversation_ids {
+                state.conversations.remove(conversation_id);
+            }
         }
     }
 }
@@ -375,4 +596,121 @@ fn take_project_deletion_failure(project_id: &str) -> Option<String> {
     Some(format!(
         "injected project deletion failure for {project_id}"
     ))
+}
+
+#[cfg(test)]
+mod scoped_deletion_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_mutations_do_not_fence_other_conversations_in_same_project() {
+        let lifecycle = Arc::new(Mutex::new(DeletionLifecycleState::default()));
+        let preparing = Arc::new(PreparingRegistry::default());
+        let first = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["a".into()],
+            Some("project"),
+        )
+        .unwrap();
+        let second = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["b".into()],
+            Some("project"),
+        )
+        .unwrap();
+        assert!(!lifecycle.lock().unwrap().projects.contains("project"));
+        assert_eq!(lifecycle.lock().unwrap().project_mutations["project"], 2);
+        let unrelated = preparing
+            .register(
+                "c",
+                Some("project"),
+                "run-c",
+                "assistant-c",
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        assert!(unrelated.validate().is_ok());
+        drop(first);
+        drop(second);
+        assert!(lifecycle.lock().unwrap().project_mutations.is_empty());
+    }
+
+    #[test]
+    fn project_deletion_waits_for_local_mutations_without_holding_registry() {
+        let lifecycle = Arc::new(Mutex::new(DeletionLifecycleState::default()));
+        let preparing = Arc::new(PreparingRegistry::default());
+        let local = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["a".into()],
+            Some("project"),
+        )
+        .unwrap();
+        let project = ProjectMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            "project",
+        )
+        .unwrap();
+        assert!(!project.wait_local_mutations(Duration::from_millis(1)));
+        assert!(ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["b".into()],
+            Some("project"),
+        )
+        .is_err());
+        let unrelated = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["c".into()],
+            Some("other"),
+        )
+        .unwrap();
+        drop(local);
+        assert!(project.wait_local_mutations(Duration::from_millis(10)));
+        drop(project);
+        drop(unrelated);
+        assert!(!lifecycle.lock().unwrap().projects.contains("project"));
+    }
+
+    #[test]
+    fn failed_tree_scope_extension_does_not_leave_partial_tombstones() {
+        let lifecycle = Arc::new(Mutex::new(DeletionLifecycleState::default()));
+        let preparing = Arc::new(PreparingRegistry::default());
+        let mut first = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["root".into()],
+            None,
+        )
+        .unwrap();
+        let second = ConversationMutationGuard::acquire(
+            Arc::clone(&lifecycle),
+            Arc::clone(&preparing),
+            vec!["child-b".into()],
+            None,
+        )
+        .unwrap();
+        assert!(first
+            .extend_conversations(vec!["child-a".into(), "child-b".into()])
+            .is_err());
+        assert!(!lifecycle.lock().unwrap().conversations.contains("child-a"));
+        let free = preparing
+            .register(
+                "child-a",
+                None,
+                "run-a",
+                "assistant-a",
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        assert!(free.validate().is_ok());
+        drop(second);
+        drop(first);
+    }
 }

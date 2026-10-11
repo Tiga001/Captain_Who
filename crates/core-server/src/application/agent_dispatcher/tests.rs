@@ -1850,3 +1850,5 @@ fn zero_global_limit_is_rejected() {
 
 #[path = "blocking_tests.rs"]
 mod blocking_tests;
+#[path = "fair_preparation_tests.rs"]
+mod fair_preparation_tests;

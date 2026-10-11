@@ -69,7 +69,8 @@ pub(crate) use wake_resolution::{
     validate_agent_wake_terminal_fence,
 };
 pub use wakes::{
-    claim_next_agent_wake, claim_next_dispatchable_agent_wake, enqueue_agent_wake, get_agent_wake,
+    claim_next_agent_wake, claim_next_dispatchable_agent_wake,
+    claim_next_fair_dispatchable_agent_wake, enqueue_agent_wake, get_agent_wake,
     interrupt_agent_execution, interrupt_agent_execution_with_receipt,
     list_undispatched_agent_interrupts, mark_agent_interrupt_dispatched, recover_agent_wakes,
     renew_agent_wake_lease, transition_agent_wake,

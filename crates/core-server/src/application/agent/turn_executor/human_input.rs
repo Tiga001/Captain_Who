@@ -61,7 +61,11 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             .map(|value| value.encode())
             .map_err(|e| fail(e.to_string()))?;
         let checkpoint = serde_json::from_str(&envelope).map_err(|e| fail(e.to_string()))?;
-        let mut pending = self
+        let _decision = self
+            .service
+            .action_admission
+            .lock_conversation(&suspension.run_id);
+        let pending = self
             .service
             .pending_actions
             .lock()
@@ -86,6 +90,7 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             })
             .transpose()
             .map_err(fail)?;
+        drop(pending);
         let previous_usage = self
             .service
             .usage_contexts
@@ -114,7 +119,11 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             predecessor: self.predecessor.clone(),
             pending_action_predecessor: approval_predecessor,
         };
-        // The same lock arbitrates Stop and publication. SQLite independently checks stop/owner.
+        // Only this Run is held through durable publication. Registry reads stay short.
+        let _publication = self
+            .service
+            .run_publication
+            .lock_conversation(&suspension.run_id);
         let cancellations = self
             .service
             .cancellations
@@ -128,6 +137,7 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             restore_run_usage_state(&self.service, &suspension.run_id, &previous_usage);
             return Err(fail("question execution segment was retired".into()));
         }
+        drop(cancellations);
         let snapshot = match self
             .service
             .storage
@@ -140,7 +150,13 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
             }
         };
         if let Some((previous, target)) = &self.approval_predecessor {
-            if let Some(current) = pending.get_mut(&previous.storage_id) {
+            if let Some(current) = self
+                .service
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&previous.storage_id)
+            {
                 current.snapshot.status = *target;
             }
         }
@@ -272,8 +288,7 @@ impl AgentService {
         // available. The central root admission checks again if that Turn ends before dispatch.
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .lock_conversation(&input.conversation_id);
         let request = self
             .storage
             .get_human_interaction_request(&input.conversation_id, &input.request_id)?;
@@ -289,28 +304,32 @@ impl AgentService {
                         "Unable to check the current conversation Turn.",
                     )
                 })? {
-            let guard = self.execution_access.lock().map_err(|_| {
-                let denial = ExecutionAccessDenied::unavailable();
+            let token = self.capture_execution_access().map_err(|denial| {
                 mycopilot_core::human_interaction::HumanInteractionError::new(
                     denial.code,
                     denial.message,
                 )
             })?;
-            guard.check().map_err(|denial| {
-                mycopilot_core::human_interaction::HumanInteractionError::new(
-                    denial.code,
-                    denial.message,
-                )
-            })?;
-            Some(guard)
+            Some(token)
         } else {
             None
         };
         // Shared with native admission and waiting-state publication: a fast submission cannot
         // publish revision N+1 and then receive the retiring segment's revision N notification.
-        let _publication = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
-        let snapshot = self.storage.submit_human_interaction(input)?;
-        drop(access);
+        let _publication = self.run_publication.lock_conversation(&request.run_id);
+        let snapshot = self
+            .storage
+            .submit_human_interaction_with_execution_access(input, &|| {
+                if let Some(token) = access {
+                    self.check_execution_access_token(token).map_err(|denial| {
+                        mycopilot_core::human_interaction::HumanInteractionError::new(
+                            denial.code,
+                            denial.message,
+                        )
+                    })?;
+                }
+                Ok(())
+            })?;
         let _ = notifications.send(serde_json::json!({"jsonrpc":"2.0",
             "method":mycopilot_protocol_rs::HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,"params":snapshot}));
         Ok(snapshot)
@@ -325,7 +344,8 @@ impl AgentService {
             return;
         };
         for request in ready {
-            let mut cancellations = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
+            let _publication = self.run_publication.lock_conversation(&request.run_id);
+            let cancellations = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
             // Shutdown snapshots this same registry after publishing its fence. A resume either
             // registers before that snapshot and gets cancelled, or leaves its answer for restart.
             if self.runtime_stopping.load(Ordering::Acquire) {
@@ -334,6 +354,7 @@ impl AgentService {
             if cancellations.contains_key(&request.run_id) {
                 continue;
             }
+            drop(cancellations);
             if self
                 .ensure_turn_concurrency_permit(&request.run_id)
                 .is_err()
@@ -356,8 +377,15 @@ impl AgentService {
                 }
             };
             let token = AgentCancellationToken::default();
-            cancellations.insert(request.run_id.clone(), token.clone());
-            drop(cancellations);
+            // Shutdown may publish its global fence while this short claim waits for the writer.
+            // Register the cancelled owner so the accepted claim is settled, never abandoned.
+            if self.runtime_stopping.load(Ordering::Acquire) {
+                token.cancel();
+            }
+            self.cancellations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request.run_id.clone(), token.clone());
             let service = self.clone();
             let notifications = notifications.clone();
             tokio::spawn(async move {

@@ -11,22 +11,10 @@ impl AgentService {
         action_id: &str,
         notifications: CoreServerNotificationSender,
     ) -> Result<Option<AgentActionExecutionOutput>, String> {
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(storage_id) =
-            resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
-        else {
+        let Some(mut record) = self.pending_action_for_decision(run_id, action_id) else {
             return Ok(None);
         };
-        let record = pending_actions
-            .get(&storage_id)
-            .expect("resolved pending action exists");
+        let storage_id = record.storage_id.clone();
         let is_recoverable_approved_mcp = record.snapshot.status == PendingActionStatus::Approved
             && matches!(
                 record.snapshot.action,
@@ -40,14 +28,10 @@ impl AgentService {
         if !is_recoverable_approved_mcp {
             return Ok(None);
         }
-        self.ensure_approval_predecessors_settled(record)?;
-        let record = pending_actions
-            .get_mut(&storage_id)
-            .expect("resolved pending action exists");
-        if deletion_lifecycle.contains_input(&record.agent_input) {
-            return Err("项目或会话正在移除，无法恢复 MCP 操作。".to_string());
-        }
-        if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
+        let lifecycle_activity =
+            self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id)?;
+        self.ensure_approval_predecessors_settled(&record)?;
+        if let Err(error) = self.validate_provider_continuations_before_dispatch(&record) {
             let retired = self
                 .storage
                 .terminalize_mcp_agent_action_on_startup(
@@ -65,15 +49,22 @@ impl AgentService {
                         .to_string(),
                 );
             }
+            self.publish_pending_action_status(
+                &record,
+                PendingActionStatus::Approved,
+                PendingActionStatus::Failed,
+            )?;
             record.snapshot.status = PendingActionStatus::Failed;
             let failed_record = record.clone();
-            pending_actions.remove(&storage_id);
+            self.pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&storage_id);
             self.startup_recoverable_mcp_approvals
                 .lock()
                 .unwrap_or_else(|lock_error| lock_error.into_inner())
                 .remove(&storage_id);
-            drop(pending_actions);
-            drop(deletion_lifecycle);
+            drop(lifecycle_activity);
             self.invalidate_mcp_pending_payload(&failed_record.snapshot.action);
             if let Some(conversation_id) = failed_record.snapshot.conversation_id.as_deref() {
                 self.release_conversation_turn_if_current(
@@ -107,12 +98,25 @@ impl AgentService {
         // Preserve the frozen Provider ToolCall exactly as it appeared in the checkpoint.
         // Approval is carried by the typed action journal and lifecycle, not by rewriting the
         // append-only call from `required` to `approved` after restart.
-        let call = tool_call_for_pending_record(record)?;
-        let guard = self
-            .process_runs
-            .register(&record.storage_id, &record.snapshot.run_id);
+        let call = tool_call_for_pending_record(&record)?;
+        let guard = {
+            let lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if lifecycle.contains_input(&record.agent_input) {
+                return Err("项目或会话正在移除，无法恢复 MCP 操作。".to_string());
+            }
+            self.process_runs
+                .register(&record.storage_id, &record.snapshot.run_id)
+        };
         self.persist_pending_dispatch_status(
-            record,
+            &record,
+            PendingActionStatus::Approved,
+            PendingActionStatus::Executing,
+        )?;
+        self.publish_pending_action_status(
+            &record,
             PendingActionStatus::Approved,
             PendingActionStatus::Executing,
         )?;
@@ -121,9 +125,7 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&storage_id);
-        let record = record.clone();
-        drop(pending_actions);
-        drop(deletion_lifecycle);
+        drop(lifecycle_activity);
         self.queue_claimed_mcp_tool_execution(record, call, guard, notifications)
             .map(Some)
     }

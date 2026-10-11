@@ -10,8 +10,13 @@ use mycopilot_core::{ConversationTraceSnapshot, EnsureRootAgentInput};
 
 fn fixture() -> (tempfile::TempDir, Arc<StorageService>, AgentService) {
     let directory = tempfile::tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("awareness.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("awareness.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let service = AgentService::new_authorized_for_test(storage.clone());
     (directory, storage, service)
 }

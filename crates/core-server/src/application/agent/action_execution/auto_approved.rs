@@ -199,13 +199,9 @@ impl AgentService {
         }
         match action {
             AgentProposedAction::FileChange { file_change } => {
-                let deletion_lifecycle = self
-                    .deletion_lifecycle
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if deletion_lifecycle.contains_input(&agent_input) {
-                    return Err(AgentError::cancelled());
-                }
+                let effect_id = pending_action_storage_id(&run_id, &file_change.id);
+                let mut file_effect =
+                    self.register_file_effect(&agent_input, &run_id, &effect_id)?;
                 cancellation_token.check()?;
                 let action_id = file_change.id.clone();
                 let prepared_action = AgentProposedAction::FileChange {
@@ -226,13 +222,12 @@ impl AgentService {
                     ));
                 };
                 let mut pending = self
-                    .prepare_auto_file_change_action_journal_under_deletion_guard(
+                    .prepare_auto_file_change_action_journal(
                         &run_id,
                         conversation_id,
                         assistant_message_id,
                         prepared_action,
                         agent_input.clone(),
-                        &deletion_lifecycle,
                     )
                     .map_err(|error| {
                         eprintln!("automatic FileChange journal preparation failed: {error}");
@@ -260,6 +255,10 @@ impl AgentService {
                 }
                 let call = tool_call_for_pending_record(&pending)
                     .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
+                // Scope deletion may fence new effects while this registered one drains. An
+                // uncertain filesystem result must retain its unsettled recovery marker.
+                cancellation_token.check()?;
+                file_effect.mark_effects_started();
                 let mut execution = action_execution_for_decision(
                     &self.storage,
                     &pending,
@@ -296,7 +295,7 @@ impl AgentService {
                     notifications,
                 )
                 .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
-                drop(deletion_lifecycle);
+                file_effect.mark_durably_settled();
                 Ok(execution.tool_result)
             }
             AgentProposedAction::Command { command } => {

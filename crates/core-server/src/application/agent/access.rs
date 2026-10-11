@@ -103,6 +103,9 @@ impl AgentService {
     /// registries are held by persistence paths, so transport must call this in a bounded blocking
     /// worker, never while reading stdin. Handlers still perform their normal authorization.
     pub(crate) fn conversation_id_for_run(&self, run_id: &str) -> Option<String> {
+        if let Some(preparation) = self.preparing.snapshot_run(run_id) {
+            return Some(preparation.token.conversation_id);
+        }
         // Do not retain a registry guard across the next registry or SQLite fallback. In
         // particular an unknown/retired run must not hold active_runs while waiting for storage.
         let conversation = {

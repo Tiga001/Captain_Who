@@ -467,11 +467,11 @@ impl AgentService {
                             .cloned();
                         let persisted = persist_terminal_with_bounded_retry(
                             || {
-                                let deletion_lifecycle = service
-                                    .deletion_lifecycle
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner());
-                                if deletion_lifecycle.contains_input(&record.agent_input) {
+                                let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &record.agent_input,
+                                    &record.snapshot.run_id,
+                                );
+                                if deletion_lifecycle.is_err() {
                                     return Err("项目或会话正在移除，无法持久化审批续跑终态。".to_string());
                                 }
                                 match owner_ids {
@@ -505,11 +505,11 @@ impl AgentService {
                         let pending_transition = if persisted.is_ok() {
                             persist_terminal_with_bounded_retry(
                                 || {
-                                    let deletion_lifecycle = service
-                                        .deletion_lifecycle
-                                        .lock()
-                                        .unwrap_or_else(|error| error.into_inner());
-                                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                                    let deletion_lifecycle = service.register_lifecycle_activity(
+                                        &record.agent_input,
+                                        &record.snapshot.run_id,
+                                    );
+                                    if deletion_lifecycle.is_err() {
                                         return Err(
                                             "项目或会话正在移除，无法完成审批状态迁移。".to_string()
                                         );
@@ -537,11 +537,11 @@ impl AgentService {
                             pending_transition.is_ok(),
                             committed_durable_context,
                         );
-                        let deletion_lifecycle = service
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                        let deletion_lifecycle = service.register_lifecycle_activity(
+                            &record.agent_input,
+                            &record.snapshot.run_id,
+                        );
+                        if deletion_lifecycle.is_err() {
                             deletion_cleanup = true;
                             terminal_event_gate.discard();
                             service.discard_usage_context(&run_id);
@@ -596,11 +596,11 @@ impl AgentService {
                             .cloned();
                         let persisted = persist_terminal_with_bounded_retry(
                             || {
-                                let deletion_lifecycle = service
-                                    .deletion_lifecycle
-                                    .lock()
-                                    .unwrap_or_else(|lock_error| lock_error.into_inner());
-                                if deletion_lifecycle.contains_input(&record.agent_input) {
+                                let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &record.agent_input,
+                                    &record.snapshot.run_id,
+                                );
+                                if deletion_lifecycle.is_err() {
                                     return Err(
                                         "项目或会话正在移除，无法持久化审批续跑失败终态。".to_string()
                                     );
@@ -716,11 +716,11 @@ impl AgentService {
                         let pending_transition = if persisted.is_ok() {
                             persist_terminal_with_bounded_retry(
                                 || {
-                                    let deletion_lifecycle = service
-                                        .deletion_lifecycle
-                                        .lock()
-                                        .unwrap_or_else(|lock_error| lock_error.into_inner());
-                                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                                    let deletion_lifecycle = service.register_lifecycle_activity(
+                                        &record.agent_input,
+                                        &record.snapshot.run_id,
+                                    );
+                                    if deletion_lifecycle.is_err() {
                                         return Err(
                                             "项目或会话正在移除，无法完成审批失败状态迁移。".to_string()
                                         );
@@ -750,11 +750,11 @@ impl AgentService {
                             pending_transition.is_ok(),
                             true,
                         );
-                        let deletion_lifecycle = service
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|lock_error| lock_error.into_inner());
-                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                        let deletion_lifecycle = service.register_lifecycle_activity(
+                            &record.agent_input,
+                            &record.snapshot.run_id,
+                        );
+                        if deletion_lifecycle.is_err() {
                             deletion_cleanup = true;
                             service.discard_usage_context(&run_id);
                         } else if let Err(error) = &persisted {
@@ -868,11 +868,11 @@ impl AgentService {
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
                     {
-                        let deletion_lifecycle = service
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                        let deletion_lifecycle = service.register_lifecycle_activity(
+                            &record.agent_input,
+                            &record.snapshot.run_id,
+                        );
+                        if deletion_lifecycle.is_err() {
                             terminal_event_gate.discard();
                         } else {
                             emit_terminal_events_after_persistence_for_turn(

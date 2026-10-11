@@ -48,6 +48,14 @@ impl AgentService {
             }
         }
         self.authorize_user_pending_action(run_id, action_id)?;
+        // Explicit user decisions for one Run are ordered. Internal subtree stop deliberately
+        // bypasses this gate: its cancellation token and durable CAS must progress while an
+        // approval is validating a slow Provider payload.
+        let owner = self.pending_action_for_decision(run_id, action_id);
+        let _decision = owner.as_ref().map(|record| {
+            self.action_admission
+                .lock_conversation(&record.snapshot.run_id)
+        });
         self.cancel_action_internal(run_id, action_id)
     }
 
@@ -74,25 +82,21 @@ impl AgentService {
                 turn_termination_confirmed: true,
             });
         }
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(storage_id) =
-            resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
-        else {
+        let Some(mut owned_record) = self.pending_action_for_decision(run_id, action_id) else {
             return Ok(InternalActionCancellationOutcome::default());
         };
-        let record = pending_actions
-            .get_mut(&storage_id)
-            .expect("resolved pending action exists");
-        if deletion_lifecycle.contains_input(&record.agent_input) {
+        let record = &mut owned_record;
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             return Ok(InternalActionCancellationOutcome::default());
         }
+        let lifecycle_activity =
+            match self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id) {
+                Ok(activity) => activity,
+                Err(_) if self.is_agent_input_scope_deleting(&record.agent_input) => {
+                    return Ok(InternalActionCancellationOutcome::default());
+                }
+                Err(error) => return Err(error),
+            };
         let is_cancellable_process = matches!(
             record.snapshot.action,
             AgentProposedAction::Command { .. }
@@ -110,12 +114,9 @@ impl AgentService {
         if is_cancellable_process
             && (record.snapshot.status == PendingActionStatus::Approved || is_mcp_dispatching)
         {
-            // Freeze the identity, then release approval/deletion locks before touching a process
-            // Session. Session termination performs a bounded wait and must never hold the
-            // pending-action or destructive-lifecycle mutexes while doing so.
+            // Session termination performs a bounded wait. Only this scope's logical activity
+            // is retained; no pending-action or destructive-lifecycle mutex crosses that wait.
             let record = record.clone();
-            drop(pending_actions);
-            drop(deletion_lifecycle);
 
             // A command which has already returned Running is no longer represented by the
             // legacy process guard. Arbitrate it through the same Session-state fence used by
@@ -128,14 +129,19 @@ impl AgentService {
             let cancelled = cancelled_sessions > 0 || cancelled_process;
             let mut runtime_token_signalled = false;
             if cancelled {
-                if let Some(token) = self
-                    .cancellations
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .get(&record.snapshot.run_id)
                 {
-                    token.cancel();
-                    runtime_token_signalled = true;
+                    let _publication = self
+                        .run_publication
+                        .lock_conversation(&record.snapshot.run_id);
+                    if let Some(token) = self
+                        .cancellations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(&record.snapshot.run_id)
+                    {
+                        token.cancel();
+                        runtime_token_signalled = true;
+                    }
                 }
                 self.fence_cancelled_run_steering(&record.snapshot.run_id);
                 self.record_action_audit(
@@ -170,6 +176,11 @@ impl AgentService {
             PendingActionStatus::Pending,
             PendingActionStatus::Executing,
         )?;
+        self.publish_pending_action_status(
+            record,
+            PendingActionStatus::Pending,
+            PendingActionStatus::Executing,
+        )?;
         record.snapshot.status = PendingActionStatus::Executing;
         if let Err(error) = self.storage.set_pending_agent_action_target_status(
             &record.storage_id,
@@ -183,6 +194,11 @@ impl AgentService {
                 PendingActionStatus::Pending,
             );
             if rollback.is_ok() {
+                self.publish_pending_action_status(
+                    record,
+                    PendingActionStatus::Executing,
+                    PendingActionStatus::Pending,
+                )?;
                 record.snapshot.status = PendingActionStatus::Pending;
             }
             return match rollback {
@@ -195,8 +211,6 @@ impl AgentService {
             };
         }
         let record = record.clone();
-        drop(pending_actions);
-        drop(deletion_lifecycle);
         if let AgentProposedAction::SkillInstallation { installation } = &record.snapshot.action {
             let conversation_id = record.snapshot.conversation_id.as_deref().ok_or_else(|| {
                 "Skill installation approval has no conversation identity.".to_string()
@@ -236,6 +250,7 @@ impl AgentService {
             self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
             self.release_turn_concurrency_permit(&record.snapshot.run_id);
         }
+        drop(lifecycle_activity);
         Ok(InternalActionCancellationOutcome {
             affected: true,
             turn_termination_confirmed: true,
@@ -245,30 +260,18 @@ impl AgentService {
     /// Atomically cancels an MCP approval which was durable `approved` across a process restart
     /// but has not crossed the `executing` dispatch boundary.
     ///
-    /// The pending-action mutex serializes decisions inside this Host, while the SQLite status CAS
-    /// is authoritative across stale/restarted Host instances. Rejection takes the normal
+    /// The Run decision gate serializes user decisions inside this Host, while the SQLite status
+    /// CAS also arbitrates against subtree stop and stale/restarted Host instances. Rejection takes the normal
     /// ToolResult continuation path; cancellation intentionally terminates the run here.
     fn try_cancel_recovered_approved_mcp_action(
         &self,
         run_id: &str,
         action_id: &str,
     ) -> Result<Option<AgentActionExecutionOutput>, String> {
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(storage_id) =
-            resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
-        else {
+        let Some(record) = self.pending_action_for_decision(run_id, action_id) else {
             return Ok(None);
         };
-        let Some(record) = pending_actions.get(&storage_id) else {
-            return Ok(None);
-        };
+        let storage_id = record.storage_id.clone();
         let is_recovered_approved = record.snapshot.status == PendingActionStatus::Approved
             && matches!(
                 record.snapshot.action,
@@ -282,10 +285,8 @@ impl AgentService {
         if !is_recovered_approved {
             return Ok(None);
         }
-        if deletion_lifecycle.contains_input(&record.agent_input) {
-            return Err("项目或会话正在移除，无法处理恢复的 MCP 审批。".to_string());
-        }
-        let record = record.clone();
+        let lifecycle_activity =
+            self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id)?;
         let changed = self
             .storage
             .terminalize_mcp_agent_action_on_startup(
@@ -301,13 +302,20 @@ impl AgentService {
                     .to_string(),
             );
         }
-        pending_actions.remove(&storage_id);
+        self.publish_pending_action_status(
+            &record,
+            PendingActionStatus::Approved,
+            PendingActionStatus::Cancelled,
+        )?;
+        self.pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&storage_id);
         self.startup_recoverable_mcp_approvals
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&storage_id);
-        drop(pending_actions);
-        drop(deletion_lifecycle);
+        drop(lifecycle_activity);
 
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
         if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
@@ -494,13 +502,7 @@ impl AgentService {
     /// therefore both the same-process single-flight guard and the cross-Host arbitration point:
     /// only its winner may clear the payload, publish lifecycle, or spawn a model continuation.
     fn claim_rejected_mcp_continuation(&self, record: &PendingActionRecord) -> Result<(), String> {
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pending = pending_actions
-            .get_mut(&record.storage_id)
-            .ok_or_else(|| "MCP rejection no longer has a pending action.".to_string())?;
+        let pending = self.pending_action_snapshot(&record.storage_id)?;
         let current = pending.snapshot.status;
         let is_recovered_approved = current == PendingActionStatus::Approved
             && self
@@ -513,12 +515,12 @@ impl AgentService {
                 "MCP rejection was already settled by another approval decision.".to_string(),
             );
         }
-        self.persist_pending_dispatch_status(pending, current, PendingActionStatus::Rejected)
+        self.persist_pending_dispatch_status(&pending, current, PendingActionStatus::Rejected)
             .map_err(|_| {
                 "MCP rejection lost its durable status arbitration; continuation was stopped."
                     .to_string()
             })?;
-        pending.snapshot.status = PendingActionStatus::Rejected;
+        self.publish_pending_action_status(&pending, current, PendingActionStatus::Rejected)?;
         if is_recovered_approved {
             self.startup_recoverable_mcp_approvals
                 .lock()

@@ -62,8 +62,13 @@ fn message(id: &str, role: &str, content: &str, created_at: i64) -> ChatMessageR
 impl WindowFixture {
     fn new() -> Self {
         let directory = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         storage.save_model_settings(test_model_settings()).unwrap();
         storage
             .save_conversation(ChatConversationRecord {
@@ -528,8 +533,13 @@ fn context_profile_idle_toggle_refreshes_measurement_without_rewriting_history()
     assert!(minimal.cost_breakdown.tool_schema_tokens < full.cost_breakdown.tool_schema_tokens);
     assert_eq!(minimal.input_capacity_tokens, full.input_capacity_tokens);
 
-    let reopened =
-        Arc::new(StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap());
+    let reopened = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture._directory.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     assert_eq!(
         reopened
             .load_agent_prompt_preferences()
@@ -613,8 +623,13 @@ fn context_profile_active_run_stays_frozen_and_terminal_previews_next_mode() {
     let active = saved_profile_snapshot(&fixture.service);
     save_context_profile(&fixture.storage, Full);
     assert_eq!(saved_profile_snapshot(&fixture.service), active);
-    let reopened =
-        Arc::new(StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap());
+    let reopened = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture._directory.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     assert_eq!(
         reopened.load_agent_context_profile_for_run(run_id).unwrap(),
         Some(Minimal)
@@ -910,6 +925,7 @@ fn child_terminal_preview_retains_tree_workspace_and_skill_catalog_after_primary
             claim_token: claim_token.into(),
             source_agent_message_id: spawn.task_message.message_id.clone(),
         },
+        &|| Ok(()),
     )
     .unwrap();
     let frozen_context = prepared.agent_input.context.as_ref().unwrap();

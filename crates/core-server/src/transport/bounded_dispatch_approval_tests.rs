@@ -12,6 +12,17 @@ fn submit(
     alias: Option<RpcOwnerResolver>,
     task: impl FnOnce() -> Value + Send + 'static,
 ) {
+    if request.method == mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD {
+        rpc.try_submit_scoped(
+            RpcDispatchClass::Control,
+            request.id.clone(),
+            0,
+            Box::new(|| RpcResourceScope::ExecutionAccess),
+            task,
+        )
+        .unwrap();
+        return;
+    }
     rpc.try_submit_ordered(
         rpc_dispatch_class(&request),
         request.id.clone(),
@@ -182,14 +193,13 @@ async fn approval_admission_is_bounded_independent_of_cancel_and_shutdown_drains
         &rpc,
         request(101, AGENT_CANCEL_RUN_METHOD, json!({"runId":"run-B"})),
         alias("B"),
-        || ok(101),
+        || panic!("unknown global barrier must prevent this handler before shutdown"),
     );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), responses.recv())
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), responses.recv())
             .await
-            .unwrap()
-            .unwrap()["id"],
-        101
+            .is_err(),
+        "unknown global mutations conservatively fence controls too"
     );
     rpc.begin_shutdown();
     release.send(()).unwrap();
@@ -201,7 +211,9 @@ async fn approval_admission_is_bounded_independent_of_cancel_and_shutdown_drains
         ids.push(response["id"].as_i64().unwrap());
     }
     ids.sort();
-    assert_eq!(ids, (2..APPROVAL_CAPACITY as i64 + 2).collect::<Vec<_>>());
+    let mut expected = (2..APPROVAL_CAPACITY as i64 + 2).collect::<Vec<_>>();
+    expected.push(101);
+    assert_eq!(ids, expected);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,7 +7,11 @@ use mycopilot_core::workflow_execution::{
 async fn workflow_runtime_publication_real_storage_drains_final_mail_metadata() {
     let directory = tempdir().unwrap();
     let storage = Arc::new(
-        StorageService::open(&directory.path().join("runtime-publication.sqlite")).unwrap(),
+        StorageService::open_with_model_credentials(
+            &directory.path().join("runtime-publication.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
     );
     storage.save_model_settings(test_model_settings()).unwrap();
     let (source, _) = workflow_fixture(&storage);

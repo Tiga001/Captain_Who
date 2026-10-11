@@ -68,7 +68,7 @@ impl AgentService {
                         &assistant_message_id,
                         Some(&run_id),
                         &rollback,
-                        error,
+                        error.into(),
                     ),
                 });
             }
@@ -108,7 +108,7 @@ impl AgentService {
                     &assistant_message_id,
                     Some(&run_id),
                     &rollback,
-                    CAUSE,
+                    CAUSE.to_string().into(),
                 ),
             });
         }
@@ -195,7 +195,8 @@ impl AgentService {
                     started
                         .err()
                         .map(|e| e.to_string())
-                        .unwrap_or_else(|| "human answer startup was cancelled".into()),
+                        .unwrap_or_else(|| "human answer startup was cancelled".into())
+                        .into(),
                 ));
             }
         }
@@ -358,13 +359,14 @@ impl AgentService {
                             .cloned();
                         let persisted = persist_terminal_with_bounded_retry(
                             || {
-                                let deletion_lifecycle = service
-                                    .deletion_lifecycle
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner());
-                                if deletion_lifecycle.contains_input(&pending_agent_input) {
+                                let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                );
+                                if deletion_lifecycle.is_err() {
                                     return Err("项目或会话正在移除，无法持久化 agent 终态。".to_string());
                                 }
+                                #[cfg(test)]
+                                run_after_terminal_activity_hook(&worker_conversation_id);
                                 service.persist_final_assistant_output_with_wake_fence(
                                     &worker_conversation_id,
                                     &worker_assistant_message_id,
@@ -390,11 +392,10 @@ impl AgentService {
                             }
                         }
                         let persistence_committed = persisted.is_ok();
-                        let deletion_lifecycle = service
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        let durable_terminal = if deletion_lifecycle.contains_input(&pending_agent_input) {
+                        let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                );
+                        let durable_terminal = if deletion_lifecycle.is_err() {
                             deletion_cleanup = true;
                             terminal_event_gate.discard();
                             service.discard_usage_context(&worker_run_id);
@@ -458,11 +459,10 @@ impl AgentService {
                             .cloned();
                         let persisted = persist_terminal_with_bounded_retry(
                             || {
-                                let deletion_lifecycle = service
-                                    .deletion_lifecycle
-                                    .lock()
-                                    .unwrap_or_else(|lock_error| lock_error.into_inner());
-                                if deletion_lifecycle.contains_input(&pending_agent_input) {
+                                let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                );
+                                if deletion_lifecycle.is_err() {
                                     return Err(
                                         "项目或会话正在移除，无法持久化 agent 失败终态。".to_string()
                                     );
@@ -509,11 +509,10 @@ impl AgentService {
                         }
                         let persistence_committed = persisted.is_ok();
                         let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
-                        let deletion_lifecycle = service
-                            .deletion_lifecycle
-                            .lock()
-                            .unwrap_or_else(|lock_error| lock_error.into_inner());
-                        let durable_terminal = if deletion_lifecycle.contains_input(&pending_agent_input) {
+                        let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                );
+                        let durable_terminal = if deletion_lifecycle.is_err() {
                             deletion_cleanup = true;
                             terminal_event_gate.discard();
                             service.discard_usage_context(&worker_run_id);
@@ -590,8 +589,8 @@ impl AgentService {
                     // The atomic terminal commit, not unrelated global receipt recovery, ends
                     // this logical Turn. Retire only its exact process-local owner now: a busy
                     // admission stream must not make preflight report a completed Turn active.
-                    // Recovery below still retains admission exclusion before inspecting claims;
-                    // receipts, workflow publication and Done retain their original order.
+                    // Exact Run receipt recovery, workflow publication and Done retain their
+                    // original order without excluding unrelated Preparing owners.
                     service.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
                     service.release_turn_concurrency_permit(&worker_run_id);
                     if !keep_trace_snapshot {
@@ -608,6 +607,7 @@ impl AgentService {
                     service: recovery_service,
                     input: recovery_input,
                     needs_admission,
+                    run_id: worker_run_id.clone(),
                     complete: Some(Box::new(move || {
                         if durable_terminal && !deletion_cleanup {
                             if let Err(error) = service
@@ -690,7 +690,9 @@ impl AgentService {
                             notifications: notifications.clone(),
                             should_deliver: (waiting_for_user_input && persistence_committed) || durable_terminal,
                             publish: Box::new(move || {
-                                if !service.is_agent_input_scope_deleting(&pending_agent_input) {
+                                if let Ok(_activity) = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                ) {
                                     for event in committed_failure_events {
                                         emit_agent_event_notifications(
                                             &service, &notifications,
@@ -704,11 +706,10 @@ impl AgentService {
                         // complete; a receiver may synchronously start another Turn from this notification.
                         if let Some(output) = committed_terminal_output.as_ref() {
                             {
-                                let deletion_lifecycle = service
-                                    .deletion_lifecycle
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner());
-                                if deletion_lifecycle.contains_input(&pending_agent_input) {
+                                let deletion_lifecycle = service.register_lifecycle_activity(
+                                    &pending_agent_input, &worker_run_id,
+                                );
+                                if deletion_lifecycle.is_err() {
                                     terminal_event_gate.discard();
                                 } else {
                                     emit_terminal_events_after_persistence_for_turn(
@@ -843,12 +844,13 @@ impl AgentService {
 #[cfg(test)]
 include!("runtime_isolation_tests.rs");
 
-/// The old workflow recovery must keep admission exclusion, but waiting for that mutex must not
-/// occupy either completion worker: deletion can own it while waiting for another Turn to retire.
+/// Recovery settles only this durably terminal Run. It must never scan unrelated claimed
+/// inputs, whose owner may still be preparing without an initial Trace.
 struct DeferredRuntimeSettlement {
     service: AgentService,
     input: AgentChatInput,
     needs_admission: bool,
+    run_id: String,
     complete: Option<Box<dyn FnOnce() -> RuntimeDeliveryContinuation + Send>>,
     delivery: Option<RuntimeDeliveryContinuation>,
 }
@@ -878,14 +880,11 @@ impl DeferredRuntimeSettlement {
             .submit(move || {
                 if self.needs_admission && !self.service.is_agent_input_scope_deleting(&self.input)
                 {
-                    // Keep the original claim/preparation exclusion. This lane is independent of
-                    // preparation, control, lease, observation and durable terminal settlement.
-                    let _admission = self
+                    if let Err(error) = self
                         .service
-                        .conversation_admission
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    if let Err(error) = self.service.storage.workflow_execution_recover_claims() {
+                        .storage
+                        .workflow_execution_recover_run(&self.run_id)
+                    {
                         eprintln!("failed to settle organization input receipts: {error}");
                     }
                 }

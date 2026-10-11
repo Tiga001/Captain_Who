@@ -65,6 +65,7 @@ mod child_agents;
 mod command_sessions;
 mod compaction;
 mod conversations;
+mod execution_access_boundary;
 mod file_change_run_grants;
 mod file_changes;
 mod guidance;

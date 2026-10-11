@@ -8,3 +8,5 @@ include!("turn_executor/runtime_segment.rs");
 include!("turn_executor/human_input.rs");
 include!("turn_executor/human_input_async.rs");
 include!("turn_executor/terminal_persistence_retry_tests.rs");
+#[cfg(test)]
+include!("turn_executor/resource_preparation_tests.rs");

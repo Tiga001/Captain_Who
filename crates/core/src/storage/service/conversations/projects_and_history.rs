@@ -29,8 +29,42 @@ impl StorageService {
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        self.delete_project_with_member_check(project_id, None)
+    }
+
+    /// The application drained this exact set. A concurrent move/spawn must force a retry,
+    /// never extend deletion to a Conversation whose effects were not fenced and drained.
+    pub fn delete_project_checked_members(
+        &self,
+        project_id: &str,
+        members: &[String],
+    ) -> Result<(), String> {
+        self.delete_project_with_member_check(project_id, Some(members))
+    }
+
+    fn delete_project_with_member_check(
+        &self,
+        project_id: &str,
+        members: Option<&[String]>,
+    ) -> Result<(), String> {
+        let check_members = |connection: &rusqlite::Connection| -> Result<(), String> {
+            if let Some(expected) = members {
+                let mut expected = expected.to_vec();
+                expected.sort_unstable();
+                expected.dedup();
+                let mut actual = project_conversation_ids(connection, project_id)?;
+                actual.sort_unstable();
+                if actual != expected {
+                    return Err(
+                        "Project membership changed after effect drain; retry project deletion."
+                            .into(),
+                    );
+                }
+            }
+            Ok(())
+        };
         let attachments = self.state.write_sync(
-            project_id.len().saturating_add(256),
+            members.unwrap_or_default().iter().fold(project_id.len().saturating_add(256), |size, id| size.saturating_add(id.len().saturating_add(32))),
             crate::storage::StorageWriteClass::Normal,
             |connection| {
         let attachments =
@@ -38,8 +72,16 @@ impl StorageService {
                 .map_err(storage_error)?;
         let tree_scopes = project_agent_tree_deletion_scopes(connection, project_id)?;
         let conversation_ids = project_conversation_ids(connection, project_id)?;
+        if let Some(expected) = members {
+            let expected = expected.iter().collect::<std::collections::BTreeSet<_>>();
+            let observed = conversation_ids.iter().collect::<std::collections::BTreeSet<_>>();
+            if observed != expected {
+                return Err("Project membership changed before deletion transaction; retry project deletion.".to_string());
+            }
+        }
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
+            check_members(&transaction)?;
             invalidate_workflows_before_trigger_disabled_deletion(&transaction, &conversation_ids)?;
             automation_repository::prepare_tombstoned_automations_for_project_delete(
                 &transaction,
@@ -78,6 +120,7 @@ impl StorageService {
             transaction.commit().map_err(storage_error)?;
         } else {
             with_agent_deletion_transaction(connection, |transaction| {
+                check_members(transaction)?;
                 automation_repository::prepare_tombstoned_automations_for_project_delete(
                     transaction,
                     project_id,

@@ -135,8 +135,13 @@ fn request_contains_exact_mail(request: &Value, content: &str) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_independent_roots() {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("workflow.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("workflow.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -381,7 +386,13 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
         HumanInteractionAnswer, HumanInteractionListInput, HumanInteractionSubmitInput,
     };
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("accept.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("accept.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -741,7 +752,13 @@ async fn workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_
 #[test]
 fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears() {
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("stop.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("stop.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let (source, target) = workflow_fixture(&storage);
     let service = AgentService::new_authorized_for_test(storage.clone());
@@ -846,8 +863,13 @@ fn workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_execution_sources_deliver_independent_letters_without_waiting_for_peers() {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("independent.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("independent.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -965,8 +987,13 @@ async fn workflow_execution_sources_deliver_independent_letters_without_waiting_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_without_polling() {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("busy-recovery.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("busy-recovery.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -1092,7 +1119,13 @@ fn workflow_scheduler_read_microbenchmark() {
         return;
     }
     let directory = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&directory.path().join("reads.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("reads.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let (_source, _) = workflow_fixture(&storage);
     let service = AgentService::new_authorized_for_test(storage.clone());
@@ -1177,7 +1210,13 @@ async fn workflow_waiting_population_microbenchmark() {
     for count in [100, 1000] {
         let directory = tempdir().unwrap();
         let path = directory.path().join("waiting.sqlite");
-        let storage = Arc::new(StorageService::open(&path).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &path,
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut settings = test_model_settings();
         settings.api_url = format!(
@@ -1369,7 +1408,13 @@ fn insert_workflow_test_input(
 async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_once() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("repair.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -1496,7 +1541,13 @@ async fn workflow_config_repair_wakes_before_fallback_and_uses_current_model_onc
 async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("fair.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -1568,7 +1619,13 @@ async fn workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads(
 fn workflow_capacity_release_retries_waiting_owner_without_clearing_configuration() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("capacity.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let (_, target) = workflow_fixture(&storage);
     let db = rusqlite::Connection::open(&path).unwrap();

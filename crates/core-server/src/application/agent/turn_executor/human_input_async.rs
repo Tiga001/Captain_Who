@@ -36,6 +36,10 @@ impl StoredBlockingHumanInput {
             .ok_or_else(|| fail("question owner is not a root agent".into()))?;
         // Serialize publication against both fast responses and Stop. SQLite is the final
         // authority for the current root/Run identity and the live settings revision.
+        let _publication = self
+            .service
+            .run_publication
+            .lock_conversation(&request.run_id);
         let cancellations = self
             .service
             .cancellations
@@ -48,6 +52,7 @@ impl StoredBlockingHumanInput {
         {
             return Err(fail("question execution segment was retired".into()));
         }
+        drop(cancellations);
         // A first-turn root is created when the Harness attaches, after initial Turn admission.
         // Persist its exact Host-authenticated permissions before accepting any future input.
         self.service
@@ -97,6 +102,10 @@ impl StoredBlockingHumanInput {
         {
             return Err(AgentError::new("invalid human interaction sampling owner"));
         }
+        let _publication = self
+            .service
+            .run_publication
+            .lock_conversation(&request.run_id);
         let cancellations = self
             .service
             .cancellations
@@ -111,6 +120,7 @@ impl StoredBlockingHumanInput {
                 "human interaction execution segment was retired",
             ));
         }
+        drop(cancellations);
         self.service
             .storage
             .bind_human_interaction_ignored_at_sampling(&request)
@@ -160,7 +170,10 @@ impl AgentService {
         HumanInteractionRequestSnapshot,
         mycopilot_core::human_interaction::HumanInteractionError,
     > {
-        let _publication = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
+        let request = self
+            .storage
+            .get_human_interaction_request(&input.conversation_id, &input.request_id)?;
+        let _publication = self.run_publication.lock_conversation(&request.run_id);
         let snapshot = self.storage.ignore_human_interaction(input)?;
         emit_human_request_snapshot(notifications, &snapshot);
         Ok(snapshot)

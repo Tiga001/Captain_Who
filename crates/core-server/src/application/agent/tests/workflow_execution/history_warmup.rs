@@ -14,7 +14,13 @@ async fn wait_for_warmed_history(service: &AgentService, conversation_id: &str) 
 async fn workflow_capacity_wait_warms_history_without_claiming_pending_letter() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("warm-pending.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -156,8 +162,13 @@ async fn workflow_capacity_wait_warms_history_without_claiming_pending_letter() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_terminal_warms_unopened_conversation_without_starting_another_turn() {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("warm-terminal.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("warm-terminal.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -211,7 +222,13 @@ async fn durable_terminal_warms_unopened_conversation_without_starting_another_t
 fn workflow_claim_preserves_warmed_history_and_reuses_measured_prefix_without_human_replay() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("warm-workflow-prefix.sqlite");
-    let storage = Arc::new(StorageService::open(&path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let (_, target) = workflow_fixture(&storage);
     let conversation = super::super::provider_transition::conversation_with_completed_history(

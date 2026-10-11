@@ -1,8 +1,6 @@
 //! Test-only adapter over the production RPC scheduler. No synthetic handlers or larger limits.
 use super::*;
-use bounded_dispatch::{
-    rpc_has_global_mutation_fence, rpc_ordering_key, RpcDispatchClass, RpcOwnerResolver,
-};
+use bounded_dispatch::rpc_scope_resolver;
 
 pub(crate) struct BaselineDispatcher(RpcRequestDispatcher);
 
@@ -20,39 +18,28 @@ impl BaselineDispatcher {
         began: impl FnOnce() + Send + 'static,
     ) -> Result<(), Value> {
         let class = rpc_dispatch_class(&request);
-        let owner = rpc_ordering_key(&request);
-        // Keep the same authoritative alias resolution as run_request_loop. The benchmark
-        // intentionally retains the current global write fence; bypassing it hides the defect.
-        let resolver: Option<RpcOwnerResolver> = if matches!(
-            class,
-            RpcDispatchClass::Control | RpcDispatchClass::Approval
-        ) {
-            request
-                .params
-                .as_ref()
-                .and_then(|p| p["runId"].as_str())
-                .map(|run| {
-                    let run = run.to_owned();
-                    let owner_service = service.clone();
-                    Box::new(move || {
-                        owner_service
-                            .conversation_id_for_run(&run)
-                            .map(|conversation| format!("conversation:{conversation}"))
-                    }) as RpcOwnerResolver
-                })
-        } else {
-            None
-        };
-        let global_fence = rpc_has_global_mutation_fence(&request);
-        self.0.try_submit_ordered(
+        let resolver = rpc_scope_resolver(service.clone(), &request);
+        let queued_access = bounded_dispatch::rpc_requires_queued_access(&request.method)
+            .then(|| service.capture_execution_access());
+        let retained_bytes = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": &request.id,
+            "method": &request.method, "params": &request.params,
+        }))
+        .map_or(usize::MAX, |bytes| bytes.len())
+        .saturating_add(512);
+        self.0.try_submit_scoped(
             class,
             request.id.clone(),
-            owner,
+            retained_bytes,
             resolver,
-            global_fence,
             move || {
                 began();
-                handle_request(&storage, &service, outbound, request)
+                let handle = || handle_request(&storage, &service, outbound, request);
+                if let Some(token) = queued_access {
+                    service.with_queued_execution_access(token, handle)
+                } else {
+                    handle()
+                }
             },
         )
     }

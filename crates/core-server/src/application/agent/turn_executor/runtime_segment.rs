@@ -177,10 +177,13 @@ impl AgentService {
                 run_before_approval_publication_arbitration_hook(&action_id);
                 // Cancellation and approval publication form a two-sided handoff. An interrupt
                 // may signal the Runtime after its last model-loop check but before this callback
-                // makes the pending action visible in memory. The cancellation registry mutex is
+                // makes the pending action visible in memory. The per-Run gate is
                 // also the publication linearization boundary: either this event is enqueued
                 // before an interrupt can return, or the publisher observes the cancelled token
                 // and terminalizes the newly visible action without emitting a stale approval.
+                let publication_guard = emitter_service
+                    .run_publication
+                    .lock_conversation(&emitter_run_id);
                 let cancellation_publication_guard = emitter_service
                     .cancellations
                     .lock()
@@ -188,15 +191,16 @@ impl AgentService {
                 let owns_current_generation = cancellation_publication_guard
                     .get(run_id)
                     .is_some_and(|current| current.shares_state_with(&emitter_cancellation_token));
+                drop(cancellation_publication_guard);
                 if !owns_current_generation {
                     // A newer continuation now owns this logical run. The retiring emitter may
                     // no longer publish, but it must never cancel the newer generation's action.
-                    drop(cancellation_publication_guard);
+                    drop(publication_guard);
                     emitter_terminal_event_gate.discard();
                     return;
                 }
                 if emitter_cancellation_token.is_cancelled() {
-                    drop(cancellation_publication_guard);
+                    drop(publication_guard);
                     emitter_terminal_event_gate.discard();
                     if let Err(error) = emitter_service.cancel_action_internal(run_id, &action_id) {
                         *emitter_pending_store_failure
@@ -217,7 +221,7 @@ impl AgentService {
                         event,
                     );
                 }
-                drop(cancellation_publication_guard);
+                drop(publication_guard);
                 return;
             }
             if emitter_pending_store_failure
@@ -237,6 +241,9 @@ impl AgentService {
                     }
                 );
             if human_waiting {
+                let _publication = emitter_service
+                    .run_publication
+                    .lock_conversation(&emitter_run_id);
                 let cancellations = emitter_service
                     .cancellations
                     .lock()
@@ -248,6 +255,7 @@ impl AgentService {
                 {
                     return;
                 }
+                drop(cancellations);
                 let mut event = event;
                 if let AgentEvent::Done { usage, .. } = &mut event {
                     *usage = emitter_service.preview_cumulative_run_usage(&emitter_run_id, None);
@@ -294,11 +302,11 @@ impl AgentService {
                     emitter_terminal_event_gate.discard();
                     return;
                 };
-                // Fixed lock order: pending_actions -> cancellations. Approval advances the
-                // pending status while holding the first lock; cancellation token publication
-                // uses the second. Holding both through the non-blocking notification send makes
-                // Waiting linearizable with both operations, including the approved-to-spawn gap
-                // before an asynchronous command/MCP/Skill/Office worker registers its new token.
+                // Fixed scope order: action decision -> Run publication. Registry snapshots are
+                // short; unrelated Runs never wait for this event's durable publication.
+                let _decision = emitter_service
+                    .action_admission
+                    .lock_conversation(&emitter_run_id);
                 let pending_actions_guard = emitter_service
                     .pending_actions
                     .lock()
@@ -309,11 +317,14 @@ impl AgentService {
                         record.snapshot.run_id == emitter_run_id
                             && record.snapshot.status == PendingActionStatus::Pending
                     });
+                drop(pending_actions_guard);
                 if !pending_is_current {
-                    drop(pending_actions_guard);
                     emitter_terminal_event_gate.discard();
                     return;
                 }
+                let publication_guard = emitter_service
+                    .run_publication
+                    .lock_conversation(&emitter_run_id);
                 let cancellation_publication_guard = emitter_service
                     .cancellations
                     .lock()
@@ -321,9 +332,9 @@ impl AgentService {
                 let owns_current_generation = cancellation_publication_guard
                     .get(&emitter_run_id)
                     .is_some_and(|current| current.shares_state_with(&emitter_cancellation_token));
+                drop(cancellation_publication_guard);
                 if !owns_current_generation || emitter_cancellation_token.is_cancelled() {
-                    drop(cancellation_publication_guard);
-                    drop(pending_actions_guard);
+                    drop(publication_guard);
                     emitter_terminal_event_gate.discard();
                     return;
                 }
@@ -337,8 +348,7 @@ impl AgentService {
                         event,
                     );
                 }
-                drop(cancellation_publication_guard);
-                drop(pending_actions_guard);
+                drop(publication_guard);
                 return;
             }
             match &event {

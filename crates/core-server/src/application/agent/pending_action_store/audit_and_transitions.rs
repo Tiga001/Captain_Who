@@ -1,4 +1,67 @@
 impl AgentService {
+    /// Clone a frozen owner under the registry lock; storage and payload validation happen after
+    /// release. The durable status CAS remains the decision authority.
+    pub(super) fn pending_action_snapshot(
+        &self,
+        storage_id: &str,
+    ) -> Result<PendingActionRecord, String> {
+        self.pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(storage_id)
+            .cloned()
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{storage_id}"))
+    }
+
+    pub(super) fn pending_action_for_decision(
+        &self,
+        run_id: &str,
+        action_id: &str,
+    ) -> Option<PendingActionRecord> {
+        let pending = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let storage_id = resolve_pending_action_storage_id(&pending, run_id, action_id)?;
+        pending.get(&storage_id).cloned()
+    }
+
+    /// Never overwrite a later worker's projection after a successful durable CAS. Immutable
+    /// owner fields identify the entry; a direct-file-change receipt may advance its payload.
+    pub(super) fn publish_pending_action_status(
+        &self,
+        record: &PendingActionRecord,
+        expected: PendingActionStatus,
+        status: PendingActionStatus,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = pending
+            .get_mut(&record.storage_id)
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{}", record.storage_id))?;
+        if current.snapshot.run_id != record.snapshot.run_id
+            || current.snapshot.action_id != record.snapshot.action_id
+            || current.snapshot.conversation_id != record.snapshot.conversation_id
+            || current.snapshot.assistant_message_id != record.snapshot.assistant_message_id
+            || current.snapshot.tool_call_id != record.snapshot.tool_call_id
+            || current.snapshot.created_at != record.snapshot.created_at
+        {
+            return Err("Pending action owner changed after durable decision.".into());
+        }
+        if current.snapshot.status == status {
+            return Ok(());
+        }
+        if current.snapshot.status != expected {
+            return Err(
+                "Pending action advanced while its committed decision was being published.".into(),
+            );
+        }
+        current.snapshot.status = status;
+        Ok(())
+    }
+
     pub(super) fn invalidate_mcp_pending_payload(&self, action: &AgentProposedAction) {
         match action {
             AgentProposedAction::McpToolCall { approval } => {
@@ -24,21 +87,14 @@ impl AgentService {
         status: PendingActionStatus,
     ) -> Result<(), String> {
         let action_id = &record.storage_id;
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pending = pending_actions
-            .get_mut(action_id)
-            .ok_or_else(|| format!("待审批操作的内存状态不存在：{action_id}"))?;
+        let pending = self.pending_action_snapshot(action_id)?;
         let current = pending.snapshot.status;
         if current == status {
             return Ok(());
         }
         ensure_pending_status_transition(current, status)?;
-        self.persist_pending_status(pending, current, status)?;
-        pending.snapshot.status = status;
-        Ok(())
+        self.persist_pending_status(&pending, current, status)?;
+        self.publish_pending_action_status(&pending, current, status)
     }
 
     /// Claims dispatch authority while keeping the process-local pending projection in lockstep
@@ -50,21 +106,14 @@ impl AgentService {
         status: PendingActionStatus,
     ) -> Result<(), String> {
         let action_id = &record.storage_id;
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pending = pending_actions
-            .get_mut(action_id)
-            .ok_or_else(|| format!("待审批操作的内存状态不存在：{action_id}"))?;
+        let pending = self.pending_action_snapshot(action_id)?;
         let current = pending.snapshot.status;
         if current == status {
             return Ok(());
         }
         ensure_pending_status_transition(current, status)?;
-        self.persist_pending_dispatch_status(pending, current, status)?;
-        pending.snapshot.status = status;
-        Ok(())
+        self.persist_pending_dispatch_status(&pending, current, status)?;
+        self.publish_pending_action_status(&pending, current, status)
     }
 
     /// Commits the cancellation status and retires every remembered FileChange grant for the Run
@@ -73,13 +122,7 @@ impl AgentService {
         &self,
         record: &PendingActionRecord,
     ) -> Result<(), String> {
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pending = pending_actions
-            .get_mut(&record.storage_id)
-            .ok_or_else(|| format!("待审批操作的内存状态不存在：{}", record.storage_id))?;
+        let pending = self.pending_action_snapshot(&record.storage_id)?;
         let current = pending.snapshot.status;
         if current == PendingActionStatus::Cancelled {
             return Ok(());
@@ -97,8 +140,7 @@ impl AgentService {
                 &record.snapshot.action_id,
                 now_ms(),
             )?;
-        pending.snapshot.status = PendingActionStatus::Cancelled;
-        Ok(())
+        self.publish_pending_action_status(&pending, current, PendingActionStatus::Cancelled)
     }
 
     pub(super) fn persist_pending_action(
@@ -254,13 +296,7 @@ impl AgentService {
                 pending_status_label(target_status)
             ));
         }
-        let pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let pending = pending_actions
-            .get(&record.storage_id)
-            .ok_or_else(|| format!("待审批操作的内存状态不存在：{}", record.storage_id))?;
+        let pending = self.pending_action_snapshot(&record.storage_id)?;
         self.storage.set_pending_agent_action_target_status(
             &record.storage_id,
             pending_status_label(pending.snapshot.status),

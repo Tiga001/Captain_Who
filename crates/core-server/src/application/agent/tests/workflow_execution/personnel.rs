@@ -29,8 +29,13 @@ fn set_admin(storage: &StorageService, role: &str) {
 async fn workflow_organization_edit_real_host_preserves_roles_enforces_actual_authority_and_refreshes_state(
 ) {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("personnel.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("personnel.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(

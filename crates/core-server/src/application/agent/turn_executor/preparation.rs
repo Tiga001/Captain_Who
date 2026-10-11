@@ -21,8 +21,7 @@ impl AgentService {
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(start.conversation_id());
         let factory = ChildAgentFactory::new(Arc::clone(&self.storage));
         let spawn = factory
             .resolve_trusted_claimed_wake(
@@ -61,17 +60,26 @@ impl AgentService {
                 .into());
         }
 
+        let run_id = next_run_id();
+        let assistant_message_id = create_id("message");
+        let cancellation_token = AgentCancellationToken::new();
+        let preparation = self.preparing.register(
+            &conversation_id,
+            spawn.agent.project_id.as_deref(),
+            &run_id,
+            &assistant_message_id,
+            cancellation_token.clone(),
+            None,
+        )?;
         let (previous_conversation, expected_revision) =
             self.storage.load_conversation_for_turn(&conversation_id)?;
         let previous_conversation =
             previous_conversation.ok_or_else(|| "子 Agent Conversation 不存在。".to_string())?;
         let expected_revision = expected_revision
             .ok_or_else(|| "子 Agent Conversation 缺少 Turn admission revision。".to_string())?;
-        let run_id = next_run_id();
-        let assistant_message_id = create_id("message");
+        preparation.set_revision(Some(expected_revision))?;
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
         self.register_turn_concurrency_permit(&run_id, global_permit)?;
-        let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
         let trusted_wake = mycopilot_core::TrustedAgentWakeTurnAdmission {
             agent_id: start.agent_id().to_string(),
@@ -88,6 +96,23 @@ impl AgentService {
             previous_conversation.clone(),
             expected_revision,
             trusted_wake.clone(),
+            &|| {
+                preparation.mark_committing().map_err(|message| {
+                    AgentServiceError::structured(
+                        message,
+                        serde_json::json!({"code":"turn_preparation_cancelled"}),
+                    )
+                })?;
+                if self.is_conversation_deleting(Some(&spawn.agent.root_conversation_id))
+                    || self.runtime_stopping.load(Ordering::Acquire)
+                {
+                    return Err(AgentServiceError::structured(
+                        "Agent tree is stopping or being removed.",
+                        serde_json::json!({"code":"turn_preparation_cancelled"}),
+                    ));
+                }
+                Ok(())
+            },
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -117,9 +142,9 @@ impl AgentService {
         assistant_message_id: &str,
         provisional_run_id: Option<&str>,
         rollback: &PreparedTurnRollback,
-        cause: impl std::fmt::Display,
+        error: AgentServiceError,
     ) -> AgentServiceError {
-        let cause = cause.to_string();
+        let cause = error.to_string();
         let result = match rollback {
             PreparedTurnRollback::Continuation => self.settle_prepared_continuation_failure(
                 conversation_id,
@@ -162,7 +187,7 @@ impl AgentService {
                 .map(|_| ()),
         };
         match result {
-            Ok(()) => cause.into(),
+            Ok(()) => error,
             Err(rollback_error) => {
                 format!("{cause}；同时无法回滚 provisional Conversation Turn：{rollback_error}")
                     .into()

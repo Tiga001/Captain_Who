@@ -281,6 +281,17 @@ impl StorageService {
             repository::recover_claims,
         )?
     }
+
+    /// Completion recovery is scoped to the exact durable Run. Other Conversations may be
+    /// preparing a claimed input whose initial Trace has not committed yet.
+    pub fn workflow_execution_recover_run(&self, run_id: &str) -> Result<(), String> {
+        self.state.write_sync(
+            workflow_job_bytes(&[run_id]),
+            StorageWriteClass::Normal,
+            |connection| repository::recover_run(connection, run_id),
+        )?
+    }
+
     pub fn workflow_execution_bind_run(
         &self,
         conversation_id: &str,

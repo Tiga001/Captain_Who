@@ -82,11 +82,24 @@ impl StorageService {
         &self,
         input: &HumanInteractionSubmitInput,
     ) -> Result<HumanInteractionRequestSnapshot, HumanInteractionError> {
+        self.submit_human_interaction_with_execution_access(input, &|| Ok(()))
+    }
+
+    /// The check runs on the same writer that publishes account-grant changes. It may inspect
+    /// process-only permission state, but must never recursively invoke StorageService.
+    pub fn submit_human_interaction_with_execution_access(
+        &self,
+        input: &HumanInteractionSubmitInput,
+        check: &(dyn Fn() -> Result<(), HumanInteractionError> + Sync),
+    ) -> Result<HumanInteractionRequestSnapshot, HumanInteractionError> {
         self.state
             .write_sync(
                 estimated(input)?.saturating_add(4096),
                 crate::storage::StorageWriteClass::Control,
-                |connection| repository::submit(connection, input, now_ms()),
+                |connection| {
+                    check()?;
+                    repository::submit(connection, input, now_ms())
+                },
             )
             .map_err(repository::unavailable)?
     }

@@ -5,7 +5,10 @@ use serde_json::json;
 use std::collections::HashSet;
 
 pub(super) fn fixture() -> Connection {
-    let mut c = Connection::open_in_memory().unwrap();
+    fixture_on_connection(Connection::open_in_memory().unwrap())
+}
+
+fn fixture_on_connection(mut c: Connection) -> Connection {
     run_migrations(&c).unwrap();
     let agent = |id: &str| json!({"kind":"agent","id":id,"name":id,"x":0,"y":0,"permissionMode":"default","modelConfigId":"model","receives":"Artifacts","task":"Review quality","delivers":"Review report"});
     let nodes = vec![agent("a"), agent("b"), agent("c")];
@@ -578,6 +581,174 @@ fn workflow_execution_recovery_does_not_complete_unproven_claims() {
     recover_claims(&mut c).unwrap();
     assert_eq!(status(&c, &receipt, 0), MailStatus::Failed);
 }
+
+fn disk_recovery_fixture() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("workflow-recovery.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .unwrap();
+    let connection = fixture_on_connection(connection);
+    (directory, path, connection)
+}
+
+fn finish_recovery_test_run(c: &Connection, run_id: &str) {
+    c.execute(
+        "UPDATE conversation_turn_traces SET terminal_status='completed',completed_at=2 WHERE run_id=?1",
+        [run_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn workflow_execution_run_recovery_keeps_other_preparing_claim_on_disk() {
+    let (_directory, path, mut c) = disk_recovery_fixture();
+    let receipt = send_mail(&mut c, "send", &[("b", "finished"), ("c", "preparing")]);
+    start_run(&mut c, "b", "finished-run");
+    assert!(bind_input(
+        &mut c,
+        &receipt.input_ids[0],
+        "finished-run",
+        "finished-input"
+    )
+    .unwrap());
+    prove(&c, &receipt.input_ids[0]);
+    finish_recovery_test_run(&c, "finished-run");
+
+    // The durable input claim precedes long preparation and the initial assistant/Trace commit.
+    let preparing_conversation = conversation(&c, "c");
+    bind_run(&mut c, &preparing_conversation, "preparing-run").unwrap();
+    assert!(bind_input(
+        &mut c,
+        &receipt.input_ids[1],
+        "preparing-run",
+        "preparing-input"
+    )
+    .unwrap());
+    let preparing = load_input(&c, &receipt.input_ids[1]).unwrap().unwrap();
+    let before_sequence = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    recover_run(&mut c, "finished-run").unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processed);
+    let after = load_input(&c, &receipt.input_ids[1]).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&preparing).unwrap()
+    );
+    assert_eq!(after.status, InputStatus::Claimed);
+    assert_eq!(after.mail_status, MailStatus::Processing);
+
+    // Even an accidentally early exact-Run call must not turn a live preparation into failure.
+    let settled_sequence = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    assert!(settled_sequence > before_sequence);
+    recover_run(&mut c, "preparing-run").unwrap();
+    recover_run(&mut c, "finished-run").unwrap();
+    assert_eq!(
+        runtime_snapshot(&c, "instance", None).unwrap().sequence,
+        settled_sequence
+    );
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processing);
+
+    // B can commit and finish normally after A's recovery. Durable proof and final status are
+    // preserved through reopening and the existing startup scan.
+    start_run(&mut c, "c", "preparing-run");
+    recover_run(&mut c, "preparing-run").unwrap();
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processing);
+    prove(&c, &receipt.input_ids[1]);
+    finish_recovery_test_run(&c, "preparing-run");
+    recover_run(&mut c, "preparing-run").unwrap();
+    let sequence = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    drop(c);
+    let mut reopened = Connection::open(path).unwrap();
+    recover_claims(&mut reopened).unwrap();
+    assert_eq!(status(&reopened, &receipt, 0), MailStatus::Processed);
+    assert_eq!(status(&reopened, &receipt, 1), MailStatus::Processed);
+    assert_eq!(
+        runtime_snapshot(&reopened, "instance", None)
+            .unwrap()
+            .sequence,
+        sequence
+    );
+}
+
+#[test]
+fn workflow_execution_startup_still_recovers_abandoned_preparing_claim_on_disk() {
+    let (_directory, path, mut c) = disk_recovery_fixture();
+    let receipt = send_mail(&mut c, "send", &[("b", "abandoned preparation")]);
+    let conversation_id = conversation(&c, "b");
+    bind_run(&mut c, &conversation_id, "abandoned-run").unwrap();
+    assert!(bind_input(
+        &mut c,
+        &receipt.input_ids[0],
+        "abandoned-run",
+        "abandoned-input"
+    )
+    .unwrap());
+    recover_run(&mut c, "abandoned-run").unwrap();
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processing);
+    drop(c);
+
+    let mut reopened = Connection::open(path).unwrap();
+    recover_claims(&mut reopened).unwrap();
+    assert_eq!(status(&reopened, &receipt, 0), MailStatus::Failed);
+    let sequence = runtime_snapshot(&reopened, "instance", None)
+        .unwrap()
+        .sequence;
+    recover_claims(&mut reopened).unwrap();
+    assert_eq!(
+        runtime_snapshot(&reopened, "instance", None)
+            .unwrap()
+            .sequence,
+        sequence
+    );
+}
+
+#[test]
+fn workflow_execution_run_recovery_failure_rolls_back_mail_and_events_on_disk() {
+    let (_directory, path, mut c) = disk_recovery_fixture();
+    let receipt = send_mail(&mut c, "send", &[("b", "first"), ("b", "second")]);
+    start_run(&mut c, "b", "finished-run");
+    assert!(bind_input(&mut c, &receipt.input_ids[0], "finished-run", "first-input").unwrap());
+    assert!(bind_input(
+        &mut c,
+        &receipt.input_ids[1],
+        "finished-run",
+        "second-input"
+    )
+    .unwrap());
+    prove(&c, &receipt.input_ids[0]);
+    prove(&c, &receipt.input_ids[1]);
+    finish_recovery_test_run(&c, "finished-run");
+    let before = runtime_snapshot(&c, "instance", None).unwrap().sequence;
+    // Failing the second mail update proves the first update and its event share the transaction.
+    c.execute_batch(&format!(
+        "CREATE TRIGGER reject_recovery_test BEFORE UPDATE ON workflow_mail_inputs
+         WHEN NEW.input_id='{}' AND NEW.status='completed'
+         BEGIN SELECT RAISE(ABORT, 'recovery test failure'); END;",
+        receipt.input_ids[1]
+    ))
+    .unwrap();
+    assert!(recover_run(&mut c, "finished-run")
+        .unwrap_err()
+        .contains("recovery test failure"));
+    assert_eq!(status(&c, &receipt, 0), MailStatus::Processing);
+    assert_eq!(status(&c, &receipt, 1), MailStatus::Processing);
+    assert_eq!(
+        runtime_snapshot(&c, "instance", None).unwrap().sequence,
+        before
+    );
+    c.execute_batch("DROP TRIGGER reject_recovery_test")
+        .unwrap();
+    drop(c);
+    let mut reopened = Connection::open(path).unwrap();
+    recover_run(&mut reopened, "finished-run").unwrap();
+    assert_eq!(status(&reopened, &receipt, 0), MailStatus::Processed);
+    assert_eq!(status(&reopened, &receipt, 1), MailStatus::Processed);
+}
+
 #[test]
 fn workflow_execution_epoch_changes_keep_mail_but_rebinding_fences_original_recipient() {
     let mut c = fixture();

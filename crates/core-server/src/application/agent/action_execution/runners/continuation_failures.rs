@@ -79,11 +79,9 @@ impl AgentService {
             .cloned();
         let persisted = persist_terminal_with_bounded_retry(
             || {
-                let deletion_lifecycle = self
-                    .deletion_lifecycle
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if deletion_lifecycle.contains_input(&record.agent_input) {
+                let deletion_lifecycle =
+                    self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id);
+                if deletion_lifecycle.is_err() {
                     return Err("项目或会话正在移除，无法持久化已取消审批续跑终态。".to_string());
                 }
                 terminal.as_ref().map_err(Clone::clone).and_then(
@@ -104,10 +102,8 @@ impl AgentService {
             persist_terminal_with_bounded_retry(
                 || {
                     let deletion_lifecycle = self
-                        .deletion_lifecycle
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                        .register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id);
+                    if deletion_lifecycle.is_err() {
                         return Err(
                             "项目或会话正在移除，无法完成已取消审批续跑的状态迁移。".to_string()
                         );
@@ -123,11 +119,9 @@ impl AgentService {
                     .to_string(),
             )
         };
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if deletion_lifecycle.contains_input(&record.agent_input) {
+        let deletion_lifecycle =
+            self.register_lifecycle_activity(&record.agent_input, &record.snapshot.run_id);
+        if deletion_lifecycle.is_err() {
             drop(deletion_lifecycle);
             self.discard_usage_context(run_id);
             if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
@@ -330,15 +324,9 @@ impl AgentService {
         );
         let cumulative_usage = self.preview_cumulative_run_usage(run_id, None);
         let completed_at = now_ms();
-        let persisted = {
-            let mut pending_actions = self
-                .pending_actions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let pending = pending_actions
-                .get_mut(&record.storage_id)
-                .ok_or_else(|| format!("审批续跑的内存 pending 状态不存在：{}", record.storage_id));
-            pending.and_then(|pending| {
+        let persisted = self
+            .pending_action_snapshot(&record.storage_id)
+            .and_then(|pending| {
                 if pending.snapshot.run_id != *run_id
                     || pending.snapshot.conversation_id.as_deref() != Some(conversation_id)
                     || pending.snapshot.assistant_message_id.as_deref()
@@ -359,10 +347,12 @@ impl AgentService {
                     completed_at,
                     usage_record.as_ref(),
                 )?;
-                pending.snapshot.status = PendingActionStatus::Failed;
-                Ok(())
-            })
-        };
+                self.publish_pending_action_status(
+                    &pending,
+                    expected_status,
+                    PendingActionStatus::Failed,
+                )
+            });
         if persisted.is_err() {
             let mut usage_contexts = self
                 .usage_contexts

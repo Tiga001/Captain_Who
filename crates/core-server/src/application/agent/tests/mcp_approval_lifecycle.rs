@@ -1534,7 +1534,13 @@ async fn agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durabl
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-approval-lifecycle.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-approval-model",
@@ -1719,7 +1725,13 @@ async fn automatic_mcp_tool_error_keeps_model_arguments_live_but_not_durable() {
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-auto-live-arguments.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-auto-live-arguments-model",
@@ -1828,7 +1840,11 @@ async fn run_approved_behavior(behavior: ApprovalInvocationBehavior) -> (Value, 
 
     let fixture = tempdir().unwrap();
     let storage = Arc::new(
-        StorageService::open(&fixture.path().join("mcp-lifecycle-behavior.sqlite")).unwrap(),
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("mcp-lifecycle-behavior.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
     );
     save_test_pending_provider(
         &storage,
@@ -1921,7 +1937,13 @@ async fn run_rejected_approval(message: Option<&str>) -> RejectedApprovalScenari
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-rejected-approval.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-rejected-approval-model",
@@ -2214,8 +2236,13 @@ async fn concurrent_double_reject_has_one_durable_winner_and_one_model_continuat
     });
 
     let fixture = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&fixture.path().join("mcp-double-reject.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("mcp-double-reject.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-double-reject-model",
@@ -2404,7 +2431,13 @@ async fn recovered_approved_mcp_rejection_keeps_feedback_and_resumes_with_normal
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-recovered-approved-reject.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-recovered-approved-reject-model",
@@ -2558,7 +2591,11 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
 
     let fixture = tempdir().unwrap();
     let storage = Arc::new(
-        StorageService::open(&fixture.path().join("mcp-success-then-reject.sqlite")).unwrap(),
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("mcp-success-then-reject.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
     );
     save_test_pending_provider(
         &storage,
@@ -2767,7 +2804,11 @@ async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispa
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-successor-rollback.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-successor-rollback-model",
@@ -2890,7 +2931,9 @@ async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispa
     let _second_request = model_server.await.unwrap();
     drop(service);
     drop(storage);
-    let recovered_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let recovered_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let recovered = AgentService::new_authorized_for_test(Arc::clone(&recovered_storage));
     assert!(recovered.list_pending_actions().is_empty());
     let predecessor = recovered_storage
@@ -2992,7 +3035,11 @@ async fn cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_r
 
     let fixture = tempdir().unwrap();
     let storage = Arc::new(
-        StorageService::open(&fixture.path().join("mcp-cancel-lifecycle.sqlite")).unwrap(),
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("mcp-cancel-lifecycle.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
     );
     save_test_pending_provider(
         &storage,
@@ -3120,7 +3167,13 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("mcp-persistence-failure.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     save_test_pending_provider(
         &storage,
         "mcp-persistence-failure-model",

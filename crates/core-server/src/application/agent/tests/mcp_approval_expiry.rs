@@ -386,7 +386,13 @@ fn store_action(
 #[test]
 fn expiry_tick_preserves_human_approval_tickets_and_does_not_touch_payloads() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let cutoff = now_ms().saturating_add(120_000);
     let now = Arc::new(AtomicI64::new(cutoff));
     let invoker = Arc::new(ExpiryInvoker::default());
@@ -470,7 +476,13 @@ fn expiry_tick_preserves_human_approval_tickets_and_does_not_touch_payloads() {
 #[test]
 fn expiry_tick_does_not_arbitrate_or_rewrite_durable_action_status() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let now = 2_000_000;
     let invoker = Arc::new(ExpiryInvoker::default());
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage))

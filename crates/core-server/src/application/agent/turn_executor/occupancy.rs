@@ -14,7 +14,7 @@ impl AgentService {
             );
         }
         self.ensure_no_manual_context_compaction(conversation_id)?;
-        let mut active_turns = self
+        let active_turns = self
             .active_conversation_turns
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -31,6 +31,7 @@ impl AgentService {
                 }),
             ));
         }
+        drop(active_turns);
         if let Some(active) = self
             .storage
             .get_in_progress_conversation_turn_identity(conversation_id)?
@@ -45,6 +46,16 @@ impl AgentService {
                     "code": "conversation_busy",
                     "retryable": true
                 }),
+            ));
+        }
+        let mut active_turns = self
+            .active_conversation_turns
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active_turns.contains_key(conversation_id) {
+            return Err(AgentServiceError::structured(
+                "当前会话已有进行中的 agent 运行，请等待其完成。",
+                serde_json::json!({"domain":"agent_turn","code":"conversation_busy","retryable":true}),
             ));
         }
         active_turns.insert(
@@ -92,7 +103,7 @@ impl AgentService {
         run_id: &str,
         assistant_message_id: &str,
     ) -> Result<(), String> {
-        let mut active_turns = self
+        let active_turns = self
             .active_conversation_turns
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -107,6 +118,7 @@ impl AgentService {
                 ))
             };
         }
+        drop(active_turns);
         let durable = self
             .storage
             .get_in_progress_conversation_turn_identity(conversation_id)?
@@ -121,6 +133,18 @@ impl AgentService {
         {
             return Err("approval continuation does not own the durable active turn".to_string());
         }
+        let mut active_turns = self
+            .active_conversation_turns
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(active) = active_turns.get(conversation_id) {
+            return if active.run_id == run_id && active.assistant_message_id == assistant_message_id
+            {
+                Ok(())
+            } else {
+                Err("approval continuation lost the current Conversation owner".into())
+            };
+        }
         active_turns.insert(
             conversation_id.to_string(),
             ActiveConversationTurn {
@@ -132,7 +156,8 @@ impl AgentService {
     }
 
     pub(super) fn release_conversation_turn_if_current(&self, conversation_id: &str, run_id: &str) {
-        self.collaboration_run_directories.lock()
+        self.collaboration_run_directories
+            .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(run_id);
         let mut active_turns = self
@@ -154,6 +179,15 @@ impl AgentService {
 
     pub(super) fn restore_durable_conversation_turn_occupancies(&self) -> Result<(), String> {
         let durable = self.storage.list_in_progress_conversation_turn_traces()?;
+        let waiting = durable
+            .iter()
+            .map(|trace| {
+                self.storage
+                    .is_sync_human_interaction_run_waiting(&trace.run_id)
+                    .map(|waiting| (trace.run_id.clone(), waiting))
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
         let mut active_turns = self
             .active_conversation_turns
             .lock()
@@ -184,11 +218,7 @@ impl AgentService {
             // Startup may find more durable Turns than a newly lowered limit. Recovered permits
             // count every survivor, deliberately blocking new root and child admission until the
             // active count falls below the configured process limit.
-            if !self
-                .storage
-                .is_sync_human_interaction_run_waiting(&run_id)
-                .map_err(|e| e.to_string())?
-            {
+            if !waiting.get(&run_id).copied().unwrap_or(false) {
                 permits.insert(run_id, self.turn_concurrency_gate.adopt_recovered());
             }
         }

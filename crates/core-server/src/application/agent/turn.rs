@@ -298,14 +298,13 @@ impl AgentService {
 
         self.authorize_user_conversation_write(&conversation_id)?;
 
-        // Conversation Turn admission and Provider-transition admission share one Host lock. The
-        // process reservation is installed before prepare writes any message; the empty durable
-        // in-progress trace committed by the executor is the cross-restart source of truth.
+        // Only this Conversation is serialized with model/history mutations. Cancellation and
+        // deletion publish their fences through the writer without waiting for this preparation.
+        // The initial durable Trace remains the cross-restart admission source of truth.
         let admission_wait = mycopilot_core::performance::Span::new("turn", "admission_wait");
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&conversation_id);
         drop(admission_wait);
         let _admission_hold = mycopilot_core::performance::Span::new("turn", "admission_hold");
         if workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
@@ -349,17 +348,27 @@ impl AgentService {
         // Every genuinely new root Turn needs a current Host lease, including answers to old
         // asynchronous questions and edit/regenerate. Replay above, child/wake execution,
         // steering, and recovery of an existing Turn do not create new human work.
-        // Hold this lock until durable admission; revocation cannot race the message/Trace commit.
+        // Publication and the final check share the storage writer boundary. No permission
+        // registry lock is held while history, files or writer admission are awaited.
         let access_wait = mycopilot_core::performance::Span::new("turn", "access_wait");
-        let execution_access_guard = self
-            .execution_access
-            .lock()
-            .map_err(|_| ExecutionAccessDenied::unavailable().agent_error())?;
-        drop(access_wait);
-        let access_hold = mycopilot_core::performance::Span::new("turn", "access_hold");
-        execution_access_guard
-            .check()
+        let execution_access_token = self
+            .capture_execution_access()
             .map_err(ExecutionAccessDenied::agent_error)?;
+        drop(access_wait);
+        let run_id = next_run_id();
+        let cancellation_token = AgentCancellationToken::new();
+        let authoritative_project = match self.storage.load_conversation_meta(&conversation_id)? {
+            Some(conversation) => conversation.project_id,
+            None => input.project_id.clone(),
+        };
+        let preparation = self.preparing.register(
+            &conversation_id,
+            authoritative_project.as_deref(),
+            &run_id,
+            &assistant_message_id,
+            cancellation_token.clone(),
+            None,
+        )?;
         if self.is_project_deleting(input.project_id.as_deref())
             || self.is_conversation_deleting(Some(&conversation_id))
         {
@@ -419,6 +428,12 @@ impl AgentService {
             ),
             None => self.storage.load_conversation_for_turn(&conversation_id)?,
         };
+        if previous_conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.project_id != authoritative_project)
+        {
+            return Err("Conversation project changed while preparation was being registered; retry the Turn.".to_string().into());
+        }
         if let Some(continuation) = &continuation {
             let conversation = previous_conversation
                 .as_ref()
@@ -464,6 +479,9 @@ impl AgentService {
                     .into(),
             );
         }
+        preparation.set_revision(expected_revision)?;
+        #[cfg(test)]
+        super::turn_executor::run_before_preparing_admission_hook(&conversation_id);
         self.ensure_provider_transition_ready_for_send(&conversation_id, &input.model_id)?;
         if previous_conversation.is_some()
             && self.storage.conversation_revision(&conversation_id)? != expected_revision
@@ -488,7 +506,7 @@ impl AgentService {
             .is_empty();
 
         drop(history_timing);
-        let run_id = next_run_id();
+        preparation.validate()?;
         self.storage
             .workflow_execution_bind_run(&conversation_id, &run_id)?;
         let global_permit = match automation
@@ -516,7 +534,6 @@ impl AgentService {
         };
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
         self.register_turn_concurrency_permit(&run_id, global_permit)?;
-        let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
 
         let automation_admission = automation.as_ref().map(|automation| {
@@ -533,8 +550,21 @@ impl AgentService {
             }
         });
         let execution_access_check = || {
-            execution_access_guard
-                .check()
+            preparation.mark_committing().map_err(|message| {
+                AgentServiceError::structured(
+                    message,
+                    serde_json::json!({"code":"turn_preparation_cancelled"}),
+                )
+            })?;
+            if self.runtime_stopping.load(Ordering::Acquire)
+                || (workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire))
+            {
+                return Err(AgentServiceError::structured(
+                    "Agent runtime is shutting down.",
+                    serde_json::json!({"code":"turn_preparation_cancelled"}),
+                ));
+            }
+            self.check_execution_access_token(execution_access_token)
                 .map_err(ExecutionAccessDenied::agent_error)
         };
         let preparation_timing =
@@ -555,34 +585,37 @@ impl AgentService {
                 self.storage
                     .workflow_execution_bind_input(&workflow.id, &run_id, &user_message_id);
             match claim {
-                Ok(true) => self
-                    .storage
-                    .workflow_execution_load_input(&workflow.id)
-                    .map_err(AgentServiceError::from)
-                    .and_then(|bound| {
-                        let workflow = bound.ok_or_else(|| {
-                            AgentServiceError::from(
-                                "accepted organization input no longer exists".to_string(),
+                Ok(true) => {
+                    #[cfg(test)]
+                    super::turn_executor::run_after_preparing_claim_hook(&conversation_id);
+                    self.storage
+                        .workflow_execution_load_input(&workflow.id)
+                        .map_err(AgentServiceError::from)
+                        .and_then(|bound| {
+                            let workflow = bound.ok_or_else(|| {
+                                AgentServiceError::from(
+                                    "accepted organization input no longer exists".to_string(),
+                                )
+                            })?;
+                            // The claim freezes acceptance metadata. Persist that same envelope in
+                            // the chat projection, rather than the scheduler's pending preview.
+                            input.content = workflow.content.clone();
+                            prepare_reserved_workflow_turn_with_history(
+                                &self.storage,
+                                &self.skills,
+                                input,
+                                &run_id,
+                                previous_conversation.clone(),
+                                expected_revision,
+                                workflow,
+                                &execution_access_check,
+                                prepared_history.clone(),
                             )
-                        })?;
-                        // The claim freezes acceptance metadata. Persist that same envelope in
-                        // the chat projection, rather than the scheduler's pending preview.
-                        input.content = workflow.content.clone();
-                        prepare_reserved_workflow_turn_with_history(
-                            &self.storage,
-                            &self.skills,
-                            input,
-                            &run_id,
-                            previous_conversation.clone(),
-                            expected_revision,
-                            workflow,
-                            &execution_access_check,
-                            prepared_history.clone(),
-                        )
-                        .map(|prepared| {
-                            PreparedConversationTurnOutcome::Prepared(Box::new(prepared))
+                            .map(|prepared| {
+                                PreparedConversationTurnOutcome::Prepared(Box::new(prepared))
+                            })
                         })
-                    }),
+                }
                 Ok(false) => Err("organization input is no longer pending".to_string().into()),
                 Err(error) => Err(error.into()),
             }
@@ -646,8 +679,6 @@ impl AgentService {
             Ok(outcome)
         });
         drop(preparation_timing);
-        drop(execution_access_guard);
-        drop(access_hold);
         let prepared = match prepared_outcome {
             Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
             Ok(PreparedConversationTurnOutcome::Replayed(output)) => {

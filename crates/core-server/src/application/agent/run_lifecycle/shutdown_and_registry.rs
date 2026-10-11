@@ -12,14 +12,12 @@ impl AgentService {
         };
         let cancelled = reservation
             .submit(move || {
-                service.stop_workflow_delivery_admissions();
-                {
-                    let _admission = service
-                        .conversation_admission
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
+                service.stop_workflow_delivery_admissions()?;
+                service.storage.coordinate_runtime_control(|| {
                     service.runtime_stopping.store(true, Ordering::Release);
-                }
+                    service.preparing.begin_shutdown();
+                    Ok(())
+                })?;
                 service.provider_transition_tasks.begin_shutdown();
                 let manual_tokens = service
                     .manual_context_compaction_cancellations
@@ -43,17 +41,30 @@ impl AgentService {
                 };
 
                 for (run_id, token) in &active_runs {
+                    let _publication = service.run_publication.lock_conversation(run_id);
                     token.cancel();
+                    if let Some(current) = service
+                        .cancellations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(run_id)
+                    {
+                        current.cancel();
+                    }
                     service.command_sessions.cancel_pre_handoff_for_run(run_id);
                     service.process_runs.cancel_run(run_id);
                 }
 
-                (manual_tokens, active_runs)
+                Ok::<_, String>((manual_tokens, active_runs))
             })
             .wait()
             .await;
         let (manual_tokens, active_runs) = match cancelled {
-            Ok(cancelled) => cancelled,
+            Ok(Ok(cancelled)) => cancelled,
+            Ok(Err(error)) => {
+                eprintln!("active run shutdown fence failed: {error}");
+                return (0, true);
+            }
             Err(error) => {
                 eprintln!("active run shutdown outcome may be unknown: {error}");
                 return (0, true);
@@ -93,6 +104,7 @@ impl AgentService {
                 && sessions_settled
                 && manual_settled
                 && self.provider_transition_tasks.active() == 0
+                && self.preparing.snapshot().is_empty()
             {
                 return (active_runs.len() + manual_tokens.len(), false);
             }
@@ -310,14 +322,19 @@ impl AgentService {
     }
 
     pub(super) fn register_cancellation(&self, run_id: &str, token: AgentCancellationToken) {
+        let _publication = self.run_publication.lock_conversation(run_id);
         let mut cancellations = self
             .cancellations
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if self.runtime_stopping.load(Ordering::Acquire) {
+            token.cancel();
+        }
         cancellations.insert(run_id.to_string(), token);
     }
 
     pub(super) fn unregister_cancellation(&self, run_id: &str) {
+        let _publication = self.run_publication.lock_conversation(run_id);
         let mut cancellations = self
             .cancellations
             .lock()
@@ -330,6 +347,7 @@ impl AgentService {
         run_id: &str,
         token: &AgentCancellationToken,
     ) {
+        let _publication = self.run_publication.lock_conversation(run_id);
         let mut cancellations = self
             .cancellations
             .lock()

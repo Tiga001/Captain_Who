@@ -13,6 +13,12 @@ impl AgentService {
         let message = message.filter(|value| !value.trim().is_empty());
         #[cfg(test)]
         run_approval_decision_barrier_hook(action_id, decision_status);
+        let decision_owner = self
+            .pending_action_for_decision(run_id, action_id)
+            .ok_or_else(|| format!("未找到待审批操作：runId={run_id}, actionId={action_id}"))?;
+        let _decision = self
+            .action_admission
+            .lock_conversation(&decision_owner.snapshot.run_id);
         if decision_status == AgentApprovalDecisionStatus::Approved {
             if let Some(output) =
                 self.try_resume_approved_mcp_action(run_id, action_id, notifications.clone())?
@@ -21,40 +27,28 @@ impl AgentService {
             }
         }
         let lifecycle_wait = mycopilot_core::performance::Span::new("approval", "lifecycle_wait");
-        let mut deletion_lifecycle = Some(
-            self.deletion_lifecycle
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
+        let mut deletion_lifecycle = Some(self.register_lifecycle_activity(
+            &decision_owner.agent_input,
+            &decision_owner.snapshot.run_id,
+        )?);
         drop(lifecycle_wait);
         let decided_at = now_ms();
         let (
             mut record,
             call,
             approved_process_guard,
-            approved_materialization_guard,
+            approved_file_effect_guard,
             inline_continuation_guard,
             precommitted_builtin_rejection,
             provider_continuation_error,
         ) = {
             let registry_wait = mycopilot_core::performance::Span::new("approval", "registry_wait");
-            let mut pending_actions = self
-                .pending_actions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
+            let storage_id = decision_owner.storage_id.clone();
+            let mut owned_record = self.pending_action_snapshot(&storage_id)?;
+            let record = &mut owned_record;
             drop(registry_wait);
-            let _registry_hold =
-                mycopilot_core::performance::Span::new("approval", "registry_hold");
-            let Some(storage_id) =
-                resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
-            else {
-                return Err(format!(
-                    "未找到待审批操作：runId={run_id}, actionId={action_id}"
-                ));
-            };
-            let record = pending_actions
-                .get(&storage_id)
-                .expect("resolved pending action exists");
+            #[cfg(test)]
+            run_frozen_approval_hook(&record.storage_id);
             let is_rejected_mcp = decision_status == AgentApprovalDecisionStatus::Rejected
                 && matches!(
                     record.snapshot.action,
@@ -74,14 +68,7 @@ impl AgentService {
                 return Err(format!("待审批操作已经处理：{action_id}"));
             }
             self.ensure_approval_predecessors_settled(record)?;
-            let record = pending_actions
-                .get_mut(&storage_id)
-                .expect("resolved pending action exists");
-            if deletion_lifecycle
-                .as_ref()
-                .expect("deletion lifecycle guard is held while preparing approval")
-                .contains_input(&record.agent_input)
-            {
+            if self.is_agent_input_scope_deleting(&record.agent_input) {
                 return Err("项目或会话正在移除，无法处理待审批操作。".to_string());
             }
             let provider_continuation_error = (decision_status
@@ -178,27 +165,50 @@ impl AgentService {
                     record.snapshot.action,
                     AgentProposedAction::SkillMaterialization { .. }
                 );
-            let approved_process_guard = is_approved_process.then(|| {
-                self.process_runs
-                    .register(&record.storage_id, &record.snapshot.run_id)
-            });
-            let approved_materialization_guard = is_approved_materialization.then(|| {
-                // The shared lifecycle lock is held, so direct registration is atomic with the
-                // project/conversation tombstone check above and cannot race deletion.
-                self.file_effects.register(
-                    agent_input_project_id(&record.agent_input),
-                    agent_input_conversation_id(&record.agent_input),
-                    &record.snapshot.run_id,
-                    &record.storage_id,
+            let (approved_process_guard, approved_file_effect_guard, inline_continuation_guard) = {
+                let lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if lifecycle.contains_input(&record.agent_input) {
+                    return Err("项目或会话正在移除，无法处理待审批操作。".into());
+                }
+                let approved_process_guard = is_approved_process.then(|| {
+                    self.process_runs
+                        .register(&record.storage_id, &record.snapshot.run_id)
+                });
+                let is_approved_file_change = decision_status
+                    == AgentApprovalDecisionStatus::Approved
+                    && provider_continuation_error.is_none()
+                    && matches!(
+                        record.snapshot.action,
+                        AgentProposedAction::FileChange { .. }
+                    );
+                let approved_file_effect_guard =
+                    (is_approved_materialization || is_approved_file_change).then(|| {
+                        // The shared lifecycle lock is held, so direct registration is atomic with the
+                        // project/conversation tombstone check above and cannot race deletion.
+                        self.file_effects.register(
+                            agent_input_project_id(&record.agent_input),
+                            agent_input_conversation_id(&record.agent_input),
+                            &record.snapshot.run_id,
+                            &record.storage_id,
+                        )
+                    });
+                let inline_continuation_guard =
+                    (!is_approved_process && !is_rejected_mcp).then(|| {
+                        // Synchronous decisions still queue an async model continuation. Register its
+                        // pre-spawn lease under the lifecycle lock so message deletion cannot pass
+                        // between durable action settlement and worker startup.
+                        self.process_runs
+                            .register(&record.storage_id, &record.snapshot.run_id)
+                    });
+                (
+                    approved_process_guard,
+                    approved_file_effect_guard,
+                    inline_continuation_guard,
                 )
-            });
-            let inline_continuation_guard = (!is_approved_process && !is_rejected_mcp).then(|| {
-                // Synchronous decisions still queue an async model continuation. Register its
-                // pre-spawn lease under the lifecycle lock so message deletion cannot pass
-                // between durable action settlement and worker startup.
-                self.process_runs
-                    .register(&record.storage_id, &record.snapshot.run_id)
-            });
+            };
             let execution_status = if is_approved_skill_script {
                 PendingActionStatus::Executing
             } else if is_approved_process || is_approved_materialization {
@@ -267,20 +277,25 @@ impl AgentService {
                         execution_status,
                     )?;
                 }
+                self.publish_pending_action_status(
+                    record,
+                    record.snapshot.status,
+                    execution_status,
+                )?;
                 record.snapshot.status = execution_status;
             }
             (
                 record.clone(),
                 call,
                 approved_process_guard,
-                approved_materialization_guard,
+                approved_file_effect_guard,
                 inline_continuation_guard,
                 precommitted_builtin_rejection,
                 provider_continuation_error,
             )
         };
         let mut approved_process_guard = approved_process_guard;
-        let mut approved_materialization_guard = approved_materialization_guard;
+        let mut approved_file_effect_guard = approved_file_effect_guard;
         let mut inline_continuation_guard = inline_continuation_guard;
 
         let mut call = call;
@@ -323,7 +338,7 @@ impl AgentService {
             return self.queue_command_execution(
                 record,
                 call,
-                approved_process_guard.expect("approved command registered under pending lock"),
+                approved_process_guard.expect("approved command registered under lifecycle lock"),
                 notifications,
             );
         }
@@ -339,7 +354,7 @@ impl AgentService {
                 record,
                 call,
                 approved_process_guard
-                    .expect("approved Skill script registered under pending lock"),
+                    .expect("approved Skill script registered under lifecycle lock"),
                 notifications,
             );
         }
@@ -366,7 +381,7 @@ impl AgentService {
                 record,
                 call,
                 approved_process_guard
-                    .expect("approved Office operation registered under pending lock"),
+                    .expect("approved Office operation registered under lifecycle lock"),
                 notifications,
             );
         }
@@ -393,7 +408,7 @@ impl AgentService {
                 record,
                 call,
                 approved_process_guard
-                    .expect("approved MCP invocation registered under pending lock"),
+                    .expect("approved MCP invocation registered under lifecycle lock"),
                 notifications,
             );
         }
@@ -437,7 +452,7 @@ impl AgentService {
                         call,
                         grant.clone(),
                         approved_process_guard.take().expect(
-                            "approved built-in MCP invocation registered under pending lock",
+                            "approved built-in MCP invocation registered under lifecycle lock",
                         ),
                         notifications,
                     );
@@ -454,10 +469,17 @@ impl AgentService {
                     // synchronous continuation lease so the ordinary failed ToolResult is paired
                     // with the original frozen checkpoint before the agent resumes.
                     drop(approved_process_guard.take());
-                    inline_continuation_guard = Some(
+                    inline_continuation_guard = Some({
+                        let lifecycle = self
+                            .deletion_lifecycle
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if lifecycle.contains_input(&record.agent_input) {
+                            return Err("项目或会话正在移除，无法处理待审批操作。".into());
+                        }
                         self.process_runs
-                            .register(&record.storage_id, &record.snapshot.run_id),
-                    );
+                            .register(&record.storage_id, &record.snapshot.run_id)
+                    });
                 }
             }
         }
@@ -470,7 +492,7 @@ impl AgentService {
             );
         if is_approved_materialization {
             // The lease was registered atomically with the deletion-marker check above. Release
-            // the global lifecycle mutex before resource restoration and filesystem I/O so a
+            // the temporary validation activity before resource restoration and filesystem I/O so a
             // deletion can install its marker and use the bounded FileEffectTracker drain.
             drop(deletion_lifecycle.take());
         }
@@ -741,7 +763,7 @@ impl AgentService {
                 materialization.approval_status = AgentApprovalStatus::Approved;
                 let tool_result = match self.restore_skill_resource_session(&record.agent_input) {
                     Ok(resources) => {
-                        approved_materialization_guard
+                        approved_file_effect_guard
                             .as_mut()
                             .expect(
                                 "approved Skill materialization registered under lifecycle lock",
@@ -784,6 +806,9 @@ impl AgentService {
                     tool_result,
                 }
             } else {
+                if let Some(effect) = approved_file_effect_guard.as_mut() {
+                    effect.mark_effects_started();
+                }
                 action_execution_for_decision(
                     &self.storage,
                     &record,
@@ -922,10 +947,17 @@ impl AgentService {
             // Only the durable status-CAS winner owns the pre-spawn lease. Registering before
             // arbitration would let a duplicate reject overwrite the winner's action-keyed guard
             // and unregister it when the losing guard drops.
-            inline_continuation_guard = Some(
+            inline_continuation_guard = Some({
+                let lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if lifecycle.contains_input(&record.agent_input) {
+                    return Err("项目或会话正在移除，无法处理待审批操作。".into());
+                }
                 self.process_runs
-                    .register(&record.storage_id, &record.snapshot.run_id),
-            );
+                    .register(&record.storage_id, &record.snapshot.run_id)
+            });
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
             if let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action {
                 if let Ok(invocation) = mcp_tool_invocation_event(
@@ -994,9 +1026,15 @@ impl AgentService {
                         execution_status = "outcome_unknown".to_string();
                     }
                     execution.file_change_result = Some(settled_file_change_result);
+                    if let Some(effect) = approved_file_effect_guard.as_mut() {
+                        effect.mark_durably_settled();
+                    }
                     *agent_input
                 }
                 ManualFileEffectSettlement::CommittedAndAdvanced => {
+                    if let Some(effect) = approved_file_effect_guard.as_mut() {
+                        effect.mark_durably_settled();
+                    }
                     return Err(
                         "FileChange receipt was already advanced by another continuation; duplicate continuation was stopped."
                             .to_string(),
@@ -1030,14 +1068,14 @@ impl AgentService {
                     } else {
                         "failed".to_string()
                     };
-                    approved_materialization_guard
+                    approved_file_effect_guard
                         .as_mut()
                         .expect("approved Skill materialization has an effect guard")
                         .mark_durably_settled();
                     *agent_input
                 }
                 ManualFileEffectSettlement::CommittedAndAdvanced => {
-                    approved_materialization_guard
+                    approved_file_effect_guard
                         .as_mut()
                         .expect("approved Skill materialization has an effect guard")
                         .mark_durably_settled();
@@ -1114,17 +1152,11 @@ impl AgentService {
         let continuation_cancel_flag = inline_continuation_guard.cancel_flag();
         let continuation_cancellation = AgentCancellationToken::new();
         self.register_cancellation(&run_id, continuation_cancellation.clone());
-        // Inline diff/file-write actions keep the shared lifecycle lock until their target status
-        // and paired ToolResult trace are durable. Materialization and asynchronous process paths
-        // use a FileEffectGuard, so deletion can observe and drain them without an unbounded mutex
-        // wait.
-        drop(approved_materialization_guard);
+        // The scope activity retains this decision until its target and paired ToolResult are
+        // durable. Deletion drains this exact scope without holding any global registry mutex.
+        drop(approved_file_effect_guard);
         drop(deletion_lifecycle);
-        let publish_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if !publish_lifecycle.contains_input(&record.agent_input)
+        if !self.is_agent_input_scope_deleting(&record.agent_input)
             && publish_inline_file_change_tool_result(
                 &notifications,
                 &record.snapshot.run_id,
@@ -1157,7 +1189,6 @@ impl AgentService {
                 }
             }
         }
-        drop(publish_lifecycle);
 
         let service = self.clone();
         let continuation_record = record.clone();

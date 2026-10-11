@@ -251,6 +251,7 @@ fn add_grandchild(connection: &mut Connection) -> AgentNodeRecord {
 }
 
 mod delivery_lifecycle;
+mod fair_claim;
 mod mailbox_projection;
 mod nodes_permissions;
 mod result_recovery;

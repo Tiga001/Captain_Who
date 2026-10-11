@@ -147,6 +147,36 @@ pub fn claim_next_dispatchable_agent_wake(
     claim_token: &str,
     claimed_at: i64,
 ) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+    claim_next_dispatchable_agent_wake_with_preparation_fairness(
+        connection,
+        claim_token,
+        claimed_at,
+        false,
+    )
+}
+
+/// A root may own only one not-yet-admitted preparation. This is scheduling fairness, not a
+/// logical Turn quota: running and approval-waiting Wakes remain eligible to have siblings
+/// claimed. Filtering and claim share the writer transaction, including across Host instances.
+pub fn claim_next_fair_dispatchable_agent_wake(
+    connection: &mut Connection,
+    claim_token: &str,
+    claimed_at: i64,
+) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+    claim_next_dispatchable_agent_wake_with_preparation_fairness(
+        connection,
+        claim_token,
+        claimed_at,
+        true,
+    )
+}
+
+fn claim_next_dispatchable_agent_wake_with_preparation_fairness(
+    connection: &mut Connection,
+    claim_token: &str,
+    claimed_at: i64,
+    fair_preparation: bool,
+) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
     validate_id("claim_token", claim_token)?;
     validate_time(claimed_at)?;
     let transaction = immediate(connection)?;
@@ -161,6 +191,11 @@ pub fn claim_next_dispatchable_agent_wake(
              JOIN agent_nodes AS agent ON agent.agent_id = wake.agent_id
              WHERE wake.status = 'queued'
                AND agent.lifecycle = 'active'
+               AND (?2 = 0 OR NOT EXISTS (
+                   SELECT 1 FROM agent_wake_requests AS preparing
+                   WHERE preparing.root_agent_id = wake.root_agent_id
+                     AND preparing.status = 'claimed'
+               ))
                AND NOT EXISTS (
                    SELECT 1 FROM manual_context_compaction_operations AS maintenance
                    WHERE maintenance.conversation_id = agent.root_conversation_id
@@ -188,7 +223,7 @@ pub fn claim_next_dispatchable_agent_wake(
                )
              ORDER BY wake.sequence, wake.wake_id
              LIMIT 1",
-            [claimed_at],
+            params![claimed_at, fair_preparation],
             |row| row.get::<_, String>(0),
         )
         .optional()

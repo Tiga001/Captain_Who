@@ -68,7 +68,13 @@ impl mycopilot_core::office::OfficeEngine for SlowOfficeStatusEngine {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_result() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_office_engine(Arc::new(SlowOfficeStatusEngine));
     let installations =
@@ -141,7 +147,13 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
     let (image_tx, _image_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
@@ -224,7 +236,13 @@ async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = crate::transport::outbound_channel();
     let (image_tx, _image_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
@@ -329,7 +347,13 @@ async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
 #[test]
 fn office_status_rejects_even_empty_parameter_objects() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(storage)
         .with_office_engine(Arc::new(SlowOfficeStatusEngine));
     let request = serde_json::from_value::<JsonRpcRequest>(json!({
@@ -356,7 +380,13 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
         "---\nname: auditor\ndescription: Audit a repository.\n---\n# Instructions\n",
     )
     .unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage
         .save_project(ProjectRecord::with_primary_folder(
             "project-1".to_string(),
@@ -426,7 +456,13 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn changed_enablement_emits_one_invalidation_notification() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let skills_service = Arc::new(SkillsService::new().with_bundled_source().unwrap());
     let catalog = skills_service.list().unwrap();
     let skill_store = temp.path().join("skills");
@@ -523,7 +559,11 @@ async fn changed_enablement_emits_one_invalidation_notification() {
 fn indeterminate_direct_mutation_emits_catalog_invalidation_without_claiming_success() {
     const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b336";
     let temp = tempfile::tempdir().unwrap();
-    let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &temp.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let catalog = SkillsService::new();
     let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
     let workflow = SkillInstallationWorkflow::new(
@@ -578,7 +618,11 @@ fn indeterminate_direct_mutation_emits_catalog_invalidation_without_claiming_suc
 fn indeterminate_workflow_commit_emits_catalog_invalidation_without_claiming_success() {
     const INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
     let temp = tempfile::tempdir().unwrap();
-    let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &temp.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let catalog = SkillsService::new();
     let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
     let workflow = SkillInstallationWorkflow::new(
@@ -641,7 +685,11 @@ fn indeterminate_workflow_commit_emits_catalog_invalidation_without_claiming_suc
 fn ordinary_direct_mutation_failure_does_not_emit_an_invalidation() {
     const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b337";
     let temp = tempfile::tempdir().unwrap();
-    let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+    let storage = StorageService::open_with_model_credentials(
+        &temp.path().join("storage.sqlite"),
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     let catalog = SkillsService::new();
     let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
     let workflow = SkillInstallationWorkflow::new(
@@ -762,7 +810,13 @@ async fn image_artifact_permit_is_held_until_the_large_response_is_flushed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let skills_service = Arc::new(SkillsService::new());
     let skill_installation_service =
@@ -860,7 +914,13 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_read_admission_is_bounded_and_does_not_block_core_requests() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
@@ -947,7 +1007,13 @@ async fn core_shutdown_settles_the_managed_playwright_runtime_before_outbound_cl
     };
 
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
@@ -1124,7 +1190,13 @@ async fn core_shutdown_settles_the_managed_playwright_runtime_before_outbound_cl
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturated_rpc_reads_preserve_ping_cancel_ids_and_eof_responses() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_office_engine(Arc::new(SlowOfficeStatusEngine));
     let (outbound, mut responses) = crate::transport::outbound_channel();
@@ -1208,7 +1280,13 @@ async fn saturated_rpc_reads_preserve_ping_cancel_ids_and_eof_responses() {
 #[tokio::test]
 async fn outbound_failure_stops_admission_without_another_stdin_line() {
     let temp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &temp.path().join("storage.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound, _responses) = super::super::outbound::outbound_channel_with_limits(
         super::super::outbound::OutboundLimits {

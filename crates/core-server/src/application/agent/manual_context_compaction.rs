@@ -106,8 +106,7 @@ impl AgentService {
         self.authorize_user_conversation_write(&input.conversation_id)?;
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&input.conversation_id);
         let operation_id = format!(
             "manual-compaction-{}",
             mycopilot_core::content_revision(
@@ -363,8 +362,7 @@ impl AgentService {
         self.authorize_user_conversation_write(&input.conversation_id)?;
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&input.conversation_id);
         let mut operation = self
             .storage
             .get_manual_context_compaction(&input.conversation_id, Some(&input.operation_id))?
@@ -433,8 +431,7 @@ impl AgentService {
         self.authorize_user_conversation_write(&conversation.id)?;
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&conversation.id);
         let previous = self.storage.load_conversation_meta(&conversation.id)?;
         if previous.as_ref().is_some_and(|previous| {
             previous.archived_at != conversation.archived_at

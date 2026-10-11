@@ -189,8 +189,7 @@ impl AgentService {
         let operation_id = provider_transition_operation_id(transition_token);
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&input.conversation_id);
         if self.runtime_stopping.load(Ordering::Acquire) {
             return Err("Agent runtime is shutting down.".to_string().into());
         }

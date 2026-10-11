@@ -24,8 +24,13 @@ pub(super) fn tool_result(sample: &Value, tool: &str) -> Value {
 async fn organization_configuration_query_exposes_only_executable_choices_and_actual_caller_grants()
 {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("configuration.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("configuration.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(
@@ -180,8 +185,13 @@ async fn organization_configuration_query_exposes_only_executable_choices_and_ac
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_awareness_tools_query_real_members_and_own_outbox_without_delivery() {
     let directory = tempdir().unwrap();
-    let storage =
-        Arc::new(StorageService::open(&directory.path().join("awareness.sqlite")).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &directory.path().join("awareness.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!(

@@ -56,15 +56,17 @@ DTO 中的 `conversationId`/`runId` 仅为定位和排序提示。transport 必�
 到一半从 Conversation 动态升级成 Project/Tree/global 独占。删除 Project 的成员快照若已变化，最终事务必须
 复核或拒绝重试，不能漏掉新成员。
 
-### 当前锁与目标锁边界
+### 锁边界迁移记录
 
-当前 [turn.rs](../../../crates/core-server/src/application/agent/turn.rs) 在准备和接纳期间持有全局
+第一轮时 [turn.rs](../../../crates/core-server/src/application/agent/turn.rs) 在准备和接纳期间持有全局
 `conversation_admission`，新人类 Turn 同时持有 `execution_access`。仅拆前一个锁仍不能让准备真正独立。
 取消和删除也获取 admission；删除还可能等待文件副作用结算。另一方面，
 [launch.rs](../../../crates/core-server/src/application/agent/turn_executor/launch.rs) 在 Run 结算后恢复组织 claim
 时借用同一 admission 锁，防止把“已 claim、未写初始 Trace”的准备窗口误判成孤儿。
 
-目标锁顺序约束：
+第四轮已将上述长 admission 改为按 Conversation 的逻辑预约，权限更新与最终接纳在 writer 边界协调，完成尾段只恢复精确 Run。
+Preparing、按 Run 发布、项目及其实际成员删除、RPC 归属重解析与保留的全局围栏见
+[第四轮资源调度契约](round4-resource-scheduling.md)。下列约束继续适用：
 
 1. 排序/owner registry 的锁只用于取得快照、安装 reservation 或 generation，尽快释放。
 2. 资源范围内安装 Preparing/删除/取消令牌后，外部准备移到锁外；网络、文件复制、压缩、模型调用和工具执行不得
@@ -112,11 +114,11 @@ generation 或持久围栏；晚到的准备结果不能重新启动。已提交
 
 ## 5. claim、租约、恢复与容量
 
-当前 [agent_dispatcher.rs](../../../crates/core-server/src/application/agent_dispatcher.rs) 在 `run_claimed_wake`
+第一轮时 [agent_dispatcher.rs](../../../crates/core-server/src/application/agent_dispatcher.rs) 在 `run_claimed_wake`
 中同步调用 `executor.start`，随后才进入包含续租 tick 的 observe/settle。将 start 移到线程池时，排队和准备时间
 会成为明确的租约风险；不能只加 `spawn_blocking` 而忽略 claim。
 
-目标必须二选一并经过竞态测试：在 claim 前取得准备容量，或从 claim 起覆盖排队/准备全过程续租。最终 commit 再次
+第二轮已在 claim 前取得物理准备容量，并从 claim 起独立续租；第四轮另限制同一 root 的未接纳准备。目标仍须经过竞态测试：在 claim 前取得准备容量，或从 claim 起覆盖排队/准备全过程续租。最终 commit 再次
 验证 claim token/有效状态，失去租约的 worker 不得执行或结算另一 owner 的工作。续租、停止和取消不能被普通准备
 队列耗尽；共享无限 blocking pool 不是隔离。
 
@@ -130,10 +132,12 @@ generation 或持久围栏；晚到的准备结果不能重新启动。已提交
 
 ## 6. 存储事务与通知
 
-当前 [StorageState](../../../crates/core/src/storage/mod.rs) 是一个 `Mutex<Connection>`，打开时设置 busy timeout，
+第一轮时 [StorageState](../../../crates/core/src/storage/mod.rs) 是一个 `Mutex<Connection>`，打开时设置 busy timeout，
 未显式选择 WAL/synchronous。不要把开发数据库模式当生产默认；基准每次记录实际 PRAGMA 和 SQLite 运行时版本。
 
-目标是一个专属阻塞 writer 拥有写连接，小型有界只读连接池负责适合的查询。初始读取池大小是待测参数，不是固定产品
+第三轮已迁移到专属 writer、两条只读连接和显式 WAL/FULL；详见 [存储执行契约](round3-storage-execution.md)。
+
+存储目标是一个专属阻塞 writer 拥有写连接，小型有界只读连接池负责适合的查询。初始读取池大小是待测参数，不是固定产品
 承诺。禁止直接把整个 StorageService 方法塞进 writer：方法内部可能有附件复制、解压或其它慢计算。
 读方法必须按真实效果审计，`get/list/poll` 命名不构成只读证明。多查询快照在同一个短 read transaction 中捕获数据和
 cursor，释放事务后再解压/序列化；权威授权和执行决策仍走最终写事务复核。

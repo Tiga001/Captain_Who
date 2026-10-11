@@ -298,10 +298,11 @@ pub(crate) enum TreeStoppedWakeSettlement {
 
 /// The durable coordination boundary used by the scheduler.
 ///
-/// `claim_next_dispatchable` must select globally by Wake sequence and atomically skip Agents
+/// `claim_next_dispatchable` selects by Wake sequence among eligible roots and atomically skips Agents
 /// which already own a claimed/running/waiting Wake or an in-progress Conversation trace. Thus
 /// acquiring the process permit before this method establishes the fixed order
-/// `global permit -> durable per-Agent execution right`.
+/// `global permit -> durable per-Agent execution right`. The production store also skips roots
+/// with a claimed preparation so one tree cannot fill the shared preparation worker queue.
 pub(crate) trait AgentDispatcherStore: Send + Sync {
     fn list_undispatched_interrupts(
         &self,
@@ -413,11 +414,11 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
     fn claim_next_dispatchable(
         &self,
         claim_token: &str,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<Option<AgentWakeRequestRecord>, AgentDispatchClaimError> {
         let wake = self
             .storage
-            .claim_next_dispatchable_agent_wake_at(claim_token, now_ms)
+            .claim_next_fair_dispatchable_agent_wake(claim_token)
             .map_err(|error| match error {
                 AgentGraphError::Conflict(message) => AgentDispatchClaimError::NotReady(message),
                 error => AgentDispatchClaimError::Fatal(error.to_string()),

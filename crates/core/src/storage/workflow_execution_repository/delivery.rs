@@ -557,6 +557,28 @@ pub fn snapshot_for_run(
         })
     }))
 }
+/// Settles one durably finished Run without interpreting another Run's unfinished preparation
+/// as an orphan. A missing initial Trace is not proof of failure in a live Core; only startup
+/// recovery, before any preparation can run, may make that inference.
+pub fn recover_run(c: &mut Connection, run_id: &str) -> Result<(), String> {
+    let tx = c
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db)?;
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT terminal_status FROM conversation_turn_traces WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    if let Some(status) = status.filter(|status| status != "in_progress") {
+        settle_run(&tx, run_id, &status)?;
+    }
+    tx.commit().map_err(db)
+}
+
+/// Startup-only orphan recovery. Callers must not admit live preparation until this scan ends.
 pub fn recover_claims(c: &mut Connection) -> Result<(), String> {
     let tx = c
         .transaction_with_behavior(TransactionBehavior::Immediate)

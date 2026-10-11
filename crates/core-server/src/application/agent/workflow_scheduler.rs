@@ -100,16 +100,15 @@ impl AgentService {
         })
     }
 
-    /// This fence shares the root/transition admission lock. Once it returns, neither a queued
-    /// scan nor an in-flight preparation can admit a new workflow turn or provider transition.
-    pub(crate) fn stop_workflow_delivery_admissions(&self) {
-        let _admission = self
-            .conversation_admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.workflow_dispatch_stopped
-            .store(true, Ordering::Release);
-        self.workflow_scheduler_wake.wake();
+    /// Publish beside final admission in the writer. Long preparation owns no global lock;
+    /// its final callback must observe this fence before committing a new workflow Turn.
+    pub(crate) fn stop_workflow_delivery_admissions(&self) -> Result<(), String> {
+        self.storage.coordinate_runtime_control(|| {
+            self.workflow_dispatch_stopped
+                .store(true, Ordering::Release);
+            self.workflow_scheduler_wake.wake();
+            Ok(())
+        })
     }
 }
 
@@ -125,7 +124,7 @@ impl WorkflowDeliveryScheduler {
             .submit(move || service.stop_workflow_delivery_admissions())
             .wait()
             .await
-            .map_err(|error| format!("Organization scheduler shutdown fence failed: {error}"))?;
+            .map_err(|error| format!("Organization scheduler shutdown fence failed: {error}"))??;
         self.task
             .take()
             .expect("scheduler owns its worker")

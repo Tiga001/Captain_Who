@@ -61,7 +61,7 @@ async fn bounded_dispatch_sample(shared_db: bool) -> Sample {
     rpc.try_submit(
         RpcDispatchClass::Read,
         JsonRpcId::Number(1),
-        None,
+        Some("conversation:synthetic-read".into()),
         move || {
             let _guard = shared_db.then(|| reader_database.lock().unwrap());
             started.send(()).unwrap();

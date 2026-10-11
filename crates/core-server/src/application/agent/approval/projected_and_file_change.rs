@@ -204,14 +204,16 @@ impl AgentService {
                     notifications,
                 )
                 .map(|output| (output.status, true)),
-            ProjectedApprovalDecision::Cancel => self
-                .cancel_action_internal(&run_id, &action_id)
-                .map(|cancelled| {
-                    (
-                        if cancelled { "cancelled" } else { "unchanged" }.to_string(),
-                        cancelled,
-                    )
-                }),
+            ProjectedApprovalDecision::Cancel => {
+                let _decision = self.action_admission.lock_conversation(&run_id);
+                self.cancel_action_internal(&run_id, &action_id)
+                    .map(|cancelled| {
+                        (
+                            if cancelled { "cancelled" } else { "unchanged" }.to_string(),
+                            cancelled,
+                        )
+                    })
+            }
         };
         match result {
             Ok((status, accepted)) => Ok(ProjectedApprovalDecisionResult {

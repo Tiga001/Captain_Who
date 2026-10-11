@@ -132,6 +132,9 @@ mod completion;
 mod context_compaction;
 mod context_window;
 mod execution_access;
+mod keyed_admission;
+mod preparing;
+pub(crate) mod rpc_resources;
 pub(crate) use execution_access::ExecutionAccessDenied;
 mod conversation_world_state;
 mod history_warmup;
@@ -685,7 +688,11 @@ pub struct AgentService {
         Arc<Mutex<HashMap<String, std::sync::Weak<prepared_history::PreparedHistoryInflight>>>>,
     history_warmup: Arc<Mutex<history_warmup::HistoryWarmupQueue>>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
-    conversation_admission: Arc<Mutex<()>>,
+    conversation_admission: Arc<keyed_admission::KeyedAdmission>,
+    action_admission: Arc<keyed_admission::KeyedAdmission>,
+    /// Per-Run publication and cancellation ordering; the registry remains a short memory lock.
+    run_publication: Arc<keyed_admission::KeyedAdmission>,
+    preparing: Arc<preparing::PreparingRegistry>,
     execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
     runtime_stopping: Arc<AtomicBool>,
@@ -909,7 +916,10 @@ impl AgentService {
             prepared_history_inflight: Arc::new(Mutex::new(HashMap::new())),
             history_warmup: Arc::new(Mutex::new(history_warmup::HistoryWarmupQueue::default())),
             context_compaction_summary_generator: None,
-            conversation_admission: Arc::new(Mutex::new(())),
+            conversation_admission: Arc::new(keyed_admission::KeyedAdmission::default()),
+            action_admission: Arc::new(keyed_admission::KeyedAdmission::default()),
+            run_publication: Arc::new(keyed_admission::KeyedAdmission::default()),
+            preparing: Arc::new(preparing::PreparingRegistry::default()),
             execution_access: Arc::new(Mutex::new(
                 execution_access::ExecutionAccessState::default(),
             )),
@@ -973,8 +983,7 @@ impl AgentService {
     > {
         let _admission = self
             .conversation_admission
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock_conversation(&input.source_conversation_id);
         self.authorize_user_conversation_write(&input.source_conversation_id)
             .map_err(|error| {
                 mycopilot_core::storage::conversation_fork_repository::ConversationForkError::Other(
@@ -1342,8 +1351,29 @@ impl AgentService {
             return Err("invalid pre-dispatch MCP invalidation reason".to_string());
         }
         let now = self.mcp_approval_now_ms();
-        let (selected, preserved_pending) = {
-            let mut pending_actions = self
+        // Registry events and shutdown enter without an approval decision guard. Declare the
+        // complete Run set once; never upgrade a single-Run reservation while holding it.
+        let (decisions, selected, preserved_pending) = loop {
+            let mut run_ids = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .filter(|record| {
+                    matches!(record.snapshot.status, PendingActionStatus::Pending
+                        | PendingActionStatus::Approved | PendingActionStatus::Executing)
+                        && matches!(&record.snapshot.action,
+                            AgentProposedAction::McpToolCall { approval } if matches_approval(approval))
+                })
+                .map(|record| record.snapshot.run_id.clone())
+                .collect::<Vec<_>>();
+            if run_ids.is_empty() {
+                return Ok(McpActionInvalidationSummary::default());
+            }
+            run_ids.sort_unstable();
+            run_ids.dedup();
+            let decisions = self.action_admission.lock_conversations(&run_ids);
+            let pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -1386,34 +1416,62 @@ impl AgentService {
                     Some((storage_id.clone(), record.clone(), outcome))
                 })
                 .collect::<Vec<_>>();
-            if !selected.is_empty() {
-                let requests = selected
-                    .iter()
-                    .map(
-                        |(storage_id, record, outcome)| McpActionTerminalizationRequest {
-                            action_id: storage_id.clone(),
-                            expected_status: pending_status_label(record.snapshot.status)
-                                .to_string(),
-                            outcome: *outcome,
-                        },
-                    )
-                    .collect::<Vec<_>>();
-                self.storage
-                    .terminalize_mcp_agent_actions(&requests, now)
-                    .map_err(|_| storage_error.to_string())?;
-                for (storage_id, _, _) in &selected {
-                    pending_actions.remove(storage_id);
-                }
-                let mut recoverable = self
-                    .startup_recoverable_mcp_approvals
+            // A newly published matching Run may have appeared while the keys were waiting.
+            // Release the whole set and rediscover instead of acquiring a nested reservation.
+            let complete_scope = preserved_pending
+                .iter()
+                .chain(selected.iter().map(|(_, record, _)| record))
+                .all(|record| run_ids.binary_search(&record.snapshot.run_id).is_ok());
+            drop(pending_actions);
+            if !complete_scope {
+                drop(decisions);
+                continue;
+            }
+            break (decisions, selected, preserved_pending);
+        };
+        if !selected.is_empty() {
+            let requests = selected
+                .iter()
+                .map(
+                    |(storage_id, record, outcome)| McpActionTerminalizationRequest {
+                        action_id: storage_id.clone(),
+                        expected_status: pending_status_label(record.snapshot.status).to_string(),
+                        outcome: *outcome,
+                    },
+                )
+                .collect::<Vec<_>>();
+            self.storage
+                .terminalize_mcp_agent_actions(&requests, now)
+                .map_err(|_| storage_error.to_string())?;
+            {
+                let mut pending_actions = self
+                    .pending_actions
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                for (storage_id, _, _) in &selected {
-                    recoverable.remove(storage_id);
+                for (storage_id, frozen, _) in &selected {
+                    if pending_actions.get(storage_id).is_some_and(|current| {
+                        current.snapshot.run_id == frozen.snapshot.run_id
+                            && current.snapshot.action_id == frozen.snapshot.action_id
+                            && current.snapshot.conversation_id == frozen.snapshot.conversation_id
+                            && current.snapshot.assistant_message_id
+                                == frozen.snapshot.assistant_message_id
+                            && current.snapshot.tool_call_id == frozen.snapshot.tool_call_id
+                            && current.snapshot.created_at == frozen.snapshot.created_at
+                            && current.snapshot.status == frozen.snapshot.status
+                    }) {
+                        pending_actions.remove(storage_id);
+                    }
                 }
             }
-            (selected, preserved_pending)
-        };
+            let mut recoverable = self
+                .startup_recoverable_mcp_approvals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            for (storage_id, _, _) in &selected {
+                recoverable.remove(storage_id);
+            }
+        }
+        drop(decisions);
 
         let mut summary = McpActionInvalidationSummary::default();
         for record in preserved_pending {
@@ -1462,6 +1520,9 @@ impl AgentService {
                     summary.payload_invalidation_failures.saturating_add(1);
             }
             self.process_runs.cancel(&record.storage_id);
+            let _publication = self
+                .run_publication
+                .lock_conversation(&record.snapshot.run_id);
             if let Some(token) = self
                 .cancellations
                 .lock()

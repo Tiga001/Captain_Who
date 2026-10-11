@@ -2,6 +2,7 @@ use super::*;
 use std::cell::RefCell;
 
 mod automation_parent_deletion;
+mod checked_project_membership;
 mod running_summaries;
 
 #[test]

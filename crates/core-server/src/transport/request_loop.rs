@@ -255,7 +255,7 @@ where
             rpc.begin_shutdown();
             let stopping_service = agent_service.clone();
             let workflow_stop = tokio::task::spawn_blocking(move || {
-                stopping_service.stop_workflow_delivery_admissions();
+                stopping_service.stop_workflow_delivery_admissions()
             });
             let shutdown_id = request.id;
             if let Some(coordinator) = browser_risk_coordinator.as_ref() {
@@ -307,9 +307,16 @@ where
                     }
                 }
             }
-            workflow_stop.await.map_err(|error| {
-                io::Error::other(format!("organization shutdown fence failed: {error}"))
-            })?;
+            workflow_stop
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "organization shutdown fence worker failed: {error}"
+                    ))
+                })?
+                .map_err(|error| {
+                    io::Error::other(format!("organization shutdown fence failed: {error}"))
+                })?;
             return Ok(Some(shutdown_id));
         }
 
@@ -726,29 +733,12 @@ where
             continue;
         }
         let class = rpc_dispatch_class(&request);
-        let ordering_key = bounded_dispatch::rpc_ordering_key(&request);
-        let owner_resolver: Option<bounded_dispatch::RpcOwnerResolver> = if matches!(
-            class,
-            bounded_dispatch::RpcDispatchClass::Control
-                | bounded_dispatch::RpcDispatchClass::Approval
-        ) {
-            request
-                .params
-                .as_ref()
-                .and_then(|params| params.get("runId"))
-                .and_then(Value::as_str)
-                .map(|run_id| {
-                    let run_id = run_id.to_string();
-                    let owner_service = agent_service.clone();
-                    Box::new(move || {
-                        owner_service
-                            .conversation_id_for_run(&run_id)
-                            .map(|conversation| format!("conversation:{conversation}"))
-                    }) as bounded_dispatch::RpcOwnerResolver
-                })
-        } else {
-            None
-        };
+        let resolver = bounded_dispatch::rpc_scope_resolver(agent_service.clone(), &request);
+        // Freeze even a denial: waiting in a transport queue must never authorize an old human
+        // submission under a newly signed-in account. Main awaits the grant ACK before sending
+        // new Turns, so an unapplied grant cannot be mistaken for a completed authorization.
+        let queued_access = bounded_dispatch::rpc_requires_queued_access(&request.method)
+            .then(|| agent_service.capture_execution_access());
         let request_storage = Arc::clone(&storage);
         let request_service = agent_service.clone();
         let request_notifications = outbound.clone();
@@ -786,18 +776,16 @@ where
             Duration::ZERO,
             line.len(),
         );
-        let global_fence = bounded_dispatch::rpc_has_global_mutation_fence(&request);
         let diagnostic_pending = mycopilot_core::performance::track_queue(
             "rpc.pending_body",
             diagnostic_operation,
             line.len(),
         );
-        if let Err(response) = rpc.try_submit_ordered(
+        if let Err(response) = rpc.try_submit_scoped(
             class,
             request.id.clone(),
-            ordering_key,
-            owner_resolver,
-            global_fence,
+            line.len().saturating_add(512),
+            resolver,
             move || {
                 let _pending_body = diagnostic_pending;
                 if let Some(admitted) = diagnostic_admitted {
@@ -824,12 +812,19 @@ where
                     }))
                     .unwrap_or_else(|_| automation_internal_error_response(request_id))
                 } else {
-                    handle_request(
-                        &request_storage,
-                        &request_service,
-                        request_notifications,
-                        request,
-                    )
+                    let handle = || {
+                        handle_request(
+                            &request_storage,
+                            &request_service,
+                            request_notifications,
+                            request,
+                        )
+                    };
+                    if let Some(token) = queued_access {
+                        request_service.with_queued_execution_access(token, handle)
+                    } else {
+                        handle()
+                    }
                 }
             },
         ) {

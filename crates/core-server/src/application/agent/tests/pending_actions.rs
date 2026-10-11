@@ -23,6 +23,7 @@ mod mcp_fixtures;
 mod mcp_invalidation;
 mod mcp_recovery;
 mod provider_resume;
+mod resource_isolation;
 mod skill_persistence;
 mod skill_workers;
 mod startup_recovery;

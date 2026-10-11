@@ -36,13 +36,7 @@ impl AgentService {
             }
         };
         let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if deletion_lifecycle.contains_input(&agent_input) {
-            return Err("项目或会话正在移除，无法启动 MCP 操作。".to_string());
-        }
+        let deletion_lifecycle = self.register_lifecycle_activity(&agent_input, run_id)?;
         if !pending_action_binding_matches_for_auto_journal(run_id, None, &action, &agent_input) {
             return Err("automatic MCP journal frozen identity is inconsistent".to_string());
         }
@@ -148,7 +142,6 @@ impl AgentService {
     /// This is the same current Pending Action shape used by manual approval. It is intentionally
     /// not published to the approval UI, but still owns the exact ToolCall, frozen checkpoint,
     /// normalized runtime binding, and canonical pending id before any filesystem side effect.
-    #[cfg(test)]
     pub(super) fn prepare_auto_file_change_action_journal(
         &self,
         run_id: &str,
@@ -157,32 +150,9 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) -> Result<PendingActionRecord, String> {
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.prepare_auto_file_change_action_journal_under_deletion_guard(
-            run_id,
-            conversation_id,
-            assistant_message_id,
-            action,
-            agent_input,
-            &deletion_lifecycle,
-        )
-    }
-
-    /// Variant for callers that already hold the deletion lifecycle mutex across the complete
-    /// FileChange execution boundary. Passing the guarded state keeps the ownership check explicit
-    /// and avoids recursively locking the non-reentrant mutex.
-    pub(super) fn prepare_auto_file_change_action_journal_under_deletion_guard(
-        &self,
-        run_id: &str,
-        conversation_id: &str,
-        assistant_message_id: &str,
-        action: AgentProposedAction,
-        agent_input: AgentChatInput,
-        deletion_lifecycle: &DeletionLifecycleState,
-    ) -> Result<PendingActionRecord, String> {
+        // This activity keeps its owner present until the journal is committed. The caller
+        // registers the separate real effect before dispatch; no global mutex crosses storage.
+        let _activity = self.register_lifecycle_activity(&agent_input, run_id)?;
         let AgentProposedAction::FileChange { file_change } = &action else {
             return Err("automatic FileChange journal requires a current FileChange action".into());
         };
@@ -197,9 +167,6 @@ impl AgentService {
             return Err("automatic FileChange journal frozen identity is invalid".into());
         }
         let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
-        if deletion_lifecycle.contains_input(&agent_input) {
-            return Err("项目或会话正在移除，无法启动文件修改。".to_string());
-        }
         if !pending_action_binding_matches_for_auto_journal(run_id, None, &action, &agent_input) {
             return Err("automatic FileChange journal checkpoint identity is inconsistent".into());
         }
@@ -484,13 +451,7 @@ impl AgentService {
         predecessor_settlement: Option<(&PendingActionRecord, PendingActionStatus)>,
     ) -> Result<bool, String> {
         let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if deletion_lifecycle.contains_input(&agent_input) {
-            return Err("项目或会话正在移除，无法发布待审批操作。".to_string());
-        }
+        let deletion_lifecycle = self.register_lifecycle_activity(&agent_input, run_id)?;
         if !pending_action_binding_matches(run_id, None, &action, &agent_input) {
             self.invalidate_mcp_pending_payload(&action);
             return Err("Pending action frozen Tool Call identity is inconsistent.".to_string());
@@ -534,7 +495,7 @@ impl AgentService {
         )?;
 
         if let Some((predecessor, terminal_status)) = predecessor_settlement {
-            let mut pending_actions = self
+            let pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -546,13 +507,15 @@ impl AgentService {
                     ));
                 }
             }
-            let predecessor_current =
-                pending_actions
-                    .get(&predecessor.storage_id)
-                    .ok_or_else(|| {
-                        format!("前置待审批操作的内存状态不存在：{}", predecessor.storage_id)
-                    })?;
-            if !same_pending_action_identity_except_status(predecessor_current, predecessor) {
+            let predecessor_current = pending_actions
+                .get(&predecessor.storage_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("前置待审批操作的内存状态不存在：{}", predecessor.storage_id)
+                })?;
+            // The frozen clone can be checked/serialized without retaining the shared map.
+            drop(pending_actions);
+            if !same_pending_action_identity_except_status(&predecessor_current, predecessor) {
                 return Err("前置待审批操作的冻结身份已经变化。".to_string());
             }
             let predecessor_expected_status = predecessor_current.snapshot.status;
@@ -632,25 +595,31 @@ impl AgentService {
                 }
             };
 
+            self.publish_pending_action_status(
+                &predecessor_current,
+                predecessor_expected_status,
+                terminal_status,
+            )?;
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let should_publish = match pending_actions.get(&storage_id) {
                 Some(existing) if same_pending_action_identity(existing, &pending_record) => false,
                 Some(existing) => {
-                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
-                    return Err(format!(
+                    let error = format!(
                         "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
                         existing.snapshot.run_id, pending_record.snapshot.run_id
-                    ));
+                    );
+                    drop(pending_actions);
+                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
+                    return Err(error);
                 }
                 None => {
                     pending_actions.insert(storage_id, pending_record.clone());
                     true
                 }
             };
-            pending_actions
-                .get_mut(&predecessor.storage_id)
-                .expect("predecessor was validated under the same pending-action lock")
-                .snapshot
-                .status = terminal_status;
             drop(pending_actions);
             if matches!(storage_outcome, PendingActionStoreOutcome::Inserted)
                 && !matches!(
@@ -739,11 +708,13 @@ impl AgentService {
             match pending_actions.get(&storage_id) {
                 Some(existing) if same_pending_action_identity(existing, &pending_record) => false,
                 Some(existing) => {
-                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
-                    return Err(format!(
+                    let error = format!(
                         "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
                         existing.snapshot.run_id, pending_record.snapshot.run_id
-                    ));
+                    );
+                    drop(pending_actions);
+                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
+                    return Err(error);
                 }
                 None => {
                     pending_actions.insert(storage_id, pending_record.clone());

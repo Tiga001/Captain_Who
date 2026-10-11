@@ -21,10 +21,21 @@ impl AgentService {
         {
             return Ok(false);
         }
-        let _admission = self
-            .conversation_admission
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Linearize cancellation with final admission, without waiting for another Conversation
+        // or for this one's long preparation. The worker still owns its reservation until exit.
+        let preparing = self.preparing.snapshot_run(run_id);
+        let preparation_cancelled = self
+            .storage
+            .coordinate_runtime_control(|| Ok(self.preparing.cancel_run(run_id)))?;
+        if let Some(preparing) = preparing {
+            if self
+                .storage
+                .get_conversation_turn_trace(&preparing.assistant_message_id)?
+                .is_none()
+            {
+                return Ok(preparation_cancelled);
+            }
+        }
         if let Some(conversation_id) = conversation_id.as_deref() {
             if let Err(error) = self
                 .storage
@@ -336,6 +347,7 @@ impl AgentService {
     pub(super) fn cancel_run_internal(&self, run_id: &str) -> AgentRunCancellationOutcome {
         self.retire_builtin_capability_run(run_id);
         let runtime_token_signalled = {
+            let _publication = self.run_publication.lock_conversation(run_id);
             let cancellations = self
                 .cancellations
                 .lock()

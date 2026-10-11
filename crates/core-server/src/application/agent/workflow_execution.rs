@@ -15,6 +15,8 @@ use mycopilot_core::{
 use serde_json::json;
 
 mod awareness;
+#[cfg(test)]
+mod publication_tests;
 
 pub(super) struct WorkflowTurnOwner<'a> {
     pub run_id: &'a str,
@@ -35,21 +37,27 @@ struct StoredWorkflowRuntime {
     effective_permissions: mycopilot_core::AgentPermissions,
 }
 impl StoredWorkflowRuntime {
-    fn validate_owner(&self) -> AgentResult<()> {
+    /// Order this Run's durable publications with Stop and generation replacement. The global
+    /// token registry is only inspected briefly; unrelated Runs must not wait for this SQL.
+    fn lock_current_segment(&self) -> AgentResult<keyed_admission::AdmissionGuard<'_>> {
+        let publication = self.service.run_publication.lock_conversation(&self.run_id);
         self.cancellation.check()?;
-        let tokens = self
+        let current = self
             .service
             .cancellations
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !tokens
+            .unwrap_or_else(|error| error.into_inner())
             .get(&self.run_id)
-            .is_some_and(|token| token.shares_state_with(&self.cancellation))
-        {
+            .is_some_and(|token| token.shares_state_with(&self.cancellation));
+        if !current {
             return Err(AgentError::new(
                 "Organization execution segment was retired.",
             ));
         }
+        Ok(publication)
+    }
+    fn validate_owner(&self) -> AgentResult<()> {
+        let _publication = self.lock_current_segment()?;
         let root = self
             .service
             .storage
@@ -197,22 +205,9 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             &self.run_id,
             &invocation.input,
         )?;
-        // Serialize with stop through the same lock as mail mutations. The storage transaction
+        // Serialize with Stop through the same Run reservation as mail mutations. The storage transaction
         // independently checks current membership, administrator scope, rank and revision.
-        let tokens = self
-            .service
-            .cancellations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.cancellation.check()?;
-        if !tokens
-            .get(&self.run_id)
-            .is_some_and(|token| token.shares_state_with(&self.cancellation))
-        {
-            return Err(AgentError::new(
-                "Organization execution segment was retired.",
-            ));
-        }
+        let publication = self.lock_current_segment()?;
         let receipt = self
             .service
             .storage
@@ -227,7 +222,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
                 context,
             })
             .map_err(AgentError::new)?;
-        drop(tokens);
+        drop(publication);
         self.service.publish_workflow_runtime_with_preferences(
             &receipt.instance_id,
             organization_preference_updates(&receipt),
@@ -314,20 +309,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             ));
         }
         self.validate_owner()?;
-        let tokens = self
-            .service
-            .cancellations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.cancellation.check()?;
-        if !tokens
-            .get(&self.run_id)
-            .is_some_and(|token| token.shares_state_with(&self.cancellation))
-        {
-            return Err(AgentError::new(
-                "Organization execution segment was retired.",
-            ));
-        }
+        let publication = self.lock_current_segment()?;
         let receipt = self
             .service
             .storage
@@ -340,7 +322,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
                 message_ids: invocation.message_ids,
             })
             .map_err(AgentError::new)?;
-        drop(tokens);
+        drop(publication);
         if let Some(instance_id) = receipt["instanceId"].as_str() {
             self.service
                 .publish_workflow_runtime(instance_id, &self.notifications);
@@ -360,21 +342,10 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
             ));
         }
         self.validate_owner()?;
-        // Stop and send share the cancellation lock: a stopped source cannot publish new work.
-        let tokens = self
-            .service
-            .cancellations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.cancellation.check()?;
-        if !tokens
-            .get(&self.run_id)
-            .is_some_and(|token| token.shares_state_with(&self.cancellation))
-        {
-            return Err(AgentError::new(
-                "Organization execution segment was retired.",
-            ));
-        }
+        // Stop and send share this Run's publication reservation: a stopped source cannot publish new work.
+        let publication = self.lock_current_segment()?;
+        #[cfg(test)]
+        publication_tests::before_send_write(&self.run_id);
         let receipt = self
             .service
             .storage
@@ -388,7 +359,7 @@ impl WorkflowRuntimeHost for StoredWorkflowRuntime {
                 recipient_versions: invocation.recipient_versions,
             })
             .map_err(AgentError::new)?;
-        drop(tokens);
+        drop(publication);
         self.service
             .publish_workflow_runtime(&receipt.instance_id, &self.notifications);
         self.service.wake_workflow_deliveries();
@@ -1164,7 +1135,11 @@ mod organization_permission_tests {
     #[test]
     fn organization_edit_context_uses_exact_run_grant_and_rejects_unrepresentable_inheritance() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&directory.path().join("permissions.sqlite")).unwrap();
+        let storage = StorageService::open_with_model_credentials(
+            &directory.path().join("permissions.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap();
         let mut preferences = storage.load_ui_preferences().unwrap();
         preferences.full_permission_enabled = true;
         preferences.custom_permission_enabled = true;
