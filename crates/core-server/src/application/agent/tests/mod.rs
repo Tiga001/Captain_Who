@@ -27,6 +27,8 @@ use std::fs;
 use tempfile::tempdir;
 
 mod automation_turn;
+#[cfg(unix)]
+mod backend_concurrency_baseline;
 mod cancellation;
 mod collaboration_harness;
 mod collaboration_request_accounting;

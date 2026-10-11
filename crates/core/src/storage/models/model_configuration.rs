@@ -456,7 +456,9 @@ pub(crate) fn validated_connection(
         ));
     }
     let secure = parsed_url.scheme() == "https";
-    let controlled_loopback = cfg!(debug_assertions)
+    // Release benchmarks opt in through a dev-dependency feature. The normal production
+    // dependency never enables this exception, and even test builds reject remote HTTP.
+    let controlled_loopback = cfg!(any(debug_assertions, feature = "test-support"))
         && parsed_url.scheme() == "http"
         && parsed_url.host_str().is_some_and(|host| {
             host.eq_ignore_ascii_case("localhost")

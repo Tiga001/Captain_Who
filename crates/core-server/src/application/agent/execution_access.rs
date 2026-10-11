@@ -348,8 +348,13 @@ mod tests {
     #[test]
     fn execution_access_restart_does_not_restore_previous_in_memory_grant() {
         let fixture = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &fixture.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let service =
             AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
         service.grant_execution_access_for_test();

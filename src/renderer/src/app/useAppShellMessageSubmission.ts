@@ -1,3 +1,4 @@
+import { actionDiagnostics } from '../diagnostics/actionDiagnostics'
 import type { ConversationScrollPosition } from '../features/chat/useConversationSegments'
 /* eslint-disable react-hooks/exhaustive-deps -- extracted callbacks keep AppShell's original dependency arrays; omitted inputs are stable refs and React dispatchers. */
 import {
@@ -698,37 +699,55 @@ export function useAppShellMessageSubmission({
         return false
       }
 
-      await waitForConversationSaves(conversationId)
-      if (submissionIdentity !== accessIdentity.current) return false
-      const outcome = await requestProviderTransition(conversationId, options.modelId, {
-        allowUnchangedModel: true
-      })
-      if (outcome.status === 'completed' || outcome.status === 'ready') {
-        return submitMessageToConversation(
-          conversationId,
-          message,
-          {
-            ...options,
-            modelId: outcome.status === 'ready' ? outcome.modelId : outcome.operation.modelId
-          },
-          {
-            activate: true,
-            preserveComposerContent: false,
+      const diagnostic = actionDiagnostics.begin('turn.submit')
+      // Existing-conversation preflight only. The separate turn.start_rpc span includes Host
+      // admission; no diagnostic changes the existing persistence or permission boundaries.
+      let diagnosticOutcome: 'completed' | 'failed' | 'skipped' = 'failed'
+      try {
+        await diagnostic.measureAsync('preflush', () => waitForConversationSaves(conversationId))
+        if (submissionIdentity !== accessIdentity.current) {
+          diagnosticOutcome = 'skipped'
+          return false
+        }
+        const outcome = await diagnostic.measureAsync('provider.preflight', () =>
+          requestProviderTransition(conversationId, options.modelId, {
+            allowUnchangedModel: true
+          })
+        )
+        if (outcome.status === 'completed' || outcome.status === 'ready') {
+          const submission = submitMessageToConversation(
+            conversationId,
+            message,
+            {
+              ...options,
+              modelId: outcome.status === 'ready' ? outcome.modelId : outcome.operation.modelId
+            },
+            {
+              activate: true,
+              preserveComposerContent: false,
+              draftSnapshot,
+              accessIdentity: submissionIdentity
+            }
+          )
+          if (!actionDiagnostics.enabled) return submission
+          const submitted = await submission
+          diagnosticOutcome = submitted ? 'completed' : 'skipped'
+          return submitted
+        }
+        if (outcome.status === 'confirmation_required' || outcome.status === 'running') {
+          pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
+            kind: 'composer',
+            message,
+            options,
             draftSnapshot,
             accessIdentity: submissionIdentity
-          }
-        )
+          })
+        }
+        diagnosticOutcome = 'skipped'
+        return false
+      } finally {
+        diagnostic.finish(diagnosticOutcome)
       }
-      if (outcome.status === 'confirmation_required' || outcome.status === 'running') {
-        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
-          kind: 'composer',
-          message,
-          options,
-          draftSnapshot,
-          accessIdentity: submissionIdentity
-        })
-      }
-      return false
     },
     [activeDraft, requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )

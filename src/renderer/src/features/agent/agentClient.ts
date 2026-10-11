@@ -1,3 +1,5 @@
+import type { HostDiagnosticContext } from '@mycopilot/host-api'
+import { actionDiagnostics } from '../../diagnostics/actionDiagnostics'
 import type {
   AgentApprovalScope,
   AgentEvent,
@@ -49,7 +51,20 @@ export type StartConversationTurnOutput = AgentConversationTurnOutput
 export async function startConversationTurn(
   input: StartConversationTurnInput
 ): Promise<StartConversationTurnOutput> {
-  return unwrapHostInvocation(await hostClient.agent.startConversationTurn(input))
+  if (!actionDiagnostics.enabled) {
+    return unwrapHostInvocation(await hostClient.agent.startConversationTurn(input))
+  }
+  const diagnostic = actionDiagnostics.begin('turn.start_rpc')
+  try {
+    const result = await diagnostic.measureAsync('rpc.wait', async () =>
+      unwrapHostInvocation(await hostClient.agent.startConversationTurn(input, diagnostic.context))
+    )
+    diagnostic.finish('completed')
+    return result
+  } catch (error) {
+    diagnostic.finish('failed')
+    throw error
+  }
 }
 
 export async function continueConversationTurn(
@@ -134,26 +149,54 @@ export async function listPendingAgentActions(): Promise<PendingAgentActionSnaps
 export async function approveAgentAction(
   runId: string,
   actionId: string,
-  approvalScope: AgentApprovalScope
+  approvalScope: AgentApprovalScope,
+  diagnostic?: HostDiagnosticContext
 ): Promise<AgentActionExecutionOutput> {
-  return hostClient.agent.approveAction({ runId, actionId, approvalScope })
+  const input = { runId, actionId, approvalScope }
+  return diagnostic === undefined
+    ? hostClient.agent.approveAction(input)
+    : hostClient.agent.approveAction(input, diagnostic)
 }
 
 export async function rejectAgentAction(
   runId: string,
   actionId: string,
-  message?: string
+  message?: string,
+  diagnostic?: HostDiagnosticContext
 ): Promise<AgentActionExecutionOutput> {
-  return hostClient.agent.rejectAction({ runId, actionId, message })
+  const input = { runId, actionId, message }
+  return diagnostic === undefined
+    ? hostClient.agent.rejectAction(input)
+    : hostClient.agent.rejectAction(input, diagnostic)
 }
 
-export async function cancelAgentAction(runId: string, actionId: string): Promise<boolean> {
-  return hostClient.agent.cancelAction({ runId, actionId })
+export async function cancelAgentAction(
+  runId: string,
+  actionId: string,
+  diagnostic?: HostDiagnosticContext
+): Promise<boolean> {
+  const input = { runId, actionId }
+  return diagnostic === undefined
+    ? hostClient.agent.cancelAction(input)
+    : hostClient.agent.cancelAction(input, diagnostic)
 }
 
 export async function cancelAgentRun(runId: string): Promise<boolean> {
-  const response = await hostClient.agent.cancelRun({ runId })
-  return response.cancelled
+  if (!actionDiagnostics.enabled) {
+    const response = await hostClient.agent.cancelRun({ runId })
+    return response.cancelled
+  }
+  const diagnostic = actionDiagnostics.begin('run.cancel_rpc')
+  try {
+    const response = await diagnostic.measureAsync('rpc.wait', () =>
+      hostClient.agent.cancelRun({ runId }, diagnostic.context)
+    )
+    diagnostic.finish(response.cancelled ? 'completed' : 'skipped')
+    return response.cancelled
+  } catch (error) {
+    diagnostic.finish('failed')
+    throw error
+  }
 }
 
 export async function steerAgentRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput> {

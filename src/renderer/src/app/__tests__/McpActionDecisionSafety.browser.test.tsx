@@ -1,3 +1,4 @@
+import { ActionDiagnostics, actionDiagnostics } from '../../diagnostics/actionDiagnostics'
 import type { AgentProposedAction } from '@mycopilot/protocol'
 import { useRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -209,5 +210,24 @@ describe('protected pending-action logging safety', () => {
     expect(logged).not.toContain('SQLite')
     expect(logged).not.toContain('Database(')
     expect(logged).not.toContain(ERROR_CANARY)
+  })
+  it('attaches diagnostics separately to an ordinary approval without exposing its error', async () => {
+    const collector = new ActionDiagnostics(true, () => {})
+    vi.spyOn(actionDiagnostics, 'begin').mockImplementation((kind) => collector.begin(kind))
+    service.approve.mockRejectedValue(new Error(ERROR_CANARY))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const screen = await render(<Harness action={mcpAction()} />)
+      await screen.getByRole('button', { name: 'approve MCP' }).click()
+      await expect.poll(() => service.approve.mock.calls.length).toBe(1)
+      expect(service.approve).toHaveBeenCalledWith(
+        'run-mcp-console-safety',
+        '11111111-1111-4111-8111-111111111111',
+        'singleAction',
+        { rendererSessionNonce: expect.stringMatching(/^[a-f0-9]{32}$/), actionSequence: 1 }
+      )
+    } finally {
+      collector.flush()
+    }
   })
 })

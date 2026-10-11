@@ -1,3 +1,4 @@
+import { actionDiagnostics } from '../../diagnostics/actionDiagnostics'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   CollaborationApprovalDecisionResult,
@@ -135,24 +136,37 @@ export function useCollaborationApprovals({
       }
 
       inFlightRef.current.add(scopeKey)
+      const diagnostic = actionDiagnostics.begin('approval.projected')
+      let completed = false
       try {
         const decisionRootConversationId = rootConversationId
-        const result = await decideCollaborationApproval({
+        const input = {
           approvalId,
           decision,
           message,
           rootConversationId: decisionRootConversationId
-        })
+        }
+        const result = await diagnostic.measureAsync('rpc.wait', () =>
+          diagnostic.context
+            ? decideCollaborationApproval(input, diagnostic.context)
+            : decideCollaborationApproval(input)
+        )
 
         // The decision response is already an authoritative durable acknowledgement. Reflect a
         // non-pending status immediately, then use the existing projection reload to close any
         // notification gap. A failed reload must not regress an accepted decision back to a
         // clickable pending card.
-        applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
-        await refresh()
-        applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
+        diagnostic.measureSync('state.apply', () =>
+          applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
+        )
+        await diagnostic.measureAsync('projection.refresh', refresh)
+        diagnostic.measureSync('state.apply', () =>
+          applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
+        )
+        completed = true
         return result
       } finally {
+        diagnostic.finish(completed ? 'completed' : 'failed')
         inFlightRef.current.delete(scopeKey)
       }
     },

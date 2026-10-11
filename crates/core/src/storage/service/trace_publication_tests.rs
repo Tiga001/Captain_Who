@@ -9,7 +9,11 @@ fn fixture() -> (
     ConversationTraceCommitCursor,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
+    let service = StorageService::open_with_model_credentials(
+        &directory.path().join("storage.sqlite"),
+        Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     service.state.connection().unwrap().execute_batch(
         "INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('chat','Trace test',1,1);
          INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
@@ -218,8 +222,13 @@ fn commit_ack_loss_and_reopened_database_rebuild_without_duplicate_items() {
     // Losing the process-local acknowledgement after COMMIT is equivalent to losing the cursor.
     cursor = ConversationTraceCommitCursor::default();
     assert!(!append(&service, &mut cursor, &recorder).unwrap().changed);
+    let credentials = Arc::clone(&service.model_credentials);
     drop(service);
-    let reopened = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
+    let reopened = StorageService::open_with_model_credentials(
+        &directory.path().join("storage.sqlite"),
+        credentials,
+    )
+    .unwrap();
     recorder.record_narration("second").unwrap();
     let outcome = append(&reopened, &mut cursor, &recorder).unwrap();
     assert!(outcome.previous_publication.is_none());

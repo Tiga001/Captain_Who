@@ -301,10 +301,13 @@ impl AgentService {
         // Conversation Turn admission and Provider-transition admission share one Host lock. The
         // process reservation is installed before prepare writes any message; the empty durable
         // in-progress trace committed by the executor is the cross-restart source of truth.
+        let admission_wait = mycopilot_core::performance::Span::new("turn", "admission_wait");
         let _admission = self
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        drop(admission_wait);
+        let _admission_hold = mycopilot_core::performance::Span::new("turn", "admission_hold");
         if workflow.is_some() && self.workflow_dispatch_stopped.load(Ordering::Acquire) {
             return Err("Organization delivery is shutting down.".to_string().into());
         }
@@ -344,10 +347,13 @@ impl AgentService {
         // asynchronous questions and edit/regenerate. Replay above, child/wake execution,
         // steering, and recovery of an existing Turn do not create new human work.
         // Hold this lock until durable admission; revocation cannot race the message/Trace commit.
+        let access_wait = mycopilot_core::performance::Span::new("turn", "access_wait");
         let execution_access_guard = self
             .execution_access
             .lock()
             .map_err(|_| ExecutionAccessDenied::unavailable().agent_error())?;
+        drop(access_wait);
+        let access_hold = mycopilot_core::performance::Span::new("turn", "access_hold");
         execution_access_guard
             .check()
             .map_err(ExecutionAccessDenied::agent_error)?;
@@ -390,6 +396,7 @@ impl AgentService {
                 .into());
         }
         self.ensure_no_manual_context_compaction(&conversation_id)?;
+        let history_timing = mycopilot_core::performance::Span::new("turn", "history_prepare");
         let prepared_history = if rewrite.is_none()
             && continuation.is_none()
             && response.is_none()
@@ -477,6 +484,7 @@ impl AgentService {
             .list_active_conversation_world_state_records(&conversation_id)?
             .is_empty();
 
+        drop(history_timing);
         let run_id = next_run_id();
         self.storage
             .workflow_execution_bind_run(&conversation_id, &run_id)?;
@@ -526,6 +534,8 @@ impl AgentService {
                 .check()
                 .map_err(ExecutionAccessDenied::agent_error)
         };
+        let preparation_timing =
+            mycopilot_core::performance::Span::new("turn", "prepare_and_commit");
         let prepared_outcome = if let Some(continuation) = continuation.clone() {
             prepare_reserved_continuation_turn(
                 &self.storage,
@@ -631,7 +641,9 @@ impl AgentService {
             }
             Ok(outcome)
         });
+        drop(preparation_timing);
         drop(execution_access_guard);
+        drop(access_hold);
         let prepared = match prepared_outcome {
             Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
             Ok(PreparedConversationTurnOutcome::Replayed(output)) => {

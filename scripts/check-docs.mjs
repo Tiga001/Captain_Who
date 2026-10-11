@@ -118,7 +118,13 @@ if (!readFileSync(docsReadme, 'utf8').includes('# Captain Who 开发文档')) {
 
 for (const file of documentationFiles) {
   const basename = path.basename(file)
-  if (basename !== 'README.md' && !/^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(basename)) {
+  // The six-round backend plan specifies this stable handoff entry point by name.
+  const performanceHandoff = relative(file) === 'docs/performance/backend-concurrency/PROGRESS.md'
+  if (
+    basename !== 'README.md' &&
+    !performanceHandoff &&
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(basename)
+  ) {
     fail(file, 'filename must use lowercase kebab-case')
   }
 

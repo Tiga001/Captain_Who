@@ -317,6 +317,8 @@ fn history_warm_ui_only_updates_refresh_raw_source_without_rebuilding_model_hist
     let preview = warm_preview(&service);
     let before = service.prepare_cached_history(ID).unwrap().unwrap();
     let before_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    // The release core dependency omits debug counters; semantic cache assertions still run.
+    #[cfg(debug_assertions)]
     let before_storage = storage.history_snapshot_diagnostics(ID);
     for state in [
         Some(r#"{"favorited":true,"timelineCollapsed":false}"#),
@@ -346,13 +348,16 @@ fn history_warm_ui_only_updates_refresh_raw_source_without_rebuilding_model_hist
         .ui_state_json
         .is_none());
     let after_diagnostics = service.prepared_history_diagnostics_for_test(ID);
-    let after_storage = storage.history_snapshot_diagnostics(ID);
-    assert_eq!(after_storage.full_loads, before_storage.full_loads);
-    assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
-    assert_eq!(
-        after_storage.model_context_decodes,
-        before_storage.model_context_decodes
-    );
+    #[cfg(debug_assertions)]
+    {
+        let after_storage = storage.history_snapshot_diagnostics(ID);
+        assert_eq!(after_storage.full_loads, before_storage.full_loads);
+        assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
+        assert_eq!(
+            after_storage.model_context_decodes,
+            before_storage.model_context_decodes
+        );
+    }
     assert_eq!(
         after_diagnostics.history_assemblies,
         before_diagnostics.history_assemblies
@@ -369,6 +374,8 @@ fn history_warm_identical_trace_replay_preserves_materials_and_measured_prefix()
     warm_preview(&service);
     let before = service.prepare_cached_history(ID).unwrap().unwrap();
     let before_diagnostics = service.prepared_history_diagnostics_for_test(ID);
+    // The release core dependency omits debug counters; semantic cache assertions still run.
+    #[cfg(debug_assertions)]
     let before_storage = storage.history_snapshot_diagnostics(ID);
     storage
         .replace_conversation_turn_trace(&before.source.traces[0], 2000, 2001)
@@ -379,13 +386,16 @@ fn history_warm_identical_trace_replay_preserves_materials_and_measured_prefix()
     assert!(service.has_measured_prepared_history_for_test(ID));
     warm_preview(&service);
     let after_diagnostics = service.prepared_history_diagnostics_for_test(ID);
-    let after_storage = storage.history_snapshot_diagnostics(ID);
-    assert_eq!(after_storage.full_loads, before_storage.full_loads);
-    assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
-    assert_eq!(
-        after_storage.model_context_decodes,
-        before_storage.model_context_decodes
-    );
+    #[cfg(debug_assertions)]
+    {
+        let after_storage = storage.history_snapshot_diagnostics(ID);
+        assert_eq!(after_storage.full_loads, before_storage.full_loads);
+        assert_eq!(after_storage.trace_decodes, before_storage.trace_decodes);
+        assert_eq!(
+            after_storage.model_context_decodes,
+            before_storage.model_context_decodes
+        );
+    }
     assert_eq!(
         after_diagnostics.history_assemblies,
         before_diagnostics.history_assemblies

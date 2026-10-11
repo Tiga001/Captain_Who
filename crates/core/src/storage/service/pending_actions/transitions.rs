@@ -14,6 +14,7 @@ impl StorageService {
     ) -> Result<(), String> {
         let _timing = crate::performance::Span::new("approval", "command_commit");
         let mut connection = self.state.connection()?;
+        let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "approval");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -50,7 +51,11 @@ impl StorageService {
             updated_at,
         )
         .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)
+        let commit_timing = crate::performance::Span::new("sqlite.commit", "approval");
+        transaction.commit().map_err(storage_error)?;
+        drop(commit_timing);
+        crate::performance::record("sqlite.committed", "approval", std::time::Duration::ZERO, 0);
+        Ok(())
     }
 
     pub fn transition_pending_agent_action(

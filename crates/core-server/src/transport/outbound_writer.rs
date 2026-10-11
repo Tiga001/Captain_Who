@@ -45,9 +45,14 @@ where
     let mut deadline = None;
     let mut diagnostics = tokio::time::interval(Duration::from_secs(30));
     diagnostics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut runtime_probe = tokio::time::interval(Duration::from_millis(100));
+    runtime_probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             result = &mut pump => break result,
+            scheduled = runtime_probe.tick(), if mycopilot_core::performance::enabled() => {
+                mycopilot_core::performance::record("runtime", "timer_lag", scheduled.elapsed(), 0);
+            }
             _ = diagnostics.tick(), if mycopilot_core::performance::enabled() => {
                 control.sample_queue();
                 mycopilot_core::performance::flush();

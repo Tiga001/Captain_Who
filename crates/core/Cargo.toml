@@ -8,6 +8,11 @@ license.workspace = true
 name = "mycopilot_core"
 path = "src/lib.rs"
 
+[features]
+# Only test targets opt in, including release benchmarks with controlled loopback providers.
+# Production builds must leave this disabled; it does not permit remote HTTP endpoints.
+test-support = []
+
 [dependencies]
 base64 = "0.22"
 dirs = "6"

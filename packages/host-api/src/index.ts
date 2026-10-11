@@ -639,6 +639,12 @@ export interface WorkspaceFilesHostApi {
   revealInFolder(input: WorkspaceFilePreviewRequest): Promise<void>
 }
 
+/** Optional observability metadata, separate from all business DTOs and authorization. */
+export interface HostDiagnosticContext {
+  rendererSessionNonce: string
+  actionSequence: number
+}
+
 export interface AgentHostApi {
   requestWorkflows(input: WorkflowRequest): Promise<HostInvocationResult<WorkflowResponse>>
   /** Imports one UTF-8 Markdown template selected in a native file dialog. */
@@ -695,7 +701,8 @@ export interface AgentHostApi {
     input: CollaborationApprovalListRequest
   ): Promise<HostInvocationResult<CollaborationApprovalList>>
   decideCollaborationApproval(
-    input: CollaborationApprovalDecisionRequest
+    input: CollaborationApprovalDecisionRequest,
+    diagnostic?: HostDiagnosticContext
   ): Promise<HostInvocationResult<CollaborationApprovalDecisionResult>>
   onCollaborationEvent(handler: (event: CollaborationEventEnvelope) => void): () => void
   onCollaborationObserverEvent(handler: (event: AgentObserverEventEnvelope) => void): () => void
@@ -722,7 +729,8 @@ export interface AgentHostApi {
     input: AgentProviderTransitionStatusInput
   ): Promise<HostInvocationResult<AgentProviderTransitionStatusOutput>>
   startConversationTurn(
-    input: AgentConversationTurnInput
+    input: AgentConversationTurnInput,
+    diagnostic?: HostDiagnosticContext
   ): Promise<HostInvocationResult<AgentConversationTurnOutput>>
   continueConversationTurn(
     input: AgentConversationTurnContinueInput
@@ -740,11 +748,20 @@ export interface AgentHostApi {
     input: AgentCommandSessionGetInput
   ): Promise<HostInvocationResult<AgentCommandSessionGetOutput>>
   steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput>
-  cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
+  cancelRun(
+    input: AgentCancelRunRequest,
+    diagnostic?: HostDiagnosticContext
+  ): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>
-  approveAction(input: AgentApproveActionRequest): Promise<AgentActionExecutionOutput>
-  rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput>
-  cancelAction(input: AgentActionIdRequest): Promise<boolean>
+  approveAction(
+    input: AgentApproveActionRequest,
+    diagnostic?: HostDiagnosticContext
+  ): Promise<AgentActionExecutionOutput>
+  rejectAction(
+    input: AgentRejectActionRequest,
+    diagnostic?: HostDiagnosticContext
+  ): Promise<AgentActionExecutionOutput>
+  cancelAction(input: AgentActionIdRequest, diagnostic?: HostDiagnosticContext): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
   getUsageDashboard(input: AgentUsageDashboardInput): Promise<AgentUsageDashboardOutput>
   getLocalTokenUsage(input: LocalTokenUsageSummaryInput): Promise<LocalTokenUsageSummaryOutput>

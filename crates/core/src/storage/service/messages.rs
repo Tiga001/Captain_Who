@@ -447,6 +447,7 @@ impl StorageService {
         collaboration_final_response_boundary: Option<u64>,
     ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
+        let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "terminal");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -623,7 +624,11 @@ impl StorageService {
             completed_at,
         )
         .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)
+        let commit_timing = crate::performance::Span::new("sqlite.commit", "terminal");
+        transaction.commit().map_err(storage_error)?;
+        drop(commit_timing);
+        crate::performance::record("sqlite.committed", "terminal", std::time::Duration::ZERO, 0);
+        Ok(())
     }
 
     pub fn get_conversation_turn_trace(

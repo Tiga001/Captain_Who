@@ -6,6 +6,7 @@ const getAllWindows = vi.hoisted(() => vi.fn())
 vi.mock('electron', () => ({ BrowserWindow: { getAllWindows } }))
 
 import { registerAgentIpc } from '../ipc/agentIpc'
+import { currentRpcDiagnosticContext } from './rpcDiagnosticContext'
 
 describe('Main Agent IPC collaboration routing', () => {
   beforeEach(() => getAllWindows.mockReset())
@@ -240,5 +241,47 @@ describe('Main Agent IPC approval-scope boundary', () => {
 
     expect(() => handler?.({}, input)).toThrow(/Invalid Agent approve action/)
     expect(approveAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('Main Agent IPC diagnostic boundary', () => {
+  it('carries separate metadata through authorization awaits without passing it to business DTOs', async () => {
+    const original = process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+    process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = '1'
+    const diagnostic = { rendererSessionNonce: 'a'.repeat(32), actionSequence: 9 }
+    const input = { conversationId: 'business conversation' }
+    const captured: unknown[] = []
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      startConversationTurn: vi.fn(async (value) => {
+        await Promise.resolve()
+        captured.push(currentRpcDiagnosticContext())
+        return value
+      })
+    }
+    const assertCanStartTurn = vi.fn(async () => {
+      await Promise.resolve()
+    })
+    try {
+      getAllWindows.mockReturnValue([])
+      const ipc = { handle: vi.fn(), on: vi.fn() }
+      registerAgentIpc(ipc as never, coreServer as never, assertCanStartTurn)
+      const handler = ipc.handle.mock.calls.find(
+        ([channel]) => channel === HOST_CHANNELS.agent.startConversationTurn
+      )?.[1]
+      await expect(handler({}, input, diagnostic)).resolves.toEqual({ ok: true, value: input })
+      await expect(handler({}, input, { ...diagnostic, unexpected: 'SECRET' })).resolves.toEqual({
+        ok: true,
+        value: input
+      })
+      expect(captured).toEqual([diagnostic, undefined])
+      expect(assertCanStartTurn).toHaveBeenCalledTimes(2)
+      expect(coreServer.startConversationTurn.mock.calls).toEqual([[input], [input]])
+      expect(currentRpcDiagnosticContext()).toBeUndefined()
+    } finally {
+      if (original === undefined) delete process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+      else process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = original
+    }
   })
 })

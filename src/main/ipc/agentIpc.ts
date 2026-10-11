@@ -1,3 +1,4 @@
+import { withRpcDiagnosticContext } from '../core/rpcDiagnosticContext'
 import { BrowserWindow } from 'electron'
 import {
   captureHostInvocation,
@@ -132,8 +133,10 @@ export function registerAgentIpc(
   ipcMain.handle(HOST_CHANNELS.agent.collaborationApprovalList, (_event, input) =>
     captureHostInvocation(() => coreServer.listCollaborationApprovals(input))
   )
-  ipcMain.handle(HOST_CHANNELS.agent.collaborationApprovalDecide, (_event, input) =>
-    captureHostInvocation(() => coreServer.decideCollaborationApproval(input))
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationApprovalDecide, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () =>
+      captureHostInvocation(() => coreServer.decideCollaborationApproval(input))
+    )
   )
 
   ipcMain.handle(HOST_CHANNELS.agent.startManualContextCompaction, (_event, input) =>
@@ -172,11 +175,13 @@ export function registerAgentIpc(
       'Unable to restore the model-switch status. Please try again.'
     )
   )
-  ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input) =>
-    captureHostInvocation(async () => {
-      await assertCanStartTurn()
-      return coreServer.startConversationTurn(input)
-    })
+  ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () =>
+      captureHostInvocation(async () => {
+        await assertCanStartTurn()
+        return coreServer.startConversationTurn(input)
+      })
+    )
   )
   ipcMain.handle(HOST_CHANNELS.agent.continueConversationTurn, (_event, input) =>
     captureHostInvocation(async () => {
@@ -200,16 +205,20 @@ export function registerAgentIpc(
     captureHostInvocation(() => coreServer.getCommandSession(input))
   )
   ipcMain.handle(HOST_CHANNELS.agent.steerRun, (_event, input) => coreServer.steerRun(input))
-  ipcMain.handle(HOST_CHANNELS.agent.cancelRun, (_event, input) => coreServer.cancelRun(input))
+  ipcMain.handle(HOST_CHANNELS.agent.cancelRun, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () => coreServer.cancelRun(input))
+  )
   ipcMain.handle(HOST_CHANNELS.agent.listPendingActions, () => coreServer.listPendingActions())
-  ipcMain.handle(HOST_CHANNELS.agent.approveAction, (_event, input) =>
-    coreServer.approveAction(parseAgentApproveActionRequest(input))
+  ipcMain.handle(HOST_CHANNELS.agent.approveAction, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () =>
+      coreServer.approveAction(parseAgentApproveActionRequest(input))
+    )
   )
-  ipcMain.handle(HOST_CHANNELS.agent.rejectAction, (_event, input) =>
-    coreServer.rejectAction(input)
+  ipcMain.handle(HOST_CHANNELS.agent.rejectAction, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () => coreServer.rejectAction(input))
   )
-  ipcMain.handle(HOST_CHANNELS.agent.cancelAction, (_event, input) =>
-    coreServer.cancelAction(input)
+  ipcMain.handle(HOST_CHANNELS.agent.cancelAction, (_event, input, diagnostic) =>
+    withRpcDiagnosticContext(diagnostic, () => coreServer.cancelAction(input))
   )
   ipcMain.handle(HOST_CHANNELS.agent.getUsageSummary, (_event, input) =>
     coreServer.getUsageSummary(input)

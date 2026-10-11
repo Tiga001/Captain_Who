@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LatencyHistogram, LATENCY_BUCKETS_MS } from '../../shared/latencyHistogram'
 import { diagnosticMethod, RpcDiagnostics } from './rpcDiagnostics'
 
 describe('RPC scalar diagnostics', () => {
@@ -67,5 +68,83 @@ describe('RPC scalar diagnostics', () => {
     } finally {
       clock.mockRestore()
     }
+  })
+})
+
+describe('bounded latency distributions and RPC correlation', () => {
+  it('retains tails as bucket bounds and provides mergeable counts', () => {
+    const emit = vi.fn()
+    const diagnostics = new RpcDiagnostics(true, emit)
+    for (let i = 0; i < 100; i += 1) {
+      diagnostics.record('response', 'agent.approveAction', i === 99 ? 900 : i === 98 ? 90 : 3)
+    }
+    diagnostics.flush()
+    const histogram = emit.mock.calls[0][0].samples['response:agent.approveAction']
+    expect(histogram).toMatchObject({
+      count: 100,
+      p50UpperMs: 4,
+      p95UpperMs: 4,
+      p99UpperMs: 125,
+      maxMs: 900
+    })
+    expect(histogram.bucketCounts.reduce((sum: number, count: number) => sum + count, 0)).toBe(100)
+    expect(emit.mock.calls[0][0].percentileKind).toBe('fixed_bucket_upper_bound')
+  })
+
+  it('keeps queue gauges and outcomes without cardinality growth from request IDs', () => {
+    const emit = vi.fn()
+    const diagnostics = new RpcDiagnostics(true, emit)
+    for (let id = 1; id <= 100; id += 1) {
+      diagnostics.requestOutcome('offered', 'secret-method', id)
+      diagnostics.requestOutcome('completed', 'secret-method', id, 3)
+    }
+    diagnostics.requestOutcome('rpc_error', 'agent.approveAction', 101, 50)
+    diagnostics.requestOutcome('transport_failed', 'agent.cancelRun', 102, 60)
+    diagnostics.queues(10, 1000, 800)
+    diagnostics.queues(2, 25, 20)
+    diagnostics.flush()
+    const summary = emit.mock.calls[0][0]
+    expect(summary).toMatchObject({
+      pendingPeak: 10,
+      pendingCurrent: 2,
+      stdinBytesPeak: 1000,
+      stdinBytesCurrent: 25,
+      oldestPendingMsPeak: 800,
+      outcomes: {
+        'offered:other': 100,
+        'completed:other': 100,
+        'rpc_error:agent.approveAction': 1,
+        'transport_failed:agent.cancelRun': 1
+      },
+      omittedTraces: 70
+    })
+    expect(summary.traces).toHaveLength(32)
+    expect(summary.traces[0]).toEqual({
+      rpcId: 1,
+      method: 'other',
+      elapsedMs: 3,
+      outcome: 'completed'
+    })
+    expect(JSON.stringify(summary)).not.toContain('secret-method')
+  })
+  it('defines overflow and inclusive bucket boundaries without accepting invalid durations', () => {
+    const histogram = new LatencyHistogram()
+    for (const invalid of [-1, NaN, Infinity]) histogram.record(invalid)
+    histogram.record(0)
+    histogram.record(0.05)
+    histogram.record(0.051)
+    histogram.record(2_000_000)
+    const summary = histogram.snapshot()
+    expect(summary).toMatchObject({
+      count: 4,
+      p50UpperMs: 0.05,
+      p95UpperMs: 2_000_000,
+      p99UpperMs: 2_000_000,
+      overflowCount: 1
+    })
+    expect(summary.bucketCounts).toHaveLength(LATENCY_BUCKETS_MS.length + 1)
+    expect(summary.bucketCounts[0]).toBe(2)
+    expect(summary.bucketCounts[1]).toBe(1)
+    expect(summary.bucketCounts.at(-1)).toBe(1)
   })
 })

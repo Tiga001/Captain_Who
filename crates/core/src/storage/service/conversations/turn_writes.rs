@@ -375,6 +375,8 @@ impl StorageService {
     ) -> Result<ConversationTurnAdmissionResult, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
+        let _transaction_timing =
+            crate::performance::Span::new("sqlite.transaction", "turn_admission");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -846,7 +848,15 @@ impl StorageService {
         if let Some(check_execution_access) = check_execution_access {
             check_execution_access()?;
         }
+        let commit_timing = crate::performance::Span::new("sqlite.commit", "turn_admission");
         transaction.commit().map_err(storage_error)?;
+        drop(commit_timing);
+        crate::performance::record(
+            "sqlite.committed",
+            "turn_admission",
+            std::time::Duration::ZERO,
+            0,
+        );
         Ok((
             conversation,
             effective_permissions,

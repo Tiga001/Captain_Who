@@ -754,6 +754,8 @@ where
         let request_notifications = outbound.clone();
         let scheduler_wake = automation_scheduler_wake.clone();
         let diagnostic_operation = match request.method.as_str() {
+            "agent.startConversationTurn" => "startConversationTurn",
+            "agent.rewriteConversationTurn" => "rewriteConversationTurn",
             "storage.loadConversation" => "loadConversation",
             "storage.loadConversations" => "loadConversations",
             "storage.loadConversationMetas" => "loadConversationMetas",
@@ -778,7 +780,18 @@ where
         };
         let diagnostic_admitted =
             mycopilot_core::performance::enabled().then(std::time::Instant::now);
+        mycopilot_core::performance::record(
+            "rpc.request_bytes",
+            diagnostic_operation,
+            Duration::ZERO,
+            line.len(),
+        );
         let global_fence = bounded_dispatch::rpc_has_global_mutation_fence(&request);
+        let diagnostic_pending = mycopilot_core::performance::track_queue(
+            "rpc.pending_body",
+            diagnostic_operation,
+            line.len(),
+        );
         if let Err(response) = rpc.try_submit_ordered(
             class,
             request.id.clone(),
@@ -786,6 +799,7 @@ where
             owner_resolver,
             global_fence,
             move || {
+                let _pending_body = diagnostic_pending;
                 if let Some(admitted) = diagnostic_admitted {
                     mycopilot_core::performance::record(
                         "rpc.operation_queue",

@@ -45,6 +45,8 @@ impl StorageService {
         crate::storage::trace_performance_metrics::lock_wait(lock_started.elapsed());
         #[cfg(test)]
         let transaction_started = std::time::Instant::now();
+        let _transaction_timing =
+            crate::performance::Span::new("sqlite.transaction", "trace_publication");
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
@@ -157,7 +159,15 @@ impl StorageService {
                 .ok_or_else(|| {
                     "committed Trace publication has no active journal revision".to_string()
                 })?;
+        let commit_timing = crate::performance::Span::new("sqlite.commit", "trace_publication");
         transaction.commit().map_err(storage_error)?;
+        drop(commit_timing);
+        crate::performance::record(
+            "sqlite.committed",
+            "trace_publication",
+            std::time::Duration::ZERO,
+            0,
+        );
         #[cfg(test)]
         crate::storage::trace_performance_metrics::transaction(transaction_started.elapsed());
         cursor.committed = Some(CommittedPublication {

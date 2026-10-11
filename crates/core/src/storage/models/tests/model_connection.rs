@@ -110,22 +110,35 @@ fn provider_urls_enforce_utf8_byte_limit_and_reject_control_characters() {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "test-support"))]
 #[test]
-fn development_build_allows_only_explicit_loopback_http() {
+fn development_or_test_support_allows_only_explicit_loopback_http() {
     for url in ["http://localhost:11434/v1", "http://127.0.0.1:11434/v1"] {
         let settings = settings(model(Some(url), Some("model-token")));
         assert!(settings
             .effective_connection_for(&settings.models[0])
             .is_ok());
     }
-    let settings = settings(model(
-        Some("http://192.168.1.20:11434/v1"),
-        Some("model-token"),
-    ));
-    assert!(settings
-        .effective_connection_for(&settings.models[0])
-        .is_err());
+    for url in [
+        "http://192.168.1.20:11434/v1",
+        "http://0.0.0.0:11434/v1",
+        "http://provider.example/v1",
+        "http://localhost.example/v1",
+        "http://127.0.0.1.example/v1",
+    ] {
+        let settings = settings(model(Some(url), Some("model-token")));
+        assert!(settings
+            .effective_connection_for(&settings.models[0])
+            .is_err());
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "test-support")))]
+#[test]
+fn release_without_test_support_requires_https_even_for_loopback() {
+    for url in ["http://localhost:11434/v1", "http://127.0.0.1:11434/v1"] {
+        assert!(validated_connection("Model A", "专用", url, "token").is_err());
+    }
 }
 
 #[test]

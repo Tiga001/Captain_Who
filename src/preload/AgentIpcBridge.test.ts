@@ -464,3 +464,24 @@ describe('Agent IPC collaboration settings', () => {
     expect(ipc.removeListener).toHaveBeenCalledWith(channel, listener)
   })
 })
+
+describe('optional Renderer diagnostic correlation', () => {
+  it('keeps diagnostic context separate from business inputs and disabled calls unchanged', () => {
+    const result = Promise.resolve(true)
+    const invoke = vi.fn().mockReturnValue(result)
+    const bridge = createAgentIpcBridge({ invoke, on: vi.fn(), removeListener: vi.fn() } as never)
+    const input = { runId: 'run', actionId: 'action', approvalScope: 'singleAction' as const }
+    const context = { rendererSessionNonce: 'a'.repeat(32), actionSequence: 7 }
+    expect(bridge.approveAction(input)).toBe(result)
+    expect(invoke).toHaveBeenLastCalledWith('host:agent.approveAction', input)
+    expect(bridge.approveAction(input, context)).toBe(result)
+    expect(invoke).toHaveBeenLastCalledWith('host:agent.approveAction', input, context)
+    expect(input).toEqual({ runId: 'run', actionId: 'action', approvalScope: 'singleAction' })
+    const error = new Error('original IPC error')
+    invoke.mockImplementation(() => {
+      throw error
+    })
+    expect(() => bridge.cancelRun({ runId: 'run' })).toThrow(error)
+    expect(() => bridge.cancelRun({ runId: 'run' }, context)).toThrow(error)
+  })
+})

@@ -196,7 +196,17 @@ impl AgentService {
             }
         }
 
+        let runtime_scheduled =
+            mycopilot_core::performance::enabled().then(std::time::Instant::now);
         tokio::spawn(async move {
+            if let Some(scheduled) = runtime_scheduled {
+                mycopilot_core::performance::record(
+                    "turn",
+                    "runtime_schedule_wait",
+                    scheduled.elapsed(),
+                    0,
+                );
+            }
             service
                 .complete_runtime_segment(segment, notifications)
                 .await;

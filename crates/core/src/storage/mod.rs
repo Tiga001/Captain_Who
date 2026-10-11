@@ -148,6 +148,7 @@ pub struct StorageState {
 pub struct StorageConnectionGuard<'a> {
     guard: Option<MutexGuard<'a, Connection>>,
     timing: Option<(std::time::Instant, Duration)>,
+    operation: &'static str,
 }
 
 impl std::ops::Deref for StorageConnectionGuard<'_> {
@@ -170,6 +171,8 @@ impl Drop for StorageConnectionGuard<'_> {
         if let Some((held, waited)) = held {
             crate::performance::record("sqlite.wait", "connection", waited, 0);
             crate::performance::record("sqlite.hold", "connection", held, 0);
+            crate::performance::record("sqlite.operation_wait", self.operation, waited, 0);
+            crate::performance::record("sqlite.operation_hold", self.operation, held, 0);
         }
     }
 }
@@ -201,6 +204,7 @@ impl StorageState {
         })
     }
 
+    #[track_caller]
     pub fn connection(&self) -> Result<StorageConnectionGuard<'_>, String> {
         let started = crate::performance::enabled().then(std::time::Instant::now);
         let guard = self
@@ -210,11 +214,37 @@ impl StorageState {
         Ok(StorageConnectionGuard {
             guard: Some(guard),
             timing: started.map(|start| (std::time::Instant::now(), start.elapsed())),
+            operation: if started.is_some() {
+                diagnostic_storage_operation(std::panic::Location::caller().file())
+            } else {
+                "other"
+            },
         })
     }
 
     pub fn event_notifications(&self) -> StorageEventNotifications {
         self.event_notifications.clone()
+    }
+}
+
+// A closed, static vocabulary: call-site paths are classified, never retained or logged.
+fn diagnostic_storage_operation(file: &str) -> &'static str {
+    if file.ends_with("/turn_writes.rs") {
+        "turn_admission"
+    } else if file.ends_with("/trace_publication.rs") {
+        "trace_publication"
+    } else if file.contains("/pending_actions/") {
+        "approval"
+    } else if file.ends_with("/messages.rs") {
+        "messages"
+    } else if file.ends_with("/history_snapshot.rs") || file.ends_with("/projects_and_history.rs") {
+        "history"
+    } else if file.contains("/workflow") || file.contains("/agent_delivery") {
+        "delivery"
+    } else if file.contains("/settings.rs") {
+        "settings"
+    } else {
+        "other"
     }
 }
 

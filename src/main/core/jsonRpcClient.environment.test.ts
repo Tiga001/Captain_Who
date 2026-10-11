@@ -24,6 +24,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 import { CoreJsonRpcClient, CoreJsonRpcError } from './jsonRpcClient'
+import { currentRpcDiagnosticContext, withRpcDiagnosticContext } from './rpcDiagnosticContext'
 
 class FakeCoreProcess extends EventEmitter {
   pid: number | undefined = 12345
@@ -411,6 +412,129 @@ describe('CoreJsonRpcClient application data root', () => {
     } finally {
       client.stop()
       vi.useRealTimers()
+    }
+  })
+  it('records real client write, completion and failure stages without request payloads', async () => {
+    const original = process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+    process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = '1'
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'diagnostics') })
+    try {
+      client.start()
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      child.stdin.resume()
+      const response = client.request('agent.approveAction', { secret: 'SECRET_RPC_BODY' })
+      await new Promise((resolve) => setImmediate(resolve))
+      child.stdout.write('{"jsonrpc":"2.0","id":1,"result":{"accepted":true}}\n')
+      await expect(response).resolves.toEqual({ accepted: true })
+      const failed = client.request('agent.cancelRun', { runId: 'SECRET_RUN_ID' })
+      const rejection = expect(failed).rejects.toThrow('core-server stopped')
+      client.stop()
+      await rejection
+      const summaries = log.mock.calls.filter(([prefix]) => prefix === '[core-performance]')
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0][1]).toMatchObject({
+        pendingCurrent: 0,
+        outcomes: {
+          'offered:agent.approveAction': 1,
+          'completed:agent.approveAction': 1,
+          'offered:agent.cancelRun': 1,
+          'transport_failed:agent.cancelRun': 1
+        },
+        samples: {
+          'request.stdin_written:agent.approveAction': { count: 1 },
+          'response:agent.approveAction': { count: 1 }
+        }
+      })
+      expect(JSON.stringify(summaries)).not.toContain('SECRET_')
+    } finally {
+      client.stop()
+      log.mockRestore()
+      restoreEnvironmentVariable('CAPTAIN_PERFORMANCE_DIAGNOSTICS', original)
+    }
+  })
+  it.each([false, true])(
+    'keeps diagnostics timer lifecycle bounded across stop/restart with enabled=%s',
+    (enabled) => {
+      const original = process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+      process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = enabled ? '1' : '0'
+      vi.useFakeTimers()
+      const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+      const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'diagnostic-timer') })
+      try {
+        const expected = enabled ? 1 : 0
+        client.start()
+        const first = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+        client.start()
+        expect(vi.getTimerCount()).toBe(expected)
+        client.stop()
+        client.stop()
+        expect(vi.getTimerCount()).toBe(0)
+        client.start()
+        const second = spawnProcess.mock.results[1]?.value as FakeCoreProcess
+        expect(vi.getTimerCount()).toBe(expected)
+        first.emit('exit', 0, null)
+        expect(vi.getTimerCount()).toBe(expected)
+        second.emit('exit', 0, null)
+        expect(vi.getTimerCount()).toBe(0)
+        client.start()
+        expect(vi.getTimerCount()).toBe(expected)
+        client.stop()
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        client.stop()
+        log.mockRestore()
+        vi.useRealTimers()
+        restoreEnvironmentVariable('CAPTAIN_PERFORMANCE_DIAGNOSTICS', original)
+      }
+    }
+  )
+  it('joins overlapping Renderer actions to numeric RPC IDs without changing the Core wire', async () => {
+    const original = process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+    process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = '1'
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const client = new CoreJsonRpcClient({
+      appDataRoot: resolve('fixtures', 'correlated-diagnostics')
+    })
+    try {
+      const lifecycleContexts: unknown[] = []
+      client.onStarted(() => lifecycleContexts.push(currentRpcDiagnosticContext()))
+      const firstContext = { rendererSessionNonce: 'a'.repeat(32), actionSequence: 11 }
+      const secondContext = { rendererSessionNonce: 'a'.repeat(32), actionSequence: 12 }
+      const first = withRpcDiagnosticContext(firstContext, () =>
+        client.request('agent.approveAction', { runId: 'first' })
+      )
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      const wire: string[] = []
+      child.stdin.on('data', (data: Buffer) => wire.push(data.toString()))
+      expect(lifecycleContexts).toEqual([undefined])
+      const second = withRpcDiagnosticContext(secondContext, () =>
+        client.request('agent.approveAction', { runId: 'second' })
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+      child.stdout.write('{"jsonrpc":"2.0","id":2,"result":"second response"}\n')
+      child.stdout.write('{"jsonrpc":"2.0","id":1,"result":"first response"}\n')
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        'first response',
+        'second response'
+      ])
+      client.stop()
+      expect(wire.map((frame) => JSON.parse(frame))).toEqual([
+        { jsonrpc: '2.0', id: 1, method: 'agent.approveAction', params: { runId: 'first' } },
+        { jsonrpc: '2.0', id: 2, method: 'agent.approveAction', params: { runId: 'second' } }
+      ])
+      const summary = log.mock.calls.find(([prefix]) => prefix === '[core-performance]')?.[1]
+      expect(summary.traces).toEqual([
+        expect.objectContaining({ rpcId: 2, renderer: secondContext }),
+        expect.objectContaining({ rpcId: 1, renderer: firstContext })
+      ])
+      expect(Object.keys(summary.samples).join(' ')).not.toContain(
+        firstContext.rendererSessionNonce
+      )
+    } finally {
+      client.stop()
+      log.mockRestore()
+      restoreEnvironmentVariable('CAPTAIN_PERFORMANCE_DIAGNOSTICS', original)
     }
   })
 })

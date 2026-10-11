@@ -12,7 +12,13 @@ fn fixture() -> (
     let path = directory.path().join("trace-external.sqlite");
     // Keep the StorageService at one address so moving this fixture into the test (or the
     // terminal-race thread) does not itself invalidate its process-local database identity.
-    let service = Box::new(StorageService::open(&path).unwrap());
+    let service = Box::new(
+        StorageService::open_with_model_credentials(
+            &path,
+            Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     let external = Connection::open(&path).unwrap();
     external.pragma_update(None, "foreign_keys", true).unwrap();
     external.execute_batch(

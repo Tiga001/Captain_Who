@@ -1,5 +1,5 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
-import { HOST_CHANNELS, type AgentHostApi } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type AgentHostApi, type HostDiagnosticContext } from '@mycopilot/host-api'
 import {
   parseAgentCollaborationSettings,
   parseWorkflowRuntimeSnapshot,
@@ -15,6 +15,14 @@ import type {
 type AgentIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostApi {
+  const invokeWithDiagnostic = (
+    channel: string,
+    input: unknown,
+    diagnostic?: HostDiagnosticContext
+  ) =>
+    diagnostic === undefined
+      ? ipcRenderer.invoke(channel, input)
+      : ipcRenderer.invoke(channel, input, diagnostic)
   // One validated projection per incoming IPC message, regardless of the number of panels.
   // Keep no last-value cache: subscribing after navigation/auth changes must not replay old data.
   const runtimeSubscribers = new Set<Parameters<AgentHostApi['onWorkflowRuntimeChanged']>[0]>()
@@ -105,8 +113,8 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateDelete, input),
     listCollaborationApprovals: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationApprovalList, input),
-    decideCollaborationApproval: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationApprovalDecide, input),
+    decideCollaborationApproval: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.collaborationApprovalDecide, input, diagnostic),
     onCollaborationEvent: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: CollaborationEventEnvelope): void =>
         handler(payload)
@@ -144,8 +152,8 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.startProviderTransition, input),
     getProviderTransitionStatus: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.getProviderTransitionStatus, input),
-    startConversationTurn: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.agent.startConversationTurn, input),
+    startConversationTurn: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.startConversationTurn, input, diagnostic),
     continueConversationTurn: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.continueConversationTurn, input),
     rewriteConversationTurn: (input) =>
@@ -156,11 +164,15 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.listCommandSessions, input),
     getCommandSession: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getCommandSession, input),
     steerRun: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.steerRun, input),
-    cancelRun: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.cancelRun, input),
+    cancelRun: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.cancelRun, input, diagnostic),
     listPendingActions: () => ipcRenderer.invoke(HOST_CHANNELS.agent.listPendingActions),
-    approveAction: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.approveAction, input),
-    rejectAction: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.rejectAction, input),
-    cancelAction: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.cancelAction, input),
+    approveAction: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.approveAction, input, diagnostic),
+    rejectAction: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.rejectAction, input, diagnostic),
+    cancelAction: (input, diagnostic) =>
+      invokeWithDiagnostic(HOST_CHANNELS.agent.cancelAction, input, diagnostic),
     getUsageSummary: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getUsageSummary, input),
     getUsageDashboard: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getUsageDashboard, input),
     getLocalTokenUsage: (input) =>

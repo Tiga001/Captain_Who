@@ -39,6 +39,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 security-framework = "3.7"
 
 [dev-dependencies]
+mycopilot-core = { workspace = true, features = ["test-support"] }
 rmcp = { workspace = true, features = ["macros", "server", "transport-io"] }
 schemars = "1"
 tempfile = "3"

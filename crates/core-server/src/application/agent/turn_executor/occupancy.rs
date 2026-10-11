@@ -327,8 +327,13 @@ mod occupancy_tests {
 
     fn fixture() -> (tempfile::TempDir, Arc<StorageService>, AgentService) {
         let directory = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         storage
             .save_conversation(ChatConversationRecord {
                 id: "conversation".into(),
@@ -409,8 +414,13 @@ mod occupancy_tests {
             .unwrap();
         drop(service);
         drop(storage);
-        let storage =
-            Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(
+                &directory.path().join("storage.sqlite"),
+                Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+            )
+            .unwrap(),
+        );
         let service =
             AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
         service.active_conversation_turns.lock().unwrap().clear();

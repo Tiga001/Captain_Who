@@ -20,6 +20,17 @@ pub(crate) enum RpcDispatchClass {
     Approval,
 }
 
+impl RpcDispatchClass {
+    fn diagnostic_label(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Control => "control",
+            Self::Approval => "approval",
+        }
+    }
+}
+
 /// Unknown operations conservatively remain writes. Never infer read-only from a method prefix:
 /// workflow mutations and attachment imports share namespaces with actual reads.
 pub(crate) fn rpc_dispatch_class(request: &JsonRpcRequest) -> RpcDispatchClass {
@@ -170,6 +181,7 @@ struct RpcJob {
     owner_resolution: Option<OwnerResolution>,
     completion: Option<watch::Sender<bool>>,
     _permit: OwnedSemaphorePermit,
+    queue_probe: Option<mycopilot_core::performance::QueueEntry>,
 }
 
 struct Lane {
@@ -245,6 +257,8 @@ async fn execute_job(
     outbound: crate::transport::OutboundSender,
     execution: Arc<Semaphore>,
 ) {
+    let lane = class.diagnostic_label();
+    mycopilot_core::performance::record("rpc.lane_wait", lane, job.admitted_at.elapsed(), 0);
     let mut resolution_error = None;
     let mut resolved_owner = None;
     let needs_alias = job.owner_resolution.is_some();
@@ -298,6 +312,7 @@ async fn execute_job(
         }
     }
     let owner_resolution_us = resolution_started.elapsed().as_micros() as u64;
+    let dependency_started = std::time::Instant::now();
     for previous in job.priority_dependencies {
         if priority_owners_overlap(
             job.owner.as_deref(),
@@ -317,10 +332,18 @@ async fn execute_job(
             }
         }
     }
+    mycopilot_core::performance::record(
+        "rpc.dependency_wait",
+        lane,
+        dependency_started.elapsed(),
+        0,
+    );
+    let execution_wait = mycopilot_core::performance::Span::new("rpc.execution_permit_wait", lane);
     let _execution = execution
         .acquire_owned()
         .await
         .expect("lane execution remains open");
+    drop(execution_wait);
     let started_at = std::time::Instant::now();
     let response = if stopping.load(Ordering::Acquire) {
         unavailable_response(job.request_id.clone(), false)
@@ -330,7 +353,17 @@ async fn execute_job(
         // Never abort this join on shutdown: a blocking mutation may already have committed.
         let running_stop = Arc::clone(&stopping);
         let running_id = job.request_id.clone();
+        let queue_probe = job.queue_probe.take();
         match tokio::task::spawn_blocking(move || {
+            drop(queue_probe);
+            mycopilot_core::performance::record(
+                "rpc.blocking_pool_wait",
+                lane,
+                started_at.elapsed(),
+                0,
+            );
+            let _handler_timing =
+                mycopilot_core::performance::Span::new("rpc.handler_execution", lane);
             // A submitted blocking task can itself queue behind unrelated pool work. Only
             // crossing this boundary starts the handler; shutdown still cancels pool waiters.
             if running_stop.load(Ordering::Acquire) {
@@ -350,12 +383,26 @@ async fn execute_job(
         }
     };
     let completed_at = std::time::Instant::now();
-    let lane = match class {
-        RpcDispatchClass::Read => "read",
-        RpcDispatchClass::Write => "write",
-        RpcDispatchClass::Control => "control",
-        RpcDispatchClass::Approval => "approval",
-    };
+    let failed = response.get("error").is_some();
+    mycopilot_core::performance::record(
+        if failed {
+            "rpc.failed"
+        } else {
+            "rpc.completed"
+        },
+        lane,
+        Duration::ZERO,
+        0,
+    );
+    if let JsonRpcId::Number(id) = &job.request_id {
+        mycopilot_core::performance::trace_request(
+            *id,
+            lane,
+            started_at.duration_since(job.admitted_at),
+            completed_at.duration_since(started_at),
+            failed,
+        );
+    }
     mycopilot_core::performance::record(
         "rpc.queue",
         lane,
@@ -521,7 +568,19 @@ impl RpcRequestDispatcher {
     where
         F: FnOnce() -> Value + Send + 'static,
     {
+        mycopilot_core::performance::record(
+            "rpc.offered",
+            class.diagnostic_label(),
+            Duration::ZERO,
+            0,
+        );
         if self.stopping.load(Ordering::Acquire) {
+            mycopilot_core::performance::record(
+                "rpc.rejected",
+                class.diagnostic_label(),
+                Duration::ZERO,
+                0,
+            );
             return Err(unavailable_response(request_id, false));
         }
         let lane = match class {
@@ -533,6 +592,12 @@ impl RpcRequestDispatcher {
         let permit = Arc::clone(&lane.admission)
             .try_acquire_owned()
             .map_err(|_| {
+                mycopilot_core::performance::record(
+                    "rpc.rejected",
+                    class.diagnostic_label(),
+                    Duration::ZERO,
+                    0,
+                );
                 unavailable_response(request_id.clone(), !self.stopping.load(Ordering::Acquire))
             })?;
         let mut order = self.order.lock().unwrap_or_else(|error| error.into_inner());
@@ -615,13 +680,30 @@ impl RpcRequestDispatcher {
                 owner_resolution,
                 completion,
                 _permit: permit,
+                queue_probe: mycopilot_core::performance::track_queue(
+                    "rpc.queued",
+                    class.diagnostic_label(),
+                    0,
+                ),
             })
             .map_err(|error| {
+                mycopilot_core::performance::record(
+                    "rpc.rejected",
+                    class.diagnostic_label(),
+                    Duration::ZERO,
+                    0,
+                );
                 unavailable_response(
                     request_id,
                     matches!(error, mpsc::error::TrySendError::Full(_)),
                 )
             })?;
+        mycopilot_core::performance::record(
+            "rpc.admitted",
+            class.diagnostic_label(),
+            Duration::ZERO,
+            0,
+        );
         if let Some(receiver) = receiver {
             match class {
                 RpcDispatchClass::Write => {

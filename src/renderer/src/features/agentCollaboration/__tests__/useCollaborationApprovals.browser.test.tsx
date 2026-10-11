@@ -1,3 +1,4 @@
+import { ActionDiagnostics, actionDiagnostics } from '../../../diagnostics/actionDiagnostics'
 import type {
   AgentProposedAction,
   CollaborationApprovalDecisionResult,
@@ -354,6 +355,34 @@ describe('useCollaborationApprovals', () => {
     await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
     await expect.element(screen.getByTestId('decision-error')).toHaveTextContent('none')
     expect(clients.list).toHaveBeenCalledTimes(3)
+  })
+  it('forwards optional diagnostic context outside the collaboration business input', async () => {
+    clients.list.mockReset()
+    clients.decide.mockReset()
+    clients.list.mockResolvedValue({ schemaVersion: 1, approvals: [approval('pending')] })
+    clients.decide.mockResolvedValue(decisionResult())
+    const collector = new ActionDiagnostics(true, () => {})
+    const diagnostic = vi
+      .spyOn(actionDiagnostics, 'begin')
+      .mockImplementation((kind) => collector.begin(kind))
+    try {
+      const screen = await render(<Harness sequence={1} />)
+      await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+      await screen.getByRole('button', { name: 'decide' }).click()
+      await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+      expect(clients.decide).toHaveBeenCalledWith(
+        {
+          approvalId: 'approval-stable',
+          decision: 'approve',
+          message: null,
+          rootConversationId: 'conversation-root'
+        },
+        { rendererSessionNonce: expect.stringMatching(/^[a-f0-9]{32}$/), actionSequence: 1 }
+      )
+    } finally {
+      diagnostic.mockRestore()
+      collector.flush()
+    }
   })
 })
 

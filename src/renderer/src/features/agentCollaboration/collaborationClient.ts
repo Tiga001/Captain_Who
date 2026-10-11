@@ -1,3 +1,4 @@
+import type { HostDiagnosticContext } from '@mycopilot/host-api'
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import type {
   AgentCollaborationSettingsGetInput,
@@ -123,9 +124,14 @@ export async function listCollaborationApprovals(
 }
 
 export async function decideCollaborationApproval(
-  input: CollaborationApprovalDecisionRequest
+  input: CollaborationApprovalDecisionRequest,
+  diagnostic?: HostDiagnosticContext
 ): Promise<CollaborationApprovalDecisionResult> {
-  return unwrapHostInvocation(await hostClient.agent.decideCollaborationApproval(input))
+  return unwrapHostInvocation(
+    await (diagnostic === undefined
+      ? hostClient.agent.decideCollaborationApproval(input)
+      : hostClient.agent.decideCollaborationApproval(input, diagnostic))
+  )
 }
 
 export async function getCollaborationSettings(

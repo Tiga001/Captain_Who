@@ -1,3 +1,4 @@
+import { actionDiagnostics } from '../../diagnostics/actionDiagnostics'
 import { useCallback, type RefObject } from 'react'
 import type { AgentApprovalScope, AgentProposedAction } from '@mycopilot/protocol'
 import type { ChatConversation, ChatMessage } from '../chat/chatTypes'
@@ -51,22 +52,36 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
-      const persistenceBoundary =
-        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      const diagnostic = actionDiagnostics.begin('approval.approve')
+      const persistenceBoundary = diagnostic.measureAsync(
+        'preflush',
+        () => flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      )
 
       return persistenceBoundary
         .then(() =>
           applyAuthoritativePendingActionDecision({
             runId,
             invoke: (authoritativeRunId) =>
-              approveAgentAction(authoritativeRunId, actionId, approvalScope),
+              diagnostic.measureAsync('rpc.wait', () =>
+                diagnostic.context
+                  ? approveAgentAction(
+                      authoritativeRunId,
+                      actionId,
+                      approvalScope,
+                      diagnostic.context
+                    )
+                  : approveAgentAction(authoritativeRunId, actionId, approvalScope)
+              ),
             apply: (execution) => {
-              updateAssistantMessage(
-                conversationId,
-                messageId,
-                (message) =>
-                  applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
-                { touchConversation: true }
+              diagnostic.measureSync('state.apply', () =>
+                updateAssistantMessage(
+                  conversationId,
+                  messageId,
+                  (message) =>
+                    applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
+                  { touchConversation: true }
+                )
               )
             },
             onError: (error) => {
@@ -77,7 +92,22 @@ export function useAgentActionDecisionHandlers({
             }
           })
         )
-        .then((outcome) => outcome.status === 'applied')
+        .then(
+          (outcome) => {
+            diagnostic.finish(
+              outcome.status === 'applied'
+                ? 'completed'
+                : outcome.status === 'failed'
+                  ? 'failed'
+                  : 'skipped'
+            )
+            return outcome.status === 'applied'
+          },
+          (error) => {
+            diagnostic.finish('failed')
+            throw error
+          }
+        )
     },
     [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )
@@ -88,27 +118,36 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
-      const persistenceBoundary =
-        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      const diagnostic = actionDiagnostics.begin('approval.reject')
+      const persistenceBoundary = diagnostic.measureAsync(
+        'preflush',
+        () => flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      )
 
       return persistenceBoundary
         .then(() =>
           applyAuthoritativePendingActionDecision({
             runId,
             invoke: (authoritativeRunId) =>
-              rejectAgentAction(authoritativeRunId, actionId, message),
+              diagnostic.measureAsync('rpc.wait', () =>
+                diagnostic.context
+                  ? rejectAgentAction(authoritativeRunId, actionId, message, diagnostic.context)
+                  : rejectAgentAction(authoritativeRunId, actionId, message)
+              ),
             apply: (execution) => {
-              updateAssistantMessage(
-                conversationId,
-                messageId,
-                (currentMessage) =>
-                  applyAgentActionExecutionToChatMessage(
-                    currentMessage,
-                    execution,
-                    message,
-                    action
-                  ),
-                { touchConversation: true }
+              diagnostic.measureSync('state.apply', () =>
+                updateAssistantMessage(
+                  conversationId,
+                  messageId,
+                  (currentMessage) =>
+                    applyAgentActionExecutionToChatMessage(
+                      currentMessage,
+                      execution,
+                      message,
+                      action
+                    ),
+                  { touchConversation: true }
+                )
               )
             },
             onError: (error) => {
@@ -119,7 +158,22 @@ export function useAgentActionDecisionHandlers({
             }
           })
         )
-        .then((outcome) => outcome.status === 'applied')
+        .then(
+          (outcome) => {
+            diagnostic.finish(
+              outcome.status === 'applied'
+                ? 'completed'
+                : outcome.status === 'failed'
+                  ? 'failed'
+                  : 'skipped'
+            )
+            return outcome.status === 'applied'
+          },
+          (error) => {
+            diagnostic.finish('failed')
+            throw error
+          }
+        )
     },
     [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )
@@ -130,21 +184,31 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
-      const persistenceBoundary =
-        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      const diagnostic = actionDiagnostics.begin('approval.cancel')
+      const persistenceBoundary = diagnostic.measureAsync(
+        'preflush',
+        () => flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
+      )
 
       return persistenceBoundary
         .then(() =>
           applyAuthoritativePendingActionDecision({
             runId,
-            invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
+            invoke: (authoritativeRunId) =>
+              diagnostic.measureAsync('rpc.wait', () =>
+                diagnostic.context
+                  ? cancelAgentAction(authoritativeRunId, actionId, diagnostic.context)
+                  : cancelAgentAction(authoritativeRunId, actionId)
+              ),
             isAccepted: (cancelled) => cancelled,
             apply: () => {
-              updateAssistantMessage(
-                conversationId,
-                messageId,
-                (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
-                { touchConversation: true }
+              diagnostic.measureSync('state.apply', () =>
+                updateAssistantMessage(
+                  conversationId,
+                  messageId,
+                  (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
+                  { touchConversation: true }
+                )
               )
             },
             onError: (error) => {
@@ -158,7 +222,22 @@ export function useAgentActionDecisionHandlers({
             }
           })
         )
-        .then((outcome) => outcome.status === 'applied')
+        .then(
+          (outcome) => {
+            diagnostic.finish(
+              outcome.status === 'applied'
+                ? 'completed'
+                : outcome.status === 'failed'
+                  ? 'failed'
+                  : 'skipped'
+            )
+            return outcome.status === 'applied'
+          },
+          (error) => {
+            diagnostic.finish('failed')
+            throw error
+          }
+        )
     },
     [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )

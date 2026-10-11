@@ -1,3 +1,5 @@
+import type { HostDiagnosticContext } from '@mycopilot/host-api'
+import { currentRpcDiagnosticContext, withoutRpcDiagnosticContext } from './rpcDiagnosticContext'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { app } from 'electron'
@@ -23,7 +25,7 @@ import type {
 interface PendingRequest {
   resolve(value: unknown): void
   reject(reason: Error): void
-  diagnostic?: { method: string; started: number }
+  diagnostic?: { method: string; started: number; renderer?: Readonly<HostDiagnosticContext> }
 }
 
 type NotificationHandler = (params: unknown) => void
@@ -73,6 +75,7 @@ export class CoreJsonRpcClient {
   private readonly startedHandlers = new Set<() => void>()
   private networkRouteRequests = 0
   private readonly diagnostics = new RpcDiagnostics()
+  private diagnosticsTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(options: CoreJsonRpcClientOptions = {}) {
     const appDataRoot = normalize(options.appDataRoot ?? app.getPath('userData'))
@@ -92,6 +95,11 @@ export class CoreJsonRpcClient {
       return
     }
 
+    // A lazy start may be inside a Renderer action. Child streams, lifecycle listeners and
+    // recurring probes outlive that request; never let them inherit its correlation context.
+    if (currentRpcDiagnosticContext()) {
+      return withoutRpcDiagnosticContext(() => this.start())
+    }
     const command = this.resolveCommand()
     this.child = spawn(command.executable, command.args, {
       cwd: command.cwd,
@@ -100,6 +108,16 @@ export class CoreJsonRpcClient {
     })
 
     const child = this.child
+    if (this.diagnostics.enabled) {
+      let expected = performance.now() + 1000
+      this.diagnosticsTimer = setInterval(() => {
+        const now = performance.now()
+        this.recordQueues()
+        this.diagnostics.record('event_loop.delay', 'other', Math.max(0, now - expected))
+        expected = now + 1000
+      }, 1000)
+      this.diagnosticsTimer.unref()
+    }
     const stdout = createInterface({ input: child.stdout })
     stdout.on('line', (line) => {
       // A draining old process must not publish into a restarted Core's subscriptions.
@@ -122,6 +140,8 @@ export class CoreJsonRpcClient {
         this.inputFailure ??= error
         return
       }
+      clearInterval(this.diagnosticsTimer)
+      this.diagnosticsTimer = undefined
       this.child = null
       this.transportFailure = null
       this.inputFailure = null
@@ -167,6 +187,8 @@ export class CoreJsonRpcClient {
     }
 
     this.child.kill()
+    clearInterval(this.diagnosticsTimer)
+    this.diagnosticsTimer = undefined
     this.child = null
     this.transportFailure = null
     this.inputFailure = null
@@ -221,11 +243,12 @@ export class CoreJsonRpcClient {
 
     return new Promise<TResult>((resolve, reject) => {
       const started = this.diagnostics.enabled ? performance.now() : 0
+      this.diagnostics.requestOutcome('offered', method, id)
       this.pendingRequests.set(id, {
         resolve: (value) => resolve(value as TResult),
         reject,
         diagnostic: this.diagnostics.enabled
-          ? { method: diagnosticMethod(method), started }
+          ? { method: diagnosticMethod(method), started, renderer: currentRpcDiagnosticContext() }
           : undefined
       })
 
@@ -238,8 +261,18 @@ export class CoreJsonRpcClient {
           Buffer.byteLength(encoded)
         )
       }
+      const writeStarted = this.diagnostics.enabled ? performance.now() : 0
       const accepted = child.stdin.write(encoded, (error) => {
         if (!error) {
+          // This is Node's pipe-write acknowledgement, not Core admission or a durable commit.
+          if (this.diagnostics.enabled) {
+            this.diagnostics.record(
+              'request.stdin_written',
+              method,
+              performance.now() - writeStarted
+            )
+            this.recordQueues()
+          }
           return
         }
 
@@ -247,11 +280,19 @@ export class CoreJsonRpcClient {
           this.inputFailure ??= error
           this.rejectAll(this.transportFailure ?? error)
         } else {
-          this.pendingRequests.delete(id)
+          if (this.pendingRequests.delete(id)) {
+            this.diagnostics.requestOutcome(
+              'transport_failed',
+              method,
+              id,
+              performance.now() - started
+            )
+            this.recordQueues()
+          }
           reject(error)
         }
       })
-      this.diagnostics.queues(this.pendingRequests.size, child.stdin.writableLength)
+      this.recordQueues()
       if (!accepted) this.diagnostics.record('stdin.backpressure', method, 0)
     })
   }
@@ -325,8 +366,17 @@ export class CoreJsonRpcClient {
       return
     }
 
+    this.recordQueues()
     this.pendingRequests.delete(response.id)
+    this.recordQueues()
     if (pending.diagnostic) {
+      this.diagnostics.requestOutcome(
+        this.isErrorResponse(response) ? 'rpc_error' : 'completed',
+        pending.diagnostic.method,
+        response.id as number,
+        performance.now() - pending.diagnostic.started,
+        pending.diagnostic.renderer
+      )
       this.diagnostics.record(
         'response.parse',
         pending.diagnostic.method,
@@ -391,13 +441,34 @@ export class CoreJsonRpcClient {
       })
   }
 
+  private recordQueues(): void {
+    if (!this.diagnostics.enabled) return
+    // Map insertion order gives the oldest outstanding request without an O(n) hot-path scan.
+    const oldest = this.pendingRequests.values().next().value?.diagnostic
+    this.diagnostics.queues(
+      this.pendingRequests.size,
+      this.child?.stdin.writableLength ?? 0,
+      oldest ? performance.now() - oldest.started : 0
+    )
+  }
+
   private rejectAll(error: Error): void {
-    this.diagnostics.queues(this.pendingRequests.size, this.child?.stdin.writableLength ?? 0)
-    this.diagnostics.flush()
-    for (const pending of this.pendingRequests.values()) {
+    this.recordQueues()
+    for (const [id, pending] of this.pendingRequests) {
+      if (pending.diagnostic) {
+        this.diagnostics.requestOutcome(
+          'transport_failed',
+          pending.diagnostic.method,
+          id as number,
+          performance.now() - pending.diagnostic.started,
+          pending.diagnostic.renderer
+        )
+      }
       pending.reject(error)
     }
     this.pendingRequests.clear()
+    this.recordQueues()
+    this.diagnostics.flush()
   }
 
   private isErrorResponse(response: JsonRpcResponse): response is JsonRpcErrorResponse {

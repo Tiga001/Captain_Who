@@ -517,7 +517,13 @@ async fn stale_automation_admission_rolls_back_conversation_messages_and_trace()
 fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
     let task = seed_automation(&storage, "execution-access-commit");
     let run = enqueue_and_claim(&database_path, &storage, &task, "commit-expiry");
@@ -614,7 +620,13 @@ fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_bin
 async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database_path,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
     storage.save_model_settings(test_model_settings()).unwrap();
 
     let original = seed_automation(&storage, "automation-humanroot-permission-toctou");

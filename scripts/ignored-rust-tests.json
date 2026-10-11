@@ -79,6 +79,13 @@
       "status": "manual"
     },
     {
+      "file": "crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs",
+      "name": "backend_concurrency_disk_baseline",
+      "owner": "core-server-runtime",
+      "reason": "Explicit disk-backed local-provider performance experiment; records baseline results without opening user storage.",
+      "runner": "node scripts/run-backend-concurrency-baseline.mjs --mode smoke"
+    },
+    {
       "file": "crates/core-server/src/application/agent/tests/command_sessions.rs",
       "name": "aspen_pdf_runs_a_five_step_managed_session_workflow",
       "owner": "core-server-runtime",
