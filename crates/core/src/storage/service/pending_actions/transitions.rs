@@ -244,6 +244,30 @@ impl StorageService {
     /// pending-action recheck with the Wake CAS prevents that stale observation from moving an
     /// already resumed Wake back to `waiting_for_approval`.
     #[allow(clippy::too_many_arguments)]
+    pub fn mark_agent_wake_waiting_for_pending_approval(
+        &self,
+        wake_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        claim_token: &str,
+    ) -> Result<AgentWakeApprovalWaitOutcome, String> {
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        self.mark_agent_wake_waiting_with_clock(
+            wake_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            claim_token,
+            || {
+                let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                now_ms().max(started_at.saturating_add(elapsed))
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn mark_agent_wake_waiting_for_pending_approval_at(
         &self,
         wake_id: &str,
@@ -253,10 +277,31 @@ impl StorageService {
         claim_token: &str,
         marked_at: i64,
     ) -> Result<AgentWakeApprovalWaitOutcome, String> {
+        self.mark_agent_wake_waiting_with_clock(
+            wake_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            claim_token,
+            || marked_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_agent_wake_waiting_with_clock(
+        &self,
+        wake_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        claim_token: &str,
+        clock: impl Fn() -> i64,
+    ) -> Result<AgentWakeApprovalWaitOutcome, String> {
         let mut connection = self.state.connection()?;
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        let marked_at = clock();
         let running = agent_graph_repository::transition_agent_wake_in_connection(
             &transaction,
             wake_id,
@@ -282,6 +327,7 @@ impl StorageService {
                 |row| row.get::<_, bool>(0),
             )
             .map_err(storage_error)?;
+        let lease_deadline = running.lease_expires_at;
         let outcome = if tree_stopped {
             AgentWakeApprovalWaitOutcome::TreeStopped(running)
         } else {
@@ -319,6 +365,9 @@ impl StorageService {
                 }
             }
         };
+        if lease_deadline.is_none_or(|deadline| clock() >= deadline) {
+            return Err("Wake lease expired before approval wait commit".to_string());
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
     }

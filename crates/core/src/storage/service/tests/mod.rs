@@ -22,6 +22,7 @@ mod run_attachment_files;
 mod settings;
 mod terminal_message_streams;
 mod trace_reconciliation;
+mod trusted_wake_admission;
 mod turn_rewrites;
 mod waiting_persistence;
 mod workflow_timeline;

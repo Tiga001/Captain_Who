@@ -11,6 +11,27 @@ type AutomationAdmissionWithExecutionAccess<'a> = (
     &'a dyn Fn() -> Result<(), String>,
 );
 
+/// A caller's trace timestamp is a persistence fact, not the time at which it acquires SQLite.
+/// Count connection/transaction waiting and never extend a claim after a wall-clock rollback.
+struct TrustedWakeAdmissionClock {
+    started: std::time::Instant,
+    started_at: i64,
+}
+
+impl TrustedWakeAdmissionClock {
+    fn new(trace_updated_at: i64) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_at: now_ms().max(trace_updated_at),
+        }
+    }
+
+    fn now_ms(&self) -> i64 {
+        let elapsed = i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        now_ms().max(self.started_at.saturating_add(elapsed))
+    }
+}
+
 impl StorageService {
     pub fn save_conversation(
         &self,
@@ -373,6 +394,7 @@ impl StorageService {
         new_messages: Option<&[ChatMessageRecord]>,
         history_version: Option<&ConversationHistoryVersion>,
     ) -> Result<ConversationTurnAdmissionResult, String> {
+        let wake_clock = trusted_wake.map(|_| TrustedWakeAdmissionClock::new(trace_updated_at));
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         let _transaction_timing =
@@ -523,7 +545,9 @@ impl StorageService {
                 || wake.1.as_deref() != Some(trusted.source_agent_message_id.as_str())
                 || wake.2 != "claimed"
                 || wake.3.as_deref() != Some(trusted.claim_token.as_str())
-                || wake.4.is_none_or(|deadline| trace_updated_at >= deadline)
+                || wake.4.is_none_or(|deadline| {
+                    wake_clock.as_ref().expect("trusted Wake clock").now_ms() >= deadline
+                })
                 || wake.5.is_some()
                 || wake.6.is_some()
             {
@@ -747,7 +771,7 @@ impl StorageService {
                          run_id = ?1, assistant_message_id = ?2, started_at = ?3
                      WHERE wake_id = ?4 AND agent_id = ?5 AND status = 'claimed'
                        AND claim_token = ?6 AND source_agent_message_id = ?7
-                       AND lease_expires_at > ?3 AND run_id IS NULL
+                       AND lease_expires_at > ?8 AND run_id IS NULL
                        AND assistant_message_id IS NULL",
                     rusqlite::params![
                         &trace.run_id,
@@ -757,6 +781,7 @@ impl StorageService {
                         &trusted.agent_id,
                         &trusted.claim_token,
                         &trusted.source_agent_message_id,
+                        wake_clock.as_ref().expect("trusted Wake clock").now_ms(),
                     ],
                 )
                 .map_err(storage_error)?;
@@ -847,6 +872,38 @@ impl StorageService {
         // holds its access-state lock, while this check also catches time-based lease expiry.
         if let Some(check_execution_access) = check_execution_access {
             check_execution_access()?;
+        }
+        if let Some(trusted) = trusted_wake {
+            // No other writer can replace the claim while this transaction is held, but its
+            // lease can still expire during history/trace/attachment writes. Revalidate the
+            // exact binding at the final durable boundary; rollback keeps the Wake Claimed and
+            // leaves no assistant, Trace, frozen permissions, or delivery receipt behind.
+            let live = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM agent_wake_requests
+                         WHERE wake_id = ?1 AND agent_id = ?2 AND status = 'running'
+                           AND claim_token = ?3 AND source_agent_message_id = ?4
+                           AND run_id = ?5 AND assistant_message_id = ?6
+                           AND lease_expires_at > ?7
+                     )",
+                    rusqlite::params![
+                        &trusted.wake_id,
+                        &trusted.agent_id,
+                        &trusted.claim_token,
+                        &trusted.source_agent_message_id,
+                        &trace.run_id,
+                        &trace.assistant_message_id,
+                        wake_clock.as_ref().expect("trusted Wake clock").now_ms(),
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage_error)?;
+            if !live {
+                return Err(
+                    "Trusted Agent Wake lost its claim before Turn admission commit.".into(),
+                );
+            }
         }
         let commit_timing = crate::performance::Span::new("sqlite.commit", "turn_admission");
         transaction.commit().map_err(storage_error)?;

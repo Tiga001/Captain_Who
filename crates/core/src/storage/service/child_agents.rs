@@ -370,6 +370,32 @@ impl StorageService {
         Ok(spawn)
     }
 
+    /// Rechecks the captured claim after bounded host preparation and before starting a Runtime.
+    /// An expired/replaced claim, stopped tree generation, or retired exact Turn cannot execute.
+    pub fn validate_agent_wake_execution_fence(
+        &self,
+        trusted: &crate::TrustedAgentWakeTurnAdmission,
+        run_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<(), AgentGraphError> {
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        let connection = self
+            .state
+            .connection()
+            .map_err(AgentGraphError::StorageUnavailable)?;
+        agent_graph_repository::validate_agent_wake_execution_fence(
+            &connection,
+            trusted,
+            run_id,
+            assistant_message_id,
+            || {
+                let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                now_ms().max(started_at.saturating_add(elapsed))
+            },
+        )
+    }
+
     /// Rehydrates approval-resume authorization from the exact durable collaboration identity.
     pub fn resolve_active_child_agent_wake_by_identity(
         &self,

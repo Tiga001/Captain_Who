@@ -285,7 +285,11 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
     connection
         .execute("VACUUM INTO ?1", [database_path.to_str().unwrap()])
         .unwrap();
-    let storage = crate::storage::service::StorageService::open(&database_path).unwrap();
+    let storage = crate::storage::service::StorageService::open_with_model_credentials(
+        &database_path,
+        std::sync::Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+    )
+    .unwrap();
     for (conversation_id, message_id) in [
         (
             "conversation-child",

@@ -1,5 +1,6 @@
 use super::common::{
     conflict, corrupt, read_error, validate_id, validate_request_id, validate_time,
+    validate_trimmed,
 };
 use super::message_records::{query_message, query_message_by_request};
 use super::node_records::{query_node, query_node_by_request};
@@ -11,7 +12,117 @@ use crate::{
     AgentCollaborationIdentity, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
     AgentMailboxKind, AgentWakeStatus, ChildAgentSpawnRecord, TrustedActiveChildWakeBundle,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+
+/// Small execution-boundary check for an already admitted child Turn. The capability is the
+/// original claim captured by its Host owner; resolving a replacement token would defeat fencing.
+/// No conversation history, task content, model snapshot or permission projection is decoded.
+pub(crate) fn validate_agent_wake_execution_fence(
+    connection: &Connection,
+    trusted: &crate::TrustedAgentWakeTurnAdmission,
+    run_id: &str,
+    assistant_message_id: &str,
+    clock: impl Fn() -> i64,
+) -> Result<(), AgentGraphError> {
+    validate_id("agent_id", &trusted.agent_id)?;
+    validate_id("wake_id", &trusted.wake_id)?;
+    validate_id("claim_token", &trusted.claim_token)?;
+    validate_id("source_agent_message_id", &trusted.source_agent_message_id)?;
+    validate_trimmed("run_id", run_id, 2_048)?;
+    validate_trimmed("assistant_message_id", assistant_message_id, 2_048)?;
+    let deadline = connection
+        .query_row(
+            "SELECT wake.lease_expires_at
+             FROM agent_wake_requests AS wake
+             INNER JOIN agent_nodes AS agent ON agent.agent_id = wake.agent_id
+             INNER JOIN agent_nodes AS parent ON parent.agent_id = agent.parent_agent_id
+             INNER JOIN agent_mailbox_messages AS source
+                ON source.message_id = wake.source_agent_message_id
+             INNER JOIN agent_nodes AS sender ON sender.agent_id = source.sender_agent_id
+             INNER JOIN conversation_turn_traces AS trace
+                ON trace.conversation_id = agent.conversation_id
+               AND trace.run_id = wake.run_id
+               AND trace.assistant_message_id = wake.assistant_message_id
+             WHERE wake.wake_id = ?1 AND wake.agent_id = ?2
+               AND wake.claim_token = ?3 AND wake.source_agent_message_id = ?4
+               AND wake.run_id = ?5 AND wake.assistant_message_id = ?6
+               AND wake.status = 'running' AND wake.lease_expires_at IS NOT NULL
+               AND agent.lifecycle = 'active' AND parent.lifecycle = 'active'
+               AND sender.lifecycle = 'active' AND trace.terminal_status = 'in_progress'
+               AND source.recipient_agent_id = agent.agent_id
+               AND source.sender_agent_id = wake.requester_agent_id
+               AND source.root_agent_id = agent.root_agent_id
+               AND wake.root_agent_id = agent.root_agent_id
+               AND source.delivery_status = 'acknowledged'
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_tree_run_stops AS stopped WHERE stopped.run_id = ?5
+               )",
+            params![
+                &trusted.wake_id,
+                &trusted.agent_id,
+                &trusted.claim_token,
+                &trusted.source_agent_message_id,
+                run_id,
+                assistant_message_id,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(read_error)?;
+    let observed_at = clock();
+    validate_time(observed_at)?;
+    if deadline.is_none_or(|deadline| observed_at >= deadline) {
+        return Err(conflict(
+            "Agent Wake execution requires its original live claim and an unstopped exact Turn",
+        ));
+    }
+    Ok(())
+}
+
+/// Fence a Runtime terminal mutation with the claim captured when that segment was admitted.
+/// The caller holds an IMMEDIATE transaction and must recheck the returned deadline immediately
+/// before commit. A tree stop permits its current owner to publish Cancelled, never success.
+pub(crate) fn validate_agent_wake_terminal_fence(
+    connection: &Connection,
+    trusted: &crate::TrustedAgentWakeTurnAdmission,
+    trace: &crate::ConversationTurnTrace,
+    clock: impl Fn() -> i64,
+) -> Result<i64, AgentGraphError> {
+    let cancelled = trace.terminal_status == crate::ConversationTurnTraceTerminalStatus::Cancelled;
+    let deadline = connection.query_row(
+        "SELECT wake.lease_expires_at
+         FROM agent_wake_requests AS wake
+         INNER JOIN agent_nodes AS agent ON agent.agent_id = wake.agent_id
+         INNER JOIN agent_mailbox_messages AS source ON source.message_id = wake.source_agent_message_id
+         INNER JOIN conversation_turn_traces AS turn ON turn.run_id = wake.run_id
+            AND turn.assistant_message_id = wake.assistant_message_id
+            AND turn.conversation_id = agent.conversation_id
+         WHERE wake.wake_id = ?1 AND wake.agent_id = ?2
+           AND wake.claim_token = ?3 AND wake.source_agent_message_id = ?4
+           AND wake.run_id = ?5 AND wake.assistant_message_id = ?6
+           AND turn.conversation_id = ?7 AND turn.terminal_status = 'in_progress'
+           AND wake.status IN ('running', 'waiting_for_approval')
+           AND wake.lease_expires_at IS NOT NULL
+           AND source.recipient_agent_id = agent.agent_id
+           AND source.sender_agent_id = wake.requester_agent_id
+           AND source.root_agent_id = agent.root_agent_id
+           AND wake.root_agent_id = agent.root_agent_id
+           AND source.delivery_status = 'acknowledged'
+           AND (?8 OR NOT EXISTS (SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?5))",
+        params![&trusted.wake_id, &trusted.agent_id, &trusted.claim_token,
+            &trusted.source_agent_message_id, &trace.run_id, &trace.assistant_message_id,
+            &trace.conversation_id, cancelled],
+        |row| row.get::<_, i64>(0),
+    ).optional().map_err(read_error)?;
+    let observed_at = clock();
+    validate_time(observed_at)?;
+    match deadline {
+        Some(deadline) if deadline > observed_at => Ok(deadline),
+        _ => Err(conflict(
+            "terminal mutation requires the original live Agent Wake claim",
+        )),
+    }
+}
 
 /// Reconstructs and verifies the durable facts required to execute a child Wake.
 ///

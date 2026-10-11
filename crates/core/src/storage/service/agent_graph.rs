@@ -397,7 +397,18 @@ impl StorageService {
         wake_id: &str,
         claim_token: &str,
     ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
-        self.renew_agent_wake_lease_at(wake_id, claim_token, now_ms())
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::renew_agent_wake_lease_with_clock(
+            &mut connection,
+            wake_id,
+            claim_token,
+            || {
+                let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                now_ms().max(started_at.saturating_add(elapsed))
+            },
+        )
     }
 
     pub fn renew_agent_wake_lease_at(
@@ -527,7 +538,17 @@ impl StorageService {
         &self,
         input: &crate::FinishAgentTurnResultInput,
     ) -> Result<crate::AgentTurnResultSettlement, AgentGraphError> {
-        self.finish_agent_turn_with_result_at(input, now_ms())
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::finish_agent_turn_with_result_with_clock(
+            &mut connection,
+            input,
+            || {
+                let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                now_ms().max(started_at.saturating_add(elapsed))
+            },
+        )
     }
 
     pub fn finish_agent_turn_with_result_at(

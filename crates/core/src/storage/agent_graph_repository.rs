@@ -47,6 +47,7 @@ pub use permissions::{
 pub(crate) use permissions::{
     inherit_agent_permissions_in_transaction, record_agent_effective_permissions_in_transaction,
 };
+pub(crate) use settlement::finish_agent_turn_with_result_with_clock;
 pub use settlement::{
     finish_agent_turn_with_result, finish_agent_wake_with_result, settle_tree_stopped_active_wake,
 };
@@ -64,15 +65,16 @@ pub(crate) use wake_projection::project_agent_wake_source_in_transaction;
 pub(crate) use wake_resolution::{
     resolve_active_child_wake_bundle_by_identity, resolve_child_spawn_by_creation_request,
     resolve_child_wake_bundle, resolve_claimed_agent_wake_bundle,
-    resolve_running_child_wake_bundle,
+    resolve_running_child_wake_bundle, validate_agent_wake_execution_fence,
+    validate_agent_wake_terminal_fence,
 };
-pub(crate) use wakes::transition_agent_wake_in_connection;
 pub use wakes::{
     claim_next_agent_wake, claim_next_dispatchable_agent_wake, enqueue_agent_wake, get_agent_wake,
     interrupt_agent_execution, interrupt_agent_execution_with_receipt,
     list_undispatched_agent_interrupts, mark_agent_interrupt_dispatched, recover_agent_wakes,
     renew_agent_wake_lease, transition_agent_wake,
 };
+pub(crate) use wakes::{renew_agent_wake_lease_with_clock, transition_agent_wake_in_connection};
 
 #[cfg(test)]
 mod tests;

@@ -142,10 +142,32 @@ pub fn finish_agent_turn_with_result(
     input: &FinishAgentTurnResultInput,
     completed_at: i64,
 ) -> Result<AgentTurnResultSettlement, AgentGraphError> {
-    validate_finish_agent_turn_result_input(input, completed_at)?;
+    finish_agent_turn_with_result_with_clock(connection, input, || completed_at)
+}
+
+/// Production uses a fresh clock after connection/transaction waits and before commit. Explicit
+/// repository timestamp callers retain their deterministic clock; terminal replays remain valid.
+pub(crate) fn finish_agent_turn_with_result_with_clock(
+    connection: &mut Connection,
+    input: &FinishAgentTurnResultInput,
+    clock: impl Fn() -> i64,
+) -> Result<AgentTurnResultSettlement, AgentGraphError> {
     let transaction = immediate(connection)?;
+    let completed_at = clock();
+    validate_finish_agent_turn_result_input(input, completed_at)?;
+    let before = query_wake(&transaction, &input.wake_id)?
+        .ok_or_else(|| AgentGraphError::WakeNotFound(input.wake_id.clone()))?;
     let settlement =
         finish_agent_turn_with_result_in_transaction(&transaction, input, completed_at, true)?;
+    if !before.status.is_terminal()
+        && before
+            .lease_expires_at
+            .is_none_or(|deadline| clock() >= deadline)
+    {
+        return Err(conflict(
+            "Wake lease expired before terminal settlement commit",
+        ));
+    }
     transaction.commit().map_err(write_error)?;
     Ok(settlement)
 }

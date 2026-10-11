@@ -254,4 +254,5 @@ mod delivery_lifecycle;
 mod mailbox_projection;
 mod nodes_permissions;
 mod result_recovery;
+mod settlement_clock;
 mod tree_cancellation;

@@ -770,13 +770,26 @@ pub fn renew_agent_wake_lease(
     claim_token: &str,
     renewed_at: i64,
 ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+    renew_agent_wake_lease_with_clock(connection, wake_id, claim_token, || renewed_at)
+}
+
+/// Production samples the clock after SQLite has acquired its write transaction and again
+/// before commit. A caller timestamp from before a connection/writer wait cannot revive a
+/// claim which expired during that wait. Explicit `_at` callers retain a fixed test clock.
+pub(crate) fn renew_agent_wake_lease_with_clock(
+    connection: &mut Connection,
+    wake_id: &str,
+    claim_token: &str,
+    clock: impl Fn() -> i64,
+) -> Result<AgentWakeRequestRecord, AgentGraphError> {
     validate_id("wake_id", wake_id)?;
     validate_id("claim_token", claim_token)?;
+    let transaction = immediate(connection)?;
+    let renewed_at = clock();
     validate_time(renewed_at)?;
     let lease_expires_at = renewed_at
         .checked_add(WAKE_LEASE_DURATION_MS)
         .ok_or_else(|| invalid("renewed_at", "cannot compute the Wake lease deadline"))?;
-    let transaction = immediate(connection)?;
     let current = query_wake(&transaction, wake_id)?
         .ok_or_else(|| AgentGraphError::WakeNotFound(wake_id.to_string()))?;
     if !matches!(
@@ -805,6 +818,11 @@ pub fn renew_agent_wake_lease(
         .map_err(write_error)?;
     let renewed = query_wake(&transaction, wake_id)?
         .ok_or_else(|| corrupt("renewed Wake could not be read back"))?;
+    if clock() >= current_deadline {
+        // Check against the original authority, not the tentative extended lease. The
+        // transaction rolls back the extension if that authority expired during the write.
+        return Err(conflict("Wake lease expired before renewal commit"));
+    }
     transaction.commit().map_err(write_error)?;
     Ok(renewed)
 }

@@ -1,6 +1,104 @@
 use super::*;
 use crate::storage::human_interaction_repository;
 
+/// A stale owner may only observe a fully identical committed terminal fact. This path performs
+/// no writes, including usage, notification, receipt or grant writes; partial equality is refused.
+#[allow(clippy::too_many_arguments)]
+fn exact_terminal_replay(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    message_status: Option<&str>,
+    run_status: &str,
+    trace: &ConversationTurnTrace,
+    model_context_items: Option<&[ConversationModelContextItem]>,
+    completed_at: i64,
+    usage: Option<&AgentUsageRecordInsert>,
+    collaboration_final_response_boundary: Option<u64>,
+) -> Result<bool, String> {
+    let stored = conversation_trace_repository::get_trace_for_message(connection, message_id)
+        .map_err(storage_error)?;
+    if !trace.terminal_status.is_terminal() || stored.as_ref() != Some(trace) {
+        return Ok(false);
+    }
+    let message_matches = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ?1 AND id = ?2
+            AND content = ?3 AND status IS ?4
+            AND json_extract(agent_run_json, '$.runId') = ?5
+            AND json_extract(agent_run_json, '$.status') = ?6
+            AND json_extract(agent_run_json, '$.completedAt') = ?7
+            AND json_extract(agent_run_json, '$.collaborationFinalResponseBoundary') IS ?8)",
+            rusqlite::params![
+                conversation_id,
+                message_id,
+                content,
+                message_status,
+                &trace.run_id,
+                run_status,
+                completed_at,
+                collaboration_final_response_boundary
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_error)?;
+    if !message_matches {
+        return Ok(false);
+    }
+    if let Some(items) = model_context_items {
+        let stored =
+            conversation_model_context_repository::get_log_for_message(connection, message_id)
+                .map_err(storage_error)?
+                .map(|log| log.items)
+                .unwrap_or_default();
+        if stored != items {
+            return Ok(false);
+        }
+    }
+    if let Some(expected) = usage {
+        let Some(stored) = usage_repository::load_usage_record_for_owner(
+            connection,
+            &trace.run_id,
+            conversation_id,
+            message_id,
+        )
+        .map_err(storage_error)?
+        else {
+            return Ok(false);
+        };
+        macro_rules! equal_fields { ($($field:ident),+ $(,)?) => { true $(&& stored.$field == expected.$field)+ }; }
+        if !equal_fields!(
+            id,
+            conversation_id,
+            message_id,
+            run_id,
+            project_id,
+            model_id,
+            model_name,
+            started_at,
+            completed_at,
+            status,
+            error,
+            created_at,
+            input_tokens,
+            output_tokens,
+            output_thinking_tokens,
+            total_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            billable_request_count,
+            input_price,
+            cached_input_price,
+            output_price,
+            estimated_cost
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn append_trace_with_previous_projection_in_transaction(
     transaction: &rusqlite::Connection,
     trace: &ConversationTurnTrace,
@@ -390,6 +488,7 @@ impl StorageService {
             usage,
             None,
             collaboration_final_response_boundary,
+            None,
         )
     }
 
@@ -427,11 +526,14 @@ impl StorageService {
             usage,
             Some(notification),
             collaboration_final_response_boundary,
+            None,
         )
     }
 
+    /// Same atomic terminal boundary, optionally fenced by the original child-Wake capability.
+    /// Root, explicit control and recovery callers retain their existing authority with None.
     #[allow(clippy::too_many_arguments)]
-    fn finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
+    pub fn finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
         &self,
         conversation_id: &str,
         message_id: &str,
@@ -445,12 +547,62 @@ impl StorageService {
         usage: Option<&AgentUsageRecordInsert>,
         notification: Option<&notification_repository::NewNotificationEventRecord>,
         collaboration_final_response_boundary: Option<u64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
     ) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let started_at = now_ms();
+        let clock = || {
+            now_ms().max(
+                started_at
+                    .saturating_add(started.elapsed().as_millis().min(i64::MAX as u128) as i64),
+            )
+        };
         let mut connection = self.state.connection()?;
         let _transaction_timing = crate::performance::Span::new("sqlite.transaction", "terminal");
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        if trusted_wake.is_some()
+            && (trace.conversation_id != conversation_id
+                || trace.assistant_message_id != message_id)
+        {
+            return Err(
+                "agent_wake_terminal_fenced: terminal message and Trace identities must match"
+                    .into(),
+            );
+        }
+        if trusted_wake.is_some()
+            && notification.is_none()
+            && exact_terminal_replay(
+                &transaction,
+                conversation_id,
+                message_id,
+                content,
+                message_status,
+                run_status,
+                trace,
+                model_context_items,
+                completed_at,
+                usage,
+                collaboration_final_response_boundary,
+            )?
+        {
+            // An observed committed retry is a no-op even if its old lease has since expired.
+            return Ok(());
+        }
+        // Original callers use None and retain root/control/recovery authority. A child Runtime
+        // must carry its frozen capability across provider execution and physical queue waits.
+        let terminal_deadline = trusted_wake
+            .map(|trusted| {
+                agent_graph_repository::validate_agent_wake_terminal_fence(
+                    &transaction,
+                    trusted,
+                    trace,
+                    clock,
+                )
+                .map_err(|error| format!("agent_wake_terminal_fenced: {error}"))
+            })
+            .transpose()?;
         // A terminal retry can follow an idle observation; a failed binding reply can also leave
         // the active Runtime unaware of an already committed ignored event. Preserve an exact
         // suffix only, and require the durable receipt for every unacknowledged active event.
@@ -624,6 +776,9 @@ impl StorageService {
             completed_at,
         )
         .map_err(storage_error)?;
+        if terminal_deadline.is_some_and(|deadline| clock() >= deadline) {
+            return Err("agent_wake_terminal_fenced: claim expired before terminal commit".into());
+        }
         let commit_timing = crate::performance::Span::new("sqlite.commit", "terminal");
         transaction.commit().map_err(storage_error)?;
         drop(commit_timing);
