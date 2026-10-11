@@ -84,6 +84,212 @@ fn seed_notification_turn(storage: &StorageService) {
         .unwrap();
 }
 
+fn seed_command_approval(storage: &StorageService) -> AgentPendingActionRecord {
+    seed_notification_turn(storage);
+    let mut pending = pending_action("command-approval", "conversation-notification-atomic");
+    pending.run_id = "run-notification-atomic".to_string();
+    pending.assistant_message_id = Some("assistant-notification-atomic".to_string());
+    pending.agent_input_json =
+        serde_json::json!({"checkpoint": "frozen".repeat(16_384)}).to_string();
+    let mut event = notification(
+        "conversation-notification-atomic",
+        "user-notification-atomic",
+        "assistant-notification-atomic",
+        "approval_required",
+    );
+    event.approval_action_id = pending.tool_call_id.clone();
+    storage
+        .store_pending_agent_action_with_notification(pending.clone(), &event)
+        .unwrap();
+    pending
+}
+
+#[test]
+fn command_approval_preserves_checkpoint_and_claims_exact_identity_once() {
+    let fixture = StorageFixture::new();
+    let storage = fixture.service();
+    let pending = seed_command_approval(&storage);
+    storage
+        .state
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER forbid_checkpoint_rewrite BEFORE UPDATE OF agent_input_json
+         ON agent_pending_actions BEGIN SELECT RAISE(ABORT, 'frozen checkpoint rewritten'); END;",
+        )
+        .unwrap();
+    for (run, conversation, message, call) in [
+        (
+            "other-run",
+            "conversation-notification-atomic",
+            "assistant-notification-atomic",
+            "command-approval",
+        ),
+        (
+            "run-notification-atomic",
+            "other-conversation",
+            "assistant-notification-atomic",
+            "command-approval",
+        ),
+        (
+            "run-notification-atomic",
+            "conversation-notification-atomic",
+            "other-message",
+            "command-approval",
+        ),
+        (
+            "run-notification-atomic",
+            "conversation-notification-atomic",
+            "assistant-notification-atomic",
+            "other-call",
+        ),
+    ] {
+        assert!(storage
+            .approve_pending_command_and_resolve_notification(
+                &pending.action_id,
+                run,
+                Some(conversation),
+                Some(message),
+                call,
+                4,
+            )
+            .is_err());
+    }
+    let approve = || {
+        storage.approve_pending_command_and_resolve_notification(
+            &pending.action_id,
+            &pending.run_id,
+            pending.conversation_id.as_deref(),
+            pending.assistant_message_id.as_deref(),
+            pending.tool_call_id.as_deref().unwrap(),
+            4,
+        )
+    };
+    approve().unwrap();
+    assert!(
+        approve().is_err(),
+        "one durable action grants dispatch authority only once"
+    );
+    let after = storage
+        .get_pending_agent_action(&pending.action_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, "approved");
+    assert_eq!(after.agent_input_json, pending.agent_input_json);
+    assert_eq!(after.action_json, pending.action_json);
+    let resolved: bool = storage
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT resolved_at IS NOT NULL FROM notification_events WHERE approval_action_id = ?1",
+            [&pending.action_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(resolved);
+}
+
+#[test]
+fn command_approval_notification_failure_rolls_back_dispatch_authority() {
+    let fixture = StorageFixture::new();
+    let storage = fixture.service();
+    let pending = seed_command_approval(&storage);
+    storage
+        .state
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_approval_resolution BEFORE UPDATE OF resolved_at
+         ON notification_events BEGIN SELECT RAISE(ABORT, 'resolution failed'); END;",
+        )
+        .unwrap();
+    assert!(storage
+        .approve_pending_command_and_resolve_notification(
+            &pending.action_id,
+            &pending.run_id,
+            pending.conversation_id.as_deref(),
+            pending.assistant_message_id.as_deref(),
+            pending.tool_call_id.as_deref().unwrap(),
+            4,
+        )
+        .is_err());
+    let after = storage
+        .get_pending_agent_action(&pending.action_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, "pending");
+    assert_eq!(after.agent_input_json, pending.agent_input_json);
+}
+
+#[test]
+fn concurrent_command_approval_grants_dispatch_once_and_respects_tree_stop() {
+    let fixture = StorageFixture::new();
+    let storage = fixture.service();
+    let pending = seed_command_approval(&storage);
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|threads| {
+        let handles = (0..2)
+            .map(|_| {
+                threads.spawn(|| {
+                    barrier.wait();
+                    storage
+                        .approve_pending_command_and_resolve_notification(
+                            &pending.action_id,
+                            &pending.run_id,
+                            pending.conversation_id.as_deref(),
+                            pending.assistant_message_id.as_deref(),
+                            pending.tool_call_id.as_deref().unwrap(),
+                            4,
+                        )
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(outcomes.iter().filter(|approved| **approved).count(), 1);
+
+    let mut second = pending.clone();
+    second.action_id = "command-after-stop".to_string();
+    second.tool_call_id = Some("command-after-stop".to_string());
+    storage.store_pending_agent_action(second.clone()).unwrap();
+    bind_agent_root(
+        &storage,
+        "agent-approval-root",
+        "conversation-notification-atomic",
+    );
+    storage
+        .begin_agent_tree_run_stop_by_root_conversation_at(
+            "conversation-notification-atomic",
+            &pending.run_id,
+            5,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(storage
+        .approve_pending_command_and_resolve_notification(
+            &second.action_id,
+            &second.run_id,
+            second.conversation_id.as_deref(),
+            second.assistant_message_id.as_deref(),
+            second.tool_call_id.as_deref().unwrap(),
+            6,
+        )
+        .is_err());
+    assert_eq!(
+        storage
+            .get_pending_agent_action(&second.action_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+}
+
 #[test]
 fn invalid_notification_rolls_back_the_terminal_message_and_trace() {
     let fixture = StorageFixture::new();

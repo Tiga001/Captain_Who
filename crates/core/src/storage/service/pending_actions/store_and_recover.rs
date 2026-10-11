@@ -716,33 +716,44 @@ impl StorageService {
         successor_action_id: &str,
         frozen_result_call_ids: &[String],
     ) -> Result<bool, String> {
+        let _timing = crate::performance::Span::new("approval", "predecessor_check");
         if frozen_result_call_ids.is_empty() {
             return Ok(false);
         }
+        let frozen_call_ids_json =
+            serde_json::to_string(frozen_result_call_ids).map_err(|error| error.to_string())?;
         let connection = self.state.connection()?;
-        let Some(successor) =
-            pending_action_repository::load_pending_action(&connection, successor_action_id)
-                .map_err(storage_error)?
+        let Some(successor) = pending_action_repository::load_pending_action_dependency_scope(
+            &connection,
+            successor_action_id,
+        )
+        .map_err(storage_error)?
         else {
             // Preserve the approval path's existing durable status CAS as the authoritative
             // fail-closed boundary for a concurrently removed successor row. The predecessor
             // gate only adds dependency ordering; it must not replace missing-row arbitration.
             return Ok(false);
         };
-        let unsettled =
-            pending_action_repository::list_recoverable_actions_after_reconciliation(&connection)
-                .map_err(storage_error)?;
-        for predecessor in unsettled {
-            if predecessor.tool_call_id.as_ref().is_some_and(|call_id| {
-                frozen_result_call_ids
-                    .iter()
-                    .any(|frozen| frozen == call_id)
-            }) && durable_trace_proves_action_precedes(&predecessor, &successor, &connection)?
-            {
-                return Ok(true);
-            }
+        let unsettled = pending_action_repository::list_unsettled_predecessor_call_ids(
+            &connection,
+            &successor,
+            &frozen_call_ids_json,
+        )
+        .map_err(storage_error)?;
+        if unsettled.is_empty() {
+            return Ok(false);
         }
-        Ok(false)
+        // The indexed query above only selects candidates. Exact durable action identity and
+        // ToolResult-before-ToolCall ordering remain the authority, with one trace read per check.
+        durable_trace_proves_any_call_precedes(
+            &successor.run_id,
+            successor.conversation_id.as_deref(),
+            successor.assistant_message_id.as_deref(),
+            successor.tool_call_id.as_deref(),
+            &successor.action_json,
+            unsettled.iter().map(String::as_str),
+            &connection,
+        )
     }
 
     pub fn reconcile_interrupted_pending_agent_actions(
@@ -1100,5 +1111,4 @@ impl StorageService {
         transaction.commit().map_err(storage_error)?;
         Ok(interrupted)
     }
-
 }

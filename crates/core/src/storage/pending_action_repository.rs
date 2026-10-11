@@ -212,6 +212,65 @@ pub(crate) fn load_pending_action(
         .optional()
 }
 
+/// Only the durable identity needed to check approval ordering. Never hydrate another Agent's
+/// private resume checkpoint while deciding a single action.
+pub(crate) struct PendingActionDependencyScope {
+    pub action_id: String,
+    pub run_id: String,
+    pub conversation_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub action_json: String,
+}
+
+pub(crate) fn load_pending_action_dependency_scope(
+    connection: &Connection,
+    action_id: &str,
+) -> rusqlite::Result<Option<PendingActionDependencyScope>> {
+    connection
+        .query_row(
+            "SELECT action_id, run_id, conversation_id, assistant_message_id, tool_call_id, action_json
+             FROM agent_pending_actions WHERE action_id = ?1",
+            [action_id],
+            |row| {
+                Ok(PendingActionDependencyScope {
+                    action_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    assistant_message_id: row.get(3)?,
+                    tool_call_id: row.get(4)?,
+                    action_json: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+}
+
+const UNSETTLED_PREDECESSOR_CALL_IDS_SQL: &str =
+    "SELECT tool_call_id FROM agent_pending_actions INDEXED BY idx_agent_pending_actions_run_id
+     WHERE run_id = ?1 AND conversation_id IS ?2 AND assistant_message_id IS ?3
+       AND action_id != ?4 AND status IN ('pending', 'approved', 'executing')
+       AND tool_call_id IN (SELECT value FROM json_each(?5))";
+
+pub(crate) fn list_unsettled_predecessor_call_ids(
+    connection: &Connection,
+    successor: &PendingActionDependencyScope,
+    frozen_call_ids_json: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare(UNSETTLED_PREDECESSOR_CALL_IDS_SQL)?;
+    let rows = statement.query_map(
+        params![
+            successor.run_id,
+            successor.conversation_id,
+            successor.assistant_message_id,
+            successor.action_id,
+            frozen_call_ids_json,
+        ],
+        |row| row.get(0),
+    )?;
+    rows.collect()
+}
+
 fn same_frozen_identity(
     existing: &AgentPendingActionRecord,
     candidate: &AgentPendingActionRecord,
@@ -706,6 +765,81 @@ mod tests {
             created_at: 10,
             updated_at: 20,
         }
+    }
+
+    #[test]
+    fn approval_dependency_candidates_are_indexed_and_never_read_checkpoints() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let successor = executing_file_change("successor", "{}");
+        store_pending_action(&connection, &successor).unwrap();
+        let mut predecessor = executing_file_change("predecessor", "{}");
+        predecessor.tool_call_id = Some("shared-call".to_string());
+        predecessor.target_status = Some("completed".to_string());
+        store_pending_action(&connection, &predecessor).unwrap();
+        for index in 0..128 {
+            let mut unrelated = predecessor.clone();
+            unrelated.action_id = format!("unrelated-{index}");
+            unrelated.agent_input_json =
+                serde_json::json!({"checkpoint": "private".repeat(4_096)}).to_string();
+            match index % 5 {
+                0 => unrelated.run_id = format!("other-run-{index}"),
+                1 => unrelated.conversation_id = Some(format!("other-conversation-{index}")),
+                2 => unrelated.assistant_message_id = Some(format!("other-message-{index}")),
+                3 => unrelated.tool_call_id = Some(format!("not-frozen-{index}")),
+                _ => unrelated.status = "completed".to_string(),
+            }
+            store_pending_action(&connection, &unrelated).unwrap();
+        }
+        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name: "agent_pending_actions",
+                column_name: "agent_input_json",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+        let scope = load_pending_action_dependency_scope(&connection, "successor")
+            .unwrap()
+            .unwrap();
+        // Even action JSON is unnecessary once the exact successor identity has been loaded.
+        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name: "agent_pending_actions",
+                column_name: "agent_input_json" | "action_json",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+        let frozen = r#"["shared-call", "successor"]"#;
+        assert_eq!(
+            list_unsettled_predecessor_call_ids(&connection, &scope, frozen).unwrap(),
+            vec!["shared-call"]
+        );
+        let mut explain = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {UNSETTLED_PREDECESSOR_CALL_IDS_SQL}"
+            ))
+            .unwrap();
+        let plan = explain
+            .query_map(
+                params![
+                    scope.run_id,
+                    scope.conversation_id,
+                    scope.assistant_message_id,
+                    scope.action_id,
+                    frozen
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail
+                    .contains("USING INDEX idx_agent_pending_actions_run_id (run_id=?)")),
+            "{plan:?}"
+        );
     }
 
     #[test]

@@ -1,4 +1,58 @@
 impl StorageService {
+    /// A normal command approval changes only lifecycle state: its frozen resume input was
+    /// committed before the approval became visible. Preserve those exact bytes instead of
+    /// cloning, encoding and rewriting a potentially large checkpoint for pending -> approved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn approve_pending_command_and_resolve_notification(
+        &self,
+        action_id: &str,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        renderer_action_id: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let _timing = crate::performance::Span::new("approval", "command_commit");
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let affected = transaction
+            .execute(
+                "UPDATE agent_pending_actions SET status = 'approved', updated_at = ?6
+                 WHERE action_id = ?1 AND run_id = ?2
+                   AND conversation_id IS ?3 AND assistant_message_id IS ?4
+                   AND tool_call_id = ?5 AND action_type = 'command' AND tool_name = 'run_command'
+                   AND status = 'pending' AND target_status IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_tree_run_stops AS stop
+                       WHERE stop.run_id = agent_pending_actions.run_id
+                   )",
+                rusqlite::params![
+                    action_id,
+                    run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    renderer_action_id,
+                    updated_at,
+                ],
+            )
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作状态迁移必须且只能更新一条记录，actionId={action_id}，实际更新 {affected} 条。"
+            ));
+        }
+        notification_repository::resolve_notification_events_by_run_and_approval_action_id_in_transaction(
+            &transaction,
+            run_id,
+            renderer_action_id,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    }
+
     pub fn transition_pending_agent_action(
         &self,
         action_id: &str,

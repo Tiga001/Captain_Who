@@ -384,19 +384,12 @@ impl AgentService {
         guard: CommandRunGuard,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
-        let run_id = record.snapshot.run_id.clone();
-        let service = self.clone();
-        let command_record = record.clone();
-        tokio::spawn(async move {
-            service
-                .run_command_execution(command_record, call, guard, notifications)
-                .await;
-        });
-
-        Ok(AgentActionExecutionOutput {
-            action_id: record.snapshot.action_id,
-            action_type: record.snapshot.action_type,
-            tool_name: record.snapshot.tool_name,
+        // The receipt needs only small identity fields. Move the frozen checkpoint to its
+        // worker instead of cloning the whole pending record just to construct this response.
+        let output = AgentActionExecutionOutput {
+            action_id: record.snapshot.action_id.clone(),
+            action_type: record.snapshot.action_type.clone(),
+            tool_name: record.snapshot.tool_name.clone(),
             status: "approved".to_string(),
             file_change_result: None,
             command_result: None,
@@ -404,7 +397,7 @@ impl AgentService {
             agent_output: AgentChatOutput {
                 content: String::new(),
                 status: AgentRunStatus::Running,
-                run_id,
+                run_id: record.snapshot.run_id.clone(),
                 events: Vec::new(),
                 tool_definitions: Vec::new(),
                 todo: None,
@@ -413,7 +406,14 @@ impl AgentService {
                 proposed_actions: Vec::new(),
                 conversation_turn_trace: None,
             },
-        })
+        };
+        let service = self.clone();
+        tokio::spawn(async move {
+            service
+                .run_command_execution(record, call, guard, notifications)
+                .await;
+        });
+        Ok(output)
     }
 
     pub(in crate::application::agent) fn queue_mcp_tool_execution(

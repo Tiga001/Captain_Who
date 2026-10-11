@@ -105,12 +105,46 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
     attach_current_manual_file_effect_checkpoint(&mut child, &nested_trace);
     service.store_pending_agent_action(child).unwrap();
 
+    // A hot approval dependency check must not hydrate checkpoints belonging to this or other
+    // Agents. In particular, unrelated Agents may reuse the same runtime Tool Call identifier.
+    for index in 0..32 {
+        let mut unrelated = current_pending_action(
+            &format!("unrelated-run-{index}"),
+            "parent-action",
+            "conversation-nested",
+        );
+        unrelated.assistant_message_id = Some("assistant-nested".to_string());
+        unrelated.agent_input_json =
+            serde_json::json!({"checkpoint": "x".repeat(64 * 1024)}).to_string();
+        service.store_pending_agent_action(unrelated).unwrap();
+    }
+    service.state.connection().unwrap().authorizer(Some(
+        |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+            rusqlite::hooks::AuthAction::Read {
+                table_name: "agent_pending_actions",
+                column_name: "agent_input_json",
+            } => rusqlite::hooks::Authorization::Deny,
+            _ => rusqlite::hooks::Authorization::Allow,
+        },
+    ));
     assert!(service
         .pending_agent_action_has_unsettled_predecessor(
             &child_storage_id,
             &["parent-action".to_string()],
         )
         .unwrap());
+    {
+        let connection = service.state.connection().unwrap();
+        connection.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        );
+        connection
+            .execute(
+                "DELETE FROM agent_pending_actions WHERE run_id LIKE 'unrelated-run-%'",
+                [],
+            )
+            .unwrap();
+    }
 
     service
         .reconcile_interrupted_pending_agent_actions(42)

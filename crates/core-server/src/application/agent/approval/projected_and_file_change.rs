@@ -280,6 +280,7 @@ impl AgentService {
         &self,
         record: &PendingActionRecord,
     ) -> Result<(), String> {
+        let _timing = mycopilot_core::performance::Span::new("approval", "provider_validation");
         let Some(checkpoint) = record.agent_input.resume_checkpoint.as_ref() else {
             return Ok(());
         };

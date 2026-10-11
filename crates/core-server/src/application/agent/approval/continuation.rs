@@ -7,6 +7,7 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        let _timing = mycopilot_core::performance::Span::new("approval", "decision");
         // Root and projected approvals share this boundary. Feedback is optional; preserve
         // meaningful text verbatim while treating blank input like an omitted reason.
         let message = message.filter(|value| !value.trim().is_empty());
@@ -19,11 +20,13 @@ impl AgentService {
                 return Ok(output);
             }
         }
+        let lifecycle_wait = mycopilot_core::performance::Span::new("approval", "lifecycle_wait");
         let mut deletion_lifecycle = Some(
             self.deletion_lifecycle
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
         );
+        drop(lifecycle_wait);
         let decided_at = now_ms();
         let (
             mut record,
@@ -34,10 +37,14 @@ impl AgentService {
             precommitted_builtin_rejection,
             provider_continuation_error,
         ) = {
+            let registry_wait = mycopilot_core::performance::Span::new("approval", "registry_wait");
             let mut pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            drop(registry_wait);
+            let _registry_hold =
+                mycopilot_core::performance::Span::new("approval", "registry_hold");
             let Some(storage_id) =
                 resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
             else {
@@ -249,6 +256,10 @@ impl AgentService {
                             child_wake,
                             decided_at,
                         )?;
+                } else if execution_status == PendingActionStatus::Approved
+                    && matches!(record.snapshot.action, AgentProposedAction::Command { .. })
+                {
+                    self.persist_pending_command_approval(record)?;
                 } else {
                     self.persist_pending_dispatch_status(
                         record,

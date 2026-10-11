@@ -464,7 +464,28 @@ fn durable_trace_proves_action_precedes(
     {
         return Ok(false);
     }
-    let Ok(action) = serde_json::from_str::<AgentProposedAction>(&successor.action_json) else {
+    durable_trace_proves_any_call_precedes(
+        &successor.run_id,
+        successor.conversation_id.as_deref(),
+        successor.assistant_message_id.as_deref(),
+        successor.tool_call_id.as_deref(),
+        &successor.action_json,
+        predecessor.tool_call_id.as_deref().into_iter(),
+        connection,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn durable_trace_proves_any_call_precedes<'a>(
+    run_id: &str,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+    successor_call_id: Option<&str>,
+    action_json: &str,
+    predecessor_call_ids: impl Iterator<Item = &'a str>,
+    connection: &rusqlite::Connection,
+) -> Result<bool, String> {
+    let Ok(action) = serde_json::from_str::<AgentProposedAction>(action_json) else {
         return Ok(false);
     };
     let action_id = match &action {
@@ -484,10 +505,10 @@ fn durable_trace_proves_action_precedes(
         AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.as_str(),
         AgentProposedAction::SkillInstallation { installation } => installation.id.as_str(),
     };
-    if successor.tool_call_id.as_deref() != Some(action_id) {
+    if successor_call_id != Some(action_id) {
         return Ok(false);
     }
-    let Some(assistant_message_id) = successor.assistant_message_id.as_deref() else {
+    let Some(assistant_message_id) = assistant_message_id else {
         return Ok(false);
     };
     let Some(trace) =
@@ -496,31 +517,28 @@ fn durable_trace_proves_action_precedes(
     else {
         return Ok(false);
     };
-    if trace.run_id != successor.run_id
-        || trace.conversation_id != successor.conversation_id.as_deref().unwrap_or_default()
+    if trace.run_id != run_id
+        || trace.conversation_id != conversation_id.unwrap_or_default()
         || trace.assistant_message_id != assistant_message_id
     {
         return Ok(false);
     }
-    let Some(parent_call_id) = predecessor.tool_call_id.as_deref() else {
-        return Ok(false);
-    };
-    let parent_result_sequence = trace.items.iter().find_map(|item| match item {
-        ConversationTurnTraceItem::ToolResult {
-            sequence, call_id, ..
-        } if call_id == parent_call_id => Some(sequence.to_owned()),
-        _ => None,
-    });
     let child_call_sequence = trace.items.iter().find_map(|item| match item {
         ConversationTurnTraceItem::ToolCall {
             sequence, call_id, ..
         } if call_id == action_id => Some(sequence.to_owned()),
         _ => None,
     });
-    Ok(matches!(
-        (parent_result_sequence, child_call_sequence),
-        (Some(parent), Some(child)) if parent < child
-    ))
+    let Some(child_call_sequence) = child_call_sequence else {
+        return Ok(false);
+    };
+    let predecessors = predecessor_call_ids.collect::<HashSet<_>>();
+    Ok(trace.items.iter().any(|item| {
+        matches!(item,
+            ConversationTurnTraceItem::ToolResult { sequence, call_id, .. }
+                if predecessors.contains(call_id.as_str()) && *sequence < child_call_sequence
+        )
+    }))
 }
 
 pub(super) fn is_pending_successor_candidate(
@@ -616,4 +634,3 @@ fn validate_frozen_office_settlement_trace_args(
 ) -> Result<(), String> {
     crate::tools::validate_frozen_office_trace_args(frozen, operation)
 }
-

@@ -217,6 +217,26 @@ impl AgentService {
             )
     }
 
+    pub(super) fn persist_pending_command_approval(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(error) = take_pending_status_transition_failure(&record.storage_id, "approved")
+        {
+            return Err(error);
+        }
+        self.storage
+            .approve_pending_command_and_resolve_notification(
+                &record.storage_id,
+                &record.snapshot.run_id,
+                record.snapshot.conversation_id.as_deref(),
+                record.snapshot.assistant_message_id.as_deref(),
+                &record.snapshot.action_id,
+                now_ms(),
+            )
+    }
+
     pub(super) fn persist_pending_target_status(
         &self,
         record: &PendingActionRecord,
