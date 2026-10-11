@@ -3,6 +3,63 @@
 
 use super::*;
 use crate::world_state::{AnchoredWorldStateRecord, WorldStateRecord, WorldStateRequestBoundary};
+use std::collections::{HashMap, HashSet};
+
+fn canonical_world_state_origin(item: &ContextItem) -> Option<&str> {
+    item.metadata
+        .origin()
+        .filter(|origin| origin.kind() == ContextOriginKind::WorldStateRecord)
+        .map(ContextOrigin::id)
+}
+
+fn indexed_world_state_items<'a>(
+    items: impl Iterator<Item = &'a ContextItem>,
+    ledger_records: Option<&[AnchoredWorldStateRecord]>,
+) -> AgentResult<HashMap<&'a str, (usize, &'a ContextItem)>> {
+    let mut indexed = HashMap::new();
+    let mut ledger_origins = None;
+    for (index, item) in items.enumerate() {
+        if let Some(origin) = canonical_world_state_origin(item) {
+            if indexed.insert(origin, (index, item)).is_some() {
+                // Projected items are all canonical. A mixed frame can also contain unrelated
+                // Run records; their identities are not owned or validated by this ledger.
+                let canonical = match ledger_records {
+                    None => true,
+                    Some(records) => ledger_origins
+                        .get_or_insert_with(|| {
+                            records
+                                .iter()
+                                .map(|record| {
+                                    crate::context::assembler::conversation_world_state_record_origin(
+                                        record,
+                                    )
+                                    .id()
+                                    .to_owned()
+                                })
+                                .collect::<HashSet<_>>()
+                        })
+                        .contains(origin),
+                };
+                if canonical {
+                    return Err(AgentError::new(
+                        "检查点 canonical Conversation World State 投影重复。",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(indexed)
+}
+
+fn observed_projection_matches(left: &ContextItem, right: &ContextItem) -> bool {
+    left.metadata
+        .sources
+        .contains(&ContextSource::WorldStateUnobserved)
+        == right
+            .metadata
+            .sources
+            .contains(&ContextSource::WorldStateUnobserved)
+}
 
 pub(super) fn world_state_boundary(item: &ContextItem) -> Option<WorldStateRequestBoundary> {
     let origin = item.metadata.origin()?;
@@ -220,71 +277,126 @@ impl ContextFrame {
     /// Replace only the exact recorded CWS text affected by the model display
     /// policy. The ledger is the authority: arbitrary text is never parsed or sanitized into
     /// acceptance, and unrelated state/permission differences still fail exact comparison.
-    fn adopt_model_display_policy(
+    fn adopt_model_display_policy<'a>(
         &mut self,
-        records: &[AnchoredWorldStateRecord],
+        records: &'a [AnchoredWorldStateRecord],
         check_observation: bool,
-    ) -> AgentResult<()> {
+    ) -> AgentResult<Vec<(&'a AnchoredWorldStateRecord, ContextItem)>> {
+        // Always validate the authoritative ledger. Normal live synchronization and current
+        // checkpoints need only this projection; old display formats are recovery fallbacks.
+        let current = crate::context::assembler::project_conversation_world_state_records(records)?;
+        let current_by_origin =
+            indexed_world_state_items(current.iter().map(|(_, item)| item), None)?;
+        let existing_by_origin = indexed_world_state_items(self.iter_items(), Some(records))?;
+        let mut ledger_origins = None;
+        let mut mismatches = Vec::new();
+        for (origin, (index, existing)) in existing_by_origin {
+            if let Some((_, next)) = current_by_origin.get(origin) {
+                if existing.message == next.message {
+                    if existing.metadata.scope != ContextScope::Conversation
+                        || check_observation && !observed_projection_matches(existing, next)
+                    {
+                        return Err(AgentError::new(
+                            "检查点 Conversation World State 与模型投影或观察状态不一致。",
+                        ));
+                    }
+                    continue;
+                }
+            } else {
+                let origins = ledger_origins.get_or_insert_with(|| {
+                    records
+                        .iter()
+                        .map(|record| {
+                            crate::context::assembler::conversation_world_state_record_origin(
+                                record,
+                            )
+                            .id()
+                            .to_owned()
+                        })
+                        .collect::<HashSet<_>>()
+                });
+                // Active Run snapshots have the same origin kind but are not Conversation
+                // records. Only trusted ledger identities can require a compatibility view,
+                // including old records that the current display intentionally makes invisible.
+                if !origins.contains(origin) {
+                    continue;
+                }
+            }
+            mismatches.push((origin, index, existing));
+        }
+        if mismatches.is_empty() {
+            return Ok(current);
+        }
+
         let stored =
             crate::context::assembler::stored_world_state_projections_for_validation(records)?;
-        let directory =
-            crate::context::assembler::directory_world_state_projections_for_validation(records)?;
-        let legacy_subagent =
-            crate::context::assembler::legacy_subagent_world_state_projections_for_validation(
-                records,
-            )?;
-        let current = crate::context::assembler::project_conversation_world_state_records(records)?;
+        let stored_by_origin =
+            indexed_world_state_items(stored.iter().map(|(_, item)| item), None)?;
+        let mut directory = None;
+        let mut legacy_subagent = None;
         let mut changes = Vec::new();
-        for (_, old) in stored {
-            let origin = old.metadata.origin().expect("CWS projection origin");
-            let next = current
-                .iter()
-                .map(|(_, item)| item)
-                .find(|item| item.metadata.origin() == Some(origin));
-            if next.is_some_and(|next| next.message == old.message) {
-                continue;
-            }
-            let mut matches = self
-                .iter_items()
-                .enumerate()
-                .filter(|(_, item)| item.metadata.origin() == Some(origin));
-            let Some((index, existing)) = matches.next() else {
+        for (origin, index, existing) in mismatches {
+            let Some((_, old)) = stored_by_origin.get(origin) else {
+                // Unknown records are not compatibility material. Recovery's canonical-origin
+                // check rejects them; synchronization must not silently remove them.
                 continue;
             };
-            if matches.next().is_some() {
-                return Err(AgentError::new(
-                    "检查点 canonical Conversation World State 投影重复。",
-                ));
-            }
-            if next.is_some_and(|next| existing.message == next.message) {
-                continue;
-            }
             if existing.metadata.scope != ContextScope::Conversation
-                || (existing.message != old.message
-                    && !directory
-                        .iter()
-                        .chain(&legacy_subagent)
-                        .any(|(_, candidate)| {
-                            candidate.metadata.origin() == Some(origin)
-                                && candidate.message == existing.message
-                        }))
-                || check_observation
-                    && existing
-                        .metadata
-                        .sources
-                        .contains(&ContextSource::WorldStateUnobserved)
-                        != old
-                            .metadata
-                            .sources
-                            .contains(&ContextSource::WorldStateUnobserved)
+                || check_observation && !observed_projection_matches(existing, old)
             {
                 return Err(AgentError::new(
                     "Conversation World State 与可信 ledger 的存储投影不一致。",
                 ));
             }
+            if existing.message != old.message {
+                if directory.is_none() {
+                    directory = Some(
+                        crate::context::assembler::directory_world_state_projections_for_validation(
+                            records,
+                        )?
+                        .into_iter()
+                        .map(|(_, item)| {
+                            (canonical_world_state_origin(&item).unwrap().to_owned(), item)
+                        })
+                        .collect::<HashMap<_, _>>(),
+                    );
+                }
+                let matches_directory = directory
+                    .as_ref()
+                    .and_then(|items| items.get(origin))
+                    .is_some_and(|candidate| candidate.message == existing.message);
+                if !matches_directory {
+                    if legacy_subagent.is_none() {
+                        legacy_subagent = Some(
+                            crate::context::assembler::legacy_subagent_world_state_projections_for_validation(
+                                records,
+                            )?
+                            .into_iter()
+                            .map(|(_, item)| {
+                                (canonical_world_state_origin(&item).unwrap().to_owned(), item)
+                            })
+                            .collect::<HashMap<_, _>>(),
+                        );
+                    }
+                    if !legacy_subagent
+                        .as_ref()
+                        .and_then(|items| items.get(origin))
+                        .is_some_and(|candidate| candidate.message == existing.message)
+                    {
+                        return Err(AgentError::new(
+                            "Conversation World State 与可信 ledger 的存储投影不一致。",
+                        ));
+                    }
+                }
+            }
             // Remove only records made invisible by the model display policy (internal metadata
             // or other members' observations). Authority and observation markers remain exact.
-            changes.push((index, next.map(|next| next.message.clone())));
+            changes.push((
+                index,
+                current_by_origin
+                    .get(origin)
+                    .map(|(_, next)| next.message.clone()),
+            ));
         }
         if !changes.is_empty() {
             self.materialize_baseline();
@@ -300,7 +412,7 @@ impl ContextFrame {
             }
             self.world_state_metadata_changed();
         }
-        Ok(())
+        Ok(current)
     }
 
     /// Installs backend canonical authority alongside its already-rendered context. Recovery must
@@ -309,42 +421,19 @@ impl ContextFrame {
         &mut self,
         records: Vec<AnchoredWorldStateRecord>,
     ) -> AgentResult<()> {
-        self.adopt_model_display_policy(&records, true)?;
-        let mut origins = Vec::new();
-        for (_, projected) in
-            crate::context::assembler::project_conversation_world_state_records(&records)?
-        {
-            let origin = projected
-                .metadata
-                .origin()
-                .expect("projected World State origin")
-                .clone();
-            if self
-                .iter_items()
-                .filter(|item| item.metadata.origin() == Some(&origin))
-                .count()
-                != 1
-            {
-                return Err(AgentError::new(
-                    "检查点 canonical Conversation World State 投影缺失或重复。",
-                ));
-            }
-            origins.push(origin);
-            let matching = self
-                .iter_items()
-                .find(|item| item.metadata.origin() == projected.metadata.origin())
-                .ok_or_else(|| {
-                    AgentError::new("检查点缺少 canonical Conversation World State 的模型投影。")
-                })?;
+        let projected = self.adopt_model_display_policy(&records, true)?;
+        let existing = indexed_world_state_items(self.iter_items(), Some(&records))?;
+        let mut origins = HashSet::new();
+        for (_, projected) in &projected {
+            let origin =
+                canonical_world_state_origin(projected).expect("projected World State origin");
+            origins.insert(origin);
+            let (_, matching) = existing.get(origin).ok_or_else(|| {
+                AgentError::new("检查点缺少 canonical Conversation World State 的模型投影。")
+            })?;
             if matching.message != projected.message
-                || matching
-                    .metadata
-                    .sources
-                    .contains(&ContextSource::WorldStateUnobserved)
-                    != projected
-                        .metadata
-                        .sources
-                        .contains(&ContextSource::WorldStateUnobserved)
+                || matching.metadata.scope != ContextScope::Conversation
+                || !observed_projection_matches(matching, projected)
             {
                 return Err(AgentError::new(
                     "检查点 Conversation World State 与模型投影或观察状态不一致。",
@@ -362,9 +451,7 @@ impl ContextFrame {
                         .metadata
                         .sources
                         .contains(&ContextSource::WorldStateDiff))
-                && !item
-                    .metadata
-                    .origin()
+                && !canonical_world_state_origin(item)
                     .is_some_and(|origin| origins.contains(origin))
         }) {
             return Err(AgentError::new(
@@ -386,21 +473,17 @@ impl ContextFrame {
         if records.is_empty() {
             return Ok(0);
         }
-        self.adopt_model_display_policy(records, false)?;
-        let projected =
-            crate::context::assembler::project_conversation_world_state_records(records)?;
-        let mut appended = 0;
-        for (record, mut incoming) in projected {
-            let origin = incoming
-                .metadata
-                .origin()
-                .expect("World State projection has an origin")
-                .clone();
-            let existing = self.iter_items().enumerate().find_map(|(index, item)| {
-                (item.metadata.origin() == Some(&origin)).then_some((index, item))
-            });
-            if let Some((index, existing)) = existing {
-                if existing.message != incoming.message {
+        let projected = self.adopt_model_display_policy(records, false)?;
+        let existing_by_origin = indexed_world_state_items(self.iter_items(), Some(records))?;
+        let mut observation_changes = Vec::new();
+        let mut additions = Vec::new();
+        for (record, incoming) in projected {
+            let origin = canonical_world_state_origin(&incoming)
+                .expect("World State projection has an origin");
+            if let Some((index, existing)) = existing_by_origin.get(origin) {
+                if existing.message != incoming.message
+                    || existing.metadata.scope != ContextScope::Conversation
+                {
                     return Err(AgentError::new(
                         "Conversation World State origin 与既有模型投影冲突。",
                     ));
@@ -409,24 +492,30 @@ impl ContextFrame {
                     .metadata
                     .sources
                     .contains(&ContextSource::WorldStateUnobserved);
-                if existing
-                    .metadata
-                    .sources
-                    .contains(&ContextSource::WorldStateUnobserved)
-                    != unobserved
-                {
-                    self.materialize_baseline();
-                    let metadata = &mut self.items[index].metadata;
-                    metadata
-                        .sources
-                        .retain(|source| *source != ContextSource::WorldStateUnobserved);
-                    if unobserved {
-                        metadata.sources.push(ContextSource::WorldStateUnobserved);
-                    }
-                    self.world_state_metadata_changed();
+                if !observed_projection_matches(existing, &incoming) {
+                    observation_changes.push((*index, unobserved));
                 }
-                continue;
+            } else {
+                additions.push((record, incoming));
             }
+        }
+        // Apply observation changes before insertions shift indices, and invalidate the measured
+        // baseline once. No history text is cloned just to match already-present origins.
+        if !observation_changes.is_empty() {
+            self.materialize_baseline();
+            for (index, unobserved) in observation_changes {
+                let metadata = &mut self.items[index].metadata;
+                metadata
+                    .sources
+                    .retain(|source| *source != ContextSource::WorldStateUnobserved);
+                if unobserved {
+                    metadata.sources.push(ContextSource::WorldStateUnobserved);
+                }
+            }
+            self.world_state_metadata_changed();
+        }
+        let appended = additions.len();
+        for (record, mut incoming) in additions {
             if matches!(record.record, WorldStateRecord::Full(_)) {
                 if self.iter_items().any(|item| {
                     item.metadata.scope == ContextScope::Conversation
@@ -463,9 +552,12 @@ impl ContextFrame {
                     self.world_state_metadata_changed();
                 }
             }
-            appended += 1;
         }
-        self.conversation_world_state_records = Arc::from(records.to_vec());
+        // The exact ledger (including hidden metadata and observation markers) owns this
+        // identity. A no-op sync must not clone it or invalidate content-revision caches.
+        if self.conversation_world_state_records.as_ref() != records {
+            self.conversation_world_state_records = Arc::from(records.to_vec());
+        }
         Ok(appended)
     }
 
@@ -691,6 +783,146 @@ mod tests {
                     .contains(&ContextSource::WorldStateDiff)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn current_world_state_sync_and_restore_project_a_long_ledger_once_without_legacy_replay() {
+        use crate::context::assembler::world_state_projection_work::measure;
+
+        let mut previous = snapshot("long-current-ledger", 0, false);
+        let mut ledger =
+            vec![
+                AnchoredWorldStateRecord::new(WorldStateRecord::Full(previous.clone()), None)
+                    .unwrap(),
+            ];
+        for sequence in 1..=64 {
+            let next = snapshot("long-current-ledger", sequence, sequence % 2 != 0);
+            ledger.push(
+                AnchoredWorldStateRecord::at_request(
+                    WorldStateRecord::Diff(WorldStateDiff::between(&previous, &next).unwrap()),
+                    WorldStateRequestBoundary {
+                        run_id: "run".into(),
+                        assistant_message_id: "assistant".into(),
+                        request_index: sequence + 1,
+                        after_trace_sequence: Some(1),
+                    },
+                )
+                .unwrap(),
+            );
+            previous = next;
+        }
+        let mut current = frame();
+        current.push(narration(1, false));
+        current
+            .sync_conversation_world_state_records(&ledger, false)
+            .unwrap();
+        ContextCapacityDetector::for_model(
+            "test-model",
+            crate::AgentApiStyle::OpenAiCompatible,
+            &[],
+        )
+        .prepare_frame(&mut current);
+        let mut current = ContextFrame::from_measured_baseline(
+            current.share_measured_persistent_baseline().unwrap(),
+        );
+        let run_snapshot = ContextItem::new(
+            LlmMessage::backend_state("current run world state"),
+            ContextMetadata::new(
+                ContextSource::WorldStateSnapshot,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_source(ContextSource::RunBootstrap)
+            .with_origin(ContextOrigin::world_state_record("active-run:0")),
+        );
+        // Run snapshot identity is outside the Conversation ledger's validation scope.
+        current.push(run_snapshot.clone());
+        current.push(run_snapshot);
+        let expected = text(&current);
+        let revision = current.content_revision();
+        let (_, work) = measure(|| {
+            for _ in 0..8 {
+                assert_eq!(
+                    current
+                        .sync_conversation_world_state_records(&ledger, false)
+                        .unwrap(),
+                    0
+                );
+            }
+        });
+        assert_eq!(work.compatibility_records, 0);
+        assert_eq!(work.current_records, 8 * ledger.len());
+        assert_eq!(text(&current), expected);
+        assert_eq!(current.content_revision(), revision);
+        assert!(
+            current.baseline.is_some(),
+            "no-op sync preserves shared history"
+        );
+
+        let mut restored =
+            ContextFrame::from_checkpoint_items(current.checkpoint_items().unwrap()).unwrap();
+        let (_, work) = measure(|| {
+            restored
+                .restore_conversation_world_state_records(ledger.clone())
+                .unwrap();
+        });
+        assert_eq!(work.compatibility_records, 0);
+        assert_eq!(work.current_records, ledger.len());
+        assert_eq!(text(&restored), expected);
+        assert_eq!(restored.conversation_world_state_records(), ledger);
+        restored.validate_cache_layout().unwrap();
+    }
+
+    #[test]
+    fn current_world_state_fast_path_still_rejects_forged_scope_text_observation_and_origins() {
+        let ledger = records("current-validation", false);
+        let mut current = frame();
+        current.push(narration(1, false));
+        current
+            .sync_conversation_world_state_records(&ledger, false)
+            .unwrap();
+        let checkpoint = current.checkpoint_items().unwrap();
+        for change in [
+            "scope",
+            "text",
+            "observation",
+            "duplicate",
+            "missing",
+            "extra",
+        ] {
+            let mut candidate = ContextFrame::from_checkpoint_items(checkpoint.clone()).unwrap();
+            let index = candidate
+                .items
+                .iter()
+                .position(|item| canonical_world_state_origin(item).is_some())
+                .unwrap();
+            match change {
+                "scope" => candidate.items[index].metadata.scope = ContextScope::Run,
+                "text" => candidate.items[index].message = LlmMessage::backend_state("forged"),
+                "observation" => candidate.items[index]
+                    .metadata
+                    .sources
+                    .push(ContextSource::WorldStateUnobserved),
+                "duplicate" => candidate.items.push(candidate.items[index].clone()),
+                "missing" => {
+                    candidate.items.remove(index);
+                }
+                "extra" => candidate.items.push(
+                    candidate.items[index]
+                        .clone()
+                        .with_origin(ContextOrigin::world_state_record("forged-extra")),
+                ),
+                _ => unreachable!(),
+            }
+            let before = text(&candidate);
+            assert!(
+                candidate
+                    .restore_conversation_world_state_records(ledger.clone())
+                    .is_err(),
+                "must reject {change} even for current-format checkpoints"
+            );
+            assert_eq!(text(&candidate), before, "rejection must not rewrite text");
+        }
     }
 
     #[test]
@@ -1275,6 +1507,57 @@ mod tests {
             .restore_conversation_world_state_records(ledger)
             .unwrap();
         assert_eq!(text(&again), text(&restored));
+    }
+
+    #[test]
+    fn stored_world_state_recovery_does_not_replay_unneeded_intermediate_display_formats() {
+        use crate::context::assembler::world_state_projection_work::measure;
+
+        let ledger = workflow_template_ledger();
+        let mut old = frame_with_recorded_workflow_text(&ledger);
+        let (_, work) = measure(|| {
+            old.restore_conversation_world_state_records(ledger.clone())
+                .unwrap();
+        });
+        assert_eq!(work.current_records, ledger.len());
+        assert_eq!(work.compatibility_records, ledger.len());
+        assert_eq!(old.conversation_world_state_records(), ledger);
+        let visible = text(&old).join("\n");
+        assert!(visible.contains("Reviewer") && visible.contains("review-only"));
+        assert!(!visible.contains("private-template-id") && !visible.contains("Writer"));
+        old.validate_cache_layout().unwrap();
+    }
+
+    #[test]
+    fn world_state_sync_refreshes_authority_when_only_hidden_state_changes() {
+        let mut ledger = workflow_template_ledger();
+        let mut current = frame();
+        current
+            .sync_conversation_world_state_records(&ledger[..1], false)
+            .unwrap();
+        let visible = text(&current);
+        let initial_revision = current.content_revision();
+
+        assert_eq!(
+            current
+                .sync_conversation_world_state_records(&ledger[..2], false)
+                .unwrap(),
+            0,
+            "template metadata does not introduce a visible diff"
+        );
+        assert_eq!(text(&current), visible);
+        assert_eq!(current.conversation_world_state_records(), &ledger[..2]);
+        assert_ne!(current.content_revision(), initial_revision);
+
+        let metadata_revision = current.content_revision();
+        ledger[1].model_observed = true;
+        current
+            .sync_conversation_world_state_records(&ledger[..2], false)
+            .unwrap();
+        assert_eq!(text(&current), visible);
+        assert_eq!(current.conversation_world_state_records(), &ledger[..2]);
+        assert_ne!(current.content_revision(), metadata_revision);
+        current.validate_cache_layout().unwrap();
     }
 
     #[test]

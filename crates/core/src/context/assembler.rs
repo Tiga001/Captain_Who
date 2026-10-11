@@ -491,6 +491,25 @@ pub(crate) fn project_conversation_world_state_records(
     project_world_state_records(records, WorldStateDisplay::Current)
 }
 
+pub(crate) fn conversation_world_state_record_origin(
+    anchored: &AnchoredWorldStateRecord,
+) -> ContextOrigin {
+    let id = match &anchored.record {
+        WorldStateRecord::Full(snapshot) => snapshot.stable_origin_id(),
+        WorldStateRecord::Diff(diff) => anchored.request_boundary.as_ref().map_or_else(
+            || diff.stable_origin_id(),
+            |boundary| {
+                format!(
+                    "request:{}",
+                    serde_json::to_string(boundary)
+                        .expect("request boundary serialization cannot fail")
+                )
+            },
+        ),
+    };
+    ContextOrigin::world_state_record(id)
+}
+
 /// The only consumer of this stored-text view is exact checkpoint/context validation before
 /// replacing the model display projection. It must never feed a model request.
 pub(crate) fn stored_world_state_projections_for_validation(
@@ -523,10 +542,56 @@ enum WorldStateDisplay {
     LegacySubagent,
 }
 
+#[cfg(test)]
+pub(crate) mod world_state_projection_work {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(crate) struct Work {
+        pub current_records: usize,
+        pub compatibility_records: usize,
+    }
+
+    thread_local! {
+        static ACTIVE: Cell<Option<Work>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn record(current: bool, records: usize) {
+        ACTIVE.with(|active| {
+            if let Some(mut work) = active.get() {
+                if current {
+                    work.current_records += records;
+                } else {
+                    work.compatibility_records += records;
+                }
+                active.set(Some(work));
+            }
+        });
+    }
+
+    /// Count actual ledger entries submitted to projection, not elapsed time or estimated work.
+    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, Work) {
+        struct Restore(Option<Work>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE.with(|active| active.set(self.0));
+            }
+        }
+        let _restore = Restore(ACTIVE.with(|active| active.replace(Some(Work::default()))));
+        let result = operation();
+        (result, ACTIVE.with(|active| active.get().unwrap()))
+    }
+}
+
 fn project_world_state_records(
     records: &[AnchoredWorldStateRecord],
     display: WorldStateDisplay,
 ) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    #[cfg(test)]
+    world_state_projection_work::record(
+        matches!(display, WorldStateDisplay::Current),
+        records.len(),
+    );
     let Some(initial) = records.first() else {
         return Ok(Vec::new());
     };
@@ -558,7 +623,8 @@ fn project_world_state_records(
         projection.render_sanitized_text(),
         ContextSource::WorldStateSnapshot,
         ContextScope::Conversation,
-    );
+    )
+    .with_origin(conversation_world_state_record_origin(initial));
     if !initial.model_observed {
         full = full.with_source(ContextSource::WorldStateUnobserved);
     }
@@ -599,14 +665,8 @@ fn project_world_state_records(
                 projection.render_sanitized_text(),
                 ContextSource::WorldStateDiff,
                 ContextScope::Conversation,
-            );
-            if let Some(boundary) = &anchored.request_boundary {
-                item = item.with_origin(ContextOrigin::world_state_record(format!(
-                    "request:{}",
-                    serde_json::to_string(boundary)
-                        .expect("request boundary serialization cannot fail")
-                )));
-            }
+            )
+            .with_origin(conversation_world_state_record_origin(anchored));
             if !anchored.model_observed {
                 item = item.with_source(ContextSource::WorldStateUnobserved);
             }
