@@ -1575,10 +1575,12 @@ async fn run_case(case: Case) -> Value {
 fn backend_concurrency_disk_baseline() {
     let output =
         std::env::var("BACKEND_BASELINE_OUTPUT").expect("set an explicit JSONL output path");
-    assert_eq!(
-        std::env::var("CAPTAIN_PERFORMANCE_DIAGNOSTICS").as_deref(),
-        Ok("1"),
-        "stage metrics must be enabled before process startup"
+    assert!(
+        matches!(
+            std::env::var("CAPTAIN_PERFORMANCE_DIAGNOSTICS").as_deref(),
+            Ok("0" | "1")
+        ),
+        "stage diagnostics must be explicitly enabled or disabled before process startup"
     );
     let smoke = std::env::var("BACKEND_BASELINE_MODE").as_deref() == Ok("smoke");
     let filter = std::env::var("BACKEND_BASELINE_FILTER").ok();
