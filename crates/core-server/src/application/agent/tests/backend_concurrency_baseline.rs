@@ -69,6 +69,9 @@ struct RpcSample {
     offered_us: u64,
     handler_started_us: Option<u64>,
     responded_us: Option<u64>,
+    // A closed connection cannot offer more requests to the Core intake. This is a harness
+    // observation, not a fabricated JSON-RPC response or a dispatch capacity rejection.
+    transport_rejected_us: Option<u64>,
     dispatch_admitted: bool,
     response: Option<Value>,
     response_bytes: usize,
@@ -90,6 +93,7 @@ struct Events {
     errors: Vec<Value>,
     timer_lag_us: Vec<u64>,
     resource_samples: Vec<Value>,
+    transport_failure: Option<Value>,
     #[serde(skip)]
     ready_stops: Vec<(usize, String, String)>,
 }
@@ -99,6 +103,161 @@ fn us(elapsed: Duration) -> u64 {
 fn sample(events: &Arc<Mutex<Events>>, update: impl FnOnce(&mut Events)) {
     update(&mut events.lock().unwrap_or_else(|e| e.into_inner()));
 }
+fn acknowledged_root_recovery(
+    rpcs: &BTreeMap<i64, RpcSample>,
+    roots: &BTreeMap<String, Value>,
+) -> (usize, Vec<Value>) {
+    let mut errors = Vec::new();
+    let mut checked = 0;
+    for record in rpcs
+        .values()
+        .filter(|record| record.operation == AGENT_START_CONVERSATION_TURN_METHOD)
+    {
+        let Some(result) = record
+            .response
+            .as_ref()
+            .and_then(|response| response.get("result"))
+        else {
+            continue;
+        };
+        checked += 1;
+        let run_id = result["runId"].as_str().unwrap_or("");
+        let recovered = roots.get(run_id);
+        if !recovered.is_some_and(|recovered| {
+            recovered["owner"].as_u64() == Some(record.owner as u64)
+                && recovered["assistant_message_id"].as_str()
+                    == result["assistantMessageId"].as_str()
+                && result["assistantMessageId"].is_string()
+                && matches!(
+                    recovered["terminal_status"].as_str(),
+                    Some("completed" | "cancelled" | "failed")
+                )
+        }) {
+            errors.push(json!({"rpc_id":record.id,"run_id":run_id,
+                "expected_owner":record.owner,"expected_assistant_message_id":result["assistantMessageId"],
+                "recovered":recovered}));
+        }
+    }
+    (checked, errors)
+}
+
+// Recovery is observed after cleanup, but measured_us ends before cleanup. Only publish a
+// rate when the complete report proves those recovered roots naturally settled in the window.
+// This is a reporting gate, independent of latency SLOs and the workload execution path.
+fn completed_root_throughput(report: &Value) -> Option<f64> {
+    let measured_us = report["measured_us"].as_u64()?;
+    if measured_us == 0
+        || [
+            "drained_before_cleanup",
+            "starts_responded",
+            "controls_ready",
+            "replies_complete",
+        ]
+        .iter()
+        .any(|field| report[*field].as_bool() != Some(true))
+        || report["shutdown_timed_out"].as_bool() != Some(false)
+        || report["in_progress_before_cleanup"].as_u64() != Some(0)
+    {
+        return None;
+    }
+    let raw = &report["raw"];
+    let recovery = &report["recovery"];
+    let outbound = &report["outbound"]["state"];
+    if !raw["errors"].as_array()?.is_empty()
+        || !report["unexpected_rpc_errors"].as_array()?.is_empty()
+        || raw["context_compaction_events"].as_u64()? != 0
+        || !raw.get("transport_failure")?.is_null()
+        || ["closed", "failed", "overloaded"]
+            .iter()
+            .any(|field| outbound[*field].as_bool() != Some(false))
+        || !outbound.get("failure_snapshot")?.is_null()
+        || recovery["post_reopen_in_progress"].as_u64()? != 0
+        || !recovery["acknowledged_root_identity_errors"]
+            .as_array()?
+            .is_empty()
+    {
+        return None;
+    }
+    let accepted = report["root_starts_durably_accepted"].as_u64()?;
+    let roots = recovery["roots"].as_object()?;
+    if accepted == 0
+        || report["recovered_root_turns"].as_u64()? != accepted
+        || recovery["acknowledged_roots_checked"].as_u64()? != accepted
+        || roots.len() as u64 != accepted
+    {
+        return None;
+    }
+    let owner_count = report["case"]["roots"].as_u64()?;
+    let planned_starts = owner_count.checked_mul(report["case"]["waves"].as_u64()?)?;
+    let mut offered_starts = 0_u64;
+    let mut runs = HashSet::new();
+    let mut messages = HashSet::new();
+    let mut observed_completed = 0_u64;
+    for record in raw["rpcs"].as_object()?.values() {
+        record["responded_us"].as_u64()?;
+        let admitted = record["dispatch_admitted"].as_bool()?;
+        if !record.get("transport_rejected_us")?.is_null()
+            || (!record["handler_started_us"].is_null() && !admitted)
+        {
+            return None;
+        }
+        let operation = record["operation"].as_str()?;
+        let response = record.get("response")?;
+        let has_result = response.as_object()?.contains_key("result");
+        let has_error = response.as_object()?.contains_key("error");
+        if has_result == has_error || (has_error && !expected_load_rejection(operation, response)) {
+            return None;
+        }
+        if operation != AGENT_START_CONVERSATION_TURN_METHOD {
+            continue;
+        }
+        offered_starts += 1;
+        if has_error {
+            continue;
+        }
+        let result = &response["result"];
+        let run = result["runId"].as_str()?;
+        let message = result["assistantMessageId"].as_str()?;
+        let owner = record["owner"].as_u64()?;
+        let root = roots.get(run)?;
+        record["handler_started_us"].as_u64()?;
+        if !admitted
+            || run.is_empty()
+            || message.is_empty()
+            || !runs.insert(run)
+            || !messages.insert(message)
+            || owner >= owner_count
+            || root["owner"].as_u64()? != owner
+            || root["assistant_message_id"].as_str()? != message
+        {
+            return None;
+        }
+        match root["terminal_status"].as_str()? {
+            "completed" => observed_completed += 1,
+            "cancelled" => {}
+            _ => return None,
+        }
+    }
+    if offered_starts != planned_starts || runs.len() as u64 != accepted {
+        return None;
+    }
+    let mut completed = 0_u64;
+    let mut terminal_total = 0_u64;
+    for (status, count) in recovery["root_terminal_statuses"].as_object()? {
+        let count = count.as_u64()?;
+        match status.as_str() {
+            "Completed" => completed = count,
+            "Cancelled" => {}
+            _ => return None,
+        }
+        terminal_total = terminal_total.checked_add(count)?;
+    }
+    if terminal_total != accepted || completed != observed_completed {
+        return None;
+    }
+    Some(completed as f64 / (measured_us as f64 / 1_000_000.0))
+}
+
 fn quantiles(mut values: Vec<u64>) -> Value {
     values.sort_unstable();
     let at = |p: f64| {
@@ -486,12 +645,19 @@ fn submit(
                 offered_us: us(epoch.elapsed()),
                 handler_started_us: None,
                 responded_us: None,
+                transport_rejected_us: None,
                 dispatch_admitted: false,
                 response: None,
                 response_bytes: 0,
             },
         );
     });
+    if outbound.is_closed() {
+        sample(events, |state| {
+            state.rpcs.get_mut(&id).unwrap().transport_rejected_us = Some(us(epoch.elapsed()));
+        });
+        return;
+    }
     let handler_events = events.clone();
     let result = rpc.submit(
         storage.clone(),
@@ -661,24 +827,52 @@ async fn run_case(case: Case) -> Value {
     );
     let (outbound, mut receiver) = crate::transport::outbound_channel();
     let rpc = BaselineDispatcher::new(outbound.clone());
+    let failure_outbound = outbound.clone();
+    let failure_events = events.clone();
+    let transport_failure = tokio::spawn(async move {
+        failure_outbound.failed().await;
+        let at_us = us(epoch.elapsed());
+        let failure = failure_outbound.failure_state_for_test();
+        sample(&failure_events, |state| {
+            state.transport_failure = Some(json!({"at_us":at_us,"outbound":failure}));
+        });
+    });
     let collector_events = events.clone();
     let collector = tokio::spawn(async move {
-        while let Some(value) = receiver.recv().await {
+        while let Some(frame) = receiver.recv_frame().await {
+            // Observe the actual wire size, not a second full-history serialization inside
+            // the shared marker lock. Decode once outside that lock, like a transport peer.
+            let wire_bytes = frame
+                .wire
+                .len()
+                .saturating_sub(usize::from(frame.wire.last() == Some(&b'\n')));
+            let mut value: Value = serde_json::from_slice(&frame.wire).expect("encoded JSON");
+            drop(frame);
+            let received_us = us(epoch.elapsed());
+            let response_id = value["id"].as_i64();
+            let history_response = response_id.is_some_and(|id| {
+                collector_events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .rpcs
+                    .get(&id)
+                    .is_some_and(|record| record.operation == "storage.loadConversation")
+            });
+            if history_response && value["result"].is_object() {
+                // The full history was really read, serialized and decoded. Only retained
+                // measurement evidence is compacted; destroy its large decoded Value outside
+                // the marker lock as well, so unrelated handlers can publish their timestamps.
+                value = json!({"id":response_id.unwrap(),"result":{"observed":true,
+                    "id":value["result"]["id"],
+                    "messages":value["result"]["messages"].as_array().map(Vec::len)}});
+            }
             sample(&collector_events, |state| {
-                if let Some(id) = value["id"].as_i64() {
+                if let Some(id) = response_id {
                     if let Some(record) = state.rpcs.get_mut(&id) {
-                        record.responded_us = Some(us(epoch.elapsed()));
-                        record.response_bytes = value.to_string().len();
+                        record.responded_us = Some(received_us);
+                        record.response_bytes = wire_bytes;
                         // Bound the harness itself: never retain full growing history responses.
-                        record.response = Some(
-                            if record.operation == "storage.loadConversation"
-                                && value["result"].is_object()
-                            {
-                                json!({"id":id,"result":{"observed":true,"id":value["result"]["id"],"messages":value["result"]["messages"].as_array().map(Vec::len)}})
-                            } else {
-                                value
-                            },
-                        );
+                        record.response = Some(value);
                     }
                     if let Some(record) = state.rpcs.get(&id) {
                         if record.operation == AGENT_START_CONVERSATION_TURN_METHOD {
@@ -705,7 +899,7 @@ async fn run_case(case: Case) -> Value {
                     return;
                 }
                 state.output_events += 1;
-                state.output_bytes += value.to_string().len();
+                state.output_bytes += wire_bytes;
                 let event = if value["method"] == "agent.collaboration.event" {
                     &value["params"]["event"]
                 } else {
@@ -1141,6 +1335,7 @@ async fn run_case(case: Case) -> Value {
     timer_stop.store(true, Ordering::Relaxed);
     timer.await.unwrap();
     let outbound_stats = outbound.stats();
+    let outbound_state = outbound.failure_state_for_test();
     let remaining_before_cleanup = storage
         .list_in_progress_conversation_turn_traces()
         .unwrap()
@@ -1156,6 +1351,9 @@ async fn run_case(case: Case) -> Value {
     service.shutdown_collaboration_dispatcher().await.unwrap();
     let _ = stop_provider.send(());
     provider_task.await.unwrap();
+    // Dropping the receiver during ordinary fixture cleanup is not a transport failure.
+    transport_failure.abort();
+    let _ = transport_failure.await;
     collector.abort();
     let _ = collector.await;
     let sqlite = sqlite_info(&path);
@@ -1178,6 +1376,7 @@ async fn run_case(case: Case) -> Value {
         .len();
     let mut durable_terminals = BTreeMap::<String, usize>::new();
     let mut recovered_root_turns = 0;
+    let mut root_recovery = BTreeMap::<String, Value>::new();
     let mut child_terminals = BTreeMap::<String, usize>::new();
     let mut recovered_child_turns = 0;
     let mut child_recovery = BTreeMap::<String, Value>::new();
@@ -1191,6 +1390,13 @@ async fn run_case(case: Case) -> Value {
                     .entry(format!("{:?}", trace.terminal_status))
                     .or_default() += 1;
                 recovered_root_turns += 1;
+                root_recovery.insert(
+                    trace.run_id.clone(),
+                    json!({
+                        "owner":owner,"assistant_message_id":trace.assistant_message_id,
+                        "terminal_status":trace.terminal_status.as_str(),
+                    }),
+                );
             }
         }
         if matches!(case.work, Work::Tree) {
@@ -1235,6 +1441,8 @@ async fn run_case(case: Case) -> Value {
     drop(recovered_service);
     drop(reopened);
     let state = events.lock().unwrap();
+    let (acknowledged_roots, acknowledged_root_identity_errors) =
+        acknowledged_root_recovery(&state.rpcs, &root_recovery);
     let slow_tool_overlap = if matches!(case.work, Work::SlowTool) {
         let command_started = slow_run
             .as_ref()
@@ -1323,9 +1531,11 @@ async fn run_case(case: Case) -> Value {
         "slow_tool_overlap":slow_tool_overlap,
         "recovery":{"open_service_us":reopen_us,"pre_close_in_progress":before_reopen,
             "post_reopen_in_progress":in_progress_after_reopen,"root_terminal_statuses":durable_terminals,
+            "roots":root_recovery,"acknowledged_roots_checked":acknowledged_roots,
+            "acknowledged_root_identity_errors":acknowledged_root_identity_errors,
             "child_terminal_statuses":child_terminals,"children":child_recovery,
             "kind":"clean shutdown/reopen; not a crash or power-loss test"},
-        "completed_root_turns_per_second":durable_terminals.get("Completed").copied().unwrap_or(0) as f64/(measured_us as f64/1_000_000.0)});
+        "completed_root_turns_per_second":Value::Null});
     report
         .as_object_mut()
         .unwrap()
@@ -1349,11 +1559,14 @@ async fn run_case(case: Case) -> Value {
         "timer_lag":quantiles(state.timer_lag_us.clone()),"resources_before":before,"resources_after":after,
         "disk_after":disk,"provider_peak_connections":provider_peak.load(Ordering::SeqCst),
         "outbound":{"peak_bytes":outbound_stats.peak_bytes,"peak_frames":outbound_stats.peak_frames,
-            "serialized_bytes":outbound_stats.serialized_bytes,"merged_events":outbound_stats.merged_events},"raw":*state});
+            "serialized_bytes":outbound_stats.serialized_bytes,"merged_events":outbound_stats.merged_events,
+            "state":outbound_state},"raw":*state});
     report
         .as_object_mut()
         .unwrap()
         .extend(measurements.as_object().unwrap().clone());
+    let throughput = completed_root_throughput(&report);
+    report["completed_root_turns_per_second"] = json!(throughput);
     report
 }
 
@@ -1529,6 +1742,10 @@ fn backend_concurrency_disk_baseline() {
             || result["controls_ready"] != true
             || result["shutdown_timed_out"] != false
             || result["recovery"]["post_reopen_in_progress"] != 0
+            || result["recovery"]["acknowledged_root_identity_errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty())
+            || !result["raw"]["transport_failure"].is_null()
             || result["unexpected_rpc_errors"]
                 .as_array()
                 .is_some_and(|errors| !errors.is_empty())
@@ -1628,6 +1845,203 @@ fn backend_baseline_only_classifies_explicit_load_rejections() {
         AGENT_START_CONVERSATION_TURN_METHOD,
         &json!({"error":{"code":-32000,"message":"database error"}})
     ));
+}
+
+#[tokio::test]
+async fn backend_baseline_closed_transport_never_invokes_a_later_handler() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &fixture.path().join("closed-transport.sqlite"),
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let (outbound, receiver) = crate::transport::outbound_channel();
+    let rpc = BaselineDispatcher::new(outbound.clone());
+    let events = Arc::new(Mutex::new(Events::default()));
+    drop(receiver);
+    assert!(outbound.failure_state_for_test()["failed"]
+        .as_bool()
+        .unwrap());
+    submit(
+        &rpc,
+        &storage,
+        &service,
+        &outbound,
+        &events,
+        Instant::now(),
+        1,
+        0,
+        "transport_rejected",
+        0,
+        "storage.loadConversation",
+        json!({"id":"synthetic"}),
+    );
+    rpc.shutdown().await;
+    {
+        let state = events.lock().unwrap();
+        let record = &state.rpcs[&1];
+        assert!(record.transport_rejected_us.is_some());
+        assert!(!record.dispatch_admitted);
+        assert!(
+            record.handler_started_us.is_none(),
+            "the real handler's began callback must not run after disconnection"
+        );
+        assert!(record.responded_us.is_none());
+        assert!(
+            record.response.is_none(),
+            "a local connection rejection is never a fake RPC response"
+        );
+        assert_eq!(record.response_bytes, 0);
+    }
+    service.shutdown_active_runs(Duration::from_secs(1)).await;
+    service.shutdown_collaboration_dispatcher().await.unwrap();
+}
+
+#[test]
+fn backend_baseline_recovery_checks_exact_acknowledged_identity_and_terminal() {
+    let sample = RpcSample {
+        id: 1,
+        owner: 7,
+        operation: AGENT_START_CONVERSATION_TURN_METHOD,
+        phase: "recovery",
+        provider_key: None,
+        scheduled_us: 0,
+        offered_us: 1,
+        handler_started_us: Some(2),
+        responded_us: Some(3),
+        transport_rejected_us: None,
+        dispatch_admitted: true,
+        response: Some(
+            json!({"result":{"runId":"acknowledged-run","assistantMessageId":"output-7-0"}}),
+        ),
+        response_bytes: 80,
+    };
+    let rpcs = BTreeMap::from([(1, sample)]);
+    let expected =
+        json!({"owner":7,"assistant_message_id":"output-7-0","terminal_status":"completed"});
+    let mut roots = BTreeMap::from([("acknowledged-run".to_string(), expected.clone())]);
+    assert_eq!(acknowledged_root_recovery(&rpcs, &roots), (1, vec![]));
+    // Equal aggregate counts cannot hide a missing or mismatched acknowledged Run.
+    roots = BTreeMap::from([("other-run".to_string(), expected.clone())]);
+    assert_eq!(acknowledged_root_recovery(&rpcs, &roots).1.len(), 1);
+    for (field, value) in [
+        ("owner", json!(8)),
+        ("assistant_message_id", json!("output-8-0")),
+        ("terminal_status", json!("in_progress")),
+    ] {
+        let mut invalid = expected.clone();
+        invalid[field] = value;
+        roots = BTreeMap::from([("acknowledged-run".to_string(), invalid)]);
+        assert_eq!(acknowledged_root_recovery(&rpcs, &roots).1.len(), 1);
+    }
+}
+
+#[test]
+fn backend_baseline_throughput_is_null_without_complete_healthy_recovery() {
+    let report = json!({
+        "case":{"roots":1,"waves":1},"measured_us":2_000_000,
+        "root_starts_durably_accepted":1,"recovered_root_turns":1,
+        "drained_before_cleanup":true,"in_progress_before_cleanup":0,
+        "starts_responded":true,"controls_ready":true,"replies_complete":true,
+        "shutdown_timed_out":false,"unexpected_rpc_errors":[],
+        "recovery":{"post_reopen_in_progress":0,"acknowledged_roots_checked":1,
+            "acknowledged_root_identity_errors":[],"root_terminal_statuses":{"Completed":1},
+            "roots":{"run":{"owner":0,"assistant_message_id":"output-0-0",
+                "terminal_status":"completed"}}},
+        "outbound":{"state":{"closed":false,"failed":false,"overloaded":false,
+            "failure_snapshot":null}},
+        "raw":{"errors":[],"context_compaction_events":0,"transport_failure":null,
+            "rpcs":{"1":{"operation":AGENT_START_CONVERSATION_TURN_METHOD,"owner":0,
+                "responded_us":3,"handler_started_us":2,"dispatch_admitted":true,
+                "transport_rejected_us":null,
+                "response":{"result":{"runId":"run","assistantMessageId":"output-0-0"}}}}}
+    });
+    // No latency metrics are needed: an SLO miss does not invalidate a proven rate.
+    assert_eq!(completed_root_throughput(&report), Some(0.5));
+    for (path, replacement) in [
+        ("/measured_us", json!(0)),
+        ("/drained_before_cleanup", json!(false)),
+        ("/starts_responded", json!(false)),
+        ("/controls_ready", json!(false)),
+        ("/replies_complete", json!(false)),
+        ("/shutdown_timed_out", json!(true)),
+        ("/in_progress_before_cleanup", json!(1)),
+        ("/recovery/post_reopen_in_progress", json!(1)),
+        ("/unexpected_rpc_errors", json!([{}])),
+        ("/raw/errors", json!([{}])),
+        ("/raw/context_compaction_events", json!(1)),
+        ("/raw/transport_failure", json!({})),
+        ("/outbound/state/closed", json!(true)),
+        ("/outbound/state/failed", json!(true)),
+        ("/outbound/state/overloaded", json!(true)),
+        ("/outbound/state/failure_snapshot", json!({})),
+        ("/root_starts_durably_accepted", json!(0)),
+        ("/recovered_root_turns", json!(2)),
+        ("/recovery/acknowledged_roots_checked", json!(0)),
+        ("/recovery/acknowledged_root_identity_errors", json!([{}])),
+        ("/recovery/root_terminal_statuses", json!({"Completed":2})),
+        ("/recovery/root_terminal_statuses", json!({"Failed":1})),
+        ("/recovery/roots/run/owner", json!(1)),
+        ("/recovery/roots/run/assistant_message_id", json!("wrong")),
+        ("/recovery/roots/run/terminal_status", json!("in_progress")),
+        ("/raw/rpcs/1/response/result/runId", json!("replacement")),
+        ("/raw/rpcs/1/response/result/assistantMessageId", json!("")),
+        ("/raw/rpcs/1/responded_us", Value::Null),
+        ("/raw/rpcs/1/response", Value::Null),
+        ("/raw/rpcs/1/dispatch_admitted", json!(false)),
+        ("/raw/rpcs/1/transport_rejected_us", json!(3)),
+        ("/case/waves", json!(2)),
+    ] {
+        let mut invalid = report.clone();
+        *invalid.pointer_mut(path).unwrap() = replacement;
+        assert_eq!(completed_root_throughput(&invalid), None, "{path}");
+        assert_eq!(
+            json!(completed_root_throughput(&invalid)),
+            Value::Null,
+            "{path} must serialize as null"
+        );
+    }
+    for (path, field) in [
+        ("/raw", "transport_failure"),
+        ("/outbound/state", "failure_snapshot"),
+        ("/outbound/state", "closed"),
+        ("/recovery", "acknowledged_root_identity_errors"),
+        ("/raw/rpcs/1", "transport_rejected_us"),
+    ] {
+        let mut invalid = report.clone();
+        invalid
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert_eq!(completed_root_throughput(&invalid), None, "{path}/{field}");
+    }
+    let mut wrong_run = report.clone();
+    let roots = wrong_run["recovery"]["roots"].as_object_mut().unwrap();
+    let root = roots.remove("run").unwrap();
+    roots.insert("replacement".into(), root);
+    assert_eq!(completed_root_throughput(&wrong_run), None);
+
+    let mut cancelled = report.clone();
+    cancelled["recovery"]["roots"]["run"]["terminal_status"] = json!("cancelled");
+    cancelled["recovery"]["root_terminal_statuses"] = json!({"Cancelled":1});
+    assert_eq!(completed_root_throughput(&cancelled), Some(0.0));
+
+    // A classified rejection stays in the offered denominator while the accepted root
+    // still contributes its verified completion. It does not become a successful ACK.
+    let mut rejected = report.clone();
+    rejected["case"]["waves"] = json!(2);
+    rejected["raw"]["rpcs"]["2"] = json!({
+        "operation":AGENT_START_CONVERSATION_TURN_METHOD,"owner":0,
+        "responded_us":4,"handler_started_us":null,"dispatch_admitted":false,
+        "transport_rejected_us":null,
+        "response":{"error":{"data":{"type":"rpc_dispatch_error","code":"overloaded"}}}
+    });
+    assert_eq!(completed_root_throughput(&rejected), Some(0.5));
 }
 
 #[test]

@@ -353,6 +353,140 @@ async function builtExecutable(log) {
   return [...candidates][0]
 }
 
+function validateDetailedRecovery(value, records, errors) {
+  const object = (candidate) =>
+    candidate !== null && typeof candidate === 'object' && !Array.isArray(candidate)
+  const recovery = value?.recovery
+  const fields = ['roots', 'acknowledged_roots_checked', 'acknowledged_root_identity_errors']
+  // Older version-two archives predate per-Run evidence. Once any new field is present,
+  // partial or malformed evidence is an integrity failure rather than a legacy fallback.
+  if (!fields.some((field) => Object.hasOwn(recovery ?? {}, field))) return
+  if (
+    !fields.every((field) => Object.hasOwn(recovery, field)) ||
+    !object(recovery.roots) ||
+    !Number.isSafeInteger(recovery.acknowledged_roots_checked) ||
+    recovery.acknowledged_roots_checked < 0 ||
+    !Array.isArray(recovery.acknowledged_root_identity_errors) ||
+    !object(value?.raw?.rpcs)
+  ) {
+    errors.push('incomplete_root_identity_evidence')
+    return
+  }
+  if (recovery.acknowledged_root_identity_errors.length)
+    errors.push('reported_root_identity_errors')
+  const roots = Object.entries(recovery.roots)
+  if (roots.length !== value.recovered_root_turns) errors.push('root_identity_count_mismatch')
+  const terminals = { completed: 'Completed', cancelled: 'Cancelled', failed: 'Failed' }
+  const distribution = {}
+  const messages = new Set()
+  let invalidRoot = false
+  for (const [runId, root] of roots) {
+    if (
+      !runId ||
+      !object(root) ||
+      !Number.isSafeInteger(root.owner) ||
+      root.owner < 0 ||
+      root.owner >= value?.case?.roots ||
+      typeof root.assistant_message_id !== 'string' ||
+      !root.assistant_message_id ||
+      messages.has(root.assistant_message_id) ||
+      typeof root.terminal_status !== 'string' ||
+      !Object.hasOwn(terminals, root.terminal_status)
+    ) {
+      invalidRoot = true
+      continue
+    }
+    messages.add(root.assistant_message_id)
+    const status = terminals[root.terminal_status]
+    distribution[status] = (distribution[status] ?? 0) + 1
+  }
+  if (invalidRoot) errors.push('invalid_recovered_root_identity')
+  const statuses = new Set([
+    ...Object.keys(distribution),
+    ...Object.keys(recovery.root_terminal_statuses ?? {})
+  ])
+  if (
+    [...statuses].some(
+      (status) => (distribution[status] ?? 0) !== (recovery.root_terminal_statuses?.[status] ?? 0)
+    )
+  )
+    errors.push('root_identity_terminal_distribution_mismatch')
+  const acknowledged = records.filter(
+    (record) =>
+      record.operation === 'agent.startConversationTurn' && record.response?.result !== undefined
+  )
+  if (recovery.acknowledged_roots_checked !== acknowledged.length)
+    errors.push('acknowledged_root_check_count_mismatch')
+  const runs = new Set()
+  let invalidAcknowledgement = false
+  for (const record of acknowledged) {
+    const result = record.response.result
+    const runId = result?.runId
+    const root =
+      typeof runId === 'string' && Object.hasOwn(recovery.roots, runId)
+        ? recovery.roots[runId]
+        : null
+    if (
+      typeof runId !== 'string' ||
+      !runId ||
+      runs.has(runId) ||
+      !object(root) ||
+      root.owner !== record.owner ||
+      typeof result?.assistantMessageId !== 'string' ||
+      !result.assistantMessageId ||
+      root.assistant_message_id !== result.assistantMessageId ||
+      typeof root.terminal_status !== 'string' ||
+      !Object.hasOwn(terminals, root.terminal_status)
+    )
+      invalidAcknowledgement = true
+    runs.add(runId)
+  }
+  if (invalidAcknowledgement) errors.push('acknowledged_root_identity_mismatch')
+}
+
+function validateTransportEvidence(value, records, errors) {
+  const hasFailure = Object.hasOwn(value?.raw ?? {}, 'transport_failure')
+  const hasState = Object.hasOwn(value?.outbound ?? {}, 'state')
+  if (hasFailure || hasState) {
+    const state = value?.outbound?.state
+    if (
+      !hasFailure ||
+      !hasState ||
+      !state ||
+      typeof state !== 'object' ||
+      Array.isArray(state) ||
+      !['closed', 'failed', 'overloaded'].every((key) => typeof state[key] === 'boolean') ||
+      !Object.hasOwn(state, 'failure_snapshot')
+    ) {
+      errors.push('incomplete_transport_evidence')
+    }
+    if (hasFailure && value.raw.transport_failure !== null) errors.push('transport_failure')
+    if (
+      state &&
+      (state.closed === true ||
+        state.failed === true ||
+        state.overloaded === true ||
+        (Object.hasOwn(state, 'failure_snapshot') && state.failure_snapshot !== null))
+    )
+      errors.push('outbound_not_healthy')
+  }
+  const rejected = records.filter((record) => record.transport_rejected_us != null)
+  if (rejected.length) errors.push('transport_request_rejected')
+  if (
+    rejected.some(
+      (record) =>
+        !Number.isSafeInteger(record.transport_rejected_us) ||
+        record.transport_rejected_us < 0 ||
+        record.dispatch_admitted !== false ||
+        record.handler_started_us != null ||
+        record.responded_us != null ||
+        record.response != null ||
+        record.response_bytes !== 0
+    )
+  )
+    errors.push('invalid_transport_rejection')
+}
+
 /** Independent postconditions: an empty recovery result must never count as a successful run. */
 export function validateBaselineCase(value) {
   const errors = []
@@ -387,6 +521,9 @@ export function validateBaselineCase(value) {
 
   if (value?.format_version >= 2 && (!value?.raw?.rpcs || typeof value.raw.rpcs !== 'object'))
     errors.push('missing_raw_rpcs')
+  const rawRecords = Object.values(value?.raw?.rpcs ?? {})
+  validateDetailedRecovery(value, rawRecords, errors)
+  validateTransportEvidence(value, rawRecords, errors)
   if (value?.raw?.rpcs) {
     const records = Object.values(value.raw.rpcs)
     if (records.some((record) => !record.response || record.responded_us == null))

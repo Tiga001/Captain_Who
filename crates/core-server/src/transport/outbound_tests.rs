@@ -207,6 +207,40 @@ fn overload_diagnostics_distinguish_bytes_and_oversize_without_payloads() {
 }
 
 #[tokio::test]
+async fn multiple_regular_responses_exhaust_total_bytes_and_preserve_failure_evidence() {
+    let response = json!({"id":1,"result":{"private":"synthetic-private-content".repeat(8)}});
+    let bytes = serde_json::to_vec(&response).unwrap().len() + 1;
+    let (sender, mut receiver) = outbound_channel_with_limits(OutboundLimits {
+        data_bytes: bytes * 2,
+        control_bytes: 16,
+        frames: 20,
+        control_frames: 2,
+        merge_bytes: 0,
+    });
+    sender.send(response.clone()).unwrap();
+    sender.send(response.clone()).unwrap();
+    assert!(sender.send(response.clone()).is_err());
+    let evidence = sender.failure_state_for_test();
+    assert_eq!(evidence["closed"], true);
+    assert_eq!(evidence["overloaded"], true);
+    assert_eq!(evidence["failure_snapshot"]["category"], "rpc.response");
+    assert_eq!(evidence["failure_snapshot"]["frame_bytes"], bytes);
+    assert_eq!(evidence["failure_snapshot"]["queue_bytes"], bytes * 2);
+    assert_eq!(evidence["failure_snapshot"]["byte_limit"], true);
+    assert_eq!(evidence["failure_snapshot"]["frame_limit"], false);
+    assert_eq!(evidence["failure_snapshot"]["oversize_busy"], false);
+    assert!(!evidence.to_string().contains("synthetic-private-content"));
+    assert_eq!(receiver.recv().await.unwrap(), response);
+    assert_eq!(receiver.recv().await.unwrap(), response);
+    assert!(receiver.recv().await.is_none());
+    assert_eq!(
+        sender.failure_state_for_test(),
+        evidence,
+        "reading/draining must not erase failure counters"
+    );
+}
+
+#[tokio::test]
 async fn command_output_and_observer_progress_use_data_budget_without_merging() {
     for (method, kind) in [
         ("agent.event", "command_output"),

@@ -378,3 +378,136 @@ test('version two requires planned work and accepted starts to match the raw evi
   assert.ok(validateBaselineCase(mixed).includes('planned_background_read_count_mismatch'))
   assert.ok(validateBaselineCase({ ...value, raw: {} }).includes('missing_raw_rpcs'))
 })
+
+// eslint-disable-next-line @typescript-eslint/explicit-function-return-type -- Plain JavaScript fixture builder.
+function identityCase() {
+  return {
+    ...validCase(),
+    format_version: 2,
+    case: { work: 'text', units: 1, roots: 1, waves: 1 },
+    root_starts_durably_accepted: 1,
+    recovered_root_turns: 1,
+    recovery: {
+      root_terminal_statuses: { Completed: 1 },
+      post_reopen_in_progress: 0,
+      roots: {
+        run: { owner: 0, assistant_message_id: 'output-0-0', terminal_status: 'completed' }
+      },
+      acknowledged_roots_checked: 1,
+      acknowledged_root_identity_errors: []
+    },
+    raw: {
+      rpcs: {
+        1: {
+          operation: 'agent.startConversationTurn',
+          owner: 0,
+          response: { result: { runId: 'run', assistantMessageId: 'output-0-0' } },
+          dispatch_admitted: true,
+          handler_started_us: 1,
+          responded_us: 2,
+          response_bytes: 80,
+          transport_rejected_us: null
+        }
+      },
+      transport_failure: null
+    },
+    outbound: {
+      state: { closed: false, failed: false, overloaded: false, failure_snapshot: null }
+    },
+    metrics: {
+      'agent.startConversationTurn': {
+        offered: 1,
+        success_response: 1,
+        dispatch_admitted: 1,
+        rejected_or_error: 0,
+        no_response: 0
+      }
+    }
+  }
+}
+
+test('per-Run recovery rejects equal-count replacements and wrong owner, message or terminal', () => {
+  const value = identityCase()
+  assert.deepEqual(validateBaselineCase(value), [])
+  const wrongRun = structuredClone(value)
+  wrongRun.recovery.roots.other = wrongRun.recovery.roots.run
+  delete wrongRun.recovery.roots.run
+  assert.ok(validateBaselineCase(wrongRun).includes('acknowledged_root_identity_mismatch'))
+  for (const [field, replacement] of [
+    ['owner', 1],
+    ['assistant_message_id', 'output-0-other'],
+    ['terminal_status', 'in_progress']
+  ]) {
+    const changed = structuredClone(value)
+    changed.recovery.roots.run[field] = replacement
+    assert.ok(validateBaselineCase(changed).includes('acknowledged_root_identity_mismatch'), field)
+  }
+  const extra = structuredClone(value)
+  extra.recovery.roots.extra = {
+    owner: 0,
+    assistant_message_id: 'extra',
+    terminal_status: 'completed'
+  }
+  assert.ok(validateBaselineCase(extra).includes('root_identity_count_mismatch'))
+  const count = structuredClone(value)
+  count.recovery.acknowledged_roots_checked = 0
+  assert.ok(validateBaselineCase(count).includes('acknowledged_root_check_count_mismatch'))
+  const errors = structuredClone(value)
+  errors.recovery.acknowledged_root_identity_errors = [{ run_id: 'run' }]
+  assert.ok(validateBaselineCase(errors).includes('reported_root_identity_errors'))
+})
+
+test('new recovery evidence is all-or-none while older version-two archives remain compatible', () => {
+  const fields = ['roots', 'acknowledged_roots_checked', 'acknowledged_root_identity_errors']
+  for (const field of fields) {
+    const missing = identityCase()
+    delete missing.recovery[field]
+    assert.ok(validateBaselineCase(missing).includes('incomplete_root_identity_evidence'), field)
+    const onlyOne = identityCase()
+    for (const other of fields) if (other !== field) delete onlyOne.recovery[other]
+    assert.ok(validateBaselineCase(onlyOne).includes('incomplete_root_identity_evidence'), field)
+  }
+  const legacy = identityCase()
+  for (const field of fields) delete legacy.recovery[field]
+  delete legacy.raw.transport_failure
+  delete legacy.outbound.state
+  delete legacy.raw.rpcs[1].transport_rejected_us
+  assert.deepEqual(validateBaselineCase(legacy), [])
+  const malformed = identityCase()
+  malformed.recovery.roots = []
+  assert.ok(validateBaselineCase(malformed).includes('incomplete_root_identity_evidence'))
+})
+
+test('transport failure or a post-close request cannot be valid or disguised as an RPC response', () => {
+  const failure = identityCase()
+  failure.raw.transport_failure = { at_us: 3, outbound: { failed: true } }
+  assert.ok(validateBaselineCase(failure).includes('transport_failure'))
+  for (const key of ['closed', 'failed', 'overloaded']) {
+    const failed = identityCase()
+    failed.outbound.state[key] = true
+    assert.ok(validateBaselineCase(failed).includes('outbound_not_healthy'), key)
+  }
+  const snapshot = identityCase()
+  snapshot.outbound.state.failure_snapshot = { byte_limit: true }
+  assert.ok(validateBaselineCase(snapshot).includes('outbound_not_healthy'))
+  for (const missing of ['failure', 'state']) {
+    const partial = identityCase()
+    if (missing === 'failure') delete partial.raw.transport_failure
+    else delete partial.outbound.state
+    assert.ok(validateBaselineCase(partial).includes('incomplete_transport_evidence'))
+  }
+  const rejected = identityCase()
+  Object.assign(rejected.raw.rpcs[1], {
+    transport_rejected_us: 3,
+    dispatch_admitted: false,
+    handler_started_us: null,
+    responded_us: null,
+    response: null,
+    response_bytes: 0
+  })
+  assert.ok(validateBaselineCase(rejected).includes('transport_request_rejected'))
+  assert.ok(!validateBaselineCase(rejected).includes('invalid_transport_rejection'))
+  const disguised = identityCase()
+  disguised.raw.rpcs[1].transport_rejected_us = 3
+  assert.ok(validateBaselineCase(disguised).includes('invalid_transport_rejection'))
+})

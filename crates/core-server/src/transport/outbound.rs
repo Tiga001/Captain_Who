@@ -69,6 +69,7 @@ struct State {
 
 /// Only closed labels and counters: no method supplied by a caller, IDs, paths or payloads.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct FailureSnapshot {
     category: &'static str,
     frame_bytes: usize,
@@ -337,6 +338,17 @@ impl OutboundSender {
             .lock()
             .expect("outbound state poisoned")
             .stats
+    }
+
+    /// Test evidence only. Preserve the first failure's bounded counters without exposing a
+    /// payload or consuming the diagnostic that the real stdio writer reports.
+    #[cfg(test)]
+    pub(crate) fn failure_state_for_test(&self) -> Value {
+        let state = self.shared.state.lock().expect("outbound state poisoned");
+        serde_json::json!({
+            "closed":state.closed,"failed":state.failed,"overloaded":state.overloaded,
+            "failure_snapshot":state.failure_snapshot,
+        })
     }
 }
 
