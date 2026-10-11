@@ -586,6 +586,21 @@ impl AgentService {
                 }
                 drop(steering_retirement);
 
+                if durable_terminal {
+                    // The atomic terminal commit, not unrelated global receipt recovery, ends
+                    // this logical Turn. Retire only its exact process-local owner now: a busy
+                    // admission stream must not make preflight report a completed Turn active.
+                    // Recovery below still retains admission exclusion before inspecting claims;
+                    // receipts, workflow publication and Done retain their original order.
+                    service.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
+                    service.release_turn_concurrency_permit(&worker_run_id);
+                    if !keep_trace_snapshot {
+                        service.discard_trace_snapshot(&worker_run_id);
+                        service.discard_exact_running_context_window_snapshot(&worker_run_id);
+                    }
+                    service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+                }
+
                 let needs_admission = durable_terminal && !deletion_cleanup;
                 let recovery_service = service.clone();
                 let recovery_input = pending_agent_input.clone();
@@ -615,14 +630,14 @@ impl AgentService {
                                 }
                             }
                         }
-                        if durable_terminal || deletion_cleanup {
+                        if deletion_cleanup {
                             service.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
                             service.release_turn_concurrency_permit(&worker_run_id);
-                            service.workflow_readiness_changed(Some(&worker_conversation_id));
-                        }
-                        if deletion_cleanup || (durable_terminal && !keep_trace_snapshot) {
                             service.discard_trace_snapshot(&worker_run_id);
                             service.discard_exact_running_context_window_snapshot(&worker_run_id);
+                        }
+                        if durable_terminal || deletion_cleanup {
+                            service.workflow_readiness_changed(Some(&worker_conversation_id));
                         }
                         if waiting_for_user_input && persistence_committed {
                             service.release_turn_concurrency_permit(&worker_run_id);
@@ -630,7 +645,9 @@ impl AgentService {
                         // This worker has exited even if SQLite could not commit its terminal state. Retain the
                         // durable fence for recovery, but never advertise an abandoned token as a live executor.
                         // The identity check preserves a newer approval/human-input continuation's token.
-                        service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+                        if !durable_terminal {
+                            service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+                        }
 
                         if waiting_for_user_input && cancellation_token.is_cancelled() {
                             service.cancel_waiting_human_input_run(&worker_run_id);
@@ -838,45 +855,45 @@ struct DeferredRuntimeSettlement {
 impl DeferredRuntimeSettlement {
     fn try_finish(mut self) -> Option<Self> {
         if self.needs_admission && !self.service.is_agent_input_scope_deleting(&self.input) {
-            // Never retain a domain guard across an executor or timer await. In the common case
-            // this executes inside the originally reserved completion job, even after close.
-            let service = self.service.clone();
-            match service.conversation_admission.try_lock() {
-                Ok(_admission) => {
-                    if let Err(error) = service.storage.workflow_execution_recover_claims() {
-                        eprintln!("failed to settle organization input receipts: {error}");
-                    }
-                }
-                Err(std::sync::TryLockError::Poisoned(error)) => {
-                    let _admission = error.into_inner();
-                    if let Err(error) = service.storage.workflow_execution_recover_claims() {
-                        eprintln!("failed to settle organization input receipts: {error}");
-                    }
-                }
-                Err(std::sync::TryLockError::WouldBlock) => return Some(self),
-            };
+            // Its durable terminal and exact owner retirement already happened. A single
+            // bounded recovery worker waits for admission; never repeatedly requeue this tail
+            // on completion workers while an unrelated stream of admissions is busy.
+            return Some(self);
         }
+        // Waiting/failed-persistence segments have no global recovery work. Their cancellation
+        // retirement must not queue behind an admission holder waiting for those same segments.
         self.delivery = Some((self.complete.take().expect("completion is consumed once"))());
         Some(self)
     }
 
     async fn finish(mut self) -> Result<(), crate::application::blocking_executor::BlockingError> {
-        loop {
-            if let Some(delivery) = self.delivery.take() {
-                return delivery.finish().await;
-            }
-            // A competing admission owns the lock. Yield physically rather than retaining either
-            // completion worker while deletion might be waiting for a different Turn to settle.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let executor = self.service.blocking_work.completion.clone();
-            let reservation = executor
-                .reserve(runtime_work_estimated_bytes(&self.input))
-                .await?;
-            match reservation.submit(move || self.try_finish()).wait().await? {
-                Some(pending) => self = pending,
-                None => return Ok(()),
-            }
+        if let Some(delivery) = self.delivery.take() {
+            return delivery.finish().await;
         }
+        let executor = self.service.blocking_work.recovery.clone();
+        let reservation = executor
+            .reserve(runtime_work_estimated_bytes(&self.input))
+            .await?;
+        let delivery = reservation
+            .submit(move || {
+                if self.needs_admission && !self.service.is_agent_input_scope_deleting(&self.input)
+                {
+                    // Keep the original claim/preparation exclusion. This lane is independent of
+                    // preparation, control, lease, observation and durable terminal settlement.
+                    let _admission = self
+                        .service
+                        .conversation_admission
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if let Err(error) = self.service.storage.workflow_execution_recover_claims() {
+                        eprintln!("failed to settle organization input receipts: {error}");
+                    }
+                }
+                (self.complete.take().expect("completion is consumed once"))()
+            })
+            .wait()
+            .await?;
+        delivery.finish().await
     }
 }
 

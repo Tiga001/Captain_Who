@@ -224,6 +224,7 @@ mod runtime_isolation_tests {
             );
         }
         drop(release);
+        let mut held_completion_capacity = Vec::new();
         if hold_admission {
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
@@ -241,8 +242,10 @@ mod runtime_isolation_tests {
             })
             .await
             .unwrap();
-            // Recovery still awaits admission before releasing the owner, but its try-lock retry
-            // must free the sole physical completion worker for an unrelated durable settlement.
+            // Global receipt recovery still awaits admission, but a durable completed Turn must
+            // release its exact owner already. Otherwise a later start incorrectly rejects the
+            // completed conversation as active while unrelated admissions keep arriving.
+            // The sole completion worker must also remain available for unrelated settlement.
             tokio::time::timeout(
                 Duration::from_secs(1),
                 service.blocking_work.completion.run(1, || ()),
@@ -250,9 +253,30 @@ mod runtime_isolation_tests {
             .await
             .unwrap()
             .unwrap();
-            assert!(service
-                .has_conversation_turn_occupancy(&started_turn.conversation_id)
-                .unwrap());
+            assert!(
+                !service
+                    .has_conversation_turn_occupancy(&started_turn.conversation_id)
+                    .unwrap(),
+                "global workflow recovery must not extend completed Turn occupancy"
+            );
+            assert!(!service
+                .cancellations
+                .lock()
+                .unwrap()
+                .contains_key(&started_turn.run_id));
+            while let Ok(notification) = receiver.try_recv() {
+                assert_ne!(
+                    notification["params"]["type"], "done",
+                    "Done must still wait for receipt recovery and delivery: {notification}"
+                );
+            }
+            // Retain every remaining completion slot until Done. Receipt recovery must finish
+            // on its own worker after admission releases; a per-Turn completion retry loop would
+            // need another slot and deadlock here. The one retained slot is the handoff budget.
+            for _ in 0..107 {
+                held_completion_capacity
+                    .push(service.blocking_work.completion.try_reserve(0).unwrap());
+            }
         }
         drop(admission);
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -278,8 +302,10 @@ mod runtime_isolation_tests {
             .has_conversation_turn_occupancy(&started_turn.conversation_id)
             .unwrap());
         provider.await.unwrap();
+        drop(held_completion_capacity);
         service.blocking_work.preparation.shutdown().await;
         service.blocking_work.completion.shutdown().await;
+        service.blocking_work.recovery.shutdown().await;
         service.blocking_work.maintenance.shutdown().await;
         service.blocking_work.control.shutdown().await;
     }
@@ -555,6 +581,7 @@ mod runtime_isolation_tests {
         }
         service.blocking_work.preparation.shutdown().await;
         service.blocking_work.completion.shutdown().await;
+        service.blocking_work.recovery.shutdown().await;
         service.blocking_work.maintenance.shutdown().await;
         service.blocking_work.control.shutdown().await;
     }
@@ -663,6 +690,7 @@ mod runtime_isolation_tests {
         );
         service.blocking_work.preparation.shutdown().await;
         service.blocking_work.completion.shutdown().await;
+        service.blocking_work.recovery.shutdown().await;
         service.blocking_work.maintenance.shutdown().await;
         service.blocking_work.control.shutdown().await;
     }

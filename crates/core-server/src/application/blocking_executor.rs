@@ -393,6 +393,7 @@ pub(crate) struct BlockingWork {
     pub(crate) lease: BlockingExecutor,
     pub(crate) control: BlockingExecutor,
     pub(crate) completion: BlockingExecutor,
+    pub(crate) recovery: BlockingExecutor,
 }
 impl BlockingWork {
     pub(crate) fn new() -> Result<Self, BlockingError> {
@@ -408,6 +409,15 @@ impl BlockingWork {
             completion: BlockingExecutor::new(
                 "completion",
                 2,
+                limit.saturating_mul(2).saturating_add(8),
+                limit.max(8).saturating_mul(8 * MIB),
+            )?,
+            // A completed Turn may need the global admission fence for receipt recovery.
+            // Its old cancellation owner is retired before using this lane, so deletion can
+            // drain real completion jobs without waiting on its own admission lock here.
+            recovery: BlockingExecutor::new(
+                "recovery",
+                1,
                 limit.saturating_mul(2).saturating_add(8),
                 limit.max(8).saturating_mul(8 * MIB),
             )?,

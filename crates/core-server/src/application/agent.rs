@@ -1812,6 +1812,9 @@ impl AgentService {
         self.blocking_work.preparation.shutdown_submitted().await;
         self.blocking_work.control.shutdown_submitted().await;
         self.blocking_work.completion.shutdown_submitted().await;
+        // Completion must drain before fencing its deferred receipt-recovery handoffs. A tail
+        // not yet submitted at this final boundary keeps its durable terminal/receipt facts.
+        self.blocking_work.recovery.shutdown_submitted().await;
         self.blocking_work.maintenance.shutdown_submitted().await;
         self.blocking_work.lease.shutdown_submitted().await;
     }
