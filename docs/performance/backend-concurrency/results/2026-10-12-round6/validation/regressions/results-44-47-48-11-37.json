@@ -1,0 +1,82 @@
+[
+  {
+    "index": 44,
+    "kind": "server",
+    "filter": "application::notification",
+    "returncode": 0,
+    "duration_s": 0.938,
+    "log": "44-application-notification.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 47,
+    "kind": "server",
+    "filter": "transport::automation_rpc::tests::host_notification_rpc_",
+    "returncode": 101,
+    "duration_s": 0.014,
+    "log": "47-transport-automation_rpc-tests-host_notification_rpc_.log",
+    "counts": [
+      "FAILED",
+      "0",
+      "2",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 48,
+    "kind": "server",
+    "filter": "application::agent::tests::prepared_history",
+    "returncode": 101,
+    "duration_s": 0.013,
+    "log": "48-application-agent-tests-prepared_history.log",
+    "counts": [
+      "FAILED",
+      "0",
+      "14",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 11,
+    "kind": "server",
+    "filter": "runtime_isolation_tests",
+    "returncode": 0,
+    "duration_s": 5.4,
+    "log": "11-runtime_isolation_tests.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 37,
+    "kind": "server",
+    "filter": "runtime_checkpoint",
+    "returncode": 0,
+    "duration_s": 2.598,
+    "log": "37-runtime_checkpoint.log",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  }
+]

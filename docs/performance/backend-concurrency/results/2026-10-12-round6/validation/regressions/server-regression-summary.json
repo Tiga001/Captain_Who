@@ -1,0 +1,19 @@
+{
+  "groups": 47,
+  "distinct_tests": 555,
+  "passed_executions": 562,
+  "failed_executions": 0,
+  "ignored_executions": 0,
+  "binary_sha256": [
+    "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b",
+    "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082"
+  ],
+  "duration_sum_s": 98.769,
+  "initial_fixture_failures": 16,
+  "initial_failure_evidence": "../diagnostics/server-credential-fixture-first-run",
+  "rerun_scope": [
+    47,
+    48
+  ],
+  "debug_only_continuous_send": "not included in release inventory; separate debug run required"
+}

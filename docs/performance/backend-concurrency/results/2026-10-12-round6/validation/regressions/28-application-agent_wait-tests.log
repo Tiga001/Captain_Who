@@ -1,0 +1,11 @@
+
+running 6 tests
+test application::agent_wait::tests::durable_fallback_observes_another_process_without_notification ... ok
+test application::agent_wait::tests::notification_after_registration_rechecks_durable_store ... ok
+test application::agent_wait::tests::quiet_wait_uses_read_probes_without_repeated_settlement_transactions ... ok
+test application::agent_wait::tests::returns_existing_pending_without_waiting ... ok
+test application::agent_wait::tests::steer_wins_over_simultaneously_ready_result_without_polling_it ... ok
+test application::agent_wait::tests::timeout_cancel_shutdown_and_steer_are_independent_stop_domains ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1246 filtered out; finished in 0.11s
+

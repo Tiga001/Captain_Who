@@ -1,0 +1,21 @@
+
+running 16 tests
+test application::agent::runtime_checkpoint::tests::failed_write_and_lost_ack_keep_exact_request_before_coalesced_successor ... ok
+test application::agent::runtime_checkpoint::tests::reset_restores_exact_content_and_committed_narration_belongs_to_trace ... ok
+test application::agent::runtime_checkpoint::tests::terminal_event_does_not_claim_a_durable_outcome ... ok
+test application::agent::runtime_checkpoint_child_tests::spawned_child_cancel_preserves_checkpoint_and_rejects_late_stream_without_observer ... ok
+test application::agent::runtime_checkpoint_child_tests::spawned_child_stream_checkpoints_and_reopens_without_observer ... ok
+test application::agent::runtime_checkpoint_failure_tests::approval_checkpoint_failure_preserves_usage_once_without_exposing_action ... ok
+test application::agent::runtime_checkpoint_failure_tests::completion_checkpoint_failure_preserves_usage_trace_and_response ... ok
+test application::agent::runtime_checkpoint_human_tests::failed_human_checkpoint_barrier_never_publishes_or_leaves_a_suspension ... ok
+test application::agent::runtime_checkpoint_human_tests::human_wait_without_frontend_reopens_narration_and_resumes_exact_identity_once ... ok
+test application::agent::runtime_checkpoint_tests::committed_stream_survives_process_kill_and_startup_reconciliation ... ok
+test application::agent::runtime_checkpoint_tests::frontend_closed_stream_is_saved_and_terminal_reopens_exactly ... ok
+test application::agent::runtime_checkpoint_tests::process_crash_fixture ... ok
+test application::agent::runtime_checkpoint_web_read::tests::read_error_labels_and_generated_artifact_receipts_keep_the_existing_ui_inputs ... ok
+test application::agent::runtime_checkpoint_web_read::tests::read_thumbnail_matches_renderer_limits_and_keeps_no_full_image_or_body ... ok
+test application::agent::runtime_checkpoint_web_read::tests::retains_all_web_display_sources_without_private_fields_or_history_truncation ... ok
+test application::agent::runtime_checkpoint_web_read::tests::unrelated_tools_never_enter_this_checkpoint_and_fetch_input_is_exact ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 1231 filtered out; finished in 2.56s
+

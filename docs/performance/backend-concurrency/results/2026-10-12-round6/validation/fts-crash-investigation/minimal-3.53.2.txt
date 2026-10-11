@@ -1,0 +1,24 @@
+SQLite version=3.53.2
+SQL: PRAGMA journal_mode=WAL; CREATE TABLE messages(content TEXT); CREATE VIRTUAL TABLE evidence USING fts5(content,tokenize='trigram'); CREATE TRIGGER message_insert AFTER INSERT ON messages BEGIN INSERT INTO evidence(rowid,content) VALUES(NEW.rowid,NEW.content); END; CREATE TRIGGER message_update AFTER UPDATE ON messages BEGIN DELETE FROM evidence WHERE rowid=OLD.rowid; INSERT INTO evidence(rowid,content) VALUES(NEW.rowid,NEW.content); END; INSERT INTO messages VALUES('confirmed checkpoint');
+journal_mode=wal 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=
+SQL: UPDATE messages SET content='committed terminal'
+rc=0 error=
+SQL: SELECT content FROM messages
+content=committed terminal 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=fts5: checksum mismatch for table "evidence" 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=
+SQL: SELECT content FROM evidence WHERE evidence MATCH 'committed'
+content=committed terminal 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=

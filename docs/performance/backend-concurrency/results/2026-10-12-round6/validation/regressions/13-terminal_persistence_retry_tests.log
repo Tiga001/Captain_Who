@@ -1,0 +1,7 @@
+
+running 2 tests
+test application::agent::turn_executor::terminal_persistence_retry_tests::exhausted_retry_keeps_the_last_staged_terminal_state_for_reconciliation ... ok
+test application::agent::turn_executor::terminal_persistence_retry_tests::retries_restore_staged_state_and_apply_the_terminal_segment_once ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1250 filtered out; finished in 0.34s
+

@@ -1,0 +1,7 @@
+
+running 1 test
+test storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery ... ROUND6_METRIC tree_nodes=64 facts=10000 results=63 events=17088 writers=4 sqlite_busy_errors=0 max_enqueue_us=15736 query_us=2371 event_catchup_us=99284 max_event_page_us=3711 restarts=20 max_restart_us=33948 database_bytes=30306304 wall_ms=16169
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3486 filtered out; finished in 16.17s
+

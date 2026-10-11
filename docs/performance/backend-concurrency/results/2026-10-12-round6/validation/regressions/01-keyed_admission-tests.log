@@ -1,0 +1,29 @@
+
+running 8 tests
+test application::agent::keyed_admission::tests::keyed_admission_conflicting_requests_are_fifo ... ok
+test application::agent::keyed_admission::tests::keyed_admission_global_holder_excludes_every_resource ... ok
+test application::agent::keyed_admission::tests::keyed_admission_multikey_claim_is_atomic_sorted_and_fair ... ok
+test application::agent::keyed_admission::tests::keyed_admission_nested_acquisition_is_rejected_without_poisoning_owner ... 
+thread 'application::agent::keyed_admission::tests::keyed_admission_nested_acquisition_is_rejected_without_poisoning_owner' (59543981) panicked at crates/core-server/src/application/agent/keyed_admission.rs:122:13:
+nested resource admission is forbidden; declare all resources in one request
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'application::agent::keyed_admission::tests::keyed_admission_nested_acquisition_is_rejected_without_poisoning_owner' (59543981) panicked at crates/core-server/src/application/agent/keyed_admission.rs:122:13:
+nested resource admission is forbidden; declare all resources in one request
+ok
+test application::agent::keyed_admission::tests::keyed_admission_rejects_unknown_empty_resource_set ... 
+thread 'application::agent::keyed_admission::tests::keyed_admission_rejects_unknown_empty_resource_set' (59543982) panicked at crates/core-server/src/application/agent/keyed_admission.rs:99:9:
+resource admission requires a non-empty, authoritative Conversation resource set
+
+thread 'application::agent::keyed_admission::tests::keyed_admission_rejects_unknown_empty_resource_set' (59543982) panicked at crates/core-server/src/application/agent/keyed_admission.rs:99:9:
+resource admission requires a non-empty, authoritative Conversation resource set
+ok
+test application::agent::keyed_admission::tests::keyed_admission_unrelated_conversation_passes_blocked_same_key_waiter ... ok
+test application::agent::keyed_admission::tests::keyed_admission_unwind_releases_exact_keys_and_does_not_retain_registry_entries ... 
+thread 'application::agent::keyed_admission::tests::keyed_admission_unwind_releases_exact_keys_and_does_not_retain_registry_entries' (59543987) panicked at crates/core-server/src/application/agent/keyed_admission/tests.rs:204:9:
+synthetic preparation failure
+ok
+test application::agent::keyed_admission::tests::keyed_admission_waiting_global_cannot_be_overtaken_by_new_conversation ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1244 filtered out; finished in 0.00s
+

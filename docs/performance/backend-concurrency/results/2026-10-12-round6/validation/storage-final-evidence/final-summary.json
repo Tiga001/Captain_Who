@@ -1,0 +1,30 @@
+{
+  "storage": {
+    "passed": 1227,
+    "failed": 0,
+    "ignored": 1,
+    "log_sha256": "6fc0695c3f714f4da00c18c482d4d041b2a71712a6aef997098c452e16e62b8d",
+    "inventory_count": 1228
+  },
+  "performance": {
+    "passed": 7,
+    "failed": 0,
+    "ignored": 0,
+    "log_sha256": "65a86cba4e61bb3b72b47bc6561540cf678ad4c6a20e1f260e94c046f8829398",
+    "inventory_count": 7
+  },
+  "storage_source_changed_since_test_start": [],
+  "unique_ordinary_passed": 1234,
+  "extra_ignored_profile": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "elapsed_seconds": 16.2285105,
+    "name": "storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery",
+    "log_parse_note": "The single exact test prints ROUND6_METRIC between the harness test name and ok; pass is confirmed by its final 1-passed result and process exit 0."
+  },
+  "all_unique_passed": 1235,
+  "storage_source_changed_through_extra_profile": [],
+  "binary_sha256_after": "3696d25b57e9c271814ccace77b38f439aff96da687341367068e4fc9b4f4563",
+  "round6_metric": "ROUND6_METRIC tree_nodes=64 facts=10000 results=63 events=17088 writers=4 sqlite_busy_errors=0 max_enqueue_us=15736 query_us=2371 event_catchup_us=99284 max_event_page_us=3711 restarts=20 max_restart_us=33948 database_bytes=30306304 wall_ms=16169"
+}

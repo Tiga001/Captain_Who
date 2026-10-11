@@ -1,0 +1,7 @@
+{
+  "binary_sha256": "946075d21b47a1e5b22a6171ed7ad7762580e6e1e5df391a15bda040bb309a17",
+  "fixture_sha256": "97096a15a1786444a06cda0cc4b3a4f81aa6b9cf1fffc482ec62a0431e2ed037",
+  "change_from_r2": "Only post-measurement throughput eligibility and synthetic validation test; no provider, workload, dispatch, collection or production behavior changes.",
+  "r2_delta_patch": "resume-raw-throughput-only.patch",
+  "build_log": "build-resume-final.stdout.log"
+}

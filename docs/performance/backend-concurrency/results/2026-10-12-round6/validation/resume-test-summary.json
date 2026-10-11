@@ -1,0 +1,215 @@
+{
+  "audit_date": "2026-10-12",
+  "scope": "Read-only source/hash/log audit, followed by creation of this report; no build, test, or benchmark executed by this reviewer.",
+  "deduplication_key": "crate plus exact full Rust test name; release/debug variants of the same full server name count once",
+  "previous_verified": {
+    "core_distinct_passed": 1235,
+    "server_release_distinct_passed": 555,
+    "server_debug_passed_executions": 15,
+    "server_debug_additional_distinct": 1,
+    "all_distinct_passed": 1791,
+    "all_passed_executions": 1812,
+    "final_failures": 0
+  },
+  "supplemental_current_r2": {
+    "log_groups": [
+      {
+        "path": "current-outbound-r2-tests.log",
+        "passed_executions": 13,
+        "sha256": "8a1fcd59cee41c4bcb894bbc214d5eb63042949963912eeabf9b1b3d02baeb1a"
+      },
+      {
+        "path": "current-fixture-r2-tests.log",
+        "passed_executions": 5,
+        "sha256": "9891b6d24706d8e76025333a069f003257863a993f0ffe3abfd35bb0d3b2e5f7"
+      }
+    ],
+    "passed_executions": 18,
+    "distinct_names_in_these_logs": 18,
+    "new_distinct_tests": 3,
+    "repeat_passed_executions": 15,
+    "new_test_names": [
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_closed_transport_never_invokes_a_later_handler",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_recovery_checks_exact_acknowledged_identity_and_terminal",
+      "transport::outbound::tests::multiple_regular_responses_exhaust_total_bytes_and_preserve_failure_evidence"
+    ],
+    "repeated_test_names": [
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_only_classifies_explicit_load_rejections",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_payloads_use_current_protocol_contracts",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_quantiles_are_exact_and_small_p99_is_labelled",
+      "transport::outbound::tests::adjacent_delta_merge_preserves_unicode_escaping_empty_parts_and_all_boundaries",
+      "transport::outbound::tests::byte_and_count_budgets_reserve_control_space_and_fail_the_entire_connection",
+      "transport::outbound::tests::command_output_and_observer_progress_use_data_budget_without_merging",
+      "transport::outbound::tests::disconnect_wakes_admission_even_when_producers_ignore_send_errors",
+      "transport::outbound::tests::large_terminal_keeps_its_existing_payload_without_a_new_size_cap_or_fifo_reordering",
+      "transport::outbound::tests::observer_cursor_and_unknown_stage_fields_are_never_merged",
+      "transport::outbound::tests::one_oversized_response_is_leased_until_its_owned_frame_is_released",
+      "transport::outbound::tests::overload_diagnostics_distinguish_bytes_and_oversize_without_payloads",
+      "transport::outbound::tests::overload_drains_accepted_fifo_then_emits_independent_failure_frame",
+      "transport::outbound::tests::slow_stream_first_character_has_no_coalescing_timer",
+      "transport::outbound::tests::stalled_writer_has_no_normal_deadline_but_shutdown_interrupts_blocked_write",
+      "transport::outbound::tests::writer_batches_ready_frames_and_flushes_tail_before_terminal_and_shutdown"
+    ],
+    "final_failures": 0
+  },
+  "combined_verified": {
+    "core_distinct_passed": 1235,
+    "server_release_distinct_passed": 559,
+    "server_debug_additional_distinct": 1,
+    "all_distinct_passed": 1795,
+    "all_passed_executions": 1849,
+    "final_failures": 0
+  },
+  "frontend_reused": {
+    "unit": 129,
+    "browser": 254,
+    "native_electron_baseline": 1,
+    "native_electron_current": 1,
+    "scope_production_files_hash_matched": 20,
+    "test_files_hash_matched": 19,
+    "sha256_manifest_entries_matched": 24
+  },
+  "storage_reused": {
+    "source_manifest_files_hash_matched": 318
+  },
+  "node_supplemental": {
+    "log": "runner-outbound-recovery-tests.log",
+    "passed": 17,
+    "failed": 0,
+    "counting_note": "A separate rerun of the runner suite; do not add 17 to the previous 25 infrastructure unique tests without exact Node subtest deduplication."
+  },
+  "sources": [
+    {
+      "path": "correctness-summary.json",
+      "sha256": "5239a2acf71bb3319954becb564cc9c3904e63945330b111103e33b80ebf7dab"
+    },
+    {
+      "path": "storage-final-evidence/all-unique-passed.txt",
+      "sha256": "6bd26c296e852b5b12b2477a02169ea2e8214430fbd3fc4d59894b04a61cdd5b"
+    },
+    {
+      "path": "storage-final-evidence/final-summary.json",
+      "sha256": "673b462bb97d879f2599413fc6ca117dfe70de06ceb6179ab0d49ff3e2767632"
+    },
+    {
+      "path": "regressions/server-tests-deduplicated.txt",
+      "sha256": "b1d86404269461c695564b76ce8934d133fe65211f4250019aa921bc7326d75f"
+    },
+    {
+      "path": "regressions/server-regression-summary.json",
+      "sha256": "a70421463cfedc8e9e73c5d394d707d9796bd3c192301113d4d027e6141507c5"
+    },
+    {
+      "path": "debug-history-final-r3.log",
+      "sha256": "75b7fd0b92cfc516104992a9ca0c0583ed534d1a573591e26c116a7c7febef0e"
+    },
+    {
+      "path": "current-outbound-r2-tests.log",
+      "sha256": "8a1fcd59cee41c4bcb894bbc214d5eb63042949963912eeabf9b1b3d02baeb1a"
+    },
+    {
+      "path": "current-fixture-r2-tests.log",
+      "sha256": "9891b6d24706d8e76025333a069f003257863a993f0ffe3abfd35bb0d3b2e5f7"
+    },
+    {
+      "path": "delivery-fixture-tests.log",
+      "sha256": "692464250edf65a01d1057cc5583b2c8f2d2d013a9b844fc9194f54d9fbdf05d"
+    },
+    {
+      "path": "delivery-outbound-tests.log",
+      "sha256": "13cc98cbe44cefedbba5e245c1282bbfab5b1aefda98df4e8b91f6a6d6f5625c"
+    },
+    {
+      "path": "infrastructure-resume-final.log",
+      "sha256": "b0cd42996859749b176c5a4b001d5ce40b19ad11e0dabd3bee6640e0767c714e"
+    },
+    {
+      "path": "clippy-resume-final.log",
+      "sha256": "9e00a48d64c7be8ed1ea42fffac9e85d34be8e25793d469c156b55f94bf1ac69"
+    },
+    {
+      "path": "build-resume-final.stdout.log",
+      "sha256": "a46d12c8bca4f3509352f864c10d86adbe51ae6a7c9f7da7dea35597a6316ff5"
+    },
+    {
+      "path": "delivery-binary-provenance.json",
+      "sha256": "65914ec35106f36cbb57a5870c3d96338345d0f019bd388245175271e18ca20f"
+    },
+    {
+      "path": "resume-raw-throughput-only.patch",
+      "sha256": "ef42fe14f2d0ec9f6d53f518b522f20c2dec41deec0533906bdad61f219c601c"
+    }
+  ],
+  "limits": [
+    "The previous 1812 execution count is taken from correctness-summary.json and cross-checked with its 1235 core, 562 server release and 15 debug components; this audit does not claim to parse every previous command log anew.",
+    "Counts include compiler-reported child-process helper tests; they are not extra fault scenarios.",
+    "Matrix and native Electron results tied to 99349b2f remain evidence for that production implementation; the new collector changes require their own binary/provenance record and matching long-run evidence.",
+    "Full AppShell/Markdown, hardware click/compositor paint, real ENOSPC/IOERR/fsync/power loss and complete data-root rollback remain outside verified coverage.",
+    "The r2 supplement adds 3 unique tests from 18 executions, and delivery supplement adds 1 further unique test from 19 executions. The total is 1795 unique tests / 1849 passed executions. Build/Clippy/Node checks are separate from Rust test execution counts."
+  ],
+  "supplemental_delivery": {
+    "log_groups": [
+      {
+        "path": "delivery-fixture-tests.log",
+        "passed_executions": 6,
+        "sha256": "692464250edf65a01d1057cc5583b2c8f2d2d013a9b844fc9194f54d9fbdf05d"
+      },
+      {
+        "path": "delivery-outbound-tests.log",
+        "passed_executions": 13,
+        "sha256": "13cc98cbe44cefedbba5e245c1282bbfab5b1aefda98df4e8b91f6a6d6f5625c"
+      }
+    ],
+    "passed_executions": 19,
+    "distinct_names_in_these_logs": 19,
+    "new_distinct_tests": 1,
+    "repeat_passed_executions": 18,
+    "new_test_names": [
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_throughput_is_null_without_complete_healthy_recovery"
+    ],
+    "repeated_test_names": [
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_closed_transport_never_invokes_a_later_handler",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_only_classifies_explicit_load_rejections",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_payloads_use_current_protocol_contracts",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_quantiles_are_exact_and_small_p99_is_labelled",
+      "application::agent::tests::backend_concurrency_baseline::backend_baseline_recovery_checks_exact_acknowledged_identity_and_terminal",
+      "transport::outbound::tests::adjacent_delta_merge_preserves_unicode_escaping_empty_parts_and_all_boundaries",
+      "transport::outbound::tests::byte_and_count_budgets_reserve_control_space_and_fail_the_entire_connection",
+      "transport::outbound::tests::command_output_and_observer_progress_use_data_budget_without_merging",
+      "transport::outbound::tests::disconnect_wakes_admission_even_when_producers_ignore_send_errors",
+      "transport::outbound::tests::large_terminal_keeps_its_existing_payload_without_a_new_size_cap_or_fifo_reordering",
+      "transport::outbound::tests::multiple_regular_responses_exhaust_total_bytes_and_preserve_failure_evidence",
+      "transport::outbound::tests::observer_cursor_and_unknown_stage_fields_are_never_merged",
+      "transport::outbound::tests::one_oversized_response_is_leased_until_its_owned_frame_is_released",
+      "transport::outbound::tests::overload_diagnostics_distinguish_bytes_and_oversize_without_payloads",
+      "transport::outbound::tests::overload_drains_accepted_fifo_then_emits_independent_failure_frame",
+      "transport::outbound::tests::slow_stream_first_character_has_no_coalescing_timer",
+      "transport::outbound::tests::stalled_writer_has_no_normal_deadline_but_shutdown_interrupts_blocked_write",
+      "transport::outbound::tests::writer_batches_ready_frames_and_flushes_tail_before_terminal_and_shutdown"
+    ],
+    "final_failures": 0
+  },
+  "infrastructure_final": {
+    "log": "infrastructure-resume-final.log",
+    "passed_executions": 28,
+    "distinct_subtest_names": 28,
+    "failed": 0,
+    "sha256": "b0cd42996859749b176c5a4b001d5ce40b19ad11e0dabd3bee6640e0767c714e",
+    "previous_25_names_preserved": true,
+    "new_names_relative_to_previous_25": [
+      "new recovery evidence is all-or-none while older version-two archives remain compatible",
+      "per-Run recovery rejects equal-count replacements and wrong owner, message or terminal",
+      "transport failure or a post-close request cannot be valid or disguised as an RPC response"
+    ],
+    "counting_note": "Final 28-test suite includes the previous 25 and collector validator additions; do not add historical rerun execution counts to claim more unique tests."
+  },
+  "delivery_build_and_clippy": {
+    "release_build_success": true,
+    "build_log": "build-resume-final.stdout.log",
+    "binary_sha256": "946075d21b47a1e5b22a6171ed7ad7762580e6e1e5df391a15bda040bb309a17",
+    "fixture_sha256": "97096a15a1786444a06cda0cc4b3a4f81aa6b9cf1fffc482ec62a0431e2ed037",
+    "clippy_passed": true,
+    "clippy_log": "clippy-resume-final.log",
+    "change_from_r2": "Only post-measurement throughput eligibility and synthetic validation test; no provider, workload, dispatch, collection or production behavior changes."
+  }
+}

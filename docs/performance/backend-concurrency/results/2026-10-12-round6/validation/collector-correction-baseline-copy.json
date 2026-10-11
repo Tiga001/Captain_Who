@@ -1,0 +1,7 @@
+{
+  "fixture": "crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs",
+  "sha256": "75fc4fad46311d39942dc4bdca61125527790d2306d8919d84b44efd3e84828a",
+  "baseline_fixture_identical": true,
+  "outbound_cfg_test_patch_sha256": "e5735a5729ba8fcc1d03911260a1578dc9e9601962177c357060fca73a8f11e4",
+  "scope": "Only identical benchmark fixture and cfg(test) diagnostic accessor copied; baseline production behavior unchanged."
+}

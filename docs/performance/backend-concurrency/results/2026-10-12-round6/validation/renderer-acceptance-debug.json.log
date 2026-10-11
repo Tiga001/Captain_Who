@@ -1,0 +1,142 @@
+[core-server] invalid JSON-RPC response SyntaxError: Unexpected end of JSON input
+    at JSON.parse (<anonymous>)
+    at CoreJsonRpcClient.handleLine (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15927:22)
+    at Interface.<anonymous> (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15768:64)
+    at Interface.emit (node:events:519:28)
+    at [_onLine] [as _onLine] (node:internal/readline/interface:419:12)
+    at [_normalWrite] [as _normalWrite] (node:internal/readline/interface:613:22)
+    at Socket.ondata (node:internal/readline/interface:250:23)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+[core-server] invalid JSON-RPC response SyntaxError: Unexpected token 'r', "running 1 test" is not valid JSON
+    at JSON.parse (<anonymous>)
+    at CoreJsonRpcClient.handleLine (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15927:22)
+    at Interface.<anonymous> (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15768:64)
+    at Interface.emit (node:events:519:28)
+    at [_onLine] [as _onLine] (node:internal/readline/interface:419:12)
+    at [_normalWrite] [as _normalWrite] (node:internal/readline/interface:613:22)
+    at Socket.ondata (node:internal/readline/interface:250:23)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+[core-server] managed Artifact Runtime is unavailable: Artifact runtime component directory `/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/.cache/artifact-runtime/current` does not exist.
+
+[core-server] invalid JSON-RPC response SyntaxError: Unexpected token 'e', "test transp"... is not valid JSON
+    at JSON.parse (<anonymous>)
+    at CoreJsonRpcClient.handleLine (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15927:22)
+    at Interface.<anonymous> (/private/var/folders/sc/nx18hfrd579f3y2g37x101340000gn/T/captain-acceptance-electron-yJ4Ggg/backendAcceptance.electron.cjs:15768:64)
+    at Interface.emit (node:events:519:28)
+    at [_onLine] [as _onLine] (node:internal/readline/interface:419:12)
+    at [_normalWrite] [as _normalWrite] (node:internal/readline/interface:613:22)
+    at Socket.ondata (node:internal/readline/interface:250:23)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+[core-server] 2026-10-11T14:58:36.349243Z  INFO core_performance: outbound queue snapshot bytes=0 frames=0 oversize_in_use=false peak_bytes=399 peak_frames=3 peak_oversize_bytes=0 accepted=3 merged=0
+
+[core-server] 2026-10-11T14:58:36.349277Z  INFO core_performance: performance window stage="blocking.execution" operation="maintenance" count=1 total_us=2 max_us=2 bytes=16384 max_bytes=16384 p50_upper_us=2 p95_upper_us=2 p99_upper_us=2
+2026-10-11T14:58:36.349281Z  INFO core_performance: performance window stage="blocking.execution" operation="preparation" count=1 total_us=235 max_us=235 bytes=4194304 max_bytes=4194304 p50_upper_us=235 p95_upper_us=235 p99_upper_us=235
+2026-10-11T14:58:36.349283Z  INFO core_performance: performance window stage="blocking.execution" operation="rpc_identity" count=1 total_us=3 max_us=3 bytes=0 max_bytes=0 p50_upper_us=3 p95_upper_us=3 p99_upper_us=3
+2026-10-11T14:58:36.349284Z  INFO core_performance: performance window stage="blocking.queue_wait" operation="maintenance" count=2 total_us=12 max_us=7 bytes=32768 max_bytes=16384 p50_upper_us=5 p95_upper_us=7 p99_upper_us=7
+2026-10-11T14:58:36.349285Z  INFO core_performance: performance window stage="blocking.queue_wait" operation="preparation" count=1 total_us=14 max_us=14 bytes=4194304 max_bytes=4194304 p50_upper_us=14 p95_upper_us=14 p99_upper_us=14
+2026-10-11T14:58:36.349287Z  INFO core_performance: performance window stage="blocking.queue_wait" operation="rpc_identity" count=1 total_us=13 max_us=13 bytes=0 max_bytes=0 p50_upper_us=13 p95_upper_us=13 p99_upper_us=13
+2026-10-11T14:58:36.349288Z  INFO core_performance: performance window stage="outbound.queue" operation="other" count=3 total_us=652 max_us=229 bytes=399 max_bytes=146 p50_upper_us=223 p95_upper_us=229 p99_upper_us=229
+2026-10-11T14:58:36.349289Z  INFO core_performance: performance window stage="outbound.serialize" operation="other" count=3 total_us=0 max_us=0 bytes=399 max_bytes=146 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349291Z  INFO core_performance: performance window stage="outbound.write_flush" operation="ordinary" count=1 total_us=48 max_us=48 bytes=399 max_bytes=399 p50_upper_us=48 p95_upper_us=48 p99_upper_us=48
+2026-10-11T14:58:36.349292Z  INFO core_performance: performance window stage="rpc.admitted" operation="write" count=1 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349293Z  INFO core_performance: performance window stage="rpc.blocking_pool_wait" operation="write" count=1 total_us=11 max_us=11 bytes=0 max_bytes=0 p50_upper_us=11 p95_upper_us=11 p99_upper_us=11
+2026-10-11T14:58:36.349294Z  INFO core_performance: performance window stage="rpc.dependency_wait" operation="write" count=1 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349295Z  INFO core_performance: performance window stage="rpc.execution_permit_wait" operation="write" count=1 total_us=8 max_us=8 bytes=0 max_bytes=0 p50_upper_us=8 p95_upper_us=8 p99_upper_us=8
+2026-10-11T14:58:36.349296Z  INFO core_performance: performance window stage="rpc.lane_wait" operation="write" count=1 total_us=9 max_us=9 bytes=0 max_bytes=0 p50_upper_us=9 p95_upper_us=9 p99_upper_us=9
+2026-10-11T14:58:36.349297Z  INFO core_performance: performance window stage="rpc.offered" operation="write" count=1 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349299Z  INFO core_performance: performance window stage="rpc.operation_queue" operation="other" count=1 total_us=87 max_us=87 bytes=0 max_bytes=0 p50_upper_us=87 p95_upper_us=87 p99_upper_us=87
+2026-10-11T14:58:36.349300Z  INFO core_performance: performance window stage="rpc.request_bytes" operation="other" count=1 total_us=0 max_us=0 bytes=622 max_bytes=622 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349301Z  INFO core_performance: performance window stage="runtime" operation="timer_lag" count=1 total_us=737 max_us=737 bytes=0 max_bytes=0 p50_upper_us=737 p95_upper_us=737 p99_upper_us=737
+2026-10-11T14:58:36.349302Z  INFO core_performance: performance window stage="sqlite.hold" operation="connection" count=14 total_us=587 max_us=101 bytes=0 max_bytes=0 p50_upper_us=31 p95_upper_us=101 p99_upper_us=101
+2026-10-11T14:58:36.349303Z  INFO core_performance: performance window stage="sqlite.operation_hold" operation="approval" count=1 total_us=45 max_us=45 bytes=0 max_bytes=0 p50_upper_us=45 p95_upper_us=45 p99_upper_us=45
+2026-10-11T14:58:36.349304Z  INFO core_performance: performance window stage="sqlite.operation_hold" operation="delivery" count=1 total_us=20 max_us=20 bytes=0 max_bytes=0 p50_upper_us=20 p95_upper_us=20 p99_upper_us=20
+2026-10-11T14:58:36.349306Z  INFO core_performance: performance window stage="sqlite.operation_hold" operation="other" count=12 total_us=522 max_us=101 bytes=0 max_bytes=0 p50_upper_us=31 p95_upper_us=101 p99_upper_us=101
+2026-10-11T14:58:36.349307Z  INFO core_performance: performance window stage="sqlite.operation_wait" operation="approval" count=1 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349309Z  INFO core_performance: performance window stage="sqlite.operation_wait" operation="delivery" count=1 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349310Z  INFO core_performance: performance window stage="sqlite.operation_wait" operation="other" count=12 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349311Z  INFO core_performance: performance window stage="sqlite.read_hold" operation="reader" count=20 total_us=4778 max_us=3952 bytes=0 max_bytes=0 p50_upper_us=21 p95_upper_us=287 p99_upper_us=3952
+2026-10-11T14:58:36.349312Z  INFO core_performance: performance window stage="sqlite.read_wait" operation="reader" count=22 total_us=92 max_us=90 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=2 p99_upper_us=90
+2026-10-11T14:58:36.349313Z  INFO core_performance: performance window stage="sqlite.wait" operation="connection" count=14 total_us=0 max_us=0 bytes=0 max_bytes=0 p50_upper_us=0 p95_upper_us=0 p99_upper_us=0
+2026-10-11T14:58:36.349314Z  INFO core_performance: performance window stage="storage.queue_wait" operation="writer" count=15 total_us=13 max_us=11 bytes=112136 max_bytes=16384 p50_upper_us=0 p95_upper_us=11 p99_upper_us=11
+2026-10-11T14:58:36.349316Z  INFO core_performance: performance window stage="storage.worker_wait" operation="writer" count=9 total_us=68 max_us=16 bytes=0 max_bytes=0 p50_upper_us=6 p95_upper_us=16 p99_upper_us=16
+2026-10-11T14:58:36.349318Z  INFO core_performance: performance queue window stage="blocking.estimated" operation="maintenance" count=1 bytes=16384 oldest_us=940 peak_count=1 peak_bytes=16384 omitted=0
+2026-10-11T14:58:36.349320Z  INFO core_performance: performance queue window stage="blocking.estimated" operation="preparation" count=0 bytes=0 oldest_us=0 peak_count=1 peak_bytes=4194304 omitted=0
+2026-10-11T14:58:36.349321Z  INFO core_performance: performance queue window stage="blocking.estimated" operation="rpc_identity" count=0 bytes=0 oldest_us=0 peak_count=1 peak_bytes=0 omitted=0
+2026-10-11T14:58:36.349322Z  INFO core_performance: performance queue window stage="rpc.pending_body" operation="other" count=1 bytes=622 oldest_us=226 peak_count=1 peak_bytes=622 omitted=0
+2026-10-11T14:58:36.349323Z  INFO core_performance: performance queue window stage="rpc.queued" operation="write" count=0 bytes=0 oldest_us=0 peak_count=1 peak_bytes=1134 omitted=0
+2026-10-11T14:58:36.349324Z  INFO core_performance: performance queue window stage="storage.queue" operation="reader" count=5 bytes=5120 oldest_us=933 peak_count=6 peak_bytes=6144 omitted=0
+2026-10-11T14:58:36.349325Z  INFO core_performance: performance queue window stage="storage.queue" operation="writer" count=1 bytes=1024 oldest_us=84 peak_count=1 peak_bytes=16384 omitted=0
+
+CAPTAIN_ACCEPTANCE_CORE_PID=36195
+[core-server] 2026-10-11T14:58:36.360602Z  INFO core_performance: performance request trace request_id=1 lane="write" queue_us=55 processing_us=11437 failed=false
+
+[core-server] 2026-10-11T14:58:36.361469Z  INFO core_performance: performance request trace request_id=2 lane="control" queue_us=69 processing_us=126 failed=false
+
+(electron) 'console-message' arguments are deprecated and will be removed. Please use Event<WebContentsConsoleMessageEventParams> object instead.
+[core-server] 2026-10-11T14:58:36.913253Z  INFO core_performance: performance request trace request_id=3 lane="read" queue_us=151 processing_us=355 failed=false
+
+[core-server] 2026-10-11T14:58:36.916791Z  INFO core_performance: performance request trace request_id=4 lane="read" queue_us=129 processing_us=293 failed=false
+
+[core-server] 2026-10-11T14:58:37.008724Z  INFO core_performance: performance request trace request_id=5 lane="control" queue_us=136 processing_us=150 failed=false
+
+[core-server] 2026-10-11T14:58:37.008798Z  INFO core_performance: performance request trace request_id=6 lane="read" queue_us=259 processing_us=37 failed=false
+
+[core-server] 2026-10-11T14:58:37.009851Z  INFO core_performance: performance request trace request_id=7 lane="read" queue_us=194 processing_us=1086 failed=false
+
+[core-server] 2026-10-11T14:58:37.026579Z  INFO core_performance: performance request trace request_id=8 lane="write" queue_us=484 processing_us=16677 failed=false
+
+[core-server] 2026-10-11T14:58:37.041495Z  INFO core_performance: performance request trace request_id=9 lane="read" queue_us=436 processing_us=577 failed=false
+
+[core-server] 2026-10-11T14:58:37.412437Z  INFO core_performance: performance request trace request_id=10 lane="read" queue_us=236 processing_us=1015 failed=false
+
+[core-server] 2026-10-11T14:58:37.421869Z  INFO core_performance: performance request trace request_id=11 lane="read" queue_us=93 processing_us=958 failed=false
+
+[core-server] 2026-10-11T14:58:37.423019Z  INFO core_performance: performance request trace request_id=12 lane="read" queue_us=19 processing_us=257 failed=false
+
+[core-server] 2026-10-11T14:58:37.423532Z  INFO core_performance: performance request trace request_id=13 lane="control" queue_us=17 processing_us=26 failed=false
+
+[core-server] 2026-10-11T14:58:37.432006Z  INFO core_performance: performance request trace request_id=14 lane="write" queue_us=68 processing_us=8277 failed=false
+
+[core-server] 2026-10-11T14:58:37.443348Z  INFO core_performance: performance request trace request_id=15 lane="read" queue_us=81 processing_us=2838 failed=false
+
+[core-server] 2026-10-11T14:58:37.807018Z  INFO core_performance: performance request trace request_id=16 lane="read" queue_us=94 processing_us=1424 failed=false
+
+[core-server] 2026-10-11T14:58:37.808216Z  INFO core_performance: performance request trace request_id=18 lane="read" queue_us=19 processing_us=209 failed=false
+
+[core-server] 2026-10-11T14:58:37.809107Z  INFO core_performance: performance request trace request_id=17 lane="read" queue_us=62 processing_us=1537 failed=false
+
+[core-server] 2026-10-11T14:58:37.809300Z  INFO core_performance: performance request trace request_id=19 lane="control" queue_us=699 processing_us=56 failed=false
+
+[core-server] 2026-10-11T14:58:37.824057Z  INFO core_performance: performance request trace request_id=20 lane="write" queue_us=90 processing_us=14056 failed=false
+
+[core-server] 2026-10-11T14:58:37.833641Z  INFO core_performance: performance request trace request_id=21 lane="read" queue_us=92 processing_us=1795 failed=false
+
+[core-server] 2026-10-11T14:58:38.190243Z  INFO core_performance: performance request trace request_id=22 lane="read" queue_us=67 processing_us=1794 failed=false
+
+[core-server] 2026-10-11T14:58:38.195592Z  INFO core_performance: performance request trace request_id=23 lane="read" queue_us=70 processing_us=1704 failed=false
+
+[core-server] 2026-10-11T14:58:38.196852Z  INFO core_performance: performance request trace request_id=24 lane="read" queue_us=17 processing_us=211 failed=false
+
+[core-server] 2026-10-11T14:58:38.203318Z  INFO core_performance: performance request trace request_id=25 lane="control" queue_us=30 processing_us=27 failed=false
+
+[core-server] 2026-10-11T14:58:38.212465Z  INFO core_performance: performance request trace request_id=26 lane="write" queue_us=49 processing_us=8983 failed=false
+
+[core-server] 2026-10-11T14:58:38.225834Z  INFO core_performance: performance request trace request_id=27 lane="read" queue_us=82 processing_us=2123 failed=false
+
+[core-server] 2026-10-11T14:58:38.583603Z  INFO core_performance: performance request trace request_id=28 lane="read" queue_us=60 processing_us=2423 failed=false
+
+[core-server] 2026-10-11T14:58:38.588059Z  INFO core_performance: performance request trace request_id=29 lane="read" queue_us=225 processing_us=2116 failed=false
+
+[core-server] 2026-10-11T14:58:38.589422Z  INFO core_performance: performance request trace request_id=30 lane="read" queue_us=19 processing_us=205 failed=false
+
+[core-server] 2026-10-11T14:58:38.589697Z  INFO core_performance: performance request trace request_id=31 lane="control" queue_us=16 processing_us=23 failed=false
+
+[core-server] 2026-10-11T14:58:38.599556Z  INFO core_performance: performance request trace request_id=32 lane="write" queue_us=55 processing_us=9663 failed=false
+
+CAPTAIN_RENDERER_ACCEPTANCE={"status":"failed","offeredActions":11,"completedActions":11,"failedActions":0,"unfinishedActions":0,"verifiedTerminals":10,"reports":[{"action":"submit","accepted":true,"receiptMs":22.700000047683716,"frameOpportunityMs":35,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730717005-ho2mdx","runId":"run-1d926ed8c6b9499c939d19ac5f5250bb","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":9.899999856948853,"frameOpportunityMs":17.699999809265137,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730717423-d5uub5","runId":"run-b5e444d03a384a8eb010b163b29ed635","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":16.700000047683716,"frameOpportunityMs":23.59999990463257,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730717808-3brbqi","runId":"run-f0f011c98bd34af4b25bb5f52871eb64","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":16.200000047683716,"frameOpportunityMs":26.799999952316284,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730718203-0lerjm","runId":"run-310c90d0cbc142e7a75ba1d6e60380fc","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":10.799999952316284,"frameOpportunityMs":26.09999990463257,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730718589-u4t3l7","runId":"run-b7a86e24ee3d4344a1900383a77ae2a1","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":8.899999856948853,"frameOpportunityMs":13.599999904632568,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730718976-75g10q","runId":"run-3a72114050474f68943b4fd41d55aa0d","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":10.099999904632568,"frameOpportunityMs":14.699999809265137,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730719367-3nvxyo","runId":"run-65b9f7bb281540c2ad4831e3bea03e90","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":9.799999952316284,"frameOpportunityMs":10.299999952316284,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730719763-q5wpfq","runId":"run-611ce0ba4e694d3d809244561408be4e","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":10,"frameOpportunityMs":15.399999856948853,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730720158-xqrrmq","runId":"run-00ec7346733f4f8ca168fb8ba38fc1c4","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":18.699999809265137,"frameOpportunityMs":27.699999809265137,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730720579-z4otm4","runId":"run-f898bc403a43467cbe410fa1b2ae7477","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]},{"action":"submit","accepted":true,"receiptMs":10.300000190734863,"frameOpportunityMs":26.600000143051147,"conversationId":"conversation-1791730717005-t8kz01","assistantMessageId":"message-1791730721005-tfjst5","runId":"run-1bfb8376c7274261af29daa298e94d02","status":"running","content":"","pendingApprovals":0,"renderedContent":"","renderedStatus":"running","notices":[]}],"hostMetrics":[],"rendererDiagnostics":[],"pageErrors":[],"error":"Error: Approval projection timed out"}

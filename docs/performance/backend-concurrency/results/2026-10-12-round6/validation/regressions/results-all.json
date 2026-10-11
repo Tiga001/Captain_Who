@@ -1,0 +1,674 @@
+[
+  {
+    "index": 0,
+    "kind": "server",
+    "filter": "resource_preparation_tests",
+    "returncode": 0,
+    "duration_s": 1.875,
+    "log": "00-resource_preparation_tests.log",
+    "counts": [
+      "ok",
+      "12",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 1,
+    "kind": "server",
+    "filter": "keyed_admission::tests",
+    "returncode": 0,
+    "duration_s": 0.025,
+    "log": "01-keyed_admission-tests.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 2,
+    "kind": "server",
+    "filter": "preparing::tests",
+    "returncode": 0,
+    "duration_s": 0.08,
+    "log": "02-preparing-tests.log",
+    "counts": [
+      "ok",
+      "7",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 3,
+    "kind": "server",
+    "filter": "application::agent::execution_access::tests",
+    "returncode": 0,
+    "duration_s": 0.312,
+    "log": "03-application-agent-execution_access-tests.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 4,
+    "kind": "server",
+    "filter": "preparing_deletion_tests",
+    "returncode": 0,
+    "duration_s": 0.755,
+    "log": "04-preparing_deletion_tests.log",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 5,
+    "kind": "server",
+    "filter": "scoped_deletion_tests",
+    "returncode": 0,
+    "duration_s": 0.014,
+    "log": "05-scoped_deletion_tests.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 6,
+    "kind": "server",
+    "filter": "fair_preparation_tests",
+    "returncode": 0,
+    "duration_s": 0.201,
+    "log": "06-fair_preparation_tests.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 7,
+    "kind": "server",
+    "filter": "application::agent::rpc_resources",
+    "returncode": 0,
+    "duration_s": 0.698,
+    "log": "07-application-agent-rpc_resources.log",
+    "counts": [
+      "ok",
+      "8",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 8,
+    "kind": "server",
+    "filter": "transport::bounded_dispatch",
+    "returncode": 0,
+    "duration_s": 0.582,
+    "log": "08-transport-bounded_dispatch.log",
+    "counts": [
+      "ok",
+      "37",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 9,
+    "kind": "server",
+    "filter": "application::blocking_executor",
+    "returncode": 0,
+    "duration_s": 0.085,
+    "log": "09-application-blocking_executor.log",
+    "counts": [
+      "ok",
+      "11",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 10,
+    "kind": "server",
+    "filter": "application::agent_dispatcher::tests",
+    "returncode": 0,
+    "duration_s": 0.988,
+    "log": "10-application-agent_dispatcher-tests.log",
+    "counts": [
+      "ok",
+      "30",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 12,
+    "kind": "server",
+    "filter": "workflow_scheduler::tests",
+    "returncode": 0,
+    "duration_s": 0.255,
+    "log": "12-workflow_scheduler-tests.log",
+    "counts": [
+      "ok",
+      "5",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 13,
+    "kind": "server",
+    "filter": "terminal_persistence_retry_tests",
+    "returncode": 0,
+    "duration_s": 0.372,
+    "log": "13-terminal_persistence_retry_tests.log",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 14,
+    "kind": "server",
+    "filter": "execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding",
+    "returncode": 0,
+    "duration_s": 0.131,
+    "log": "14-execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 15,
+    "kind": "server",
+    "filter": "permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission",
+    "returncode": 0,
+    "duration_s": 0.14,
+    "log": "15-permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 16,
+    "kind": "server",
+    "filter": "wake_execution_fence::tests",
+    "returncode": 0,
+    "duration_s": 0.013,
+    "log": "16-wake_execution_fence-tests.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 17,
+    "kind": "server",
+    "filter": "trusted_terminal_fence_refusal_preserves_shared_usage_accumulator",
+    "returncode": 0,
+    "duration_s": 0.139,
+    "log": "17-trusted_terminal_fence_refusal_preserves_shared_usage_accumulator.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 18,
+    "kind": "server",
+    "filter": "application::agent::tests::cancellation",
+    "returncode": 0,
+    "duration_s": 1.13,
+    "log": "18-application-agent-tests-cancellation.log",
+    "counts": [
+      "ok",
+      "9",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 19,
+    "kind": "server",
+    "filter": "application::agent::tests::human_input",
+    "returncode": 0,
+    "duration_s": 22.197,
+    "log": "19-application-agent-tests-human_input.log",
+    "counts": [
+      "ok",
+      "45",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 20,
+    "kind": "server",
+    "filter": "application::agent::tests::collaboration_harness",
+    "returncode": 0,
+    "duration_s": 4.392,
+    "log": "20-application-agent-tests-collaboration_harness.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 21,
+    "kind": "server",
+    "filter": "destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion",
+    "returncode": 0,
+    "duration_s": 0.411,
+    "log": "21-destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 22,
+    "kind": "server",
+    "filter": "project_deletion_timeout_preserves_late_command_observation",
+    "returncode": 0,
+    "duration_s": 0.595,
+    "log": "22-project_deletion_timeout_preserves_late_command_observation.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 23,
+    "kind": "server",
+    "filter": "application::agent::tests::automation_turn",
+    "returncode": 0,
+    "duration_s": 1.406,
+    "log": "23-application-agent-tests-automation_turn.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 24,
+    "kind": "server",
+    "filter": "provider_transition",
+    "returncode": 0,
+    "duration_s": 3.159,
+    "log": "24-provider_transition.log",
+    "counts": [
+      "ok",
+      "25",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 25,
+    "kind": "server",
+    "filter": "application::agent::tests::provider_profiles",
+    "returncode": 0,
+    "duration_s": 3.303,
+    "log": "25-application-agent-tests-provider_profiles.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 26,
+    "kind": "server",
+    "filter": "application::agent::tests::human_root_notifications",
+    "returncode": 0,
+    "duration_s": 0.302,
+    "log": "26-application-agent-tests-human_root_notifications.log",
+    "counts": [
+      "ok",
+      "4",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 27,
+    "kind": "server",
+    "filter": "application::agent::tests::pending_actions",
+    "returncode": 0,
+    "duration_s": 8.388,
+    "log": "27-application-agent-tests-pending_actions.log",
+    "counts": [
+      "ok",
+      "75",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 28,
+    "kind": "server",
+    "filter": "application::agent_wait::tests",
+    "returncode": 0,
+    "duration_s": 0.142,
+    "log": "28-application-agent_wait-tests.log",
+    "counts": [
+      "ok",
+      "6",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 29,
+    "kind": "server",
+    "filter": "occupancy_tests",
+    "returncode": 0,
+    "duration_s": 0.478,
+    "log": "29-occupancy_tests.log",
+    "counts": [
+      "ok",
+      "4",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 30,
+    "kind": "server",
+    "filter": "application::agent::tests::context_window_consistency",
+    "returncode": 0,
+    "duration_s": 1.09,
+    "log": "30-application-agent-tests-context_window_consistency.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 33,
+    "kind": "server",
+    "filter": "application::agent::tests::mcp_approval_",
+    "returncode": 0,
+    "duration_s": 5.547,
+    "log": "33-application-agent-tests-mcp_approval_.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 34,
+    "kind": "server",
+    "filter": "transport::tests::request_loop",
+    "returncode": 0,
+    "duration_s": 3.708,
+    "log": "34-transport-tests-request_loop.log",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 35,
+    "kind": "server",
+    "filter": "transport::request_loop",
+    "returncode": 0,
+    "duration_s": 0.012,
+    "log": "35-transport-request_loop.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 36,
+    "kind": "server",
+    "filter": "workflow_execution",
+    "returncode": 0,
+    "duration_s": 3.66,
+    "log": "36-workflow_execution.log",
+    "counts": [
+      "ok",
+      "23",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 38,
+    "kind": "server",
+    "filter": "child_event_transport",
+    "returncode": 0,
+    "duration_s": 1.947,
+    "log": "38-child_event_transport.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 39,
+    "kind": "server",
+    "filter": "agent_support::tests",
+    "returncode": 0,
+    "duration_s": 0.012,
+    "log": "39-agent_support-tests.log",
+    "counts": [
+      "ok",
+      "10",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 40,
+    "kind": "server",
+    "filter": "collaboration_authorization",
+    "returncode": 0,
+    "duration_s": 0.364,
+    "log": "40-collaboration_authorization.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 41,
+    "kind": "server",
+    "filter": "application::agent::tests::terminal_events",
+    "returncode": 0,
+    "duration_s": 15.363,
+    "log": "41-application-agent-tests-terminal_events.log",
+    "counts": [
+      "ok",
+      "32",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 42,
+    "kind": "server",
+    "filter": "application::agent::tests::skills::",
+    "returncode": 0,
+    "duration_s": 1.276,
+    "log": "42-application-agent-tests-skills-.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 43,
+    "kind": "server",
+    "filter": "transport::outbound",
+    "returncode": 0,
+    "duration_s": 0.143,
+    "log": "43-transport-outbound.log",
+    "counts": [
+      "ok",
+      "16",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 45,
+    "kind": "server",
+    "filter": "backend_baseline_",
+    "returncode": 0,
+    "duration_s": 0.007,
+    "log": "45-backend_baseline_.log",
+    "counts": [
+      "ok",
+      "3",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  },
+  {
+    "index": 46,
+    "kind": "server",
+    "filter": "mixed_provider_only_",
+    "returncode": 0,
+    "duration_s": 0.007,
+    "log": "46-mixed_provider_only_.log",
+    "counts": [
+      "ok",
+      "1",
+      "0",
+      "0"
+    ],
+    "binary": "core_server-f7a97b10b9960ccf",
+    "sha256": "64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b"
+  }
+]

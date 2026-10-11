@@ -1,0 +1,138 @@
+{
+  "format": "round6-storage-evidence-allowlist-v1",
+  "base_directory": ".cache/backend-concurrency/round6-validation-20261011",
+  "created_date": "2026-10-12",
+  "entries": [
+    {
+      "path": "rollback-and-faults.md",
+      "bytes": 12755,
+      "sha256": "05b8f8301914a67671249333c93a156df429172e4e4d3941004ddf7298982f92",
+      "role": "review and limits"
+    },
+    {
+      "path": "rollback-faults-provenance.json",
+      "bytes": 63355,
+      "sha256": "ac7ef9b90f27db1232bcb2f9435841359cbbd6094c12af20c7826ef48cade9d7",
+      "role": "sanitized commands, binary/source hashes, scope"
+    },
+    {
+      "path": "storage-final-evidence/final-summary.json",
+      "bytes": 1337,
+      "sha256": "673b462bb97d879f2599413fc6ca117dfe70de06ceb6179ab0d49ff3e2767632",
+      "role": "final deduplicated core result"
+    },
+    {
+      "path": "storage-final-evidence/all-unique-passed.txt",
+      "bytes": 141529,
+      "sha256": "6bd26c296e852b5b12b2477a02169ea2e8214430fbd3fc4d59894b04a61cdd5b",
+      "role": "exact test identities"
+    },
+    {
+      "path": "regressions/31-storage-.log",
+      "bytes": 157512,
+      "sha256": "6fc0695c3f714f4da00c18c482d4d041b2a71712a6aef997098c452e16e62b8d",
+      "role": "complete final storage log"
+    },
+    {
+      "path": "regressions/32-performance-.log",
+      "bytes": 765,
+      "sha256": "65a86cba4e61bb3b72b47bc6561540cf678ad4c6a20e1f260e94c046f8829398",
+      "role": "complete performance unit log"
+    },
+    {
+      "path": "regressions/results-31-32.json",
+      "bytes": 708,
+      "sha256": "a457da5ff79211dd600781620d538297d6f5cc7e47a4144e3a743c3138fff74b",
+      "role": "original core group results"
+    },
+    {
+      "path": "regressions/37-runtime_checkpoint.log",
+      "bytes": 2195,
+      "sha256": "54d5f66a1775de3386a130b8e4507bc5364e53808524469573ab07f9888334f6",
+      "role": "checkpoint crash and startup recovery log"
+    },
+    {
+      "path": "storage-final-evidence/release-profile.log",
+      "bytes": 497,
+      "sha256": "3111dd25530b8664f0d0232aaf47aaee6abd645a552cdec795c8768862c82df4",
+      "role": "10k-facts profile original log"
+    },
+    {
+      "path": "storage-faults.log",
+      "bytes": 1135,
+      "sha256": "22ec20be14b5bbff829293cf9d93bc704628b669e76c6c6d56a6f6a3f35115ef",
+      "role": "preserved initial FTS failure"
+    },
+    {
+      "path": "fts-crash-investigation/README.md.txt",
+      "bytes": 7824,
+      "sha256": "ce847a23443099f08c5dd17333a60db3f1faf161eebc8d26f71e07b607cbcff0",
+      "role": "initial investigation and reproduction commands"
+    },
+    {
+      "path": "fts-crash-investigation/minimal.c",
+      "bytes": 1807,
+      "sha256": "89c2ac2b3a1f3c2c5c439c55e546dee7c37b744db40577ce2e2647e471077363",
+      "role": "standalone SQLite C reproduction"
+    },
+    {
+      "path": "fts-crash-investigation/minimal-3.53.2.txt",
+      "bytes": 1049,
+      "sha256": "ce7b1a350edd5c00688163ebe6d114421d193e59b944403c5da9433631190cbf",
+      "role": "SQLite 3.53.2 reproduction output"
+    },
+    {
+      "path": "fts-crash-investigation/reproduce_python.py",
+      "bytes": 1689,
+      "sha256": "d507acbfa43382ba71d89a43eaf45deec43f8df5e71a42d36107f6a981a1379d",
+      "role": "standalone Python SQLite reproduction"
+    },
+    {
+      "path": "fts-crash-investigation/minimal-python-3.51.0.txt",
+      "bytes": 964,
+      "sha256": "c3fe5805871490ea07b180ac8cc9845ddf519d8f9122e6ba22e24ab990e0e682",
+      "role": "SQLite 3.51.0 reproduction output"
+    },
+    {
+      "path": "fts-crash-investigation/probe.c",
+      "bytes": 1064,
+      "sha256": "1362bcdf3bbfea638598d9c6636507abcbe9219662635ff2812591eb4189c971",
+      "role": "fresh/old handle application-index probe"
+    },
+    {
+      "path": "fts-crash-investigation/fresh-before.txt",
+      "bytes": 320,
+      "sha256": "e1494ef5f1312dad91890f57da0bc141cac73d625813f989c394b5945ee4772c",
+      "role": "fresh-handle before-commit evidence"
+    },
+    {
+      "path": "fts-crash-investigation/fresh-after.txt",
+      "bytes": 465,
+      "sha256": "6859fa67fb58d40ef6e1f0f15108206cee51e8cdc4e16a2101995b56471ff0c2",
+      "role": "fresh-handle after-commit evidence"
+    },
+    {
+      "path": "fts-crash-investigation/stale-reader-reproduction.txt",
+      "bytes": 815,
+      "sha256": "b81764f0c1e93e65dcce699f5a6e3b66a42fe8b4d1a59db78f5b26a15ad3d273",
+      "role": "stale-reader and MATCH control"
+    },
+    {
+      "path": "fts-crash-investigation/recreate_crash_fixtures.py",
+      "bytes": 1400,
+      "sha256": "fad2322e943ce40011bbf8bfcd46047a60d8d8efefe02eca8db42547ed13a53b",
+      "role": "synthetic child-only crash fixture recreation"
+    }
+  ],
+  "total_files": 20,
+  "total_bytes": 399185,
+  "manifest_excluded_from_own_hash": true,
+  "archive_instruction": "Archive only these explicit text paths plus this manifest. Do not recursively include the parent directory. Preserve the listed SHA256 values; regenerate if any selected file changes.",
+  "excluded": [
+    "all executables/static libraries/build outputs",
+    "all SQLite/DB/WAL/SHM files, synthetic or real",
+    "ready markers and other sample binary files",
+    "original metadata containing local personal paths",
+    "user data-root, credentials, real conversation data"
+  ]
+}

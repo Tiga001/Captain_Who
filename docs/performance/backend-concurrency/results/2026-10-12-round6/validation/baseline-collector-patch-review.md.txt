@@ -1,0 +1,34 @@
+# baseline/current collector 修正的安全对照清单
+
+准备日期：2026-10-12。此文件只记录待核验条件；本代理没有修改 baseline worktree、产品源码或构建配置，也没有重跑测试。失败样本原件保留在 `round6-final-soak-u20-20261012-r1`。
+
+## 拷贝前后应保持的边界
+
+1. 分别记录 baseline/current 的原 HEAD、工作区 diff、fixture hash 与 `transport/outbound.rs` hash。不要用 current 的完整 outbound 文件覆盖 baseline；两者原有产品实现差异就是对照对象。
+2. baseline 与 current 复制同一份完整 `backend_concurrency_baseline.rs`，最终文件 bytes/SHA256 相等；若旧接口迫使差异，逐行记录适配原因，不得改变消费、调度或统计逻辑后仍声称完全相同。
+3. `outbound.rs` 只添加 `#[cfg(test)]` getter，读取已有 `failure_snapshot`、关闭状态或 frame 字节所需信息；不改生产队列预算、merge、序列化、计费、FIFO、oversize、closed/failed、recv_frame 行为。对两边各自 pre-patch 做 diff，新增 getter 应在非 test 编译中消失。
+4. collector 仍经生产 outbound 的完整序列化、容量接纳与 FIFO；不能用直接 callback/预序列化特例绕过队列，不能放大队列掩盖历史响应的体积。更换收集执行位置或解析方式必须对两边一致。
+5. 较重 JSON 解析、历史裁剪和 raw 记录工作不应持有全局 Events 锁阻塞 Provider/投放线程；如果新 collector 引入缓冲，它的容量、排空、错误处理和字节归属需要明确且两边一致。不能把无界 harness 队列的资源排除后宣称产品资源下降。
+6. 根数 20、301 波、2s 提供节奏、500ms 历史查询、mixed cycle、Provider 输出与权限 TTL/renewal、取消/审批触发规则、资源采样和 diagnostics 均一致。使用同构建 profile、隔离 target 与固定二进制 hash，逐次运行且 CPU 独占。
+7. 失败诊断应保留 failure snapshot/时间、collector 退出或 panic、每个响应失败/缺失状态；区分连接失效、主动停止提供与原定工作未提供。若改变 outbound 失败后的 fixture 行为，两边必须一起改变并重新解释 offered/control/terminal 计数。
+8. durable 查询如增加逐根 runId/assistantMessageId/status，应在收尾窗口独立标注；不要混入计时段，也不要以 ACK 数代替实际接纳/持久根数。Provider 重试应按 synthetic marker 单独记录，便于解释本次 42 Failed 与 84 额外请求。
+9. 编译后核对各自 compiler artifact 与实际执行文件 hash；以新目录保存 baseline/current 的两次 600s 原始 run，记录 source before/after 和测试 binary，不覆盖本次失败材料。旧失败及同 collector 的新对照应同时保留。
+
+## archive-evidence.py 的只读发现
+
+审查时脚本会选择 250 个文件、37,816,934 bytes 原始文本（后续新增文件会变化），没有发现当前候选 symlink。主要大文件为 synthetic cases JSONL；保留这些原始计时/失败数据有必要，不能仅保留汇总来缩小包。
+
+确认需要修正的归档问题：
+
+- 后缀过滤仍会复制 `storage-final-evidence/metadata.json`、build stdout 及 run metadata 中的真实本机目录。gzip 不脱敏。应优先使用已生成的 `rollback-faults-provenance.json`，或生成含 `<repo>`/`<build>`/`<home>` 的派生归档版本，并注明原文件 SHA256 和转换规则；原始本机证据留在 cache 不改写。
+- DEST 直接覆盖而不清理；本次不再选择的旧文件、压缩阈值变化留下的 `.log`/`.log.gz` 双份都可能继续进入 `DEST.rglob` 的 SHA256SUMS。使用新的空 staging 或明确清理仅归档工具拥有的目的目录；manifest 应只列本次显式写入的文件，不将目的目录历史残留自动认证。
+- `.json/.log/.patch` 后缀不是 synthetic 数据保证，`is_file()` 还会跟随文件 symlink。使用显式来源/文件 allowlist、拒绝 symlink、检查解析后路径仍在预期根下、验证 UTF-8/无 NUL，再对所需 metadata/失败日志做脱敏。当前没有发现 DB/二进制被后缀直接选择，但该规则不能作为未来数据内容保证。
+- `renderer-acceptance-debug5/6`、重复 analysis JSON/CSV 和全量构建输出可按复现必要性取舍；应保留原失败原因与最终结果，避免把每个调试中间副本自动纳入“最小证据”。
+
+本代理未执行归档脚本、没有删除或改动原始证据。归档修复权与统一构建仍归主代理。
+
+## 后续授权的归档修复（2026-10-12）
+
+主代理随后授权本代理修复 `archive-evidence.py`。现已实现：全新 staging、显式逐次 inventory、未来 r2/r3 自动发现但仅选 cases/metadata/resources 三种 runner 输出、拒绝 symlink/非普通文件/非 UTF-8/NUL、路径脱敏、原件/派生文本/压缩归档三层 hash，以及 `TRANSFORM-MANIFEST.json` 的原 hash 语义声明。正式运行只发布本任务专属目录；已有目录仅在显式 `--replace-existing` 且匹配本脚本 ownership manifest 时替换。SHA256SUMS 仅来自本次写入清单，不扫描旧 DEST。
+
+实际只运行 `python3 .cache/backend-concurrency/round6-validation-20261011/archive-evidence.py --dry-run`，没有写 docs 或 staging。最后一次 dry-run 当时选择 259 个源文件，约 38.28MB 原文、4.96MB 预计归档；已覆盖 baseline-worktree 63 处、build 3906 处、repo 351 处、user-home 3870 处路径转换。该数量是当时快照，父代理持续产生新 evidence 时会增加。额外确认语法可解析，正式目的目录与 `.round6-stage-*` 均不存在。初次 dry-run 遇本机 Python 的 pathlib.stat 参数兼容问题，改为 `lstat()` 后通过；没有通过真实归档写入“验证”来改变冻结源码。

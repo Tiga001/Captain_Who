@@ -1,0 +1,76 @@
+# 第六轮 final-soak-u20 失败：存储与回执独立复核
+
+只读复核日期：2026-10-12。原始数据为 `round6-final-soak-u20-20261012-r1/cases.jsonl`；逐项计算、输入 SHA256、运行时源码校验和每 owner 明细见同目录 `final-soak-failure-storage-review.json`。没有访问数据库、改源码、构建或重跑。失败运行的 HEAD 为 `b1744ab98e6eb5db633e351d983bbe9d401a76f6`，binary SHA256 为 `99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082`，metadata 记录运行期间源码未变。复核使用该 commit 与原 manifest 匹配的源码；随后发生的 collector 修正不归入本次失败版本。
+
+## 结论
+
+**约 171.86 秒后整个回执/事件观测通道停止，但夹具仍继续提交和执行。总持久终态与到达 Provider 的不同根数相等，没有总量丢失证据；原始数据不足以逐 Run 认证所有已 ACK 项的最终重开状态。** 出站统计恰多出一个未出队 RPC 响应，大小约 3.526MB，支持普通历史响应在队列中累计容量耗尽。它低于 9MiB 单帧阈值，不能归因于单个响应自身超过该阈值。
+
+此次数据必须保留为失败样本。`drained_before_cleanup=true` 只说明最终无活动 Run，不代表回执恢复或稳态门禁通过。
+
+## 首个异常与失联边界
+
+时间均为 fixture epoch 后的秒；首计划时刻为 0.033067 秒。
+
+- 首个业务拒绝是 68.621331 秒返回的 `provider_transition_blocked/active_run`，owner 12 / wave 34，计划于 68.033067 秒。全部 179 个同类错误在 handler 开始时均有同 owner 已 ACK、尚未观测 Done 的前驱 Run，符合重叠新 Turn 的占用拒绝；不是第一个断流证据。
+- 最早未收到回执的 start 是 ID 2561、owner 0 / wave 85，170.035179 秒 offered、172.705461 秒 handler 开始。其他 wave 85 start 在它之后 offered 却先收到回执，因此不能仅按 RPC ID 确定断流时间。
+- 首个未收到回执的历史读取是 ID 2583、owner 3，171.533067 秒计划、171.554694 秒 offered、171.561422 秒 handler 开始。
+- 最后一条 RPC 回执为 ID 2582、owner 2 的历史读取，171.863128 秒收到，3,482,213 bytes、160 条消息。最后可见 Done 为 171.857138 秒。最后一次新的 Provider 根请求在 601.262406 秒才到达；最终 measured 为 810.058166 秒。
+
+| RPC | 提供/handler 开始 | 成功回执 | 错误回执 | 无回执 |
+| --- | ---: | ---: | ---: | ---: |
+| start | 6020 | 1527 | 179 | 4314 |
+| approval | 632 | 339 | 0 | 293 |
+| cancel | 180 | 180 | 0 | 0 |
+| loadConversation | 1201 | 343 | 0 | 858 |
+| 合计 | 8033 | 2389 | 179 | 5465 |
+
+全部 8033 个请求都通过 dispatcher 并开始 handler；“handler 开始”不能解释为事务成功。`raw.errors=[]` 来自同一失联的事件收集通道，不能证明后续 runtime 无错误。
+
+## 出站字节的直接证据
+
+`outbound.serialize/rpc.response` 为 **2569 帧、623,644,611 bytes**；`outbound.queue/rpc.response` 为 **2568 帧、620,118,870 bytes**。二者差值恰为 **1 帧、3,525,741 bytes（含换行）**，且 serialize 的 `max_bytes` 也等于该值。
+
+`agent.event` 序列化与出队的 count/bytes 完全相等；delta 的 count 差为 602，正好等于已记录的 602 次 merge。因此没有把成批缺失事件误计成这一帧。
+
+已记录 queue peak 为 7,021,568 bytes；与未出队帧相加为 10,547,309 bytes，大于总普通队列容量 9,437,184 bytes。峰值与未出队帧未必是同一时刻，不能把这个加法当作 failure snapshot，但它与多份约 3.5MB 历史响应并发在队列中等待的容量机制一致。源码在普通帧无法接纳时置 failed/closed 并拒绝后续发送；接纳后的 FIFO 仍排空。这解释了为何 serialize/dequeue 仅差一帧，后续业务却没有任何回执。
+
+本轮没有导出 `failure_snapshot`、close timestamp 或未出队 RPC ID，因此仍不能确定首次失败时的准确队列大小、具体响应身份或关闭点。不能仅凭最大历史响应给 ID 2583 定罪；不能排除缺失的额外诊断所揭示的其他因素。
+
+## 已 ACK 与 durable conservation
+
+1527 个成功 start ACK 各有唯一 runId，而且全部对应一个 Provider marker。1513 个可见 Done 全能映射回这些 ACK：1333 Completed、180 Cancelled。剩下 **14 个 ACK 没有可见 Done**，逐项身份已保留在 JSON。
+
+Provider 一共观察到 2678 个不同根 marker，其中 **1151 个来自没有收到 ACK 的 start**。重开后查询真实 Trace 得到 2678 个根终态：2456 Completed、180 Cancelled、42 Failed；清理前、关闭前及重开后的 InProgress 都为 0，shutdown 未超时。
+
+因此总量满足：
+
+`2678 Provider roots = 1527 可见 ACK + 1151 无 ACK 但确实执行 = 2456 Completed + 180 Cancelled + 42 Failed`。
+
+这支持“提交/执行与客户端可见回执分离，失联之后仍产生持久事实”，不支持将 `recovered_root_count_mismatch` 简单解释为数据库丢失或重复运行。字段 `root_starts_durably_accepted=1527` 实际由收到成功回执的 start 列表计算，不是独立查询的 durable admission 总数。
+
+局限：recovery 只导出根终态计数，没有每个重开 runId/assistantMessageId/status 列表。因此本次不能独立证明 2678 个 Provider 根与 2678 条 Trace 的逐 ID 双射，更不能凭总数保证那 14 项 ACK 的具体终态。此结果也没有提供 SQLite quick_check 或完整数据根恢复证明；它是正常关闭/重开，不是崩溃或断电试验。
+
+## 历史响应增长与断流后的工作量变化
+
+| epoch 时间窗口 | 读取回执/提供 | 响应总字节 | 最大响应字节 | 最大消息条数 |
+| --- | ---: | ---: | ---: | ---: |
+| 0–30s | 60/60 | 20,218,530 | 660,606 | 30 |
+| 30–60s | 60/60 | 59,709,760 | 1,321,010 | 60 |
+| 60–90s | 60/60 | 98,766,292 | 1,938,242 | 88 |
+| 90–120s | 60/60 | 134,250,619 | 2,509,187 | 114 |
+| 120–150s | 60/60 | 167,256,620 | 3,038,985 | 138 |
+| 150–172s | 43/44 | 138,706,059 | 3,525,738 | 162 |
+| 172s 之后 | 0/857 | 0（仅收到部分的计数） | 未知 | 未知 |
+
+总历史回执为 618,907,880 bytes。原始记录在计字节后只保留 id/messages，故可确认完整历史返回量随消息数增长，不能从本数据进一步定位哪个 JSON 字段占据主要体积，也不能把断流之后的零回执字节当作零历史处理成本。
+
+Provider 实际到达的 cycle 0/1/2/3/4 数为 577/620/627/632/222。cycle 4 中 180 个有 start ACK，全部获得 fixture Stop 并对应 Cancelled 总量；另 42 个无 ACK。夹具 `ready_stops` 只由成功回执填入，因此这 42 个实际开始的 stop-cycle 根没有注入 Stop，其假 Provider 会等待最多 120 秒。42 个 durable Failed 与额外 84 次 Provider 请求（3394 − 2678 − 632）在数量上符合每项多重试两次；源码 `LLM_MAX_ATTEMPTS=3`。由于未导出逐次请求和每 Run 重开状态，这是强相关解释，不是已逐项证明的失败归因。
+
+approval 则继续从 service pending state 轮询，所以仍发起 632 次。缺少对应 start ACK 时，夹具将 approval 的 owner 标签 fallback 为 0，失联后的“所有 RPC 按 owner 公平性”会被这个标签污染。JSON 中另列的每 owner start/provider 统计不依赖这个 fallback。
+
+## 与生产连接行为的边界
+
+BaselineDispatcher 使用生产 bounded RPC scheduler/handler/outbound，但绕过生产 request loop。生产 `request_loop.rs` 在 `outbound.failed()` 时启动 fork/RPC shutdown 并返回 BrokenPipe；夹具没有该选择分支，继续提供所有预定请求。因此关闭之后的持续静默执行是本夹具路径的行为，不能直接声称真实 stdin 连接也继续接纳。
+
+这个限制不能抹去失败前生产 outbound 的容量问题。后续应保留失败原件，并在 baseline/current 使用相同修正 collector、相同诊断与工作量重新测量；原样本的成功回执分位数排除了全部 5465 个无回执请求，不得作为通过稳态 SLO 的证据。

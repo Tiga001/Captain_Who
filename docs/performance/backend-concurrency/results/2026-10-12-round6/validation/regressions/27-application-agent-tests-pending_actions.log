@@ -1,0 +1,93 @@
+
+running 75 tests
+test application::agent::tests::pending_actions::approval_ordering::restart_loaded_pending_map_still_blocks_a_proven_successor ... ok
+test application::agent::tests::pending_actions::approval_ordering::successor_approval_is_blocked_until_its_durable_predecessor_settles ... ok
+test application::agent::tests::pending_actions::atomic_transitions::cancel_finalize_failure_atomically_restores_pending_payload ... ok
+test application::agent::tests::pending_actions::atomic_transitions::cancel_usage_failure_rolls_back_message_trace_and_action_together ... ok
+test application::agent::tests::pending_actions::atomic_transitions::invalid_checkpoint_tool_call_is_rejected_before_pending_publication ... ok
+test application::agent::tests::pending_actions::atomic_transitions::missing_pending_transition_row_fails_closed_without_terminal_success ... ok
+test application::agent::tests::pending_actions::builtin_activation::auto_activation_has_durable_non_replayable_receipt_and_cancellation_revokes_grant ... ok
+test application::agent::tests::pending_actions::builtin_activation::builtin_capability_approval_waits_past_its_proposal_window_and_can_still_be_approved ... ok
+test application::agent::tests::pending_actions::builtin_activation::builtin_capability_pending_binding_requires_exact_action_and_call_ids ... ok
+test application::agent::tests::pending_actions::builtin_sensitive::approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_result ... ok
+test application::agent::tests::pending_actions::builtin_sensitive::builtin_sensitive_approval_tick_preserves_ticket_and_turn_ownership ... ok
+test application::agent::tests::pending_actions::builtin_sensitive::builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once ... failed to append in-progress conversation trace for run builtin-sensitive-approve-race-run: 本地数据库操作失败：conversation trace updates must preserve every committed item as an exact prefix
+ok
+test application::agent::tests::pending_actions::builtin_sensitive::builtin_sensitive_cancel_reaches_pre_spawn_and_dispatching_process_guards ... ok
+test application::agent::tests::pending_actions::builtin_sensitive::builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_once ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_execution::automatic_builtin_sensitive_execution_claims_before_invoke_and_never_replays ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_execution::automatic_builtin_sensitive_journal_is_durable_cancelable_and_non_replayable ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_execution::builtin_sensitive_post_commit_error_adopts_receipt_and_emits_safe_result ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_execution::builtin_sensitive_result_commit_failure_terminalizes_and_notifies_once ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_recovery::builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt ... ok
+test application::agent::tests::pending_actions::builtin_sensitive_recovery::builtin_sensitive_startup_terminalization_is_typed_atomic_and_secret_free ... ok
+test application::agent::tests::pending_actions::continuation::child_approval_continuation_persists_waiting_to_running_before_runtime ... ok
+test application::agent::tests::pending_actions::continuation::projected_child_skill_approval_atomically_resumes_wake_before_worker_runs ... 
+thread 'application::agent::tests::pending_actions::continuation::projected_child_skill_approval_atomically_resumes_wake_before_worker_runs' (59550373) panicked at crates/core-server/src/application/agent/action_execution/runners/support.rs:151:9:
+injected Skill script worker panic after durable receipt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test application::agent::tests::pending_actions::continuation_failures::pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recovery ... ok
+test application::agent::tests::pending_actions::continuation_failures::pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupancy ... ok
+test application::agent::tests::pending_actions::continuation_failures::pre_spawn_cancelled_continuation_retries_real_pending_target_and_releases_resources ... ok
+test application::agent::tests::pending_actions::file_change_automatic_recovery::startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit ... ok
+test application::agent::tests::pending_actions::file_change_automatic_recovery::startup_reconciles_published_automatic_direct_file_change_without_replaying_it ... ok
+test application::agent::tests::pending_actions::file_change_automatic_recovery::startup_reconciles_published_automatic_staged_file_changes_without_replaying_them ... ok
+test application::agent::tests::pending_actions::file_change_manual_recovery::startup_file_change_reconciliation_types_base_divergence_and_unreadable_targets ... ok
+test application::agent::tests::pending_actions::file_change_manual_recovery::startup_reconciles_published_manual_direct_file_change_without_replaying_it ... ok
+test application::agent::tests::pending_actions::file_change_manual_recovery::startup_reconciles_published_manual_staged_file_changes_without_replaying_them ... ok
+test application::agent::tests::pending_actions::file_changes::cancelled_file_change_with_durable_abort_never_rolls_back_to_pending ... ok
+test application::agent::tests::pending_actions::file_changes::direct_file_change_execution_is_private_to_renderer_but_durable_for_restart ... ok
+test application::agent::tests::pending_actions::file_changes::file_change_pending_checkpoint_requires_exact_canonical_pending_action_id ... ok
+test application::agent::tests::pending_actions::identity_and_store::malformed_non_mcp_pending_states_retire_without_restoring_an_executable_action ... ok
+test application::agent::tests::pending_actions::identity_and_store::mcp_pending_and_checkpoint_json_freeze_only_the_safe_payload_capability ... ok
+test application::agent::tests::pending_actions::identity_and_store::mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity ... ok
+test application::agent::tests::pending_actions::identity_and_store::mcp_pending_identity_mismatch_is_rejected_on_store_and_malformed_resume_is_retired ... ok
+test application::agent::tests::pending_actions::identity_and_store::pending_command_round_trip_keeps_the_host_frozen_runtime_binding ... ok
+test application::agent::tests::pending_actions::identity_and_store::pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence ... ok
+test application::agent::tests::pending_actions::identity_and_store::provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict ... ok
+test application::agent::tests::pending_actions::mcp_approval::expired_mcp_approval_accepts_one_decision_and_settles_execution_normally ... ok
+test application::agent::tests::pending_actions::mcp_approval::recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winner ... ok
+test application::agent::tests::pending_actions::mcp_approval::recovered_approved_mcp_can_be_cancelled_with_a_definitely_not_dispatched_terminal_cas ... ok
+test application::agent::tests::pending_actions::mcp_automatic::auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs_terminal_row ... ok
+test application::agent::tests::pending_actions::mcp_automatic::live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_failure ... ok
+test application::agent::tests::pending_actions::mcp_automatic::startup_adopts_a_terminal_auto_mcp_result_when_its_dispatch_journal_lagged ... ok
+test application::agent::tests::pending_actions::mcp_automatic::startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unknown ... ok
+test application::agent::tests::pending_actions::mcp_automatic::startup_rejects_malformed_terminal_auto_mcp_result_instead_of_adopting_it ... ok
+test application::agent::tests::pending_actions::mcp_invalidation::catalog_generation_invalidation_targets_only_prior_generation_of_same_config_epoch ... ok
+test application::agent::tests::pending_actions::mcp_invalidation::mcp_invalidation_waiting_for_writer_releases_unrelated_pending_registry ... ok
+test application::agent::tests::pending_actions::mcp_invalidation::server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_unknown ... ok
+test application::agent::tests::pending_actions::mcp_recovery::mcp_startup_terminalization_uses_durable_identity_when_private_action_is_corrupt ... ok
+test application::agent::tests::pending_actions::mcp_recovery::startup_preserves_pending_mcp_tickets_while_pruning_expired_and_orphaned_payloads ... ok
+test application::agent::tests::pending_actions::mcp_recovery::typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_accepts_search_credential_replacement_without_rehydration ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_preserves_frozen_generic_profile_when_current_model_selects_deepseek ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edits ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_rejects_provider_endpoint_replacement ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_rejects_provider_token_replacement_at_the_same_endpoint ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_rejects_tokenless_to_token_presence_drift ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_selects_local_config_when_provider_model_id_is_shared ... ok
+test application::agent::tests::pending_actions::provider_resume::pending_resume_sqlite_row_contains_only_versioned_secret_free_projection ... ok
+test application::agent::tests::pending_actions::provider_resume::persisted_resume_requires_exact_collaboration_identity_on_both_context_copies ... ok
+test application::agent::tests::pending_actions::provider_resume::provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatch ... ok
+test application::agent::tests::pending_actions::resource_isolation::delayed_pending_projection_cannot_regress_a_later_decision ... ok
+test application::agent::tests::pending_actions::resource_isolation::deletion_fences_slow_approval_and_waits_for_its_scope_only ... ok
+test application::agent::tests::pending_actions::resource_isolation::slow_frozen_approval_does_not_block_other_run_cancel_or_its_own_stop ... ok
+test application::agent::tests::pending_actions::skill_persistence::terminal_pending_action_persistence_redacts_run_scoped_skill_bodies ... ok
+test application::agent::tests::pending_actions::skill_workers::queued_skill_script_post_receipt_panic_terminalizes_without_replay ... 
+thread 'application::agent::tests::pending_actions::skill_workers::queued_skill_script_post_receipt_panic_terminalizes_without_replay' (59551290) panicked at crates/core-server/src/application/agent/action_execution/runners/support.rs:151:9:
+injected Skill script worker panic after durable receipt
+ok
+test application::agent::tests::pending_actions::skill_workers::queued_skill_script_worker_panic_is_supervised_to_durable_outcome_unknown ... 
+thread 'application::agent::tests::pending_actions::skill_workers::queued_skill_script_worker_panic_is_supervised_to_durable_outcome_unknown' (59551303) panicked at crates/core-server/src/application/agent/action_execution/runners/support.rs:117:9:
+injected Skill script worker panic after effect boundary
+failed to append in-progress conversation trace for run skill-worker-supervised-panic-run: 本地数据库操作失败：conversation trace updates must preserve every committed item as an exact prefix
+ok
+test application::agent::tests::pending_actions::skill_workers::skill_script_worker_setup_failure_persists_receipt_and_runs_continuation ... failed to append in-progress conversation trace for run skill-worker-setup-failure-run: 本地数据库操作失败：conversation trace updates must preserve every committed item as an exact prefix
+ok
+test application::agent::tests::pending_actions::startup_recovery::agent_service_startup_retires_an_orphaned_cancelled_conversation_trace ... ok
+test application::agent::tests::pending_actions::startup_recovery::startup_reconciliation_failure_prevents_agent_service_startup ... ok
+
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 1177 filtered out; finished in 8.34s
+

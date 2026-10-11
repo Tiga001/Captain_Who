@@ -1,0 +1,15 @@
+
+running 10 tests
+test application::agent::tests::context_window_consistency::child_terminal_preview_retains_tree_workspace_and_skill_catalog_after_primary_switch ... ok
+test application::agent::tests::context_window_consistency::completed_turn_changed_budget_preview_is_reused_on_the_second_read ... ok
+test application::agent::tests::context_window_consistency::completed_turn_preview_is_identical_across_hot_cold_and_direct_read_paths ... ok
+test application::agent::tests::context_window_consistency::context_profile_active_run_stays_frozen_and_terminal_previews_next_mode ... ok
+test application::agent::tests::context_window_consistency::context_profile_idle_toggle_refreshes_measurement_without_rewriting_history ... ok
+test application::agent::tests::context_window_consistency::multi_workspace_active_preview_and_next_turn_share_the_correct_frozen_binding ... ok
+test application::agent::tests::context_window_consistency::omitted_wire_limit_keeps_internal_reserve_consistent_across_context_read_paths ... ok
+test application::agent::tests::context_window_consistency::terminal_preview_counts_discovery_once_and_retires_completed_skill_activation ... ok
+test application::agent::tests::context_window_consistency::terminal_preview_retires_automation_execution_but_preserves_user_preferences ... ok
+test application::agent::tests::context_window_consistency::text_append_grows_the_same_measurement_and_compaction_can_reduce_it ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 1.08s
+

@@ -1,0 +1,289 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling typenum v1.20.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.2
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.32
+   Compiling jobserver v0.1.35
+   Compiling errno v0.3.14
+   Compiling stable_deref_trait v1.2.1
+   Compiling bitflags v2.13.0
+   Compiling cc v1.2.66
+   Compiling bytes v1.12.0
+   Compiling serde_core v1.0.228
+   Compiling futures-sink v0.3.32
+   Compiling futures-channel v0.3.32
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling syn v2.0.118
+   Compiling hybrid-array v0.4.14
+   Compiling once_cell v1.21.4
+   Compiling core-foundation-sys v0.8.7
+   Compiling serde v1.0.228
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling smallvec v1.15.2
+   Compiling zmij v1.0.21
+   Compiling pkg-config v0.3.33
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling log v0.4.33
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling crypto-common v0.2.2
+   Compiling tracing-core v0.1.36
+   Compiling synstructure v0.13.2
+   Compiling ring v0.17.14
+   Compiling icu_properties_data v2.2.0
+   Compiling crc32fast v1.5.0
+   Compiling version_check v0.9.5
+   Compiling getrandom v0.4.3
+   Compiling simd-adler32 v0.3.9
+   Compiling utf8_iter v1.0.4
+   Compiling zeroize v1.9.0
+   Compiling rand_core v0.10.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling rustls-pki-types v1.15.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling displaydoc v0.2.6
+   Compiling zerofrom v0.1.8
+   Compiling zerovec-derive v0.11.3
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tokio v1.52.3
+   Compiling serde_derive v1.0.228
+   Compiling futures-util v0.3.32
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling generic-array v0.14.7
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling syn v3.0.3
+   Compiling http v1.4.2
+   Compiling foldhash v0.2.0
+   Compiling serde_json v1.0.150
+   Compiling percent-encoding v2.3.2
+   Compiling hashbrown v0.17.1
+   Compiling http-body v1.0.1
+   Compiling tracing-attributes v0.1.31
+   Compiling block-padding v0.4.2
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling getrandom v0.2.17
+   Compiling adler2 v2.0.1
+   Compiling untrusted v0.9.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling thiserror v2.0.18
+   Compiling httparse v1.10.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling miniz_oxide v0.8.9
+   Compiling tracing v0.1.44
+   Compiling security-framework v3.7.0
+   Compiling inout v0.2.2
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling thiserror-impl v2.0.18
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling crossbeam-epoch v0.9.21
+   Compiling rustls v0.23.41
+   Compiling strsim v0.11.1
+   Compiling tower-service v0.3.3
+   Compiling ident_case v1.0.1
+   Compiling try-lock v0.2.5
+   Compiling darling_core v0.23.0
+   Compiling want v0.3.1
+   Compiling idna_adapter v1.2.2
+   Compiling cipher v0.5.2
+   Compiling rustls-webpki v0.103.13
+   Compiling flate2 v1.1.9
+   Compiling form_urlencoded v1.2.2
+   Compiling block-buffer v0.12.1
+   Compiling core-foundation v0.9.4
+   Compiling subtle v2.6.1
+   Compiling ref-cast v1.0.26
+   Compiling const-oid v0.10.2
+   Compiling atomic-waker v1.1.2
+   Compiling equivalent v1.0.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling vcpkg v0.2.15
+   Compiling crossbeam-deque v0.8.8
+   Compiling libsqlite3-sys v0.38.2
+   Compiling tinyvec v1.11.0
+   Compiling hyper v1.10.1
+   Compiling indexmap v2.14.0
+   Compiling digest v0.11.3
+   Compiling system-configuration v0.7.0
+   Compiling idna v1.1.0
+   Compiling darling_macro v0.23.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling ref-cast-impl v1.0.26
+   Compiling serde_derive_internals v0.30.0
+   Compiling chrono v0.4.45
+   Compiling tokio-util v0.7.18
+   Compiling sync_wrapper v1.0.2
+   Compiling cpufeatures v0.3.0
+   Compiling tower-layer v0.3.3
+   Compiling ryu v1.0.23
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.0
+   Compiling zstd-safe v7.2.4
+   Compiling rustix v1.1.4
+   Compiling rayon-core v1.13.0
+   Compiling hyper-util v0.1.20
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling schemars_derive v1.2.2
+   Compiling digest v0.10.7
+   Compiling darling v0.23.0
+   Compiling url v2.5.8
+   Compiling unicode-normalization v0.1.25
+   Compiling rustls-native-certs v0.8.4
+   Compiling uuid v1.23.4
+   Compiling futures-executor v0.3.32
+   Compiling webpki-roots v1.0.8
+   Compiling chacha20 v0.10.1
+   Compiling fdeflate v0.3.7
+   Compiling keyring-core v1.0.0
+   Compiling cpufeatures v0.2.17
+   Compiling zune-core v0.5.1
+   Compiling unicode-properties v0.1.4
+   Compiling color_quant v1.1.0
+   Compiling unicode-bidi v0.3.18
+   Compiling option-ext v0.2.0
+   Compiling quick-error v2.0.1
+   Compiling byteorder-lite v0.1.0
+   Compiling bumpalo v3.20.3
+   Compiling siphasher v1.0.3
+   Compiling dyn-clone v1.0.20
+   Compiling rmcp v3.0.0
+   Compiling pxfm v0.1.30
+   Compiling cpubits v0.1.1
+   Compiling weezl v0.1.12
+   Compiling zip v2.4.2
+   Compiling gif v0.14.2
+   Compiling aes v0.9.2
+   Compiling moxcms v0.8.1
+   Compiling schemars v1.2.2
+   Compiling zopfli v0.8.3
+   Compiling phf_shared v0.12.1
+   Compiling image-webp v0.2.4
+   Compiling stringprep v0.1.5
+   Compiling dirs-sys v0.5.0
+   Compiling zune-jpeg v0.5.15
+   Compiling sha2 v0.10.9
+   Compiling apple-native-keyring-store v1.0.1
+   Compiling png v0.18.1
+   Compiling rand v0.10.2
+   Compiling hyper-rustls v0.27.9
+   Compiling futures v0.3.32
+   Compiling rmcp-macros v3.0.0
+   Compiling tower-http v0.6.11
+   Compiling serde_urlencoded v0.7.1
+   Compiling sha2 v0.11.0
+   Compiling md-5 v0.11.0
+   Compiling ecb v0.2.0
+   Compiling cbc v0.2.1
+   Compiling async-trait v0.1.91
+   Compiling http-body-util v0.1.3
+   Compiling hashlink v0.12.2
+   Compiling tokio-stream v0.1.19
+   Compiling num_threads v0.1.7
+   Compiling nom v8.0.0
+   Compiling encoding_rs v0.8.35
+   Compiling chrono-tz v0.10.4
+   Compiling time-core v0.1.9
+   Compiling deranged v0.5.8
+   Compiling pastey v0.2.3
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling lazy_static v1.5.0
+   Compiling powerfmt v0.2.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling either v1.19.0
+   Compiling fallible-iterator v0.3.0
+   Compiling bytemuck v1.25.0
+   Compiling rangemap v1.8.0
+   Compiling fastrand v2.4.1
+   Compiling num-conv v0.2.2
+   Compiling weezl v0.2.1
+   Compiling tempfile v3.27.0
+   Compiling time v0.3.53
+   Compiling image v0.25.10
+   Compiling lopdf v0.44.0
+   Compiling serde_yaml_ng v0.10.0
+   Compiling rusqlite v0.40.2
+   Compiling rayon v1.12.0
+   Compiling sharded-slab v0.1.7
+   Compiling reqwest v0.12.28
+   Compiling keyring v4.1.5
+   Compiling dirs v6.0.0
+   Compiling zstd v0.13.3
+   Compiling phf v0.12.1
+   Compiling tracing-log v0.2.0
+   Compiling roxmltree v0.21.1
+   Compiling thread_local v1.1.10
+   Compiling similar v2.7.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling unicode-segmentation v1.13.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling mycopilot-core v0.1.0 (<repo>/crates/core)
+   Compiling mycopilot-protocol-rs v0.1.0 (<repo>/crates/protocol-rs)
+   Compiling mycopilot-mcp-client v0.1.0 (<repo>/crates/mcp-client)
+   Compiling mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `mycopilot-core-server` (bin "core-server" test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 1m 24s
+     Running unittests src/main.rs (<build>/debug/deps/core_server-d1a844c28316c58e)
+
+running 15 tests
+test application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget ... ok
+test application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes ... ok
+test application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly ... ok
+test application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id ... ok
+test application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas ... ok
+test application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged ... ok
+test application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload ... ok
+test application::agent::tests::prepared_history_continuous_send::continuous_warm_send_survives_metadata_and_observers_without_full_history_rebuild ... FAILED
+
+failures:
+
+---- application::agent::tests::prepared_history_continuous_send::continuous_warm_send_survives_metadata_and_observers_without_full_history_rebuild stdout ----
+[历史上下文缓存] 缓存未命中：会话=continuous-warm-send，来源=发送准备，原因=尚未预热或缓存已淘汰，同步准备耗时=1ms
+[历史上下文缓存] 计量基线未命中：会话=continuous-warm-send，来源=发送准备，原因=通用历史已缓存，尚无可复用的计量基线，转为正常准备
+
+thread 'application::agent::tests::prepared_history_continuous_send::continuous_warm_send_survives_metadata_and_observers_without_full_history_rebuild' (59593104) panicked at crates/core-server/src/application/agent/tests/prepared_history_continuous_send.rs:269:9:
+assertion `left == right` failed
+  left: Number(1791734538198)
+ right: 1791734538113
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    application::agent::tests::prepared_history_continuous_send::continuous_warm_send_survives_metadata_and_observers_without_full_history_rebuild
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 1245 filtered out; finished in 4.41s
+
+error: test failed, to rerun pass `-p mycopilot-core-server --bin core-server`

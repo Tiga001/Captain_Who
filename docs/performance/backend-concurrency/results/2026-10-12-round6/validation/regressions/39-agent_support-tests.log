@@ -1,0 +1,15 @@
+
+running 10 tests
+test application::agent_support::tests::child_observer_notification_adds_exact_identity_without_changing_safe_event_projection ... ok
+test application::agent_support::tests::child_observer_notification_preserves_previously_dropped_runtime_event_projections ... ok
+test application::agent_support::tests::command_approval_rejection_records_user_authority_without_claiming_execution ... ok
+test application::agent_support::tests::failed_command_tool_result_keeps_the_complete_execution_observation ... ok
+test application::agent_support::tests::pending_continuation_uses_original_model_args_not_backend_bound_builder_fields ... ok
+test application::agent_support::tests::policy_rejection_keeps_stable_structured_diagnostics_in_tool_result ... ok
+test application::agent_support::tests::renderer_command_projection_excludes_host_runtime_authority_and_private_input_paths ... ok
+test application::agent_support::tests::renderer_command_projection_excludes_managed_office_script_authority ... ok
+test application::agent_support::tests::renderer_file_change_projection_excludes_all_execution_authority ... ok
+test application::agent_support::tests::shared_mcp_renderer_contract_matches_rust_safe_event_serialization ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 0.00s
+

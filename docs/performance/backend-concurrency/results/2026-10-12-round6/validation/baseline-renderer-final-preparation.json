@@ -1,0 +1,44 @@
+{
+  "status": "synchronized_for_final_execution",
+  "baselineRoot": "<baseline-worktree>",
+  "baselineHead": "acae06623b7ce6031b90795e730968fb36e38107",
+  "currentRoot": "<repo>",
+  "currentHead": "6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e",
+  "fixtures": [
+    {
+      "path": "src/main/core/backendAcceptance.electron.test.ts",
+      "sha256": "f26897cb750056c3be080bd4ee22396c61a4ba67b6c63eb89745be67f7f97802",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.electron.ts",
+      "sha256": "19593fafa8559f3a573059f6b1b888d8f7773107fa94dae1f3b58f6a1f2d6462",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.preload.ts",
+      "sha256": "20b14e1a21cae24bd905e46f6d38f3303a88b526caaf2d30b0b89e3995b75a42",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.types.ts",
+      "sha256": "eacd776d1d42f3ed1b9c616fd19f45d8b2de9864ebcd78f9ccc18df4787357cc",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/renderer/src/app/__fixtures__/backendAcceptance.html",
+      "sha256": "e0e5b068ea8a82522ee3938c201eca2c3344e0a3693648343c4b6e6afb9cbaed",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/renderer/src/app/__fixtures__/backendAcceptance.tsx",
+      "sha256": "9c2ced3bfe6b52e7f69ed053d6301768da968ecb73cb6533c2bed99f6d13b615",
+      "identicalToCurrent": true
+    }
+  ],
+  "hookApiAdaptations": [],
+  "workloadDifferences": [],
+  "bootstrapChangedThisSync": false,
+  "priorBootstrapPatch": "baseline-renderer-bootstrap.patch",
+  "changesSincePriorFixture": "Fixed TS narrowing; strengthened all text chunks, terminal JSON/reopen and unique diagnostics join; fixture-only per-method RPC counts. Same 50 actions, 40 loopback Provider requests and local approval command."
+}

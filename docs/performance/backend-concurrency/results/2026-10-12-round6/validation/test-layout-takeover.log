@@ -1,0 +1,3 @@
+$ node scripts/check-vitest-project-ownership.mjs && node scripts/check-ignored-rust-tests.mjs
+Vitest project ownership OK: 508 files (unit=314, browser=181, electron-fixtures=10, managed-playwright-e2e=1, human-interaction-core-e2e=1, automation-core-e2e=1)
+Ignored Rust test registry OK: 16 tests

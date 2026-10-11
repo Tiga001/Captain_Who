@@ -1,0 +1,1 @@
+self-test passed: raw errors, compaction, shutdown failure, and cleanup cannot yield acceptance/throughput

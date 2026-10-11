@@ -1,0 +1,20 @@
+
+running 2 tests
+test transport::automation_rpc::tests::host_notification_rpc_claims_and_acknowledges_the_durable_outbox ... 
+thread 'transport::automation_rpc::tests::host_notification_rpc_claims_and_acknowledges_the_durable_outbox' (59541558) panicked at crates/core-server/src/transport/automation_rpc.rs:356:60:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test transport::automation_rpc::tests::host_notification_rpc_revalidates_the_claim_at_the_native_display_boundary ... 
+thread 'transport::automation_rpc::tests::host_notification_rpc_revalidates_the_claim_at_the_native_display_boundary' (59541559) panicked at crates/core-server/src/transport/automation_rpc.rs:506:86:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+
+failures:
+
+failures:
+    transport::automation_rpc::tests::host_notification_rpc_claims_and_acknowledges_the_durable_outbox
+    transport::automation_rpc::tests::host_notification_rpc_revalidates_the_claim_at_the_native_display_boundary
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1250 filtered out; finished in 0.00s
+

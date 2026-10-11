@@ -1,0 +1,5 @@
+#include <stdio.h>
+#include <sqlite3.h>
+static int row(void *p,int n,char **v,char **names) { for(int i=0;i<n;i++) printf("%s=%s ",names[i],v[i]?v[i]:"NULL"); puts(""); return 0; }
+static void sql(sqlite3 *db,const char *q) { char *error=0; printf("SQL: %s\n",q); int r=sqlite3_exec(db,q,row,0,&error); printf("rc=%d error=%s\n",r,error?error:""); sqlite3_free(error); }
+int main(int argc,char **argv) { sqlite3 *db=0,*wr=0; printf("version=%s\n",sqlite3_libversion()); sqlite3_open_v2(argv[1],&db,SQLITE_OPEN_READONLY,0); sql(db,"PRAGMA quick_check"); sql(db,"SELECT rowid,ref_key,content FROM conversation_history_fts"); sql(db,"PRAGMA quick_check"); if(argc>2) { sqlite3_open(argv[1],&wr); sql(wr,"UPDATE messages SET content='committed terminal' WHERE id='fault-assistant'"); sql(db,"SELECT content FROM messages WHERE id='fault-assistant'"); sql(db,"PRAGMA quick_check"); sql(db,"SELECT content FROM conversation_history_fts WHERE conversation_history_fts MATCH 'committed'"); sql(db,"PRAGMA quick_check"); sqlite3_close(wr); } sqlite3_close(db); return 0; }

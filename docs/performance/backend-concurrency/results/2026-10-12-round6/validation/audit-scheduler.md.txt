@@ -1,0 +1,126 @@
+第六轮资源调度 / Preparing / execution access / Wake lease 独立审查
+基线：6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e
+审查方式：只读代码与契约审查；收到主代理明确文件所有权后修复下述 P1。
+本代理未运行构建或测试，未接触用户数据库、用户软件或真实模型。测试结果由主代理统一记录。
+
+1. 已修复、待统一测试的 P1
+
+原 runtime_segment.rs:670 对 captured Wake claim 做了最后一次校验，但第五轮在其后
+新增 :689 begin_runtime_checkpoint。该调用可在单 writer 队列/SQL 事务中等待。
+随后 :738 直接开始 send_chat_with_host_services，未重新检查 lease 或接手后的 token。
+原 runtime_checkpoints.rs:62-86 只检查精确 InProgress Trace/消息，并无 Wake capability。
+
+可复现交错：原 claim 在初检时有效；暂停在 checkpoint 调用前；占住隔离 writer；
+令租约过期，或用既有 recover_agent_wakes_at 接管并安装继任 checkpoint generation；
+放行旧作业。原实现能给失效 claim 安装 generation，且可能开始旧模型请求。
+PersistentAgentSamplingBoundaryInbox 不接受 captured claim，不能替代这个 execution fence。
+原 runtime_isolation_tests 的 BEFORE_RUNTIME_EXECUTION_FENCE hook 位于原最后检查之前，
+因此原三个 expiry/replacement/tree-stop 测试不能覆盖新增数据库等待窗口。
+
+修复：
+- begin_runtime_checkpoint_checked 在获得 writer/IMMEDIATE transaction 后检查 live segment
+  cancellation、当前 cancellation generation、runtime_stopping，以及原 captured Wake
+  token/run/assistant/source/active-agent/Trace/tree-stop/新鲜期限；写入后 commit 前再检查。
+  失败通过事务回滚，不能安装或覆盖 generation。
+- 回调只读短内存状态；不能回调 StorageService 或取得 publication gate。
+- checkpoint setup 完成后再次验证原 Wake，再返回模型 future；没有从数据库重新领取新 token。
+- 区分 Fenced 和 Storage 错误，磁盘写入故障仍沿既有 persistence failure 语义处理。
+- 普通 root 的既有账户许可边界保持不变，详见第 3 节。
+
+新增/建议统一执行的过滤器：
+- checkpoint_writer_wait_expired_claim_preserves_generation_and_never_samples
+- checkpoint_writer_wait_replaced_claim_preserves_successor_and_never_samples
+- checked_checkpoint_begin_rechecks_live_owner_and_rolls_back_generation
+- checkpoint_fingerprint_streaming_matches_existing_json_bytes
+- 全部 runtime_isolation_tests 与 runtime_checkpoints::tests（保护原拒绝/终态/ACK语义）
+
+前两个测试使用临时磁盘库、内存credential store和loopback监听器，显式阻塞真实writer。
+断言模型连接数为0、原Trace仍InProgress、无Done、错误为execution_fenced、继任token和
+checkpoint generation不变。expiry分支在期限前没有checkpoint；拒绝后仍不得安装一个。
+storage测试令live-owner回调在更新后第二次检查失效，核对整个generation更新已回滚。
+
+2. 新 writer -> cancellation registry 锁序逐路径检查
+
+runtime_segment.rs checked begin 回调中的 cancellations.lock 只计算 owns_generation；
+分号之后 guard 已释放，后续 Wake SQL 不持该锁。外层仍持精确 run_publication gate。
+检查了生产 .cancellations 的全部引用（不含 tests 和独立 manual_compaction registry）：
+
+- run_lifecycle/shutdown_and_registry.rs:32-41 先克隆快照再释放；43-56 在每 Run gate下
+  对当前token发cancel，if块结束后才做command/process操作。register/unregister :324-360
+  仅更新map，不调用SQL，不等待writer。
+- run_lifecycle/cancellation.rs:347-361 只取Run gate和map发cancel；:366之后才做实际
+  command/session和:374 SQL；map guard已在:361块尾释放。
+- run_lifecycle/destructive_mutations.rs:685-693 仅查询contains_key；随后才检查process
+  和sleep。无跨writer/副作用排空持锁。
+- approval/rejection_and_cancellation.rs:132-145 只发cancel；audit和revoke SQL在块外。
+- workflow_execution.rs:42-57 只把当前generation检查变成bool，再返回Run gate；后续
+  validate_owner SQL不持map锁。
+- runtime_segment.rs:231-238、291-302、372-379 均显式释放map guard后才通知/持久化。
+- turn_executor/human_input_async.rs:43-55、109-123 均显式drop后才做相应SQL。
+- turn_executor/human_input.rs:129-142 在有效路径显式drop后checkpoint flush；拒绝路径
+  仅恢复内存usage再return。:370-379 在claim SQL前drop；:407-410的insert独立语句结束
+  即释放，随后才spawn。
+- agent.rs:1534-1544 MCP批失效在Run gate里仅token.cancel，存储失效已在此前完成。
+
+未发现“持同一 cancellations registry等待writer”的现存生产反向锁序。
+不能把所有小registry推广为此结论：wake_execution_fences.rs:235-253仍跨renew SQL持锁，
+其文档/恢复路径通过先读库再锁map避免既有反向锁序；本次没有扩大或变更它。
+
+3. 账户许可与 Wake 执行租约不能混为一类
+
+明确产品契约：docs/subsystems/local-token-usage-and-license.md:12、40、42：
+账户许可只管理新的root Turn准入，不取消已经运行的任务、审批、工具、子任务或自动化。
+活跃回合steer、既有回合恢复与子任务不重新申请新root许可。
+
+执行路径：turn.rs:348-356先冻结execution_access token；:552-568的callback由最终
+initial-admission事务调用，包含Preparing/关机及account token新鲜检查。
+执行到runtime_segment的checkpoint setup时，初始user/assistant/Trace已经durably admitted。
+execution_access.rs:187-212更新账户状态并结算未接纳automation；不会cancel已接纳Run，
+因此不是依赖撤销同步cancel来保证checkpoint，它本来就不该撤销此Run。
+
+既有可执行证据：tests/automation_turn.rs:323-349，在admission后设置AccountSignedOut，
+断言automation仍Running并最终Completed。human_input.rs:307-310 / 317-337也明确仅空闲
+异步回答可能创建新root时检查许可，同步恢复和既有占用回答保持可用。
+
+所以给每个checkpoint或已接纳Runtime重新检查account admission lease会改变业务语义，
+并导致正常长于60秒任务因Host续租故障而被取消。本次明确不增加此校验。
+Wake execution lease是持续拥有子任务的能力，必须在runtime setup最终边界和终态提交
+重新验证；本次P1修复正是补齐该持续授权的新增writer等待窗口。
+
+4. 其余资源/生命周期路径审查结论
+
+- KeyedAdmission原子取得排序去重后的全部键，冲突FIFO；全局排队屏障不被后续不相关键
+  无限超越。bookkeeping mutex不跨SQL；发现同线程嵌套时先释放再panic。
+- transport scope解析保留未知全局回退，移动元数据同时声明原/目标Project，审批同时声明
+  frozen/当前Project，Stop仅允许已证明Preparing owner越过其已开始准备。
+- Preparing validate精确boot/generation/Conversation/Run，取消保留实体owner直到实际退出；
+  同writer顺序发布Stop/delete/shutdown fence。Project成员最终CAS与drain分离。
+- execution access同账号有效renew不废弃token；拒绝、identity epoch变化、曾观察过期会
+  永久废弃旧准入token。排队token/拒绝结果在handler前冻结，线程局部作用域不泄漏后台。
+- 完成期workflow恢复只调用recover_run(run_id)，缺失或InProgress Trace不结算claim；
+  recover_claims仅由startup orphan reconciliation调用。现有真实claim→Trace空窗回归
+  保留，未发现新的运行期全局扫描侵入Preparing。
+- shutdown晚到register会立即cancel并保留结算owner；最终blocking shutdown排空已提交
+  同步工作，late reservation拒绝。既有active_runs_settled累计标志会降低单次返回状态的
+  精度，但最终shutdown_submitted仍承担真实变更drain；本次未将其报告为已证明数据丢失。
+
+5. 未通过硬门槛 / 不能从已有回归推导的结论
+
+这些是文档明确保留的验收缺口，不是假装本代理已经运行的失败测试：
+- PROGRESS与round5结果只有60秒固定输入稳态；10–30分钟稳态、持续流、慢消费者、
+  突发排空及每root最长等待仍需第六轮实测，有限双root不能证明持续负载不饥饿。
+- 50并发短历史send p95 704.033ms，仍高于acceptance暂定500ms目标；当前不能宣称总体SLO达标。
+- 原生用户动作到paint/持久决策链与至少10000观测的可靠尾分位数尚未由本审查证明。
+- writer阻塞后的lease expiry与新增checkpoint边界此前无专属覆盖；已补代码/测试但等主代理执行。
+- 进程实际崩溃/磁盘满、长快照/WAL增长、物理磁盘写入量不得用payload字节或WAL尾部大小替代。
+- active逻辑额度峰值需要独立测量字段；provider并发和累计完成量不能替代额度50验证。
+
+6. 同文件的低风险内存修复（主代理/audit_storage授权）
+
+checkpoint_fingerprint改为serde_json::to_writer直接喂SHA256 Write adapter，保持同一JSON
+tuple和完全一致字节；避免每个checkpoint额外分配整份content/patch序列化缓冲。
+active_projection消费已解析Value::Object，去掉整份Map深拷贝，只保留小status字符串。
+新增兼容测试用Unicode、转义、NUL及多KiB正文对比旧to_vec摘要；待统一执行。
+
+已执行的静态验证：指定文件rustfmt、git diff --check无输出。
+未宣称任何新增测试通过；不增加额度、线程、队列，不改变权限/审批/业务规则。

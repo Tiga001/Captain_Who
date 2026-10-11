@@ -1,0 +1,8 @@
+
+running 3 tests
+test transport::request_loop::mcp_management_task_tests::shutdown_aborts_and_joins_a_request_that_exceeds_the_grace_period ... ok
+test transport::request_loop::mcp_management_task_tests::shutdown_joins_completed_management_requests_and_closes_admission ... ok
+test transport::request_loop::tests::storage_reads_use_the_non_blocking_dispatch_path ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1249 filtered out; finished in 0.00s
+

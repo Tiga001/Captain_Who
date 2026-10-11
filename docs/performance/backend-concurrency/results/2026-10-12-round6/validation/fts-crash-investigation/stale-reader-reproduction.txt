@@ -1,0 +1,25 @@
+version=3.53.2
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=
+SQL: SELECT rowid,ref_key,content FROM conversation_history_fts
+rowid=1 ref_key=message:fault-user content=hello 
+rowid=2 ref_key=message:fault-assistant content=confirmed checkpoint 🐈 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=
+SQL: UPDATE messages SET content='committed terminal' WHERE id='fault-assistant'
+rc=0 error=
+SQL: SELECT content FROM messages WHERE id='fault-assistant'
+content=committed terminal 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=fts5: checksum mismatch for table "conversation_history_fts" 
+rc=0 error=
+SQL: SELECT content FROM conversation_history_fts WHERE conversation_history_fts MATCH 'committed'
+content=committed terminal 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=

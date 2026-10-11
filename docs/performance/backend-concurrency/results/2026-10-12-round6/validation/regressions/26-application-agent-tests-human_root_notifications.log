@@ -1,0 +1,9 @@
+
+running 4 tests
+test application::agent::tests::human_root_notifications::child_conversation_is_not_classified_as_an_ordinary_human_root_turn ... ok
+test application::agent::tests::human_root_notifications::completed_human_root_turn_atomically_publishes_one_safe_notification ... ok
+test application::agent::tests::human_root_notifications::emoji_heavy_prompt_persists_notification_without_rolling_back_terminal_turn ... ok
+test application::agent::tests::human_root_notifications::failed_human_root_turn_uses_prompt_identity_and_never_the_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1248 filtered out; finished in 0.29s
+

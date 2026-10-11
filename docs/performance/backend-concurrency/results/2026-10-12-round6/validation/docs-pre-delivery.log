@@ -1,0 +1,2 @@
+$ node scripts/check-docs.mjs
+Documentation checks passed: 66 docs, 70 Markdown files, storage schema v71.

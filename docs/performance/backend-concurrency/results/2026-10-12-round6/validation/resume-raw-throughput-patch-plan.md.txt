@@ -1,0 +1,65 @@
+# Rust raw 吞吐字段最小补丁方案与实施记录
+
+日期：2026-10-12。等待主代理发出可修改信号。当前仅写此缓存计划，不改 tracked source，不编译，不运行压测。目标源文件：`crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs`。
+
+后续实施状态：主代理确认 current r2 已结束、baseline r2 独占运行后，授权只修改 current 的上述文件。现已应用本计划的纯统计函数、最终 report 赋值和一个同步合成报告测试；没有改 baseline、runner、transport，也没有编译或执行测试。`rustfmt --edition 2021`（仓库 edition）与该文件 `git diff --check` 已通过。相对冻结 baseline fixture 的仅本次补丁另存 `resume-raw-throughput-only.patch`，此前 collector / recovery 改动不在这个派生 patch 内。
+
+待统一编译后执行的精确测试名：
+
+```text
+application::agent::tests::backend_concurrency_baseline::backend_baseline_throughput_is_null_without_complete_healthy_recovery
+```
+
+测试已编写：可信完成 Some(0.5)、32 个逐字段错误派生、5 个必要字段缺失、同数量恢复 Run 替换、全取消 Some(0.0)，以及显式容量拒绝与一个可信完成共存时 Some(0.5)。这些仅是代码覆盖设计；本代理没有执行 Rust 测试，不能写为通过。
+
+## 修改边界
+
+只增加纯统计函数、替换一个 JSON 初始值、在最终 report 组装结束时赋值，以及一个 table-driven 合成 report 单元测试。不要修改 collector、submit、provider、授权、固定提供节奏、drain、shutdown 或计时时间点；不要改变既有 benchmark 成败条件。
+
+调用方式：
+
+```rust
+fn completed_root_throughput(report: &Value) -> Option<f64> { /* gates below */ }
+
+// lifecycle 中旧的无条件除法先替换为 null，保留字段位置。
+"completed_root_turns_per_second": Value::Null
+
+// report.extend(measurements...) 之后，所有证据齐备；run_case 返回之前。
+let throughput = completed_root_throughput(&report);
+report["completed_root_turns_per_second"] = json!(throughput);
+report
+```
+
+纯函数只读取完整报告；不读取时钟、环境、数据库或 mutex，不修改报告。`Option<f64>` 的 `None` 序列化为 JSON null。此 gate 和缓存 analyzer 相同：延迟 SLO 超标或明确分类的负载拒绝本身不禁止一个可信完成速率。
+
+## 必须通过的 gate
+
+类型不匹配或必要证据缺失即 `None`，避免 `unwrap_or(0)` 把未知状态当健康。
+
+1. `measured_us.as_u64()` 存在且大于零。
+2. `drained_before_cleanup`、`starts_responded`、`controls_ready`、`replies_complete` 都严格为 true；`shutdown_timed_out` 严格为 false。
+3. `in_progress_before_cleanup`、`recovery.post_reopen_in_progress` 为 0。前者补足“naturally drained”的直接证据，防止单独错误的 drained bool 掩盖清理前未结束任务。
+4. `raw.errors`、`unexpected_rpc_errors` 都是空数组，`raw.context_compaction_events` 为 0。
+5. `raw.transport_failure` 明确存在且为 null；`outbound.state.closed / failed / overloaded` 严格为 false；`failure_snapshot` 明确存在且为 null。此函数只服务当前 Rust report，不需要接受旧 schema 的缺省字段。
+6. `root_starts_durably_accepted` 是正整数，`recovered_root_turns` 与之相等；`recovery.acknowledged_roots_checked` 相等，`acknowledged_root_identity_errors` 是空数组。
+7. `recovery.roots` 是 object 且数量等于 recovered。`root_terminal_statuses` 是 object，只有 Completed / Cancelled 两类、各值为非负整数，并用 checked arithmetic 验证总数等于 recovered。`Completed` 可缺省为 0（全取消仍可报告 0 completed/s）。
+8. `raw.rpcs` 是 object；所有请求均有非 null response 和整数 responded_us，所有 `transport_rejected_us` 都明确为 null。成功 start ACK 数等于 accepted；planned start 数为 case.roots × case.waves（checked arithmetic），防止少提供任务。
+9. ACK 逐项确认其 runId 在 roots 中，owner / assistantMessageId 相同且终态 completed/cancelled。重复 runId、缺失身份、非字符串/空字符串身份一律失败。根恢复表的数量等于唯一 ACK 集合，故不会被额外或替换 root 的相同 aggregate count 掩盖。可在这一遍累计根身份的终态分布，与 root_terminal_statuses 比较，不必重复遍历。
+
+gate 6 信任原有 `acknowledged_root_recovery` 已给出的错误清单，gate 9 再在 JSON 汇总边界核对实际 identity；这样合成 report 将 roots 替换但遗漏同步 errors 字段时仍会返回 None。避免为最小补丁再复制 runner 全部 mixed/control/tree 校验逻辑；独立 runner / analyzer 继续是可发布结果的最终完整性检查。
+
+最后计算：`Some(completed as f64 / (measured_us as f64 / 1_000_000.0))`。不得使用 cleanup/reopen 后的额外执行时间去悄悄更换分母，也不得把恢复条目本身视为提供负载内已正常完成。
+
+## 一个合成 report 单元测试
+
+新增一个普通同步 `#[test]`（不创建 DB/runtime）。构造最小完整报告：1 root、1 wave、1 ACK、匹配的 root identity、Completed=1、measured_us=2_000_000、所有 lifecycle/transport 健康。预期 `Some(0.5)`，序列化等于 0.5。
+
+在同一个测试内，用循环 clone 该 JSON，并分别注入以下失败，断言 helper 返回 None 且 `json!(helper(&value))` 为 null：未 drain、缺回复、starts/controls/replies false、shutdown timeout、清理前/恢复后 in-progress、runtime error、unexpected RPC error、compaction、各 transport flag、failure snapshot、transport failure、局部 transport evidence 缺失、零 duration、recovered/ACK checked/count mismatch、reported identity error、相同数量替换 runId、错误 owner/message/terminal、planned starts mismatch、transport rejection。另验证全取消报告 `Some(0.0)`，以及未提供 latency metrics 不影响可信吞吐，防止意外引入 SLO gate。
+
+这一个测试覆盖纯函数结果，不重新测试业务路径。当前只设计、不运行；主代理待所有压测结束后统一编译/执行。
+
+## 对照与溯源
+
+可修改信号到达后仅改 current 工作区测试源文件。baseline 正在独占运行时，不修改 baseline 的源码或二进制，以免 source-changed metadata 失真；baseline 已冻结二进制继续保留旧 raw 字段，最终分析统一忽略它并使用修正后的缓存 analyzer。
+
+如后续需要新 baseline build，再在没有基准运行时将相同纯统计 patch 同步到 baseline 并重新记录 fixture hash；不得把旧 r2 二进制 hash 绑定到修改后的源码。两份既有 raw 结果保留原样。该 patch 不改变实际提供/执行/消费工作量，但源码 fingerprint 会变化，应在最终文档独立注明。

@@ -1,0 +1,378 @@
+[
+  {
+    "case": "mixed-u5-r5-h0-s0",
+    "configuration": {
+      "history_pairs": 0,
+      "roots": 5,
+      "slow_seconds": 0,
+      "units": 5,
+      "waves": 11,
+      "work": "mixed"
+    },
+    "operations": {
+      "agent.approveAction": {
+        "offered": 10,
+        "dispatch_admitted": 10,
+        "handler_started": 10,
+        "success": 10,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 10,
+          "p50_ms": 14.04,
+          "p95_ms": 19.207,
+          "p99_ms": 19.207,
+          "max_ms": 19.207
+        },
+        "all_scheduled": {
+          "n": 10,
+          "p50_ms": 14.04,
+          "p95_ms": 19.207,
+          "p99_ms": 19.207,
+          "max_ms": 19.207
+        },
+        "success_actual": {
+          "n": 10,
+          "p50_ms": 13.983,
+          "p95_ms": 19.184,
+          "p99_ms": 19.184,
+          "max_ms": 19.184
+        },
+        "queue": {
+          "n": 10,
+          "p50_ms": 0.303,
+          "p95_ms": 2.831,
+          "p99_ms": 2.831,
+          "max_ms": 2.831
+        },
+        "provider_start": {
+          "n": 0,
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "max_ms": null
+        },
+        "response_bytes": 3140,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 1
+        }
+      },
+      "agent.cancelRun": {
+        "offered": 10,
+        "dispatch_admitted": 10,
+        "handler_started": 10,
+        "success": 10,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 10,
+          "p50_ms": 5.815,
+          "p95_ms": 17.085,
+          "p99_ms": 17.085,
+          "max_ms": 17.085
+        },
+        "all_scheduled": {
+          "n": 10,
+          "p50_ms": 5.815,
+          "p95_ms": 17.085,
+          "p99_ms": 17.085,
+          "max_ms": 17.085
+        },
+        "success_actual": {
+          "n": 10,
+          "p50_ms": 5.812,
+          "p95_ms": 17.061,
+          "p99_ms": 17.061,
+          "max_ms": 17.061
+        },
+        "queue": {
+          "n": 10,
+          "p50_ms": 0.183,
+          "p95_ms": 0.396,
+          "p99_ms": 0.396,
+          "max_ms": 0.396
+        },
+        "provider_start": {
+          "n": 0,
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "max_ms": null
+        },
+        "response_bytes": 1000,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 1
+        }
+      },
+      "agent.startConversationTurn": {
+        "offered": 55,
+        "dispatch_admitted": 55,
+        "handler_started": 55,
+        "success": 55,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 55,
+          "p50_ms": 50.709,
+          "p95_ms": 232.708,
+          "p99_ms": 282.38,
+          "max_ms": 282.38
+        },
+        "all_scheduled": {
+          "n": 55,
+          "p50_ms": 50.709,
+          "p95_ms": 232.708,
+          "p99_ms": 282.38,
+          "max_ms": 282.38
+        },
+        "success_actual": {
+          "n": 55,
+          "p50_ms": 49.31,
+          "p95_ms": 230.98,
+          "p99_ms": 280.534,
+          "max_ms": 280.534
+        },
+        "queue": {
+          "n": 55,
+          "p50_ms": 12.887,
+          "p95_ms": 85.626,
+          "p99_ms": 227.921,
+          "max_ms": 227.921
+        },
+        "provider_start": {
+          "n": 55,
+          "p50_ms": 69.781,
+          "p95_ms": 282.07,
+          "p99_ms": 290.32,
+          "max_ms": 290.32
+        },
+        "response_bytes": 36044,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 2
+        }
+      },
+      "storage.loadConversation": {
+        "offered": 21,
+        "dispatch_admitted": 21,
+        "handler_started": 21,
+        "success": 21,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 21,
+          "p50_ms": 17.554,
+          "p95_ms": 26.712,
+          "p99_ms": 31.483,
+          "max_ms": 31.483
+        },
+        "all_scheduled": {
+          "n": 21,
+          "p50_ms": 17.554,
+          "p95_ms": 26.712,
+          "p99_ms": 31.483,
+          "max_ms": 31.483
+        },
+        "success_actual": {
+          "n": 21,
+          "p50_ms": 4.327,
+          "p95_ms": 15.829,
+          "p99_ms": 30.122,
+          "max_ms": 30.122
+        },
+        "queue": {
+          "n": 21,
+          "p50_ms": 0.214,
+          "p95_ms": 0.777,
+          "p99_ms": 5.807,
+          "max_ms": 5.807
+        },
+        "provider_start": {
+          "n": 0,
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "max_ms": null
+        },
+        "response_bytes": 4801700,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 2
+        }
+      }
+    },
+    "cpu_seconds": 4.283245,
+    "process_disk_io_delta": {
+      "diskio_bytes_read": 622592,
+      "diskio_bytes_written": 130883584,
+      "logical_writes": 118639568,
+      "pageins": 0
+    },
+    "queue_peaks": {
+      "rpc.queued/read": {
+        "peak_count": 1,
+        "peak_bytes": 614,
+        "sampled_oldest_max_us": 165,
+        "omitted": 0
+      },
+      "storage.queue/reader": {
+        "peak_count": 5,
+        "peak_bytes": 5120,
+        "sampled_oldest_max_us": 103,
+        "omitted": 0
+      },
+      "storage.queue/writer": {
+        "peak_count": 5,
+        "peak_bytes": 880519,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/completion": {
+        "peak_count": 10,
+        "peak_bytes": 4964440,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/maintenance": {
+        "peak_count": 2,
+        "peak_bytes": 88380,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/preparation": {
+        "peak_count": 2,
+        "peak_bytes": 992888,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/recovery": {
+        "peak_count": 1,
+        "peak_bytes": 496444,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/rpc_identity": {
+        "peak_count": 6,
+        "peak_bytes": 0,
+        "sampled_oldest_max_us": 126,
+        "omitted": 0
+      },
+      "rpc.queued/write": {
+        "peak_count": 5,
+        "peak_bytes": 5335,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/rpc_approval": {
+        "peak_count": 2,
+        "peak_bytes": 0,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "rpc.queued/approval": {
+        "peak_count": 4,
+        "peak_bytes": 2872,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "blocking.estimated/rpc_control": {
+        "peak_count": 2,
+        "peak_bytes": 0,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      },
+      "rpc.queued/control": {
+        "peak_count": 2,
+        "peak_bytes": 1244,
+        "sampled_oldest_max_us": 0,
+        "omitted": 0
+      }
+    },
+    "logical_active_sampled_peak": 0,
+    "sampled_wal_peak": 4478472,
+    "disk_after": {
+      "database_bytes": 7184384,
+      "journal_bytes": 0,
+      "shm_bytes": 32768,
+      "wal_bytes": 4478472
+    },
+    "outbound": {
+      "merged_events": 0,
+      "peak_bytes": 440441,
+      "peak_frames": 33,
+      "serialized_bytes": 10354698
+    },
+    "recovery": {
+      "child_terminal_statuses": {},
+      "children": {},
+      "kind": "clean shutdown/reopen; not a crash or power-loss test",
+      "open_service_us": 12899,
+      "post_reopen_in_progress": 0,
+      "pre_close_in_progress": 0,
+      "root_terminal_statuses": {
+        "Cancelled": 10,
+        "Completed": 45
+      }
+    },
+    "terminal_counts": {
+      "Cancelled": 10,
+      "Completed": 45
+    },
+    "offered_turns_per_second": 5.0,
+    "measured_seconds": 10.589013,
+    "completed_turns_per_second": 4.2496878604266515,
+    "settled_turns_per_second": 5.194062940521463,
+    "sustainability_checks": {
+      "no_rejections_or_errors": true,
+      "all_responded": true,
+      "drained": true,
+      "recovered": true,
+      "send_p95_under_500ms": true,
+      "agent.approveAction_empirical_latency": true,
+      "agent.cancelRun_empirical_latency": true
+    },
+    "empirical_slo_and_drain_pass": true,
+    "slo_scope": "Core scheduled intake only; success quantiles never include rejections; small p99 remains exploratory.",
+    "owner_start_latency": {
+      "0": {
+        "n": 11,
+        "p50_ms": 19.186,
+        "p95_ms": 89.623,
+        "p99_ms": 89.623,
+        "max_ms": 89.623
+      },
+      "1": {
+        "n": 11,
+        "p50_ms": 19.316,
+        "p95_ms": 101.513,
+        "p99_ms": 101.513,
+        "max_ms": 101.513
+      },
+      "2": {
+        "n": 11,
+        "p50_ms": 45.366,
+        "p95_ms": 232.717,
+        "p99_ms": 232.717,
+        "max_ms": 232.717
+      },
+      "3": {
+        "n": 11,
+        "p50_ms": 57.079,
+        "p95_ms": 232.708,
+        "p99_ms": 232.708,
+        "max_ms": 232.708
+      },
+      "4": {
+        "n": 11,
+        "p50_ms": 54.548,
+        "p95_ms": 282.38,
+        "p99_ms": 282.38,
+        "max_ms": 282.38
+      }
+    },
+    "retained_raw_json_bytes": 123441,
+    "rss_limit": "Process includes finite raw harness records and local fake provider; neither raw JSON bytes nor socket peak equals product heap."
+  }
+]

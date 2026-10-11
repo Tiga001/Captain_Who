@@ -1,0 +1,56 @@
+
+running 45 tests
+test application::agent::tests::human_input::all_skipped_is_a_formal_sync_response_and_resumes_same_run ... ok
+test application::agent::tests::human_input::committed_unclaimed_sync_answer_resumes_after_host_restart ... ok
+test application::agent::tests::human_input::concurrent_submission_cannot_overtake_the_open_request_notification ... ok
+test application::agent::tests::human_input::consecutive_sync_questions_preserve_one_run_and_cumulative_usage ... ok
+test application::agent::tests::human_input::disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human_input ... ok
+test application::agent::tests::human_input::open_sync_question_survives_host_restart_and_accepts_its_answer ... ok
+test application::agent::tests::human_input::stopped_sync_wait_after_host_restart_rejects_late_submission_without_sampling ... ok
+test application::agent::tests::human_input::stopped_sync_wait_rejects_a_late_submission_without_sampling ... ok
+test application::agent::tests::human_input::submitted_answer_waits_for_the_old_worker_to_retire_before_resuming ... ok
+test application::agent::tests::human_input::sync_human_input_resumes_same_run_once_with_mixed_answers ... ok
+test application::agent::tests::human_input::sync_questions_and_command_approval_alternate_without_crossing_resume_authority ... ok
+test application::agent::tests::human_input::web_search_late_model_calls_are_denied_after_committed_off_setting ... ok
+test application::agent::tests::human_input::web_search_missing_credential_after_sync_restart_keeps_same_run ... ok
+test application::agent::tests::human_input::web_search_toggle_across_sync_and_approval_pauses_preserves_same_run ... ok
+test application::agent::tests::human_input_async::active_async_batches_follow_submission_order_without_duplicate_user_rows_or_usage ... ok
+test application::agent::tests::human_input_async::active_ignored_batches_enter_natural_samples_once_and_remain_in_history_after_restart ... ok
+test application::agent::tests::human_input_async::all_skipped_async_batch_is_a_formal_answer_that_starts_one_idle_turn ... ok
+test application::agent::tests::human_input_async::answer_accepted_while_active_cannot_start_new_root_after_logout_and_terminal_race ... human answer delivery deferred: 请登录账号后再启动新的回合。
+human answer delivery deferred: 请登录账号后再启动新的回合。
+ok
+test application::agent::tests::human_input_async::answer_accepted_while_active_chooses_one_idle_route_after_natural_terminal_race ... ok
+test application::agent::tests::human_input_async::async_answer_after_natural_completion_starts_one_human_root_turn ... ok
+test application::agent::tests::human_input_async::async_answer_waits_for_real_manual_compaction_and_drains_after_its_completion ... human answer delivery deferred: 当前聊天正在压缩上下文，请稍后重试。
+human answer delivery deferred: 当前聊天正在压缩上下文，请稍后重试。
+ok
+test application::agent::tests::human_input_async::async_guidance_queued_before_approval_retains_identity_after_same_run_resume ... ok
+test application::agent::tests::human_input_async::async_guidance_queued_before_sync_pause_is_rebound_once_after_same_run_resume ... ok
+test application::agent::tests::human_input_async::async_submission_waits_for_command_approval_then_enters_the_same_run ... ok
+test application::agent::tests::human_input_async::async_submission_waits_for_sync_answer_then_enters_the_same_run ... ok
+test application::agent::tests::human_input_async::committed_async_answer_is_delivered_once_after_restart_before_dispatch ... ok
+test application::agent::tests::human_input_async::disabled_host_setting_still_delivers_previously_admitted_sync_and_async_answers ... ok
+test application::agent::tests::human_input_async::failed_idle_answer_is_settled_without_restart_and_a_later_batch_can_continue ... ok
+test application::agent::tests::human_input_async::human_root_rewrite_and_async_answer_expiry_at_commit_roll_back_all_turn_facts ... ok
+test application::agent::tests::human_input_async::idle_async_answers_after_completion_or_stop_reject_denial_before_saving_and_can_retry ... ok
+test application::agent::tests::human_input_async::idle_ignored_batches_survive_restart_without_waking_and_precede_the_next_user ... ok
+test application::agent::tests::human_input_async::ignore_during_the_final_request_does_not_extend_the_run_and_replays_after_restart ... ok
+test application::agent::tests::human_input_async::ignore_one_async_batch_does_not_deliver_or_wake_and_leaves_other_batches_open ... ok
+test application::agent::tests::human_input_async::ignored_history_after_compaction_is_ordinary_history_and_is_not_reinjected ... ok
+test application::agent::tests::human_input_async::live_host_setting_close_rejects_in_flight_model_questions_then_reopens_next_snapshot ... ok
+test application::agent::tests::human_input_async::logout_preserves_active_async_steering_and_sync_or_approval_resume ... ok
+test application::agent::tests::human_input_async::new_explicit_async_answer_after_stop_is_new_user_intent_and_starts_one_turn ... ok
+test application::agent::tests::human_input_async::new_root_and_rewrite_require_execution_access_even_without_main ... ok
+test application::agent::tests::human_input_async::open_async_batch_survives_restart_after_its_original_run_completed ... ok
+test application::agent::tests::human_input_async::pre_runtime_approval_failure_releases_occupancy_and_drains_pending_async_answer ... ok
+test application::agent::tests::human_input_async::revoked_sync_resume_claim_retires_control_and_drains_pending_async_answer ... refused human input continuation: human response execution claim was revoked
+ok
+test application::agent::tests::human_input_async::shared_response_display_fixture_matches_rust_history_contract ... ok
+test application::agent::tests::human_input_async::shutdown_does_not_dispatch_committed_answers_and_restart_recovers_them ... ok
+test application::agent::tests::human_input_async::stop_before_sync_resume_execution_retires_control_and_allows_later_explicit_answer ... refused human input continuation: human response execution claim was revoked
+ok
+test application::agent::tests::human_input_async::stop_cancels_already_accepted_async_delivery_before_dispatch_and_prevents_restart_wake ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 1207 filtered out; finished in 22.15s
+

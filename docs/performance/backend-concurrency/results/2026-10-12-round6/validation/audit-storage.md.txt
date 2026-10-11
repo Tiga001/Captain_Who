@@ -1,0 +1,175 @@
+# 第六轮独立存储审查
+
+审查日期：2026-10-11。审查起点：6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e。
+审查者：audit_storage 子代理；未主导第三至第五轮实现。
+本记录区分源码审查、已写修复、已存在测试与本轮实际运行。保存本记录时，统一构建由主代理执行中；本文不宣称新增测试已通过。最终运行结果应以主代理同源码日志为准。
+
+## 范围与操作约束
+
+已读 PROGRESS.md、acceptance.md、round3-storage-execution.md、round3-results.md、round5-persistence-ownership.md，以及相关源码与现有测试。审查存储事务/提交后通知/游标、运行展示 checkpoint/CAS/ACK 丢失、WAL/读池、终态原子性、备份恢复和回退边界。
+
+初始为只读审查。随后按主代理明确分配，修改通知服务/仓库/专属测试，增加独立 storage_faults 测试及注册；database_snapshot.rs 只修正注释。checkpoint 内存优化建议交给已拥有该文件的 audit_scheduler 实施，未并行修改其文件。
+
+本代理未构建、未运行测试或基准、未访问真实用户数据库、未停止用户软件、未调用外部模型。所有新增测试只使用 tempfile、内存凭据、自启动测试子进程和合成数据。格式检查与 scoped git diff --check 已执行且通过；这不替代编译和测试。
+
+## 可操作发现与处理
+
+### 1. 通知投递 lease 在 writer 排队后仍使用调用前时间（已写修复，待运行）
+
+起点源码证据：
+
+- crates/core-server/src/application/notification.rs:75、112 在调用存储前取 now_ms。
+- crates/core/src/storage/service/notifications.rs:59-69、81-90 排入单 writer 后原样传入 caller now。
+- crates/core/src/storage/notification_repository.rs:598/634 在 BEGIN IMMEDIATE 后仍以旧 now 创建到期时间；692/699 验证也使用旧 now。
+
+复现：先取得 writer 并阻塞通知任务，任务按 T0 发起，推进可控时间跨过 lease_expires_at，释放 writer。旧实现仍按 T0 验证并返回可投递记录；新 claim 也可能刚返回便已经到期。这是投递有效性/重复提醒风险，不把它描述为模型或工具执行授权绕过。
+
+当前修复：
+
+- StorageService 的两个生产入口不再接受调用者 now；在入口建立 wall clock + monotonic elapsed 下限的时钟闭包，由仓库在真正取得 BEGIN IMMEDIATE 后调用。
+- 新 claim 返回前再次核对时钟；若事务自身已耗尽整个 lease，回滚该事务并返回空集合，不能发布失效投递权。
+- 已有 claim 的幂等返回及 validate 也在返回前重新核对 expiry；不通过重放隐式延租。
+- 原 repository 固定时间 API 保留，转入相同实现的固定时钟分支，保持旧合成时间测试语义。
+- 全仓调用检索发现两个 StorageService 生产调用者，均已更新；其余固定 now 调用属于 repository 测试。
+
+当前定位：service/notifications.rs:20、61、98；notification_repository.rs:604、724；application/notification.rs:77、113。
+
+新测试：crates/core/src/storage/service/notifications/tests.rs。
+
+1. notification_claim_lease_starts_after_the_writer_barrier
+2. notification_validate_rejects_a_lease_expired_behind_the_writer_barrier
+3. notification_claim_expiring_in_its_transaction_rolls_back_the_claim
+4. notification_replayed_claim_and_validation_recheck_expiry_before_returning
+5. notification_late_delivery_ack_preserves_the_real_receipt
+6. notification_successor_fences_late_delivery_ack_and_release
+
+前两个使用真实隔离磁盘 writer barrier 和 AtomicI64 可控时钟；时钟闭包同时断言实际运行在 core-sqlite-writer，确定性排除提前在请求线程读取时钟。时间推进不依赖长 sleep。第三、四个在同一仓库调用的首尾读取之间推进时钟。没有把 thread-start 信号包装成已证明精确入队时点。
+
+### 2. ACK/release 到期后仍可结算，不应机械增加 expiry WHERE（正确行为保留）
+
+起点 notification_repository.rs:806、823 的 ACK UPDATE 和 release:852、872 检查 status + exact claim_token，没有 expiry 约束。
+
+解释：validate 是开始投递前的有效性检查；ACK 是原生投递已发生后的事实回执。真实投递已经发生、但 ACK 因 writer 排队晚到时，如果仍是精确旧 token，应保存事实；若新 token 已接管，旧 ACK/release 必须被 fenced。此次不改变这层语义，新增上述第 5、6 项证明迟到回执保存及 successor fencing。该协议不能保证跨进程崩溃的原生 OS 提醒绝对 exactly-once，不作该承诺。
+
+### 3. Round5 checkpoint 的额外 CPU/RSS 与写入成本（两处低风险内存优化已交接）
+
+起点 runtime_checkpoints.rs:111-126 为 SHA256 先 serde_json::to_vec 整个 identity/content/patch；active_projection:258-281 解析完整 Value 后再 clone Map。
+当前 audit_scheduler 已实现 streaming serde_json::to_writer -> Sha256 io::Write adapter（当前约 274-307），消费已解析 Value::Object（约 333-358），并增加 Unicode/特殊字符大载荷对旧 hash 字节语义一致测试。该代码由其负责，最终编译/验证由主代理记录。
+
+其他确实仍有的成本：
+
+- runtime_checkpoint.rs 原 flush:247/252 将正文复制进 pending 后再深拷贝 pending。建议保持精确未确认请求的 Arc；主代理拥有该优化，本文不声称由本代理完成或已测收益。
+- estimated_bytes 原 :291 重新序列化 dirty Value 计量；写入前完整安全白名单校验、merge 后完整投影序列化仍存在。
+- runtime_checkpoints.rs 当前 :190-200 验证并重写完整 agent_run_json；正文变化会更新 content。
+- canonical_schema.sql:5233-5250 的 FTS message UPDATE trigger 对 content 更新执行完整删除/重插；:2494-2521、:7295-7329 还维护 conversation/history/presentation revisions。
+
+约束：300 ms 合并窗口、精确 ACK-loss replay、完整持久数据、终态/授权所有者和 FULL 同步级别必须保持；不能通过延长窗口、略过字段/历史、减弱权限或改为 NORMAL 换取速度。内存拷贝优化不自动等于物理磁盘写入下降。
+
+Round5 记录的 writer payload 895.7 MB -> 1394.9 MB、CPU +21.8%、RSS +3.2% 是既有测量结果；这些不是本轮实测。本轮必须同输入比较并报告回退，不能用 payload bytes 或 WAL 文件尾部长度代替累计物理 IO。
+
+## 已有正确实现与复用依据
+
+以下为源码审查与现有测试定位，不表示本代理在本轮执行了测试：
+
+- checkpoint apply 在同一 Immediate 事务检查 conversation/assistant/run、InProgress、rewrite、generation、expected sequence；相同序号相同 fingerprint 为 Replayed，不同内容/跳号冲突，终态/新 generation 为 Retired。当前 runtime_checkpoints.rs:169-202、310-361。
+- RuntimeCheckpoint 保留一个 latest projection 和一个 exact pending request；flush_gate 序列化刷新，错误保留 pending，确认后才发合并后继，未新增逐 token 队列。runtime_checkpoint.rs:35-55、208-269。普通 timer 保持 300 ms；磁盘阻塞时它不是硬持久化 deadline。
+- commit_notifications.rs:59-69 的 SQLite update hook 仅置 dirty，:85-106 在 autocommit 且实际 journal head 推进后再发送通知。回滚不提前发成功；核验失败保留 dirty。durable journal/cursor 是真源，不把 watch 当 durable ACK。
+- state.rs:84-102、229-230、271-276 回收边界检查遗留事务；rollback 后仍不 autocommit 的 writer/reader 被隔离，见 :530-551。没有把同步 SQL 随 async 等待者消失而取消。
+- state.rs:239-284 明确 queued cancellation 和 started job 归属；shutdown :327-377 先拒绝接纳并排空 reader/writer，再关闭连接。单 writer/两 reader 和原容量仍保留。
+- state.rs:149-170 设置 busy_timeout、WAL、FULL、1000 页 auto-checkpoint，并使用共享 StorageState instance identity。reader 是 READ_ONLY/query_only；不能建立独立存储身份后复用旧游标。
+- messages.rs:564-599、605 起的 terminal 路径继续原子提交 message、Trace、model context、usage、notification；没有拆事务或提前 Done。
+
+值得保留的既有测试入口：
+
+- storage/commit_notifications/tests.rs:63 explicit_commit_wakes_only_after_independent_connection_can_read；221/269 deferred constraint COMMIT failure/retry；334 commit_hook_veto；385 failed_journal_verification；412 old_read_snapshot；442 subscriber catchup race。
+- storage/state/tests.rs:124 failed_and_unfinished_transactions_cannot_leak_to_next_owner；162 cancelled_queued_job_never_starts_but_started_job_is_drained；213 pinned_snapshot_checkpoint_and_backup_include_wal_commits；322 read_pool_bounds_waiters_and_drains_accepted_reads_after_close。
+- storage/state/review_tests.rs:45 unpolled future；75 failed_writer_rollback_quarantines；109 failed_reader_rollback_closes_pool。
+- service/trace_publication_tests.rs:144 rollback_mid_append；254 commit_ack_loss_and_reopened_database_rebuild_without_duplicate_items；399 concurrent_terminal_commit_never_reopens；trace_publication_external_tests.rs:125 external_terminal_commit_fences_a_waiting_publication。
+- service/runtime_checkpoints/tests.rs 的 lost ACK、wrong generation/terminal/Turn、stale renderer、writer-blocked terminal、reopen、安全展示 patch 等回归。
+- core-server/application/agent/runtime_checkpoint_tests.rs:204 committed_stream_survives_process_kill_and_startup_reconciliation，是真子进程 kill，而非仅 Drop/reopen。
+
+在这些检查范围内，本代理未发现另一个需重写核心事务/CAS/提交后通知/reader 池的确定性 P1 数据丢失缺陷。该表述不等于全仓无缺陷证明。scheduler 单独发现/修复的 child Wake->checkpoint->sampling fencing 窗口以其报告为准。
+
+## 故障和备份证据：已有、增加、未覆盖
+
+原有：
+
+- database_snapshot.rs:134 单 evidence 行仍在 WAL 时 Backup API 含已提交数据，并确认目标无 sidecar；168 只读源；192 拒绝 symlink 目标。
+- state/tests.rs:213 长 reader 钉 WAL、PASSIVE 未完全推进、backup 读最新值、释放 snapshot 后 checkpoint/关闭进展。
+- migrations_history_timeline_tests.rs:181 v59/v60/current snapshot 恢复，FTS/timeline 一致，恢复后可继续写。
+- storage-reset-dev.rs:2927 reset 失败保留源/backup，恢复副本核验 schema/quick_check/credential ref；3009 明确只恢复 allowlisted configuration。不能把 reset 的丢弃历史行为称为完整业务 backup restore。
+- checkpoint_failed_commit_keeps_sequence_retryable_and_does_not_ack 原 :110-141 使用 BEFORE UPDATE RAISE(ABORT) trigger；它是 SQL 失败回滚证据，不是磁盘写满或 fsync 失败证据。
+
+本轮新增但保存本报告时仍待统一实际执行：crates/core/src/storage/service/tests/storage_faults.rs，注册于 service/tests/mod.rs。
+
+1. sqlite_full_at_terminal_notification_rolls_back_all_facts_and_retries（约 :216）：隔离磁盘以 max_page_count 留出小终态更新空间，在最后的 notification INSERT trigger 插入 4 MiB zeroblob 触发真正 SQLite FULL；断言十组 durable 表恢复原状、通知 watch 不醒、消息/Trace/context/usage/notification 均不提交；解除注入后精确 checkpoint Replayed，terminal 成功且旧 checkpoint Retired。
+2. sqlite_backup_restores_checkpoint_terminal_pending_and_notification_cursor_together（约 :281）：独立 SQLite reader 钉住前终态快照；真实 service 提交 checkpoint/terminal/context/usage/notification，并存 pending action；Backup API 后打开隔离副本，逐表比较消息、Trace、model context、usage、pending、notification/batch/items/change journal，quick_check/FK 检查，验证 cursor 补拉为空以及恢复后新 seen 事件推进。原源和其 pinned snapshot 保持原事实。
+3. process_kill_at_terminal_commit_boundary_restores_an_atomic_prefix（约 :385）：自启动当前测试二进制，分别在 terminal commit_hook 内（事务全部 SQL 已执行、尚未成功 commit）和 service 成功返回后以原子 ready 文件通知父进程；父进程只 kill 自己启动的 fixture。重开分别得到已确认 checkpoint 前缀或完整终态。前提交崩溃后再以同身份结算，确保一次消息/Trace/context/usage/notification。
+4. terminal_crash_fixture 是第 3 项的子进程入口，普通 test run 未设置专用环境变量时直接返回；不能把这一空运行计为独立故障证明。
+
+局限必须保留：
+
+- max_page_count 得到 SQLITE_FULL，但不是主机/文件系统 ENOSPC，不覆盖真实 fsync、I/O 短写/错误或磁盘拔除。
+- process kill 不是断电；测试前后边界不穷举 WAL frame 写入、commit record、fsync 中每个纳秒。
+- backup 联合行等值及 quick_check/FK 不覆盖全部外部附件、credential backend、Provider continuation 文件、每种 pending action 的外部恢复流程；完整数据根回退仍须包含对应外部资产与权限。
+- 本轮未增加新 VFS 注入层；真实 SQLITE_IOERR/fsync/OS ENOSPC/断电矩阵仍是明确未测范围，不能以 ABORT/FULL/process kill 合并宣称完成。
+- 长时间 reader 钉 WAL 的增长、有界排队长期公平性、真实周期 checkpoint 与控制尾延迟，需要主代理 10–30 分钟稳态/端到端场景证据；本代理不并行跑重测试干扰测量。
+
+## Backup hot rollback 和回退边界
+
+database_snapshot.rs 原 :10-11 声称“hot rollback journal 或 WAL 会被恢复并包含”。这对当前只读打开源的实现过宽：:19-21 使用 SQLITE_OPEN_READ_ONLY。当前 bundled libsqlite3-sys-0.38.2/sqlite3/sqlite3.c:64894 在 hot journal + readOnly 情况返回 SQLITE_READONLY_ROLLBACK。
+
+已仅修函数注释：可读 WAL 提交由 SQLite 纳入；需要写源库才能恢复的 hot rollback journal 被拒绝，函数不负责修复原库。没有把唯一源改为读写，没有修改 backup 功能。
+
+一个未来可安全补的拒绝边界回归：在 tempfile 自启动 DELETE-journal 进程，cache_spill 后未提交强杀；只读 Backup 应失败且源主库与 journal 字节不变，再复制“已停止的主库+hot journal”到另一个隔离身份验证 rollback 可恢复。主代理决定本轮不扩展热 DELETE 夹具以免拖延冻结，故未保留/运行该测试；不把它算通过。产品当前 WAL 业务 backup + process kill 是本轮实际补充目标。
+
+回退必须先停业务生产者、排空已开始写入、checkpoint/关闭，再使用 SQLite Backup API 或已验证一致快照保留完整数据；不能只复制正在 WAL 运行的主 sqlite 文件。旧 SQLite 3.46.0 不可当作多连接 WAL 回退版本。任何模式切换不能在用户运行库实验。docs/operations/recovery-runbook.md:107 已明确仓库没有受支持的一键 backup restore；恢复 SQLite 也不等于恢复凭据/外部文件。
+
+## 统一验证建议
+
+新增 filter：
+
+- storage::service::notifications::tests::
+- storage::service::tests::storage_faults::
+
+相邻回归 filter：storage::notification_repository::tests::、storage::service::tests::notifications::、storage::automation_repository::tests::、application::notification、storage::service::runtime_checkpoints::tests::、application::agent::runtime_checkpoint、storage::commit_notifications::、storage::state::、storage::service::trace_publication、storage::database_snapshot::。
+
+编译曾由主代理报告通知 writer barrier 闭包借用 Receiver 缺少 Send；已按其要求改成 move。commit_hook 的 Result 也已显式 unwrap。保存本记录时尚未收到最终编译和测试结果，所有新增用例必须由主代理在统一源码状态验证后才可计入通过数。
+
+## 实际故障运行与 FTS 诊断补录（2026-10-11）
+
+本段更新前文“本代理未运行测试”的保存时状态：在主代理明确要求调查失败后，本代理运行了一次旧 core test binary 的精确 process-kill filter、隔离子进程夹具及小型 SQLite C/Python 诊断；没有并行 Cargo 或性能测量。
+
+主代理首轮 storage-faults.log 为 3 passed / 1 failed：FULL、业务 Backup API 恢复及空环境 helper 通过；进程崩溃测试在重复使用 pooled reader 的 quick_check 报 FTS checksum mismatch。独立最小普通表+FTS trigger 夹具在 SQLite 3.53.2 与 3.51.0 都复现“另一连接提交后，旧 reader quick_check 误报；fresh read-only quick_check 正常；旧 reader MATCH 正确且之后 quick_check 正常”，完全不需要应用代码或 crash。故不能归因于本次终态回滚损坏，也不能声称 3.53.2 新引入问题。连接内 FTS 检查状态是推断，未有 upstream 根因确认。
+
+已将 assert_terminal_state 的 integrity/FK 检查改为同一隔离磁盘库的全新 READ_ONLY handle，保留消息/Trace/context/usage/notification 原断言；没有重建 FTS、修复数据库、改变生产连接池/事务/索引。修正后仍待主代理统一重编译并运行。
+
+完整最小 C/Python 源、compile/run 命令、两版本输出、实际 crash 原库新句柄核验、MATCH 证据、样本重建脚本和推断边界保存在 fts-crash-investigation/README.md.txt 及同目录附件。最终归档应一起保存，不应缩写为“修测试”。
+
+## 后续追加：完整展示数据与模型历史窄读取
+
+主代理追加要求追踪 Round5 完整 toolDefinitions 展示数据对长会话发送的影响。本次源码证据修正了“全部 JSON decode”的说法：原 history_snapshot -> get_active_persisted_conversation -> list_persisted_messages 将全量 agent_run_json 读为 String，并未在该路径逐条解析为 Value；但每个新模型历史版本或 active turn 会完整读取这些历史字符串，serialized_size 会再次扫描/转义，prepared_history 原 :227 的 to_record 会深拷贝一次，turn.rs:426 的 admission materialization 又深拷贝一次。稳定同版本命中则已有复用，不是每个调用无条件全量重读。
+
+模型实际需求在 agent_support/conversation.rs 原 :1402-1660：message identity/role/content/time/status、完整 validated Trace、model context 与 compaction boundary；不读取 agent_run_json 或 ui_state_json。附件与权限所需来源由原 loader 的 attachment ownership/preview hydration、history digest 与 admission authority 路径提供。
+
+普通 Human/Workflow 已使用 append_conversation_and_begin_turn_with_history_version（agent_support/conversation.rs 当前 :1200），turn_writes.rs:684 事务内核对完整 history_version，:737 仅 append 新消息。因此不需降低持久内容、修改工具能力、放宽 CAS 或重写旧消息即可缩小读取与排队内存。turn_writes.rs:454 对整个被保留 conversation 计算 writer payload，所以窄 record 自然缩小实际被计量的输入；不能把此项直接称为物理 IO 降低。
+
+经主代理授权后的实现（已写，保存本段时未编译/运行）：
+
+- chat_repository.rs:540、1967：专用 model-history 查询从 SQL 起不选择 agent_run_json/ui_state_json，其余行语义、排序、rewrite exclusion、人机回答投影仍复用原逻辑。
+- history_snapshot.rs:87、111、481：专用 ModelHistoryConversation / ConversationModelHistorySnapshot；没有通用 to_record，只有用途明确的 to_append_record；原 raw API 与数据完整性保持。新窄类型内部复用相同 snapshot acquisition、Trace/context decode/hash validation、summary/attachments、active 不缓存及新snapshot复核。
+- raw/model 两类视图由原 ConversationHistorySnapshotCache 同一 32 条/128 MiB 总预算管理，key 同时含视图种类，未增加线程、reader 或缓存额度；metadata revision 仍刷新，窄视图不读取无关展示overlay。
+- prepared_history.rs:160、226 改用窄类型，并借用message slice组装，去掉为模型组装而发生的全record克隆；既有 workflow delivery/excluded ids 过滤保持。
+- turn.rs:426 是唯一生产窄记录转换点，仅原普通prepared分支使用。agent_support/conversation.rs:543 起明确拒绝窄prepared参数进入 rewrite/automation/continuation/response/child/PrepareOnly；这些路径继续原raw入口。provider/renderer/fullsave未改用窄快照写回。
+- 原 model-history 组装函数现在包装同一个 from_model_rows 实现，无改变模型字段/Trace/context/compaction/图片处理。
+
+新增测试入口：
+
+1. storage::service::tests::history_snapshot::model_history_snapshot_omits_display_columns_without_changing_model_facts_or_budget：SQL authorizer 拒绝读展示列仍能加载；同raw版本/metadata/完整model facts；原数据库JSON逐字不变；两种record的实际 writer-size算法估算比例 >100x（合成大展示载荷）。
+2. storage::service::tests::history_snapshot::model_history_snapshot_refreshes_metadata_and_fences_a_concurrent_trace_change：展示更新保持model版本和共享payload但刷新metadata CAS，独立连接trace-only mutation在原writer事务检查处被拒绝且无新消息/Trace。
+3. storage::service::history_snapshot::cache_tests::raw_and_model_snapshots_share_the_existing_cache_limits：混合两类视图总额度与LRU保持。
+4. application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload：17 MiB合成schema令原source*4超过既有128 MiB prepared预算，新窄历史仍缓存命中；新旧模型消息序列化字节相同；普通append后旧展示JSON逐字未变。
+
+相邻 prepared_history、prepared_history_continuous_send、workflow_execution/history_warmup 已适配类型；UI-only测试现在同时断言模型源不引入UI和独立raw读取仍新鲜。continuous-send 仍保留完整renderer展示断言，仅把统计起点移到其刻意执行的首次raw加载后，因为raw/model本来就是不同视图。建议统一跑 history_snapshot、prepared_history、prepared_history_continuous_send、workflow_execution::history_warmup、context_history 以及原authority/compaction/attachment回归。
+
+静态 rustfmt（后续均 skip_children=true）和 git diff --check 通过。本代理未为这项实现运行Cargo/测试；主代理负责最终构建、统一测试和冻结后的长测。收益数值必须以最终同输入实测为准，不能将上述合成比例当发送SLO或RSS收益。

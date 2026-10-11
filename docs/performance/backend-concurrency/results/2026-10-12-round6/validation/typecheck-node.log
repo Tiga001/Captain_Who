@@ -1,0 +1,1 @@
+src/main/core/backendAcceptance.electron.test.ts(39,28): error TS2339: Property 'ELECTRON_RUN_AS_NODE' does not exist on type '{ CAPTAIN_PERFORMANCE_DIAGNOSTICS: string; ELECTRON_RENDERER_URL?: string | undefined; }'.

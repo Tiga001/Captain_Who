@@ -1,0 +1,37 @@
+
+running 30 tests
+test application::agent_dispatcher::tests::approval_resume_clears_waiting_before_shutdown_cancels_the_live_continuation ... ok
+test application::agent_dispatcher::tests::blocking_tests::exhausted_preparation_capacity_does_not_claim_or_consume_logical_turns ... ok
+test application::agent_dispatcher::tests::blocking_tests::fatal_manager_error_drains_started_preparation_before_returning ... ok
+test application::agent_dispatcher::tests::blocking_tests::final_execution_refusal_stops_observation_renewal_and_same_claim_reattachment ... ok
+test application::agent_dispatcher::tests::blocking_tests::lost_preparation_lease_cancels_late_handle_without_settling_another_owner ... Agent dispatcher storage failed: Wake wake-1 lost its durable lease during preparation: Agent dispatcher storage failed: claim token expired or changed
+ok
+test application::agent_dispatcher::tests::blocking_tests::shutdown_waits_for_non_abortable_preparation_and_cancels_its_late_run ... ok
+test application::agent_dispatcher::tests::blocking_tests::slow_preparation_and_maintenance_leave_scheduler_and_claim_renewal_available ... ok
+test application::agent_dispatcher::tests::cloned_permit_holds_slot_until_result_settlement_owner_drops ... ok
+test application::agent_dispatcher::tests::durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply ... ok
+test application::agent_dispatcher::tests::empty_queue_probe_reserves_capacity_without_reporting_a_logical_turn ... ok
+test application::agent_dispatcher::tests::fair_preparation_tests::blocked_large_root_leaves_preparation_capacity_for_other_roots_and_human_work ... ok
+test application::agent_dispatcher::tests::global_limit_and_fifo_make_progress_across_agents ... ok
+test application::agent_dispatcher::tests::interrupt_agent_does_not_acknowledge_resource_cleanup_without_turn_termination ... ok
+test application::agent_dispatcher::tests::interrupt_agent_reports_active_turn_only_after_runtime_delivery ... ok
+test application::agent_dispatcher::tests::interrupt_agent_runtime_miss_is_an_error_while_wake_remains_active ... ok
+test application::agent_dispatcher::tests::interrupt_agent_runtime_miss_reports_no_active_turn_after_durable_settlement ... ok
+test application::agent_dispatcher::tests::manager_repeats_recovery_after_a_fresh_restart_lease_expires ... ok
+test application::agent_dispatcher::tests::one_hundred_agents_respect_limit_fifty_fifo_and_leave_no_ghost_activity ... ok
+test application::agent_dispatcher::tests::one_hundred_wakes_for_one_agent_never_overlap_and_all_settle ... ok
+test application::agent_dispatcher::tests::shutdown_rescans_an_approval_that_resumes_after_its_first_snapshot ... ok
+test application::agent_dispatcher::tests::shutdown_stops_claiming_and_leaves_unfinished_wake_durable ... ok
+test application::agent_dispatcher::tests::sqlite_adapter_atomically_projects_claims_and_settles_direct_parent_result ... ok
+test application::agent_dispatcher::tests::sqlite_dispatcher_redelivers_interrupt_receipt_left_before_runtime_dispatch ... ok
+test application::agent_dispatcher::tests::stale_empty_scan_cannot_overwrite_a_new_work_generation ... ok
+test application::agent_dispatcher::tests::startup_redelivers_an_unacknowledged_durable_interrupt ... ok
+test application::agent_dispatcher::tests::stop_winning_approval_wait_cas_settles_immediately_without_lease_recovery ... ok
+test application::agent_dispatcher::tests::stopped_tree_recovery_interrupts_local_approval_state_and_never_replays ... ok
+test application::agent_dispatcher::tests::stopped_tree_recovery_with_uncertain_external_action_becomes_outcome_unknown ... ok
+test application::agent_dispatcher::tests::temporary_candidate_projection_conflict_does_not_stop_the_manager ... Agent dispatcher skipped a temporarily unavailable Wake: temporary Mailbox projection contention
+ok
+test application::agent_dispatcher::tests::zero_global_limit_is_rejected ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 1222 filtered out; finished in 0.95s
+

@@ -1,0 +1,28 @@
+
+running 23 tests
+test application::agent::tests::provider_profiles::dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the_shared_loop ... ok
+test application::agent::tests::provider_profiles::explicit_profile_incompatible_with_the_endpoint_dialect_fails_closed ... ok
+test application::agent::tests::provider_profiles::generic_agent_service_startup_does_not_require_provider_continuation_credentials ... ok
+test application::agent::tests::provider_profiles::independent_hosts_admit_only_one_turn_without_loser_message_side_effects ... ok
+test application::agent::tests::provider_profiles::nested_result_wake_projects_semantic_identity_only_at_the_provider_boundary ... ok
+test application::agent::tests::provider_profiles::ordinary_root_turn_is_durable_before_its_terminal_event ... ok
+test application::agent::tests::provider_profiles::ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message ... ok
+test application::agent::tests::provider_profiles::prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision ... ok
+test application::agent::tests::provider_profiles::prepared_turn_keeps_local_usage_identity_separate_from_provider_wire_model ... ok
+test application::agent::tests::provider_profiles::prepared_turn_preserves_provider_default_and_explicit_output_limits ... ok
+test application::agent::tests::provider_profiles::public_human_turn_rejects_a_child_conversation_before_any_turn_write ... ok
+test application::agent::tests::provider_profiles::public_human_turn_rejects_an_inactive_root_before_any_turn_write ... ok
+test application::agent::tests::provider_profiles::recovered_unknown_child_releases_startup_permit_and_accepts_a_later_followup ... ok
+test application::agent::tests::provider_profiles::renderer_generic_selection_freezes_the_anthropic_generic_registration ... ok
+test application::agent::tests::provider_profiles::renderer_profile_selection_round_trips_into_the_frozen_registration ... ok
+test application::agent::tests::provider_profiles::renderer_turn_input_rejects_host_only_collaboration_fields ... ok
+test application::agent::tests::provider_profiles::reopened_assistant_and_provider_transition_forks_complete_human_turns ... ok
+test application::agent::tests::provider_profiles::rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal ... ok
+test application::agent::tests::provider_profiles::rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context ... ok
+test application::agent::tests::provider_profiles::trusted_child_wake_fails_closed_when_its_selected_model_is_disabled ... ok
+test application::agent::tests::provider_profiles::trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_task ... ok
+test application::agent::tests::provider_profiles::unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_approval_side_effects ... ok
+test application::agent::tests::provider_profiles::unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_available ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 1229 filtered out; finished in 3.24s
+

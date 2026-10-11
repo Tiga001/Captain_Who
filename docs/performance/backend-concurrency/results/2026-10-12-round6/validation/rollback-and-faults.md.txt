@@ -1,0 +1,75 @@
+# 第六轮：迁移、回退与存储故障证据
+
+复核日期：2026-10-12。起点 `6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e`；本稿等待合入统一验收结果。以下区分源码契约、隔离 fixture 的实测，以及未覆盖的产品恢复。没有打开真实用户数据库、调用真实模型或中断用户应用；本次整理没有构建或运行压力测试。
+
+## 迁移状态与版本边界
+
+- 当前 `STORAGE_SCHEMA_VERSION = 71`，canonical fingerprint 为 `sha256:ce54b37ebd2b7243acfdcc875db55cc3a673ed4bb0c4d3f587b72c4496f50054`。`Cargo.lock`、`storage/migrations.rs`、`canonical_schema.sql`、`state.rs` 相对第五轮起点均无修改；第六轮没有新增 schema migration，也没有调整 WAL/FULL/读池拓扑。
+- 空 v0 库创建 canonical v71；exact v50 只有协作事件日志为空才允许升级；exact v51–v70 沿连续迁移到 v71。未知版本、非空未版本化库、指纹漂移与外键错误不能用改 `user_version` 绕过。v65→v66 删除旧图执行七张表是既有历史迁移，不能把保留聊天等同保留全部旧业务记录。
+- 磁盘库源码先执行迁移，再检查 SQLite 运行时版本 `>= 3_051_003`，再启用 WAL；当前锁定依赖对应 bundled SQLite 3.53.2。这个 guard 是当前程序的库版本下限，既不是所有 SQLite 分支的通用安全判定，也不是应用可回退版本承诺。读池仍为两条 READ_ONLY/query_only 连接，单 writer、`synchronous=FULL`、`busy_timeout=5000ms`、`wal_autocheckpoint=1000`。
+- 第五轮 `coreCheckpoint` 是 agentRun JSON 的可选 `{generation, sequence, fingerprint}` 投影，并未增加 schema；Core/Renderer 持久化所有权已经改变。不能仅凭 schema 同为 71 判定任意旧 Core、Renderer 和 Host 可混搭。
+- `docs/operations/recovery-runbook.md` 原有“当前 v68”、fresh v68、`user_version=68` 及旧升级上界已经按源码修正为 71/70；历史 v67→v68 语境保留，补述既有 v68→v71 迁移。该修正不构成对手册其他子系统的全量再验收。
+
+源码：`crates/core/src/storage/migrations.rs`、`state.rs`、`canonical_schema.sql`；契约：`docs/performance/backend-concurrency/round3-storage-execution.md`、`round5-persistence-ownership.md`。全量 storage 回归实际包含 **57 个 migration 测试、3 个 database_snapshot 测试、10 个 state 测试、13 个 commit_notifications 测试**，均通过。它们是合成 fixture 验证，不是用户库迁移抽样。
+
+## 回退候选、备份与操作边界
+
+**本轮没有认证“最低可回退应用版本”，没有执行真实用户回滚，也没有用旧应用重开第六轮写入的副本完成端到端降级。** 可供下一次隔离演练选择的最近完整版本是第五轮 `6e7bd1cc`（实现提交 `e7237ce5`）：源码核对确认同为 v71、同 SQLite guard/WAL 及 Core checkpoint owner。它只是兼容性验证候选，不应写成已经验证的最早安全版本；回退还会失去第六轮通知租约及 prepared-history 修复。
+
+有需要时的保守操作顺序是停止新生产者、正常关闭应用，等待已接纳写入及读取排空并完成 checkpoint/关闭，再保留升级前完整数据根与受支持 SQLite snapshot。在隔离位置用成套的目标 Host/Renderer/Core 验证副本的 schema、完整性、已确认正文、终态、pending/lease/cursor 与外部资源引用，然后决定发布。此处是待执行流程，本轮未对用户设备执行。不要在运行中的用户库切换 journal mode；旧 baseline 的 SQLite 3.46.0 不能直接视作当前多连接 WAL 的回退运行依赖。
+
+`create_verified_sqlite_snapshot` 使用 SQLite Backup API 读取 source，不直接复制主 `.sqlite`：
+
+1. source 以 READ_ONLY/NO_MUTEX/NOFOLLOW 打开；source/target 需通过普通文件与路径检查，target 必须是已有空文件。
+2. 由 Backup API 纳入 SQLite 可读取的已提交 WAL 内容，分批复制；对 target 执行 `quick_check`，要求唯一结果 `ok`。
+3. 关闭 source/target 的 SQLite handle，目标文件 `sync_all` 后返回。函数本身不负责原子发布 target，也不提供整个数据根或目录同步的统一恢复协议。
+
+需要写 source 才能恢复的 hot DELETE rollback journal 会被只读 snapshot 路径拒绝；不能宣称此函数修复原库。相关注释已修正，本轮没有新增 hot DELETE 强杀演练。SQLite snapshot 不含附件/图片/Provider continuation 文件或操作系统凭据后端；跨设备复制数据库不等于复制这些依赖。`storage:reset-dev` 是显式丢弃运行历史、仅保留 allowlisted 配置的开发重建，不是回退/恢复命令。仓库没有受支持的一键完整 backup restore。当前 exact v71 配置来源与历史 reset allowlist 也不能由启动迁移支持集互相推断。
+
+## 启动恢复的事实与限制
+
+Agent 初始化按 startup reconciliation 处理孤立 Trace，并恢复 durable occupancy；显式 startup recovery 还恢复 workflow claims。合法 pending/suspension 保持原冻结身份与配置，未知外部结果保持保守失败/unknown，不能用当前 Provider、权限或盲重放付费请求补造进度。
+
+server 回归组 37 的 `committed_stream_survives_process_kill_and_startup_reconciliation` 实际自启动子进程，在 runtime streaming checkpoint 已确认后杀死该子进程；新 StorageService 重开并显式调用生产 reconciliation，断言正文 `已保存 partial 🐈` 与 checkpoint sequence 保留、Run 收敛 `failed`。该测试不是启动完整打包 Electron 的用户恢复演练。该组共 **16 passed / 0 failed**，包含一个普通运行时空返回的 `process_crash_fixture` helper。
+
+普通增量的 300ms 是 coalescing 调度窗口，不是磁盘堵塞下的持久化硬上限。崩溃保证限于最后已确认提交；Stop RPC 是取消请求接收，不是终态落盘确认。终态 Done 仍等待既有事务成功。迟到 generation/sequence/token 受原事务围栏约束；通知最终时间检查不保证跨进程原生显示与 ACK 的绝对 exactly-once。
+
+## 故障注入、强杀和恢复的准确计数
+
+最终新 core 二进制 SHA256：`3696d25b57e9c271814ccace77b38f439aff96da687341367068e4fc9b4f4563`。group 37 server 二进制 SHA256：`64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b`。以下均从保留的最终逐项通过日志与测试源码交叉核对。
+
+| 场景 | 实际覆盖 | 可以得出的结论 | 不可扩大为 |
+| --- | --- | --- | --- |
+| SQLite FULL | 1 个实质测试；max_page_count 限制加 notification_events 的末尾 INSERT trigger 请求 4MiB zeroblob | terminal 失败后 10 组 durable 表事实不变、无提前 watch wake；恢复容量后同 checkpoint 幂等重放、terminal retry 成功、迟到 checkpoint Retired | OS 文件系统 ENOSPC、真实 IOERR、fsync 失败、短写或断电 |
+| WAL snapshot 业务恢复 | 1 个实质测试；独立 reader 钉住旧 WAL snapshot 时做 Backup，重开副本 | 10 组 messages/Trace/context/usage/pending/notification 事实等值；cursor 补拉及后续 seen 操作正确，原库和旧快照保持各自事实 | 完整数据根、所有外部副作用与凭据恢复 |
+| terminal 提交边界强杀 | 1 个实质测试、2 个自启动子进程：commit_hook 中 before-commit，服务返回后 after-commit | 前者恢复确认 checkpoint 前缀并能重试一次；后者恢复完整 terminal；fresh read-only quick_check/FK 通过 | WAL 帧/同步过程全部失败点、掉电或硬件持久化证明 |
+| runtime checkpoint 强杀 | server 1 个实质测试、1 个自启动子进程 | 已确认 streaming 正文可读，startup reconciliation 收敛失败 | 所有未确认 token 不丢失或完整桌面启动恢复 |
+| 10k facts 恢复 profile | 1 个 ignored 测试显式运行；64 节点、10000 facts、63 results、17088 events、20 次服务重开、SQLite busy=0 | 隔离业务事实、事件与 claim 恢复门禁通过 | 20 次进程强杀、64 个同时运行 Turn，或独占性能对照 |
+
+故障文件编译器输出 **4 tests**，其中 `terminal_crash_fixture` 在普通运行时是空 helper，实质故障测试只有 3 项。上述最终成功回归的受控强杀合计 **3 个子进程 / 3 个边界、2 个实质测试**；不将此前调查重跑累计成新覆盖。profile 的 `writers=4` 是经同一 SQLite writer 的生产者线程数。
+
+最终 `storage::` 为 **1227 passed、0 failed、1 ignored**；`performance::` 为 **7 passed**；另补跑唯一 ignored profile **1 passed**。合计去重 **1235** 项通过（含编译器计入的 helper），不是 1235 个独立故障场景。profile 耗时 16.229s 与其他构建/回归可能重叠，其 enqueue/query/restart 延迟不用于性能结论。storage 源码与 binary hash 从实际测试开始到 profile 结束未变化。
+
+10 组表是 `messages`、`conversation_turn_traces`、`conversation_turn_trace_items`、`conversation_model_context_items`、`agent_usage_records`、`agent_pending_actions`、`notification_events`、`notification_batches`、`notification_batch_items`、`notification_change_events`。这个枚举限定联合恢复覆盖，不代替全数据库业务证明。
+
+## FTS 异常保留与测试校正
+
+最初 `storage-faults.log` 为 **3 passed / 1 failed**：terminal before-commit 恢复后通过另一个连接重试终态，再在旧 pooled reader 第二次 quick_check 报 `fts5: checksum mismatch`。失败原日志保留，不能隐藏或改写为一直通过。
+
+既有最小复现显示普通 UPDATE 即可触发相同旧-reader诊断，无需进程崩溃；fresh READ_ONLY handle 检查通过，旧 reader 普通 MATCH 返回正确内容后 quick_check 也通过。SQLite **3.53.2 与 3.51.0** 均有独立文本证据，后者报 malformed inverted index。原始 before/after-commit 隔离库的 fresh handle 检查均通过。这支持“连接状态敏感的完整性诊断”，内部缓存原因仍是工作假说；没有上游确认，也不能称只在新版引入的回归或普遍排除 FTS 缺陷。
+
+故障断言现先释放 pooled reader，再对同一个原隔离库开 fresh READ_ONLY 做 quick_check/FK；未 rebuild FTS、修理数据或放宽 PRAGMA。最终新二进制 storage 全组已通过该测试。保留的 FTS README 当时写“待统一重编验证”是调查时间点记录，最新状态以上述最终日志为准；本次整理没有再次运行旧 C/Python 复现。
+
+## 尚未覆盖与 I/O 口径
+
+未做真实用户数据根迁移/回退、旧版本全套应用降级恢复、OS ENOSPC/IOERR/短写/fsync 错误/VFS 全点注入、断电、磁盘拔除或完整备份原子发布演练。`synchronous=FULL` 与 snapshot 的 `sync_all` 是代码中的请求/契约，不是完整硬件故障测量。
+
+性能中的 `proc_pid_rusage` I/O 是整个测试进程归属计数，包含 harness/假 Provider，不是 SQLite 专属、物理设备/NAND 写入量或 fsync 耗时；不能据其累计值宣称证明完整持久化成本。WAL 字节、checkpoint busy/log/checkpointed 与长读 snapshot 进展需结合对应性能样本分别解释。性能最终门禁与数据留给统一验收，不由本稿代替。
+
+## 可直接归档的最小证据
+
+清单为同目录 `rollback-faults-archive-manifest.json`，逐项包含相对路径、字节数、SHA256；仅显式 allowlist 的文本文件。`rollback-faults-provenance.json` 保存脱敏后的命令、binary hash、storage source hash 清单、group 37 来源和 schema 源文件摘要。本稿和这些 JSON 可随清单归档；归档前若文件变动，应重新计算清单，不能把旧 SHA 用于新文件。
+
+最小包包含：本稿、最终 core summary/去重通过全名清单、storage/performance/group37 的原日志与原统计、profile 参数及原日志；初始 FTS 失败原日志；FTS 调查说明、两个版本最小复现文本、fresh before/after 与 stale reader 对照、四个小型复现源码。原始诊断保持原样；本机绝对工作区/构建路径在 provenance 的派生副本中替换为 `<repo>`/`<build>`，原本带本机路径的完整 metadata 不进入包。复现文字中的消息/ID 均来自合成 fixture。
+
+明确排除：测试/SQLite 二进制、静态库、整个 target、任何 `.sqlite`/`.db`/`-wal`/`-shm`、FTS 合成样本库和 ready 文件、完整真实数据根、凭据/Token/Cookie、真实会话内容、含个人目录的原始 metadata。不要递归打包整个 `.cache` 或整个 FTS 调查目录。实际产品源码由最终提交保留，归档 provenance 的文件 hash 用于关联测试时版本，不能凭 HEAD 单独标识未提交工作区。

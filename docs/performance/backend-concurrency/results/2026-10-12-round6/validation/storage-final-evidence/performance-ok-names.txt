@@ -1,0 +1,7 @@
+performance::queues::tests::diagnostics_have_a_hard_entry_budget_without_affecting_work
+performance::queues::tests::pending_age_survives_window_reset_and_removed_entries_release_bytes
+performance::queues::tests::resizing_retains_age_and_count_and_reports_the_peak_bytes
+performance::tests::histogram_quantiles_bound_samples_and_retain_the_tail
+performance::tests::registry_is_bounded_and_counters_saturate
+performance::tests::summaries_reset_counts_and_report_upper_bound_quantiles
+performance::tests::windows_aggregate_scalars_without_retaining_individual_samples

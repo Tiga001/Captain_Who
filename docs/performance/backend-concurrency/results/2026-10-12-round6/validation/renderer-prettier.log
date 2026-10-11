@@ -1,0 +1,4 @@
+src/main/core/backendAcceptance.electron.test.ts 72ms (unchanged)
+src/main/core/fixtures/backendAcceptance.electron.ts 64ms (unchanged)
+src/main/core/fixtures/backendAcceptance.types.ts 5ms (unchanged)
+src/renderer/src/app/__fixtures__/backendAcceptance.tsx 50ms (unchanged)

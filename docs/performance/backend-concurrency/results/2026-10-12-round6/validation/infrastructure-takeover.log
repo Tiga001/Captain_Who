@@ -1,0 +1,161 @@
+$ node --test scripts/check-vitest-project-ownership.test.mjs scripts/check-ignored-rust-tests.test.mjs scripts/run-backend-concurrency-baseline.test.mjs
+TAP version 13
+# Subtest: finds ignored tests across intervening Rust attributes
+ok 1 - finds ignored tests across intervening Rust attributes
+  ---
+  duration_ms: 7.637792
+  type: 'test'
+  ...
+# Subtest: accepts a complete registry with a manual status or a runner
+ok 2 - accepts a complete registry with a manual status or a runner
+  ---
+  duration_ms: 5.287416
+  type: 'test'
+  ...
+# Subtest: rejects missing, stale, duplicate, and unowned registry entries
+ok 3 - rejects missing, stale, duplicate, and unowned registry entries
+  ---
+  duration_ms: 3.260417
+  type: 'test'
+  ...
+# Subtest: rejects an ignored source test omitted from the registry
+ok 4 - rejects an ignored source test omitted from the registry
+  ---
+  duration_ms: 3.1505
+  type: 'test'
+  ...
+# Subtest: requires either a runner or an explicit manual status
+ok 5 - requires either a runner or an explicit manual status
+  ---
+  duration_ms: 3.464875
+  type: 'test'
+  ...
+# Subtest: accepts exactly one owner per TS and TSX test file
+ok 6 - accepts exactly one owner per TS and TSX test file
+  ---
+  duration_ms: 12.818458
+  type: 'test'
+  ...
+# Subtest: keeps the repository test inventory in its intended projects
+ok 7 - keeps the repository test inventory in its intended projects
+  ---
+  duration_ms: 34.722459
+  type: 'test'
+  ...
+# Subtest: repository rules route growing inventories to their intended projects
+ok 8 - repository rules route growing inventories to their intended projects
+  ---
+  duration_ms: 7.794
+  type: 'test'
+  ...
+# Subtest: reports unowned test files
+ok 9 - reports unowned test files
+  ---
+  duration_ms: 1.758
+  type: 'test'
+  ...
+# Subtest: reports files selected by more than one project
+ok 10 - reports files selected by more than one project
+  ---
+  duration_ms: 2.545958
+  type: 'test'
+  ...
+# Subtest: reports project files outside the candidate test globs
+ok 11 - reports project files outside the candidate test globs
+  ---
+  duration_ms: 1.944417
+  type: 'test'
+  ...
+# Subtest: options reject ambiguous modes, duplicate arguments and invalid waves
+ok 12 - options reject ambiguous modes, duplicate arguments and invalid waves
+  ---
+  duration_ms: 3.104666
+  type: 'test'
+  ...
+# Subtest: baseline build is bounded and isolated; old filter cannot narrow the requested run
+ok 13 - baseline build is bounded and isolated; old filter cannot narrow the requested run
+  ---
+  duration_ms: 0.459791
+  type: 'test'
+  ...
+# Subtest: source manifests include new Rust/TypeScript but exclude user screenshots and caches
+ok 14 - source manifests include new Rust/TypeScript but exclude user screenshots and caches
+  ---
+  duration_ms: 0.459333
+  type: 'test'
+  ...
+# Subtest: Cargo discovery accepts only the requested test executable artifact
+ok 15 - Cargo discovery accepts only the requested test executable artifact
+  ---
+  duration_ms: 0.10425
+  type: 'test'
+  ...
+# Subtest: resource samples never infer unsupported thread counts
+ok 16 - resource samples never infer unsupported thread counts
+  ---
+  duration_ms: 0.39225
+  type: 'test'
+  ...
+# Subtest: macOS thread samples count continuation rows only for the requested child
+ok 17 - macOS thread samples count continuation rows only for the requested child
+  ---
+  duration_ms: 0.14125
+  type: 'test'
+  ...
+# Subtest: case postconditions reject lost durable acknowledgements even after empty recovery
+ok 18 - case postconditions reject lost durable acknowledgements even after empty recovery
+  ---
+  duration_ms: 0.311583
+  type: 'test'
+  ...
+# Subtest: non-stop runs must complete and stop uses the actual Rust Cancelled variant
+ok 19 - non-stop runs must complete and stop uses the actual Rust Cancelled variant
+  ---
+  duration_ms: 0.205667
+  type: 'test'
+  ...
+# Subtest: overload permits labelled cleanup cancellations but still requires exact durable accounting
+ok 20 - overload permits labelled cleanup cancellations but still requires exact durable accounting
+  ---
+  duration_ms: 0.295083
+  type: 'test'
+  ...
+# Subtest: Tree requires each expected child provider marker, not only node population
+ok 21 - Tree requires each expected child provider marker, not only node population
+  ---
+  duration_ms: 0.326709
+  type: 'test'
+  ...
+# Subtest: result inspection reports valid JSON with invalid correctness as integrity failure
+ok 22 - result inspection reports valid JSON with invalid correctness as integrity failure
+  ---
+  duration_ms: 7.264333
+  type: 'test'
+  ...
+# Subtest: soak parameters are explicit, bounded, and cannot alter the old matrix
+ok 23 - soak parameters are explicit, bounded, and cannot alter the old matrix
+  ---
+  duration_ms: 0.243959
+  type: 'test'
+  ...
+# Subtest: raw RPC outcomes must agree with aggregate metrics and recovery
+ok 24 - raw RPC outcomes must agree with aggregate metrics and recovery
+  ---
+  duration_ms: 0.108458
+  type: 'test'
+  ...
+# Subtest: version two requires planned work and accepted starts to match the raw evidence
+ok 25 - version two requires planned work and accepted starts to match the raw evidence
+  ---
+  duration_ms: 0.148125
+  type: 'test'
+  ...
+1..25
+# tests 25
+# suites 0
+# pass 25
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 96.168

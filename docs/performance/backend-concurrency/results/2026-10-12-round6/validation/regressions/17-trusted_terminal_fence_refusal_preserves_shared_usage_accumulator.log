@@ -1,0 +1,6 @@
+
+running 1 test
+test application::agent::usage::terminal_usage_preview_tests::trusted_terminal_fence_refusal_preserves_shared_usage_accumulator ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1251 filtered out; finished in 0.09s
+

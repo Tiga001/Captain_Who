@@ -1,0 +1,89 @@
+{
+  "baseline": "acae06623b7ce6031b90795e730968fb36e38107",
+  "head": "6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e",
+  "productionFiles": [
+    {
+      "path": "src/main/core/coreServerStorageApi.ts",
+      "sha256": "f5d65fb15d94bcc7f58ed98b3690218244796300fc18b8c96979a40f537642fb"
+    },
+    {
+      "path": "src/main/core/rpcDiagnostics.ts",
+      "sha256": "16a925866a0a37109cd92dd2b03bbb87ca6ebf486fa6152faa683c536e01a7b8"
+    },
+    {
+      "path": "src/main/workspaceFiles/ReadToolFileSource.ts",
+      "sha256": "80bee1ee90eebaeaadf11bec9267c1797243ba3fc4ff762c1501144cffe8fc9d"
+    },
+    {
+      "path": "src/renderer/src/app/AppShell.tsx",
+      "sha256": "2db67a03cc0eac2e755364a7496a4fc1f3d3ae8d2670d3a467570b17b52fa839"
+    },
+    {
+      "path": "src/renderer/src/app/chatMessagePersistence.ts",
+      "sha256": "f0afc5aca605c352408a99817e51b05979c51bf30eb8e47612d822e3c4bf30e6"
+    },
+    {
+      "path": "src/renderer/src/app/persistenceDrain.ts",
+      "sha256": "326361889b0df14ec1c10c7025183c58b6999129a63fa9e167646a6b83b91328"
+    },
+    {
+      "path": "src/renderer/src/app/useAgentRunLifecycle.ts",
+      "sha256": "6f7139987bb2a13079dcce43a6d5ce8b62712e9466e6ebd3a5371f5731dba3ab"
+    },
+    {
+      "path": "src/renderer/src/app/useAppShellMessageSubmission.ts",
+      "sha256": "f95f22863b7ef9c59beca56764b00eb88c033c127e5d096ee9800ed6d0cc2b3d"
+    },
+    {
+      "path": "src/renderer/src/app/useAppShellRunControls.ts",
+      "sha256": "9777f3210db917d0e7e93b53dc8dafd03bff95000c66f619e9d0026ee8dbe69b"
+    },
+    {
+      "path": "src/renderer/src/app/useConversationPersistence.ts",
+      "sha256": "9c332261db5283d17906a094a1429015b3354365d44ab4279c00e4e5e144f0f3"
+    },
+    {
+      "path": "src/renderer/src/app/useProjectRemoval.ts",
+      "sha256": "de9a6cf4cdc13dc81113b404caf0f0ad8ed6ca61ca4b9afb791c9e8403d450c0"
+    },
+    {
+      "path": "src/renderer/src/app/useRequestAssistantResponse.ts",
+      "sha256": "96615396d2832a181c2c72c12d92c8c00e22f33372852b1f60bb608b91f915f1"
+    },
+    {
+      "path": "src/renderer/src/features/agentCollaboration/collaborationStore.ts",
+      "sha256": "d354b96acbaaf5fe1f0fc0fb7aa32b16e9f8921b4ea9f4e5bbda592b2b4d7b90"
+    },
+    {
+      "path": "src/renderer/src/features/agentCollaboration/trailingRefresh.ts",
+      "sha256": "9b7c1bf9e2b038dffad6f7c3ad1fe035b9f9b090a24223a7c255078460e3786d"
+    },
+    {
+      "path": "src/renderer/src/features/agentCollaboration/useCollaborationApprovals.ts",
+      "sha256": "9c2ad1ae16f16f079f60f0af653e32868e256b2a156b5e126d1523005b9fe071"
+    },
+    {
+      "path": "src/renderer/src/features/agentCollaboration/useObserverConversation.ts",
+      "sha256": "35246e373834fbb411e7c2b31b2947a262b7bb277d0e88e738ba3b56eb9a2650"
+    },
+    {
+      "path": "src/renderer/src/features/agentRun/useAgentActionDecisionHandlers.ts",
+      "sha256": "6d5194ce81e9ff72d227cfd2228af40f2ad1480d10f37dc9056676bb3ea7cf4f"
+    },
+    {
+      "path": "src/renderer/src/features/chat/chatTypes.ts",
+      "sha256": "0572aa37687fab73256f5876426b107e3ef1428be9060997eb9087bace4ad183"
+    },
+    {
+      "path": "src/renderer/src/features/storage/persistedAgentRun.ts",
+      "sha256": "ab1d8ed530dd01d12d8eef861895b1b7af5976d0d7db04dc6093f76e855f4dfe"
+    },
+    {
+      "path": "src/renderer/src/features/storage/storageConversationMapping.ts",
+      "sha256": "c177b90e41a8b48f1e8e507e8086616edb40af8645585bbebef205bfd048700e"
+    }
+  ],
+  "count": 20,
+  "cssOrVisualAssetChanges": [],
+  "review": "Manual review of all 20 src production files from baseline to working tree. AppShell change is an invalidationSequence prop only; no markup/layout/copy/icon/animation/style or entry changes. Remaining changes cover persistence ownership, failure draining, exact reload scopes, storage mapping, and narrow Host proof reads. Empty failed read paths are accepted as projection data, not authorization. All business permission/approval/cancel authorizations remain on existing backend RPC boundaries."
+}

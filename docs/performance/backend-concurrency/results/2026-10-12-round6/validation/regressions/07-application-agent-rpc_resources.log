@@ -1,0 +1,13 @@
+
+running 8 tests
+test application::agent::rpc_resources::tests::approval_uses_frozen_action_owner_and_ignores_forged_conversation_hint ... ok
+test application::agent::rpc_resources::tests::missing_or_forged_human_question_owner_does_not_grant_a_local_scope ... ok
+test application::agent::rpc_resources::tests::new_conversation_cancel_requires_exact_core_preparing_identity ... ok
+test application::agent::rpc_resources::tests::office_status_is_an_ownerless_observation_but_exact_reads_still_sequence ... ok
+test application::agent::rpc_resources::tests::preparing_run_preserves_its_frozen_project_after_conversation_movement ... ok
+test application::agent::rpc_resources::tests::project_delete_and_metadata_move_use_verified_project_membership ... ok
+test application::agent::rpc_resources::tests::scope_allowlist_never_promotes_unknown_or_missing_conversations ... ok
+test application::agent::rpc_resources::tests::steering_uses_preparing_run_identity_instead_of_a_forged_conversation ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1244 filtered out; finished in 0.69s
+

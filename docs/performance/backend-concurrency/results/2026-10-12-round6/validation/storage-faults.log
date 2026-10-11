@@ -1,0 +1,20 @@
+
+running 4 tests
+test storage::service::tests::storage_faults::process_kill_at_terminal_commit_boundary_restores_an_atomic_prefix ... 
+thread 'storage::service::tests::storage_faults::process_kill_at_terminal_commit_boundary_restores_an_atomic_prefix' (59397529) panicked at crates/core/src/storage/service/tests/storage_faults.rs:179:5:
+assertion `left == right` failed
+  left: [[Text("fts5: checksum mismatch for table \"conversation_history_fts\"")]]
+ right: [[Text("ok")]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test storage::service::tests::storage_faults::sqlite_backup_restores_checkpoint_terminal_pending_and_notification_cursor_together ... ok
+test storage::service::tests::storage_faults::sqlite_full_at_terminal_notification_rolls_back_all_facts_and_retries ... ok
+test storage::service::tests::storage_faults::terminal_crash_fixture ... ok
+
+failures:
+
+failures:
+    storage::service::tests::storage_faults::process_kill_at_terminal_commit_boundary_restores_an_atomic_prefix
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 3479 filtered out; finished in 0.35s
+

@@ -1,0 +1,28 @@
+   Compiling mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `mycopilot-core-server` (bin "core-server" test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 29.86s
+     Running unittests src/main.rs (<build>/debug/deps/core_server-d1a844c28316c58e)
+
+running 15 tests
+test application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget ... ok
+test application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes ... ok
+test application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly ... ok
+test application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id ... ok
+test application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas ... ok
+test application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged ... ok
+test application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload ... ok
+test application::agent::tests::prepared_history_continuous_send::continuous_warm_send_survives_metadata_and_observers_without_full_history_rebuild ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 1245 filtered out; finished in 3.79s
+

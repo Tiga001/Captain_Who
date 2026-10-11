@@ -1,0 +1,118 @@
+# 最终冻结长测对照：baseline r3 /current r2
+
+结论：**两轮都不能报告可持续吞吐或全面通过。** baseline r3完整响应并自然drain，但随运行退化、大量业务/dispatch拒绝且send/control延迟超标。current r2失联前成功延迟较低，但239.861333秒outbound失效，后续计划请求主要在夹具本地拒发，未完成600秒正常业务运行。
+
+本文件是修正runner Node差异后的最终主对照；历史 `resume-soak-r2-comparison.md/.json`保持原样，不再作为最终一致条件的主证据。仅轻量解析baseline r3 raw、核对分析；current r2三个原始文件SHA256与前次独立复核逐一相同。未编译、测试、启动负载或修改生产/正式文档。全部原始路径/哈希、计数、逐owner与资源数据见 `resume-soak-final-comparison.json`。
+
+## 对照条件
+
+- 同机Apple M4 /10逻辑核/16GiB /darwin25.5.0 arm64；Node均v22.23.1，Cargo/Rust1.99.0、pnpm11.10.0相同。metadata记录的环境除输出路径完全相同。baseline r3复用baseline-r2冻结binary，没有重编负载；两轮source_changed_during_run=false、invalidLines=0。
+- 相同fixture SHA256 `75fc4fad46311d39942dc4bdca61125527790d2306d8919d84b44efd3e84828a`、runner SHA256 `4ea7aeb1948b4a3b99dc091d811876c72010febda7ccde3ed6853eafbc8b50e3`。release、schema71、20owner/301波/每2秒，共6020计划start；背景read每500ms；runtime workers10、逻辑Turn上限50、fake provider线程1/50ms/243B、context256000及mixed循环均相同。
+- baseline HEAD `acae06623b7ce6031b90795e730968fb36e38107`，binary `d4caef036c88b5d67268dfc97b98b3a1fc6a700b3d9831eac9d93fbbadf4745d`；current HEAD `b1744ab98e6eb5db633e351d983bbe9d401a76f6`，binary `a79d93917cd199819e5f5656d49bfd1ff220d2856f1a352e575e498c5b180fb9`。测试binary的身份对应冻结性能实现；后续纯统计gate修复不能追溯改写这些raw。
+- 存储实现差异保留：baseline SQLite3.46.0/DELETE，current3.53.2/WAL；inspection synchronous均2。相同计划负载不等于相同实际业务工作量，current失联改变接纳、控制请求及历史/payload轨迹；全程不能包装成same-workload A/B。
+
+## 响应、拒绝与恢复
+
+| 量 | baseline r3 | current r2 |
+| --- | ---: | ---: |
+| RPC offered /received responses | 8537 /8537 | 7829 /3483 |
+| start offered /成功ACK | 6020 /3027 | 6020 /1873 |
+| start active_run业务错误 | 2355 | 526 |
+| start dispatch overload回复 | 638 | 0 |
+| local transport reject /Core已投递未答 | 0 /0 | 4344 /2 |
+| observed Done | 3027 | 1855 |
+| reopen Completed /Cancelled | 2703 /324 | 1719 /154 |
+| cleanup前in-progress /reopen后 | 0 /0 | 3 /0 |
+| 自然drain /完整回复 | 是 /是 | 否 /否 |
+| metadata exit code | 101 | 101 |
+
+baseline2355业务错误均为 `-32000/provider_transition_blocked/preflight.reason=active_run`，已进handler；638 dispatch错误均为 `-32001/rpc_dispatch_error/overloaded/retryable=true`，未进handler、均有RPC错误回复。current4344本地拒发是outbound已关闭后没有调用dispatcher，不能混为已回复的Core过载错误。另2个Core已启动handler未答为start id3468、read id3485；该start没有provider_first或reopen Trace，不能称durable已接受。
+
+独立逐项核对3027/1873个成功ACK的唯一runId、owner、conversationId、assistant/user消息ID和wave预期，与各自reopen一一对应：0身份错误、0ACK缺失恢复、0额外未ACK root。baseline所有Done与durable终态一致；current少观察18个Done但reopen有终态。两者shutdown均未超时；仅证明隔离fixture干净关停/重开，不是crash或断电耐久。
+
+baseline保留unexpected_rpc_errors失败；current七项完整性失败保持原样。JSON可解析/身份可恢复不等于本轮验收通过。两份analysis均throughput_eligible=false；raw遗留的completed_root_turns_per_second不得作为可持续吞吐发布。
+
+## 全程成功延迟（毫秒）
+
+以下分位只含成功，错误/拒发另计；current仅覆盖失联前仍能成功应答的约240秒，不能直接用整轮百分比声称容量提升。p99是单次有限样本描述。
+
+| 操作 | 版本 | n | p50 | p95 | p99 | max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| send | baseline r3 | 3027 | 2290.797 | 9658.655 | 12324.830 | 14628.446 |
+| send | current r2 | 1873 | 408.498 | 1615.386 | 2087.307 | 2756.632 |
+| approve | baseline r3 | 992 | 1494.709 | 3962.704 | 5102.839 | 6869.160 |
+| approve | current r2 | 454 | 148.663 | 700.078 | 1186.232 | 1983.125 |
+| cancel | baseline r3 | 324 | 92.354 | 5222.958 | 7000.808 | 7279.172 |
+| cancel | current r2 | 151 | 36.758 | 206.954 | 548.098 | 848.648 |
+| loadConversation | baseline r3 | 1201 | 3007.992 | 9402.542 | 11838.600 | 14129.150 |
+| loadConversation | current r2 | 479 | 68.507 | 715.979 | 1207.775 | 1586.580 |
+
+## 共同前240秒窗口
+
+按scheduled_us<240秒选择、允许稍后回复，避免只抽已完成者。两者各计划2400start/480read：baseline1898成功+502active_run；current1873成功+526active_run+1已投递未答。current成功延迟较低，但接纳量没有提高，之后又发生通道失效；控制数及实际正文工作量仍不同。
+
+| 操作 | 版本 | n | p50 | p95 | p99 | max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| send | baseline r3 | 1898 | 716.419 | 4088.488 | 5381.954 | 6586.486 |
+| send | current r2 | 1873 | 408.498 | 1615.386 | 2087.307 | 2756.632 |
+| approve | baseline r3 | 460 | 713.451 | 1973.544 | 2614.513 | 3020.354 |
+| approve | current r2 | 454 | 148.663 | 700.078 | 1186.232 | 1983.125 |
+| cancel | baseline r3 | 237 | 66.726 | 1258.419 | 1596.435 | 1804.654 |
+| cancel | current r2 | 151 | 36.758 | 206.954 | 548.098 | 848.648 |
+| loadConversation | baseline r3 | 480 | 733.129 | 3856.447 | 5226.525 | 6086.952 |
+| loadConversation | current r2 | 479 | 68.507 | 715.979 | 1207.775 | 1586.580 |
+
+按start计划所在分钟：
+
+| 秒区间 | baseline成功/业务/dispatch | baseline成功p95 ms | current成功/业务/dispatch | current成功p95 ms |
+| --- | --- | ---: | --- | ---: |
+| 0–60 | 600/0/0 | 796.842 | 585/15/0 | 671.184 |
+| 60–120 | 551/49/0 | 1838.103 | 502/98/0 | 1242.189 |
+| 120–180 | 440/160/0 | 3441.935 | 439/161/0 | 1684.398 |
+| 180–240 | 307/293/0 | 5726.289 | 347/252/0；未答1 | 2027.720 |
+| 240–300 | 235/342/23 | 8548.805 | 0/0/0；本地拒发600 | — |
+| 300–360 | 165/360/75 | 8115.991 | 0/0/0；本地拒发600 | — |
+| 360–420 | 204/242/154 | 11071.754 | 0/0/0；本地拒发600 | — |
+| 420–480 | 209/193/198 | 13691.195 | 0/0/0；本地拒发600 | — |
+| 480–540 | 174/342/84 | 8888.372 | 0/0/0；本地拒发600 | — |
+| 540–600 | 142/354/104 | 9141.323 | 0/0/0；本地拒发600 | — |
+
+t=600最后一波20个：baseline全业务active_run拒绝；current全本地拒发。history_pairs=0仅指初始状态，晚期历史持续增长，不能统称固定短历史。
+
+## 每owner进展与资源
+
+- baseline每owner成功ACK146–156，最后ACK599.719107–603.864562秒；各owner相邻ACK最大间隔的最差值13.858567秒。所有owner有进展及终态，但dispatch拒绝随固定投放顺序偏斜，详见JSON，不能只看总成功数。
+- current每ownerACK88–103，最后ACK236.083033–238.789519秒，失联前最差相邻ACK间隔7.690074秒；失联后每owner181个计划start全本地拒发。较短观测段的小gap不能证明600秒公平性更好。双方均不能据本次有限观察证明长期无饿死。
+
+raw资源时间点采用fixture时钟，近240秒current样本已在通道失败之后；外部ps为可执行文件启动时钟，不假定精确对齐。
+
+| raw近似时点 | baseline累计CPU s | current累计CPU s | baseline resident /footprint B | current resident /footprint B |
+| --- | ---: | ---: | --- | --- |
+| 0s | 0.088 | 0.110 | 25,706,496 /11,665,864 | 29,851,648 /14,320,144 |
+| 60s | 54.555 | 74.611 | 279,691,264 /269,697,768 | 245,612,544 /245,957,376 |
+| 120s | 155.107 | 217.060 | 351,928,320 /240,960,328 | 372,391,936 /365,642,688 |
+| 180s | 279.277 | 413.121 | 386,908,160 /506,889,152 | 417,775,616 /564,741,200 |
+| 240s | 413.886 | 618.467 | 482,639,872 /635,241,480 | 489,668,608 /689,374,456 |
+| 300s | 558.618 | 623.527 | 452,083,712 /741,622,840 | 39,960,576 /565,609,672 |
+| 600s | 1235.613 | 624.987 | 782,336,000 /1,340,884,504 | 39,763,968 /566,052,040 |
+
+约240秒累计CPU baseline413.886/current618.467秒；current随后没有正常新业务输入，到600秒仅624.987秒。全case CPU增量baseline1263.410秒/610.014墙钟秒，current626.973秒/855.061墙钟秒；current失联后的长空闲不能用于效率改善归一化。服务工作/payload不同，也不能把CPU差值唯一归因一个实现。
+
+| 全程描述量 | baseline r3 | current r2 |
+| --- | ---: | ---: |
+| raw resident峰值 B | 869,220,352 | 499,040,256 |
+| raw footprint峰值 B | 1,442,793,056 | 760,120,544 |
+| 外部ps RSS峰值 B | 1,402,159,104 | 574,242,816 |
+| 外部线程峰值 | 47 | 41 |
+| kernel归属写 B | 21,272,207,360 | 8,328,757,248 |
+| logical writes B | 10,515,018,960 | 6,631,821,480 |
+| provider请求数 | 4,019 | 2,327 |
+| provider request bytes | 926,506,659 | 380,697,724 |
+| output events | 89,919 | 56,076 |
+| output bytes | 340,400,481 | 197,164,347 |
+
+baseline DB约2.5MB→555.2MB、DELETE模式WAL恒0；current DB约2.5MB→261.3MB，WAL约120秒达到16,121,592B，此后因失联缺少正常持续投放。模式、工作量和暴露时间不同，不能把WAL平直或后段RSS下降称为负载下收敛。双方compaction均0，不代表历史未增长。
+
+背景read实际成功响应baseline1201次/185,495,234B，current479次/1,100,561,316B；payload轨迹差异与当前Core耐久展示路径变化并存，聚合尚不能唯一归因。不得删模型或展示内容换取指标。进程指标包含Core、同进程fake provider和夹具；raw resident/footprint与外部ps不同口径均保留，不挑较小值代表产品heap，也不换算物理SSD写放大。双方均不足证明无泄漏。
+
+current失联直接证据仍为rpc.response队列字节超限：239.861333秒，queue7,933,685B加frame3,882,503B超过9MiB总预算；并非帧数/oversize限制。需在保留payload、容量和成功语义下修复传输路径，再独占完成完整600秒正常输入、回复、drain、每owner进展与资源时序；send/approve尾延迟仍需独立解决。本报告不把后续纯统计修复或单场景diagnostic冒充已重跑性能验收。

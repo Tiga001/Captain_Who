@@ -1,0 +1,38 @@
+# Final soak r1 回执中断诊断与最小修复
+
+原失败证据完整保留在 `../round6-final-soak-u20-20261012-r1/`；本文不把已收到回执的前171秒分位当成600秒SLO。
+
+## 已确认的中断机制
+
+最后一条收集到的RPC响应是 `storage.loadConversation id=2582 owner=2`，offered171.047187s、handler171.100581s、receipt171.863128s，响应3482213 bytes。按offered顺序第一个缺失RPC是 `start id=2561 owner=0`（offered170.035179s，但因owner依赖到172.705461s才启动handler）；最早缺失read是 `id=2583 owner=3`，offered171.554694s、handler171.561422s。所以“第一条缺失按offer排序”不等于触发关闭的响应。
+
+阶段计数给出更强的机制证据：`outbound.serialize/rpc.response` 为2569次、623644611 bytes，`outbound.queue/rpc.response` 为2568次、620118870 bytes；差值恰好是**一条3525741 bytes响应**。所有agent.event都被dequeue，delta serialize数量与dequeue+merged数量相等，没有其他被拒帧的差额。响应最大值3525741bytes远小于生产9MiB（8MiB data+1MiB control）总限额，峰值frame数161远小于8192；queue已接受的peak bytes为7021568。由当前send条件与计数可定位为**多个正常大小响应叠加使总queue bytes超限**，不是单个超大帧策略、不足的frame数量或oversize lease冲突。
+
+旧运行没有归档FailureSnapshot，不能从聚合反推出关闭瞬间的精确queue_bytes，也不能把id2583断言为失败帧的确定ID。下一次将直接保留category/frame_bytes/queue_bytes和各限额布尔值；不保存业务payload。
+
+`outbound.rs` 在不fit时原子设置 failed+overloaded+closed，返回SendError；receiver将已有帧FIFO drain后返回None。collector的while循环因此结束。主服务真实stdio的 `request_loop.rs:208` 监听failed，停止RPC准入并以BrokenPipe结束；`outbound_writer.rs`会在可drain时输出独立overload frame。这是既有有界输出的明确过载策略。
+
+## 夹具偏差与仍未证明的产品结论
+
+旧collector使用test `receiver.recv()`先完整decode，然后在共享Events Mutex里对完整history `value.to_string().len()`再编码一次，最后才压缩成观察摘要。170秒时每条history已约3.5MB；该多余编码和大Value处理占用记录所有handler/回执/provider标记的共享锁。生产stdout writer直接写已有wire，Host进行decode；旧夹具额外往返编码不是该生产路径的一部分。这是已确认的**测量开销缺陷**。它增加queue积累压力，但修正后实际产品在同负载下是否仍会正常触发过载必须重测，不能预先把r1全部失败豁免为fixture-only。
+
+此外旧BaselineDispatcher从不监听此failed信号，collector结束后依然让后续请求真实进入handler。最终6020 start全handler，只有1527 ACK+179错误回复+4314无回复；approve632 offered中339回复/293缺失；read1201中343回复/858缺失。后台reopen却有2678 root（2456Completed、180Cancelled、42Failed），而已ACK只有1527。后171秒业务量已不再等于正常连接会执行的业务量，故其资源/SLO不可被当成健康600秒运行。179个有回执的错误仍按其真实结构分类，不能将4314次无回复改成“合理容量拒绝”。
+
+已观察Done的run只有1513个，已ACK与Done差14个。旧raw只有reopen总数不能逐ID证明这14个已ACK run都耐久终态；既不能因此断言丢失，也不能拿总数更大替代证明。新夹具会保留每个root runId对应owner、assistant_message_id、terminal_status，并逐个检查所有ACK身份和终态。
+
+## 已实施的最小改动（等待统一构建/回归）
+
+改动只在test fixture和cfg(test) diagnostic：
+
+1. collector改用recv_frame，使用真实wire长度（去掉末尾协议换行）记录bytes，在Events锁外只decode一次并释放frame；去掉锁内所有完整Value再编码；history摘要化及完整Value析构也移到锁外。receipt时间在完整帧一次decode结束后立即记录，隔离后续测量整理成本，两侧baseline/current都采用此边界。
+2. 监听outbound.failed并记录第一次观测时间和安全failure counters。每个后续offer先检查连接closed；仍保留scheduled/offered记录，但设置`transport_rejected_us`且不交dispatcher，response/responded_us保持None。不会伪造RPC回复，也不会把transport拒绝混成lane capacity拒绝。关闭与已检查提交之间的微小竞态仍视为in-flight，与真实request loop一样需保留证据；本夹具不宣称完整模拟生产shutdown。
+3. 全部重开root按runId归档，逐ACK验证owner/message ID/terminal，并把不一致加入验收失败条件；保留Done观测与durable terminal两种事实。
+4. 新增测试覆盖多个正常response总byte超限、drain后failure证据仍在且无payload泄露；断连后fixture不调用任何后续handler、不伪造回执；恢复数量相同但run/owner/message/terminal不匹配仍会检出。
+
+没有增加queue/thread/业务容量，没有改生产send失败/oversize/terminal错误帧语义，没有吞掉丢帧或放宽SLO。rustfmt和diff check已通过；本报告写入时尚未Cargo构建，不把待执行测试写成通过。主代理将相同collector移植到baseline并统一重编，再按同样成本重跑A/B600秒及diagnostics开关对照。
+
+## 结果校验器补充验证
+
+`scripts/run-backend-concurrency-baseline.mjs` 已独立校验新roots/ACK证据：任一新recovery字段出现就要求三字段完整且类型正确；逐Run身份、唯一性、逐身份终态分布与ACK checked数全部核对。transport_failure/outbound.state任一出现要求完整且健康，任何失联、故障snapshot或transport拒绝都不能valid；拒绝记录不得同时带fake response/handler证据。旧v2完全没有新字段时继续兼容。
+
+17/17 Node单元测试通过，覆盖同数量wrong Run/owner/message/in-progress、partial证据、transportfailed与伪造回执；prettier、ESLint、diff check通过。直接用新validator检查原matrix36/36与最终matrix36/36仍通过，失败soak r1仍保留7种integrity问题。证据：`runner-outbound-recovery-tests.log`、`runner-outbound-recovery-eslint.log`、`runner-outbound-recovery-crosscheck.json`。Rust新测试仍等待主代理统一binary，不以JS通过替代Rust验证。

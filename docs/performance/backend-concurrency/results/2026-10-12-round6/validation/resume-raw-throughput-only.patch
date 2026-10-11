@@ -1,0 +1,257 @@
+--- a/crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs
++++ b/crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs
+@@ -140,6 +140,124 @@
+     }
+     (checked, errors)
+ }
++
++// Recovery is observed after cleanup, but measured_us ends before cleanup. Only publish a
++// rate when the complete report proves those recovered roots naturally settled in the window.
++// This is a reporting gate, independent of latency SLOs and the workload execution path.
++fn completed_root_throughput(report: &Value) -> Option<f64> {
++    let measured_us = report["measured_us"].as_u64()?;
++    if measured_us == 0
++        || [
++            "drained_before_cleanup",
++            "starts_responded",
++            "controls_ready",
++            "replies_complete",
++        ]
++        .iter()
++        .any(|field| report[*field].as_bool() != Some(true))
++        || report["shutdown_timed_out"].as_bool() != Some(false)
++        || report["in_progress_before_cleanup"].as_u64() != Some(0)
++    {
++        return None;
++    }
++    let raw = &report["raw"];
++    let recovery = &report["recovery"];
++    let outbound = &report["outbound"]["state"];
++    if !raw["errors"].as_array()?.is_empty()
++        || !report["unexpected_rpc_errors"].as_array()?.is_empty()
++        || raw["context_compaction_events"].as_u64()? != 0
++        || !raw.get("transport_failure")?.is_null()
++        || ["closed", "failed", "overloaded"]
++            .iter()
++            .any(|field| outbound[*field].as_bool() != Some(false))
++        || !outbound.get("failure_snapshot")?.is_null()
++        || recovery["post_reopen_in_progress"].as_u64()? != 0
++        || !recovery["acknowledged_root_identity_errors"]
++            .as_array()?
++            .is_empty()
++    {
++        return None;
++    }
++    let accepted = report["root_starts_durably_accepted"].as_u64()?;
++    let roots = recovery["roots"].as_object()?;
++    if accepted == 0
++        || report["recovered_root_turns"].as_u64()? != accepted
++        || recovery["acknowledged_roots_checked"].as_u64()? != accepted
++        || roots.len() as u64 != accepted
++    {
++        return None;
++    }
++    let owner_count = report["case"]["roots"].as_u64()?;
++    let planned_starts = owner_count.checked_mul(report["case"]["waves"].as_u64()?)?;
++    let mut offered_starts = 0_u64;
++    let mut runs = HashSet::new();
++    let mut messages = HashSet::new();
++    let mut observed_completed = 0_u64;
++    for record in raw["rpcs"].as_object()?.values() {
++        record["responded_us"].as_u64()?;
++        let admitted = record["dispatch_admitted"].as_bool()?;
++        if !record.get("transport_rejected_us")?.is_null()
++            || (!record["handler_started_us"].is_null() && !admitted)
++        {
++            return None;
++        }
++        let operation = record["operation"].as_str()?;
++        let response = record.get("response")?;
++        let has_result = response.as_object()?.contains_key("result");
++        let has_error = response.as_object()?.contains_key("error");
++        if has_result == has_error || (has_error && !expected_load_rejection(operation, response)) {
++            return None;
++        }
++        if operation != AGENT_START_CONVERSATION_TURN_METHOD {
++            continue;
++        }
++        offered_starts += 1;
++        if has_error {
++            continue;
++        }
++        let result = &response["result"];
++        let run = result["runId"].as_str()?;
++        let message = result["assistantMessageId"].as_str()?;
++        let owner = record["owner"].as_u64()?;
++        let root = roots.get(run)?;
++        record["handler_started_us"].as_u64()?;
++        if !admitted
++            || run.is_empty()
++            || message.is_empty()
++            || !runs.insert(run)
++            || !messages.insert(message)
++            || owner >= owner_count
++            || root["owner"].as_u64()? != owner
++            || root["assistant_message_id"].as_str()? != message
++        {
++            return None;
++        }
++        match root["terminal_status"].as_str()? {
++            "completed" => observed_completed += 1,
++            "cancelled" => {}
++            _ => return None,
++        }
++    }
++    if offered_starts != planned_starts || runs.len() as u64 != accepted {
++        return None;
++    }
++    let mut completed = 0_u64;
++    let mut terminal_total = 0_u64;
++    for (status, count) in recovery["root_terminal_statuses"].as_object()? {
++        let count = count.as_u64()?;
++        match status.as_str() {
++            "Completed" => completed = count,
++            "Cancelled" => {}
++            _ => return None,
++        }
++        terminal_total = terminal_total.checked_add(count)?;
++    }
++    if terminal_total != accepted || completed != observed_completed {
++        return None;
++    }
++    Some(completed as f64 / (measured_us as f64 / 1_000_000.0))
++}
++
+ fn quantiles(mut values: Vec<u64>) -> Value {
+     values.sort_unstable();
+     let at = |p: f64| {
+@@ -1417,7 +1535,7 @@
+             "acknowledged_root_identity_errors":acknowledged_root_identity_errors,
+             "child_terminal_statuses":child_terminals,"children":child_recovery,
+             "kind":"clean shutdown/reopen; not a crash or power-loss test"},
+-        "completed_root_turns_per_second":durable_terminals.get("Completed").copied().unwrap_or(0) as f64/(measured_us as f64/1_000_000.0)});
++        "completed_root_turns_per_second":Value::Null});
+     report
+         .as_object_mut()
+         .unwrap()
+@@ -1447,6 +1565,8 @@
+         .as_object_mut()
+         .unwrap()
+         .extend(measurements.as_object().unwrap().clone());
++    let throughput = completed_root_throughput(&report);
++    report["completed_root_turns_per_second"] = json!(throughput);
+     report
+ }
+ 
+@@ -1820,6 +1940,111 @@
+ }
+ 
+ #[test]
++fn backend_baseline_throughput_is_null_without_complete_healthy_recovery() {
++    let report = json!({
++        "case":{"roots":1,"waves":1},"measured_us":2_000_000,
++        "root_starts_durably_accepted":1,"recovered_root_turns":1,
++        "drained_before_cleanup":true,"in_progress_before_cleanup":0,
++        "starts_responded":true,"controls_ready":true,"replies_complete":true,
++        "shutdown_timed_out":false,"unexpected_rpc_errors":[],
++        "recovery":{"post_reopen_in_progress":0,"acknowledged_roots_checked":1,
++            "acknowledged_root_identity_errors":[],"root_terminal_statuses":{"Completed":1},
++            "roots":{"run":{"owner":0,"assistant_message_id":"output-0-0",
++                "terminal_status":"completed"}}},
++        "outbound":{"state":{"closed":false,"failed":false,"overloaded":false,
++            "failure_snapshot":null}},
++        "raw":{"errors":[],"context_compaction_events":0,"transport_failure":null,
++            "rpcs":{"1":{"operation":AGENT_START_CONVERSATION_TURN_METHOD,"owner":0,
++                "responded_us":3,"handler_started_us":2,"dispatch_admitted":true,
++                "transport_rejected_us":null,
++                "response":{"result":{"runId":"run","assistantMessageId":"output-0-0"}}}}}
++    });
++    // No latency metrics are needed: an SLO miss does not invalidate a proven rate.
++    assert_eq!(completed_root_throughput(&report), Some(0.5));
++    for (path, replacement) in [
++        ("/measured_us", json!(0)),
++        ("/drained_before_cleanup", json!(false)),
++        ("/starts_responded", json!(false)),
++        ("/controls_ready", json!(false)),
++        ("/replies_complete", json!(false)),
++        ("/shutdown_timed_out", json!(true)),
++        ("/in_progress_before_cleanup", json!(1)),
++        ("/recovery/post_reopen_in_progress", json!(1)),
++        ("/unexpected_rpc_errors", json!([{}])),
++        ("/raw/errors", json!([{}])),
++        ("/raw/context_compaction_events", json!(1)),
++        ("/raw/transport_failure", json!({})),
++        ("/outbound/state/closed", json!(true)),
++        ("/outbound/state/failed", json!(true)),
++        ("/outbound/state/overloaded", json!(true)),
++        ("/outbound/state/failure_snapshot", json!({})),
++        ("/root_starts_durably_accepted", json!(0)),
++        ("/recovered_root_turns", json!(2)),
++        ("/recovery/acknowledged_roots_checked", json!(0)),
++        ("/recovery/acknowledged_root_identity_errors", json!([{}])),
++        ("/recovery/root_terminal_statuses", json!({"Completed":2})),
++        ("/recovery/root_terminal_statuses", json!({"Failed":1})),
++        ("/recovery/roots/run/owner", json!(1)),
++        ("/recovery/roots/run/assistant_message_id", json!("wrong")),
++        ("/recovery/roots/run/terminal_status", json!("in_progress")),
++        ("/raw/rpcs/1/response/result/runId", json!("replacement")),
++        ("/raw/rpcs/1/response/result/assistantMessageId", json!("")),
++        ("/raw/rpcs/1/responded_us", Value::Null),
++        ("/raw/rpcs/1/response", Value::Null),
++        ("/raw/rpcs/1/dispatch_admitted", json!(false)),
++        ("/raw/rpcs/1/transport_rejected_us", json!(3)),
++        ("/case/waves", json!(2)),
++    ] {
++        let mut invalid = report.clone();
++        *invalid.pointer_mut(path).unwrap() = replacement;
++        assert_eq!(completed_root_throughput(&invalid), None, "{path}");
++        assert_eq!(
++            json!(completed_root_throughput(&invalid)),
++            Value::Null,
++            "{path} must serialize as null"
++        );
++    }
++    for (path, field) in [
++        ("/raw", "transport_failure"),
++        ("/outbound/state", "failure_snapshot"),
++        ("/outbound/state", "closed"),
++        ("/recovery", "acknowledged_root_identity_errors"),
++        ("/raw/rpcs/1", "transport_rejected_us"),
++    ] {
++        let mut invalid = report.clone();
++        invalid
++            .pointer_mut(path)
++            .unwrap()
++            .as_object_mut()
++            .unwrap()
++            .remove(field);
++        assert_eq!(completed_root_throughput(&invalid), None, "{path}/{field}");
++    }
++    let mut wrong_run = report.clone();
++    let roots = wrong_run["recovery"]["roots"].as_object_mut().unwrap();
++    let root = roots.remove("run").unwrap();
++    roots.insert("replacement".into(), root);
++    assert_eq!(completed_root_throughput(&wrong_run), None);
++
++    let mut cancelled = report.clone();
++    cancelled["recovery"]["roots"]["run"]["terminal_status"] = json!("cancelled");
++    cancelled["recovery"]["root_terminal_statuses"] = json!({"Cancelled":1});
++    assert_eq!(completed_root_throughput(&cancelled), Some(0.0));
++
++    // A classified rejection stays in the offered denominator while the accepted root
++    // still contributes its verified completion. It does not become a successful ACK.
++    let mut rejected = report.clone();
++    rejected["case"]["waves"] = json!(2);
++    rejected["raw"]["rpcs"]["2"] = json!({
++        "operation":AGENT_START_CONVERSATION_TURN_METHOD,"owner":0,
++        "responded_us":4,"handler_started_us":null,"dispatch_admitted":false,
++        "transport_rejected_us":null,
++        "response":{"error":{"data":{"type":"rpc_dispatch_error","code":"overloaded"}}}
++    });
++    assert_eq!(completed_root_throughput(&rejected), Some(0.5));
++}
++
++#[test]
+ fn mixed_provider_only_consumes_tool_results_from_the_current_turn() {
+     let mut request = json!({"messages":[
+         {"role":"user","content":"BASELINE:root-0-wave-3"},

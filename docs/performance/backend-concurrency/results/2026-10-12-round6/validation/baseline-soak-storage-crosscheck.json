@@ -1,0 +1,309 @@
+{
+  "classification": {
+    "accepted": 3038,
+    "providerTransition/provider_transition_blocked/active_run": 2238,
+    "rpc_dispatch_error/overloaded/None": 744
+  },
+  "total_rpcs": 8524,
+  "total_success": 5542,
+  "total_errors": 2982,
+  "no_response": 0,
+  "accepted_cycle_counts": {
+    "0": 331,
+    "1": 567,
+    "2": 837,
+    "3": 971,
+    "4": 332
+  },
+  "provider_requests": 4009,
+  "expected_provider_requests": 4009,
+  "blocked_temporal_evidence": {
+    "known_ack_done_interval_overlaps_handler": 2238,
+    "known_ack_done_interval_covers_full_handler": 2222
+  },
+  "no_overlap_examples": [],
+  "overloaded_dispatch_admitted_count": 0,
+  "overloaded_handler_started_count": 0,
+  "runtime_errors": 0,
+  "per_owner": [
+    {
+      "owner": 0,
+      "offered": 301,
+      "accepted": 146,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 155
+      },
+      "completed": 133,
+      "cancelled": 13,
+      "first_ack_s": 0.012,
+      "last_ack_s": 600.933,
+      "max_between_ack_s": 14.995
+    },
+    {
+      "owner": 1,
+      "offered": 301,
+      "accepted": 149,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 152
+      },
+      "completed": 134,
+      "cancelled": 15,
+      "first_ack_s": 0.048,
+      "last_ack_s": 601.3,
+      "max_between_ack_s": 13.997
+    },
+    {
+      "owner": 2,
+      "offered": 301,
+      "accepted": 151,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 150
+      },
+      "completed": 135,
+      "cancelled": 16,
+      "first_ack_s": 0.048,
+      "last_ack_s": 601.589,
+      "max_between_ack_s": 13.997
+    },
+    {
+      "owner": 3,
+      "offered": 301,
+      "accepted": 152,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 149
+      },
+      "completed": 136,
+      "cancelled": 16,
+      "first_ack_s": 0.058,
+      "last_ack_s": 601.59,
+      "max_between_ack_s": 11.938
+    },
+    {
+      "owner": 4,
+      "offered": 301,
+      "accepted": 153,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 148
+      },
+      "completed": 138,
+      "cancelled": 15,
+      "first_ack_s": 0.06,
+      "last_ack_s": 601.59,
+      "max_between_ack_s": 11.753
+    },
+    {
+      "owner": 5,
+      "offered": 301,
+      "accepted": 155,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 145,
+        "rpc_dispatch_error/overloaded/None": 1
+      },
+      "completed": 138,
+      "cancelled": 17,
+      "first_ack_s": 0.088,
+      "last_ack_s": 601.987,
+      "max_between_ack_s": 11.838
+    },
+    {
+      "owner": 6,
+      "offered": 301,
+      "accepted": 154,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 142,
+        "rpc_dispatch_error/overloaded/None": 5
+      },
+      "completed": 138,
+      "cancelled": 16,
+      "first_ack_s": 0.088,
+      "last_ack_s": 601.988,
+      "max_between_ack_s": 11.838
+    },
+    {
+      "owner": 7,
+      "offered": 301,
+      "accepted": 154,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 132,
+        "rpc_dispatch_error/overloaded/None": 15
+      },
+      "completed": 137,
+      "cancelled": 17,
+      "first_ack_s": 0.098,
+      "last_ack_s": 602.879,
+      "max_between_ack_s": 21.135
+    },
+    {
+      "owner": 8,
+      "offered": 301,
+      "accepted": 156,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 115,
+        "rpc_dispatch_error/overloaded/None": 30
+      },
+      "completed": 138,
+      "cancelled": 18,
+      "first_ack_s": 0.112,
+      "last_ack_s": 602.879,
+      "max_between_ack_s": 20.788
+    },
+    {
+      "owner": 9,
+      "offered": 301,
+      "accepted": 155,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 107,
+        "rpc_dispatch_error/overloaded/None": 39
+      },
+      "completed": 137,
+      "cancelled": 18,
+      "first_ack_s": 0.126,
+      "last_ack_s": 602.879,
+      "max_between_ack_s": 12.964
+    },
+    {
+      "owner": 10,
+      "offered": 301,
+      "accepted": 157,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 99,
+        "rpc_dispatch_error/overloaded/None": 45
+      },
+      "completed": 140,
+      "cancelled": 17,
+      "first_ack_s": 0.136,
+      "last_ack_s": 603.349,
+      "max_between_ack_s": 13.627
+    },
+    {
+      "owner": 11,
+      "offered": 301,
+      "accepted": 155,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 93,
+        "rpc_dispatch_error/overloaded/None": 53
+      },
+      "completed": 138,
+      "cancelled": 17,
+      "first_ack_s": 0.149,
+      "last_ack_s": 603.349,
+      "max_between_ack_s": 13.289
+    },
+    {
+      "owner": 12,
+      "offered": 301,
+      "accepted": 155,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 89,
+        "rpc_dispatch_error/overloaded/None": 57
+      },
+      "completed": 138,
+      "cancelled": 17,
+      "first_ack_s": 0.174,
+      "last_ack_s": 603.797,
+      "max_between_ack_s": 13.289
+    },
+    {
+      "owner": 13,
+      "offered": 301,
+      "accepted": 153,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 85,
+        "rpc_dispatch_error/overloaded/None": 63
+      },
+      "completed": 135,
+      "cancelled": 18,
+      "first_ack_s": 0.174,
+      "last_ack_s": 603.798,
+      "max_between_ack_s": 13.384
+    },
+    {
+      "owner": 14,
+      "offered": 301,
+      "accepted": 152,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 82,
+        "rpc_dispatch_error/overloaded/None": 67
+      },
+      "completed": 134,
+      "cancelled": 18,
+      "first_ack_s": 0.186,
+      "last_ack_s": 603.799,
+      "max_between_ack_s": 17.058
+    },
+    {
+      "owner": 15,
+      "offered": 301,
+      "accepted": 153,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 79,
+        "rpc_dispatch_error/overloaded/None": 69
+      },
+      "completed": 136,
+      "cancelled": 17,
+      "first_ack_s": 0.198,
+      "last_ack_s": 603.811,
+      "max_between_ack_s": 12.032
+    },
+    {
+      "owner": 16,
+      "offered": 301,
+      "accepted": 149,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 80,
+        "rpc_dispatch_error/overloaded/None": 72
+      },
+      "completed": 131,
+      "cancelled": 18,
+      "first_ack_s": 0.208,
+      "last_ack_s": 604.716,
+      "max_between_ack_s": 12.032
+    },
+    {
+      "owner": 17,
+      "offered": 301,
+      "accepted": 148,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 80,
+        "rpc_dispatch_error/overloaded/None": 73
+      },
+      "completed": 131,
+      "cancelled": 17,
+      "first_ack_s": 0.218,
+      "last_ack_s": 604.717,
+      "max_between_ack_s": 13.813
+    },
+    {
+      "owner": 18,
+      "offered": 301,
+      "accepted": 148,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 77,
+        "rpc_dispatch_error/overloaded/None": 76
+      },
+      "completed": 131,
+      "cancelled": 17,
+      "first_ack_s": 0.234,
+      "last_ack_s": 605.059,
+      "max_between_ack_s": 13.957
+    },
+    {
+      "owner": 19,
+      "offered": 301,
+      "accepted": 143,
+      "errors": {
+        "providerTransition/provider_transition_blocked/active_run": 79,
+        "rpc_dispatch_error/overloaded/None": 79
+      },
+      "completed": 128,
+      "cancelled": 15,
+      "first_ack_s": 0.25,
+      "last_ack_s": 605.472,
+      "max_between_ack_s": 17.093
+    }
+  ],
+  "notes": [
+    "Active run classification is backed by baseline provider_transition.rs occupancy guard and same-owner ACK-to-observed-Done overlap; event times do not prove exact durable storage timing.",
+    "No raw outcomes were reclassified to success and no original data was modified."
+  ]
+}

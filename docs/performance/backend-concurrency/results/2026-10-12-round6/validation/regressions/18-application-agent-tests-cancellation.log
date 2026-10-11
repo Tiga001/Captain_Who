@@ -1,0 +1,15 @@
+
+running 9 tests
+test application::agent::tests::cancellation::cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_locally ... ok
+test application::agent::tests::cancellation::cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error ... ok
+test application::agent::tests::cancellation::cancelling_immediately_after_approval_prevents_command_side_effects ... ok
+test application::agent::tests::cancellation::cancelling_run_during_approved_command_finishes_cancelled_without_resuming_model ... ok
+test application::agent::tests::cancellation::failed_forced_cancellation_projection_is_retired_by_current_startup_reconciliation ... failed to persist forced cancelled conversation trace: 本地数据库操作失败：terminal conversation trace cannot transition to another status
+ok
+test application::agent::tests::cancellation::forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace ... ok
+test application::agent::tests::cancellation::interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_paired_trace ... ok
+test application::agent::tests::cancellation::message_deletion_cancels_a_rejected_actions_pre_spawn_continuation ... ok
+test application::agent::tests::cancellation::terminal_message_and_trace_roll_back_together_when_trace_is_invalid ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1243 filtered out; finished in 1.11s
+

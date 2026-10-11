@@ -1,0 +1,15 @@
+
+running 5 tests
+test application::agent::workflow_scheduler::tests::workflow_reads_and_draft_writes_do_not_scan_or_wake_but_readiness_writes_do ... ok
+test application::agent::workflow_scheduler::tests::workflow_scheduler_coalesces_concurrent_busy_wakes_and_keeps_completion_wake ... ok
+test application::agent::workflow_scheduler::tests::workflow_scheduler_recovery_retries_without_a_wake_and_survives_scan_failure ... 
+thread 'blocking-workflow_test-0' (59545326) panicked at crates/core-server/src/application/agent/workflow_scheduler.rs:395:21:
+injected scan failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+organization scheduler scan failed; recovery will retry: blocking job panicked; mutation outcome may be unknown
+ok
+test application::agent::workflow_scheduler::tests::workflow_scheduler_shutdown_drains_blocking_scan_and_rejects_pending_wakes ... ok
+test application::agent::workflow_scheduler::tests::workflow_scheduler_stop_fences_root_and_provider_transition_admission ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1247 filtered out; finished in 0.23s
+

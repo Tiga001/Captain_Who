@@ -96,6 +96,8 @@ fixture 和测试为准。
 | [第四轮后端性能结果](performance/backend-concurrency/round4-results.md)                 | 资源排序实测、正确性验证、回退与第五轮门禁      |
 | [运行持久化与前端责任](performance/backend-concurrency/round5-persistence-ownership.md) | 第五轮检查点、所有权、恢复与调用链契约          |
 | [第五轮后端性能结果](performance/backend-concurrency/round5-results.md)                 | 持久化责任、跨层调用实测、恢复验证与第六轮门禁  |
+| [第六轮综合验证结果](performance/backend-concurrency/round6-results.md)                 | 正确性修复、最终实测、失败门禁与后续工作        |
+| [第六轮原始证据](performance/backend-concurrency/results/2026-10-12-round6/README.md)   | 脱敏规则、原始样本、复核和文件校验              |
 | [恢复 Runbook](operations/recovery-runbook.md)                                          | 数据、Agent、命令、MCP 与运行时恢复             |
 | [威胁模型](security/threat-model.md)                                                    | 信任边界、受保护资产和残余风险                  |
 

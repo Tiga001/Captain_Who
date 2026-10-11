@@ -1,0 +1,37 @@
+
+running 32 tests
+test application::agent::tests::terminal_events::action_cancellation_fence_does_not_abort_a_sibling_command_session ... ok
+test application::agent::tests::terminal_events::approval_completed_done_admits_next_turn_before_retiring_worker_returns ... ok
+test application::agent::tests::terminal_events::assistant_persistence_failure_never_releases_pending_terminal_done ... ok
+test application::agent::tests::terminal_events::automatic_command_final_audit_failure_preserves_and_then_replays_effect_evidence ... ok
+test application::agent::tests::terminal_events::automatic_command_reconciles_a_terminal_receipt_after_post_commit_error ... ok
+test application::agent::tests::terminal_events::automatic_command_requires_durable_execution_claim_before_side_effects ... ok
+test application::agent::tests::terminal_events::automatic_command_streams_bounded_output_with_stable_call_identity ... ok
+test application::agent::tests::terminal_events::automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_exit ... ok
+test application::agent::tests::terminal_events::automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommitted ... ok
+test application::agent::tests::terminal_events::automatic_server_path_requires_explicit_approval_for_guarded_writes ... ok
+test application::agent::tests::terminal_events::command_completion_waits_for_a_failed_project_deletion_then_persists_evidence ... ok
+test application::agent::tests::terminal_events::completed_done_admits_next_turn_before_retiring_worker_returns ... ok
+test application::agent::tests::terminal_events::conversation_deletion_rejects_unsettled_effects_without_a_project ... ok
+test application::agent::tests::terminal_events::durable_command_session_receipt_allows_deletion_after_action_audit_is_indeterminate ... ok
+test application::agent::tests::terminal_events::explicit_run_cancel_interrupts_handed_off_command_after_active_control_is_retired ... ok
+test application::agent::tests::terminal_events::manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observation ... ok
+test application::agent::tests::terminal_events::message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_memory ... ok
+test application::agent::tests::terminal_events::message_deletion_rejects_an_unsettled_file_effect_and_preserves_the_owner ... ok
+test application::agent::tests::terminal_events::message_deletion_waits_for_a_durable_file_effect_receipt ... ok
+test application::agent::tests::terminal_events::nonzero_automatic_command_persists_office_artifacts_in_tool_result_audit ... ok
+test application::agent::tests::terminal_events::project_deletion_timeout_preserves_late_command_observation ... ok
+test application::agent::tests::terminal_events::restart_conservatively_blocks_interrupted_manual_command_deletion ... ok
+test application::agent::tests::terminal_events::restart_restores_executing_auto_command_as_project_deletion_blocker ... ok
+test application::agent::tests::terminal_events::runtime_terminal_error_keeps_its_durable_trace_sequence_across_commit_and_reload ... ok
+test application::agent::tests::terminal_events::settled_effect_in_another_run_cannot_clear_an_unsettled_identity ... ok
+test application::agent::tests::terminal_events::successful_conversation_deletion_tombstone_rejects_stale_file_effect_context ... ok
+test application::agent::tests::terminal_events::successful_project_deletion_tombstone_rejects_old_command_context ... ok
+test application::agent::tests::terminal_events::terminal_event_gate_defers_settled_state_and_done_until_commit ... ok
+test application::agent::tests::terminal_events::terminal_event_gate_does_not_delay_approval_waiting_done ... ok
+test application::agent::tests::terminal_events::terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit ... ok
+test application::agent::tests::terminal_events::terminal_event_gate_publishes_only_the_committed_user_stop_fact ... ok
+test application::agent::tests::terminal_events::terminal_event_gate_replaces_deferred_segment_usage_with_run_total ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 1220 filtered out; finished in 15.33s
+

@@ -1,0 +1,97 @@
+# 第六轮续接：存储独立复核与交接
+
+日期：2026-10-11。续接审查起点 HEAD `6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e`。
+负责范围：`crates/core/src/storage/**`；未修改真实数据库、未发起真实模型请求、未中断任何用户软件、未提交。
+仓库目录及父目录未发现有效 AGENTS.md。已读 PROGRESS.md、acceptance.md、round5-results.md，及既有 audit-storage 和 FTS 调查材料。
+
+## 本次新确认的问题与修复
+
+现有通知修复已把首次时间校验移到 writer FIFO 和 BEGIN IMMEDIATE 之后，并在事务末尾再次验证；但新 claim 的最后检查仍在 COMMIT 之前。若 COMMIT 本身耗尽 lease，会把已过期记录作为可投递 claim 返回。
+
+本次在 `notification_repository.rs` 修复：
+
+- 新 claim 在成功 COMMIT 后再次以同一新鲜时钟检查 expiry，过期时返回空集合。已提交事实保留，由正常 successor 流程回收，不伪造回滚或延长租约。
+- 已有 claim 重放和 validate 的最终时间采样移到 ROLLBACK 返回之后。
+- 继续保留晚到 ACK 的事实语义：同一 token 可记录已发生的投递；successor token 始终 fence 旧 ACK/release。
+
+在 `service/notifications/tests.rs` 增加 `notification_claim_expiring_during_commit_does_not_return_delivery_authority`：commit_hook 将可控时间从 1000 推进到 6000，期限为 5000；断言记录确实已经提交但调用不返回投递权，后续 successor 正常拿到 attempt 2 与新期限。现有六个 lease/fencing 测试保留。
+
+server `application/notification.rs` 在 repository 验证后还会读取 settings/items。这个额外等待可再次消耗期限，runtime_review 已补最终 DTO 返回前过滤，并保留单调时钟下限；另修复 prepared history stale source 丢失 history_version 后回退 admission 的 CAS 降级。server 侧运行结果以 runtime 交接记录和统一回归为准。
+
+## FTS 强杀测试调查的复核
+
+既有 `fts-crash-investigation/README.md.txt`、C/Python 最小复现和原始输出互相一致：在普通 UPDATE 之后（无需崩溃），曾执行 quick_check 的旧 reader 报 FTS checksum/index 异常；新 READ_ONLY handle 通过，旧 handle 经过普通 MATCH 后也通过。原调查在 SQLite 3.53.2 和 3.51.0 都观察到该现象。
+
+这支持连接状态敏感的诊断异常，不支持已经确认内部缓存根因或新版 SQLite 回归的断言。本次把 `storage_faults.rs` 中确定性过强的注释改为上述实测边界；测试仍验证同一个原始隔离库，仍运行 quick_check/FK，未 rebuild FTS、改变 PRAGMA 或修理测试数据。新 handle 校验是合理的故障测试校正。
+
+## 复核结论
+
+- runtime checkpoint 身份/序号/fingerprint、终态退休及 ACK-loss 重放仍在原事务边界内；streaming SHA256 使用相同 serde JSON 元组，无内容/顺序省略。
+- 新的 model-only history SQL 不读取历史展示/UI 字段；完整历史及展示 API 保持单独路径。cache key 区分 raw/model，两者共用原 count/byte 预算，最终 admission 保留历史版本与 metadata CAS。未修改这些 prepared-history 文件。
+- commit hook 不是通知提交边界。update hook 只标记 dirty；连接释放前以 autocommit 和真实 journal head 推进发布 wake，失败/回滚不提前通知，失败核验保留 dirty。
+- 单 writer、双 READ_ONLY/query_only reader、FULL、bounded FIFO/control reserve、reader/writer 关闭排空未被本轮更改。未完成事务在交还前回滚，失败隔离连接。
+- terminal 仍在一个事务提交正文、Trace、模型上下文、usage、notification 和授权撤销；FULL 测试在末尾 notification insert trigger 注入，因此能覆盖已执行较早 SQL 的整体回滚。
+- SQLite Backup API 测试在独立 reader 钉住旧 WAL snapshot 时验证最新完整 durable facts、pending action 与 notification cursor，并在恢复副本继续操作。只读 source backup 不保证恢复需要写原库的 hot DELETE journal；修正文档注释与实现一致。
+
+## 执行状态
+
+已执行：新增/修改三个文件的 `rustfmt --edition 2021 --check` 通过；`git diff --check -- crates/core/src/storage` 通过。
+
+父代理统一 release 构建产生测试二进制 `<build>/release/deps/mycopilot_core-7748a31bd053ad1f`，本代理核对 SHA256 `3696d25b57e9c271814ccace77b38f439aff96da687341367068e4fc9b4f4563` 后直接执行，没有另行 Cargo 构建。
+
+| 实际运行 | 通过 | 失败 | ignored | 墙钟 |
+| --- | ---: | ---: | ---: | ---: |
+| `run-regressions.py 31`：`storage:: --test-threads=4 --nocapture` | 1227 | 0 | 1 | 217.709s |
+| `run-regressions.py 32`：`performance:: --test-threads=4 --nocapture` | 7 | 0 | 0 | 0.011s |
+| 唯一 ignored release profile，`--ignored --exact ...release_profile_tree_mailbox_event_contention_and_restart_recovery --nocapture --test-threads=1` | 1 | 0 | 0 | 16.229s |
+
+普通组去重 1234 项；补跑唯一 ignored profile 后 **1235 项不同测试全部通过**。storage 组 inventory 与逐项结果逐名匹配（1228 项，其中上述 profile 初次 ignored 后显式通过）；performance 组 7 项无交集。`terminal_crash_fixture` 是普通运行时空返回的 helper，包含在编译器测试计数中，不能作为第四项独立故障证明。
+
+本轮实际覆盖并通过：7 个通知 lease/fencing 测试（含新增 COMMIT 时到期）；storage_faults 的 SQLite FULL 整体回滚、WAL 钉快照业务 Backup 恢复、两个 terminal commit 边界的真实自启动子进程强杀与重试；全部 commit_notifications/state/runtime_checkpoints/database_snapshot/history_snapshot 回归。FTS fresh READ_ONLY 测试校正现已由新二进制实际通过确认；没有重跑旧的 C/Python 调查来冒充本轮产品测试。
+
+额外 profile 固定环境 `MYCOPILOT_MULTI_AGENT_PROFILE_FACTS=10000`、`MYCOPILOT_MULTI_AGENT_PROFILE_RESTARTS=20`。原始指标为 64 个树节点、10000 facts、63 results、17088 连续 events、0 SQLite busy errors、20 次新 StorageService 恢复、0 ghost wakes。`writers=4` 是并发生产者，不是新增 SQLite writer；64 是持久节点数，不是同时运行 Turn 数。20 次恢复不是 20 次进程强杀。该验证与编译/其他回归可能并行，其延迟仅保留原始值，不作为性能对照结论。
+
+证据目录：`storage-final-evidence/metadata.json` 保存二进制 hash、命令、全部 storage Rust 文件 hash；inventory、各状态全名、去重通过清单、`ordinary-summary.json`、`final-summary.json`、profile 原日志/参数均保存。普通组原日志在 `regressions/31-storage-.log`、`32-performance-.log`，脚本原汇总在 `regressions/results-31-32.json`。运行开始至额外 profile 结束，storage 源文件和二进制 hash 均未变化。
+
+普通日志唯一受控 panic 出自 `trace_performance_metrics::tests::worker_scope_restores_its_previous_measurement_after_unwind`，其测试主动 catch/unwind 并通过。没有测试失败被重跑隐藏。profile 的 metric 插在 `test ...` 与 `ok` 之间，单行逐项 regex 最初未匹配；汇总改为核对 exact 名称、进程 0 和最终 1-passed 行，原日志未改写。
+
+旧 `results-11-37-44.json` 已由 runtime_review 保留到 `diagnostics/pre-takeover-regressions`；其中 `application::notification` 是 **0 tests**，不能写成 server 通知测试通过。
+
+## 未测与不可扩大结论
+
+- SQLite max_page_count FULL 不等于主机文件系统 ENOSPC；未新增 VFS 注入，未验证真实 IOERR、fsync 错误、短写、磁盘拔除或断电。
+- commit-hook-before / after-return 两个强杀边界不穷举 WAL 帧写入和同步期间每个失败点。
+- backup 联合表等值不覆盖完整数据根中的外部附件、凭据后端、Provider continuation 文件及每一种 pending 外部动作；不能宣称完整产品恢复全部已测。
+- notification lease 新鲜检查不会把跨进程 native delivery 变成绝对 exactly-once；不可把提交后返回值过滤描述成 IPC 到达后的无限期有效保证。
+- 长稳态、公平性、积压、WAL 增长、生产 UI SLO 与物理累计写入量由父代理本轮实测决定；本代理不并行运行重负载干扰该测量。
+
+## 额外只读审查：基准统计（修复权归父代理）
+
+已读 `analyze.py`、`scripts/run-backend-concurrency-baseline.mjs`、其测试和完整 Rust baseline fixture。以下建议已发给父代理，未修改上述文件；状态仅代表审查时源码。
+
+1. `analyze.py:49-56` 的 empirical pass 未纳入 runtime errors、unexpected errors、shutdown timeout、终态分布/控制注入完整性。即使 runner/Rust 已拒绝场景，单独分析该保留数据也可能得出 pass。建议将 runner integrity 结论纳入分析 checks，且仍展示全部失败样本。
+2. `completed_turns_per_second` 用重开后 Completed 除以 cleanup 前 measured_us；未自然排空的场景会混入测量截止之后的结算。建议与 settled rate 一样在 drained=false 时为 null，或只计原窗口内终态，另列恢复后累计事实。
+3. 名为 sustainability_checks 的检查只含最终排空和峰值，不验证积压趋势。应从 offered/responded 和 raw.terminal.at_us 重建业务未回执/未终态时间线，结合 queue count/bytes/oldest 分窗口趋势，或收窄名称与结论。
+4. 对照同工作量应同时列 provider_requests、provider_request_bytes、output 体积、compaction events、根/子终态、每 owner 完成数。配置相同不自动等于实际有效工作相同；不同拒绝/取消分布会改变历史和后续准备量。
+5. runner v2 仍在 `if (value?.raw?.rpcs)` 内做完整性检查；缺失整段 raw 可绕过检查。应对 v2 强制存在，并核对背景读取计划数 `floor(((waves-1)*interval_ms)/500)+1`。
+6. queue count/bytes 表示该埋点持有的预约，部分包含执行中；不同 stage 不能相加当业务积压。所有窗口 peaks 合并方式正确，omitted 累加与 registry 每次 take 重置一致；omitted>0 应把观测视为下界，oldest 仍只是采样时点的最长等待。
+7. proc_pid_rusage 的 I/O 是整个测试进程归属计数，包含 harness/假 provider；既不是 SQLite 专属，也不是设备/NAND 物理写入或 fsync 延迟。现源码注释正确，分析结果应保留 scope。RSS 含原本增长的持久历史和有限 raw records，不能直接据增长判泄漏或宣称恒定内存。
+8. 普通发送与背景读取是固定提供时间表；approval/stop 在 pending/provider-first 就绪后反应式注入，延迟起点是 fixture 实际发起。对照可称同 cycle 和同根发送时刻，不应称所有控制操作在预先相同墙钟点发生。
+
+父代理随后已修改 runner/analyze，复读确认：v2 raw/背景读取计划校验、runner integrity 并入分析门禁、未排空吞吐置 null、I/O/queue/sustainability scope、workload/per-owner 及 10 秒业务积压时间线已补。另反馈两个小口径点：measured_us 从首计划时刻前约 25ms 起算，`origin+measured_us` 为尾点会宽松约 25ms；同微秒事件排序先减少后增加会漏掉瞬时峰值，宜保守先增加并标明时间分辨率。未运行分析脚本或性能负载。
+
+## 600 秒旧基线的拒绝与公平性只读交叉核验
+
+输入为 `round6-baseline-soak-u20-20261011-r1/cases.jsonl` 及 `baseline-soak-u20-analysis.json`，baseline HEAD `acae06623b7ce6031b90795e730968fb36e38107`、binary SHA `a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522`，metadata 记录运行期间源码未变。独立汇总在 `baseline-soak-storage-crosscheck.json`；未修改原始数据或脚本。
+
+- 20 owner 各 301 次 start，合计 6020 offered：3038 accepted、2238 个 `providerTransition/provider_transition_blocked/active_run`、744 个 `rpc_dispatch_error/overloaded`。
+- 2238 个 active_run 均来自旧 baseline 的正常 guard：`provider_transition.rs` 原约 579 行在 provider 兼容预检时先检查会话占用，即便 target 还是同一 model。所有 2238 个 handler 区间都与同 owner 之前已 ACK 的 Run 到观测 Done 的区间交叠；2222 个被该旧 Run 区间完整覆盖。事件时间只能证明观测交叠，不能替代精确事务时间，但没有发现缺少前驱 Run 的反例。
+- 744 个 overloaded 全部 `dispatch_admitted=false`、handler 未开始，是有界队列真实容量拒绝。
+- 全部 8524 RPC = 5542 成功 + 2982 拒绝，0 无响应；971 approval / 332 cancel / 1201 background read 全成功。3038 根最终为 2706 Completed + 332 Cancelled，自然排空，重开 0 InProgress；runtime error 0，shutdown 未超时。
+- Provider 请求 4009，恰为 3038 首次请求 + 971 审批后续请求，无额外重试/未知 marker 迹象。
+
+以上拒绝是固定 open-loop 提供速率超过旧实现消化速度后出现的真实行为，未发现夹具 bug 导致这些拒绝。旧 `expected_load_rejection` 的白名单未覆盖该版本的 `providerTransition/active_run`，故 metadata 以 `unexpected_rpc_errors` 标记 failed；这仍是一条必须保留的失败/拥塞压力观察，不应丢弃或把拒绝改记成功。无论是否将其归类为已知 busy，6020 次提供仅 3038 次接纳和数秒控制 p95 都意味着不满足原始稳定性/SLO目标。
+
+每 owner 接纳 143–157、Completed 128–140、Cancelled 13–18；全部在约 600.9–605.5 秒还有新 ACK，最长相邻成功 ACK 间隔 21.135 秒。可说明此有限场景没有某个 owner 完全失去进展；不能推导长期公平性或满足尾延迟。固定 owner 0→19 的投放顺序使 overload 有明显顺序偏差：owner 0–4 无 overload，owner 19 有 79 个；总接纳仍较接近。
+
+接纳 cycle 0/1/2/3/4 为 331/567/837/971/332，实际成功构成明显偏向审批波。若新实现同时间表接纳更多，则它处理更多模型历史和终态工作；可比较同提供负载下吞吐、拒绝率和用户等待，不能将 CPU/磁盘总量当作相同实际完成量的纯效率对照。应同时列有效终态、cycle 分布、Provider 输入字节和响应体积。

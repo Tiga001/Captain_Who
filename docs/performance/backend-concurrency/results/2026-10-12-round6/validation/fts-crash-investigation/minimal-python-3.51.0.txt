@@ -1,0 +1,27 @@
+SQLite version=3.51.0
+SQL: PRAGMA journal_mode=WAL
+[('wal',)]
+SQL: CREATE TABLE messages(content TEXT)
+[]
+SQL: CREATE VIRTUAL TABLE evidence USING fts5(content,tokenize='trigram')
+[]
+SQL: CREATE TRIGGER message_insert AFTER INSERT ON messages BEGIN INSERT INTO evidence(rowid,content) VALUES(NEW.rowid,NEW.content); END
+[]
+SQL: CREATE TRIGGER message_update AFTER UPDATE ON messages BEGIN DELETE FROM evidence WHERE rowid=OLD.rowid; INSERT INTO evidence(rowid,content) VALUES(NEW.rowid,NEW.content); END
+[]
+SQL: INSERT INTO messages VALUES('confirmed checkpoint')
+[]
+SQL: PRAGMA quick_check
+[('ok',)]
+SQL: UPDATE messages SET content='committed terminal'
+[]
+SQL: SELECT content FROM messages
+[('committed terminal',)]
+SQL: PRAGMA quick_check
+[('malformed inverted index for FTS5 table main.evidence',)]
+SQL: PRAGMA quick_check
+[('ok',)]
+SQL: SELECT content FROM evidence WHERE evidence MATCH 'committed'
+[('committed terminal',)]
+SQL: PRAGMA quick_check
+[('ok',)]

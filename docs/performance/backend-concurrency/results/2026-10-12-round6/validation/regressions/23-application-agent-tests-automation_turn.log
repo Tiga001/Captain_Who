@@ -1,0 +1,15 @@
+
+running 10 tests
+test application::agent::tests::automation_turn::archived_existing_chat_is_a_repairable_target_error_without_admission ... ok
+test application::agent::tests::automation_turn::automation_human_root_uses_atomic_admission_and_new_chat_per_run ... ok
+test application::agent::tests::automation_turn::automation_model_validation_keeps_missing_and_disabled_codes ... ok
+test application::agent::tests::automation_turn::destructive_resource_mutations_terminalize_live_automation_runs_before_trace_deletion ... ok
+test application::agent::tests::automation_turn::execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding ... ok
+test application::agent::tests::automation_turn::exhausted_shared_agent_gate_is_retryable_without_admission ... ok
+test application::agent::tests::automation_turn::existing_chat_with_active_human_root_turn_is_retryable_without_admission ... ok
+test application::agent::tests::automation_turn::new_chat_with_unresolvable_model_credential_is_blocked_as_model_unavailable ... ok
+test application::agent::tests::automation_turn::permission_revoked_after_precheck_is_blocked_atomically_before_humanroot_admission ... ok
+test application::agent::tests::automation_turn::stale_automation_admission_rolls_back_conversation_messages_and_trace ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 1.38s
+

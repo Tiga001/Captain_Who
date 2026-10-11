@@ -1,0 +1,9 @@
+
+running 4 tests
+test application::agent::turn_executor::occupancy_tests::concurrent_admission_has_one_winner_and_failed_preparation_can_release_it ... ok
+test application::agent::turn_executor::occupancy_tests::durable_occupancy_survives_restart_without_a_resident_runtime_and_requires_exact_owner ... ok
+test application::agent::turn_executor::occupancy_tests::manual_compaction_keeps_occupancy_until_its_cancelled_worker_drains ... ok
+test application::agent::turn_executor::occupancy_tests::terminal_turn_cannot_reacquire_approval_ownership ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1248 filtered out; finished in 0.44s
+

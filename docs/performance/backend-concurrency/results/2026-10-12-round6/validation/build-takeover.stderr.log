@@ -1,0 +1,4 @@
+   Compiling mycopilot-core v0.1.0 (<repo>/crates/core)
+   Compiling mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+error: could not compile `mycopilot-core-server` (bin "core-server" test) due to 8 previous errors; 9 warnings emitted
+warning: build failed, waiting for other jobs to finish...

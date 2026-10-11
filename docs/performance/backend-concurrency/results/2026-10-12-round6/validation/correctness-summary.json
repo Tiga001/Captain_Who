@@ -1,0 +1,36 @@
+{
+  "rust": {
+    "core_distinct_passed": 1235,
+    "server_release_distinct_passed": 555,
+    "server_release_passed_executions": 562,
+    "server_debug_passed_executions": 15,
+    "server_debug_additional_distinct": 1,
+    "all_distinct_passed": 1791,
+    "all_passed_executions": 1812,
+    "final_failures": 0,
+    "earlier_failures_retained": {
+      "server_fixture_missing_explicit_credentials": 16,
+      "debug_outdated_renderer_ownership_assertion_runs": 2
+    },
+    "count_limit": "Includes compiler-reported subprocess helper tests, which return without work outside child mode; helper test counts are not extra fault scenarios."
+  },
+  "frontend": {
+    "unit": 129,
+    "browser": 254,
+    "native_electron": {
+      "baseline": 1,
+      "final": 1
+    }
+  },
+  "infrastructure_tests": 25,
+  "clippy": {
+    "passed": true,
+    "preexisting_cli_exclusions": [
+      "collapsible_match",
+      "useless_conversion",
+      "unnecessary_lazy_evaluations",
+      "deprecated"
+    ]
+  },
+  "source_commit": "b1744ab98e6eb5db633e351d983bbe9d401a76f6"
+}

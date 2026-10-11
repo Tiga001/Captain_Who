@@ -1,0 +1,8 @@
+
+running 3 tests
+test application::agent::wake_execution_fence::tests::cancellation_targets_exact_generation_even_when_run_identity_is_reused ... ok
+test application::agent::wake_execution_fence::tests::refusal_is_generation_specific_and_cannot_be_reopened ... ok
+test application::agent::wake_execution_fence::tests::refusal_registry_is_bounded_and_existing_refusal_survives_capacity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1249 filtered out; finished in 0.00s
+

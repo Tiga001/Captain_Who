@@ -1,0 +1,839 @@
+{
+  "review_date": "2026-10-12",
+  "scope": "Read-only independent audit of retained final-soak raw data; no DB access, source edits, build or test run.",
+  "provenance": {
+    "case_source": ".cache/backend-concurrency/round6-final-soak-u20-20261012-r1/cases.jsonl",
+    "case_sha256": "5b2b7731307556710af47045b3399afe67d5f98042fc2cea661de89fa70beb73",
+    "metadata_sha256": "c782ff85dfd7a3de88073337a744e2b2d33f614084ad58a1a975208438b1f72d",
+    "analysis_source": ".cache/backend-concurrency/round6-validation-20261011/final-soak-u20-analysis.json",
+    "analysis_sha256": "bc0f38aef7e6932a3df35d7e42c05c752507fa31b07f2c598fee5963e4afe4ee",
+    "head": "b1744ab98e6eb5db633e351d983bbe9d401a76f6",
+    "binary_sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082",
+    "source_changed_during_run": false,
+    "reviewed_source_hashes": [
+      {
+        "path": "crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs",
+        "working_copy_sha256_at_review": "788e6b87f33bfe79ca5444d20b9b9c3b568e9bf528b7b29295a1e0b85aafd8c9",
+        "working_copy_matches_recorded_run_source": false,
+        "run_commit_sha256": "bb2fa8b7f46aca88bdc6515f4ef0c71ddf614a6c1037f9ee0fda0083ea7f77fa",
+        "run_commit_matches_recorded_run_source": true
+      },
+      {
+        "path": "crates/core-server/src/transport/baseline_dispatch.rs",
+        "working_copy_sha256_at_review": "ae344f07dd3e811127a6926bb7ae9a072f8df19fcf092d96e626046a99c14ce8",
+        "working_copy_matches_recorded_run_source": true,
+        "run_commit_sha256": "ae344f07dd3e811127a6926bb7ae9a072f8df19fcf092d96e626046a99c14ce8",
+        "run_commit_matches_recorded_run_source": true
+      },
+      {
+        "path": "crates/core-server/src/transport/outbound.rs",
+        "working_copy_sha256_at_review": "90a7e668fd894a530a87b1b78bbfa065a511d7a1fd37078b805d5e40866e2be9",
+        "working_copy_matches_recorded_run_source": false,
+        "run_commit_sha256": "2580338a0383dc89e62949c874d79814755d87faec67458f5b8f9ec0e4588ec8",
+        "run_commit_matches_recorded_run_source": true
+      },
+      {
+        "path": "crates/core-server/src/transport/request_loop.rs",
+        "working_copy_sha256_at_review": "ed788de4e1cc5e52faf3010b0b01d6894d6caf91dced00b22cbd74f6120bb400",
+        "working_copy_matches_recorded_run_source": true,
+        "run_commit_sha256": "ed788de4e1cc5e52faf3010b0b01d6894d6caf91dced00b22cbd74f6120bb400",
+        "run_commit_matches_recorded_run_source": true
+      },
+      {
+        "path": "crates/core/src/llm/transport.rs",
+        "working_copy_sha256_at_review": "c58488a67053ca0c855f3ffb54760b5c2e9b74c8426c1d34c1869b604937799a",
+        "working_copy_matches_recorded_run_source": true,
+        "run_commit_sha256": "c58488a67053ca0c855f3ffb54760b5c2e9b74c8426c1d34c1869b604937799a",
+        "run_commit_matches_recorded_run_source": true
+      }
+    ],
+    "source_note": "Run commit file hashes match the retained run manifest. Fixture/outbound working copies changed after this failed run during the parent-coordinated collector correction; those later hashes are listed separately and are not attributed to the failed binary."
+  },
+  "time_basis": {
+    "unit": "microseconds since fixture epoch, not wall-clock UTC",
+    "first_scheduled_us": 33067,
+    "measured_us": 810058166,
+    "last_rpc_receipt_us": 171863128,
+    "last_done_receipt_us": 171857138,
+    "last_provider_first_us": 601262406,
+    "last_resource_sample_us": 690050624
+  },
+  "operations": {
+    "agent.approveAction": {
+      "offered": 632,
+      "dispatch_admitted": 632,
+      "handler_started": 632,
+      "success": 339,
+      "error": 0,
+      "no_response": 293,
+      "received_response_bytes": 106998
+    },
+    "agent.cancelRun": {
+      "offered": 180,
+      "dispatch_admitted": 180,
+      "handler_started": 180,
+      "success": 180,
+      "error": 0,
+      "no_response": 0,
+      "received_response_bytes": 18240
+    },
+    "agent.startConversationTurn": {
+      "offered": 6020,
+      "dispatch_admitted": 6020,
+      "handler_started": 6020,
+      "success": 1527,
+      "error": 179,
+      "no_response": 4314,
+      "received_response_bytes": 1083184
+    },
+    "storage.loadConversation": {
+      "offered": 1201,
+      "dispatch_admitted": 1201,
+      "handler_started": 1201,
+      "success": 343,
+      "error": 0,
+      "no_response": 858,
+      "received_response_bytes": 618907880
+    }
+  },
+  "first_observed_rpc_error": {
+    "id": 1090,
+    "operation": "agent.startConversationTurn",
+    "owner": 12,
+    "provider_key": "root-12-wave-34",
+    "scheduled_us": 68033067,
+    "offered_us": 68034451,
+    "handler_started_us": 68551337,
+    "responded_us": 68621331,
+    "response_bytes": 389,
+    "code": "provider_transition_blocked",
+    "reason": "active_run",
+    "error_intervals_with_prior_same_owner_ack_not_yet_observed_done": 179,
+    "error_count": 179
+  },
+  "first_missing_receipts_by_offer": [
+    {
+      "id": 2561,
+      "operation": "agent.startConversationTurn",
+      "owner": 0,
+      "provider_key": "root-0-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035179,
+      "handler_started_us": 172705461,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2568,
+      "operation": "agent.startConversationTurn",
+      "owner": 7,
+      "provider_key": "root-7-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035255,
+      "handler_started_us": 171366248,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2569,
+      "operation": "agent.startConversationTurn",
+      "owner": 8,
+      "provider_key": "root-8-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035264,
+      "handler_started_us": 171383296,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2570,
+      "operation": "agent.startConversationTurn",
+      "owner": 9,
+      "provider_key": "root-9-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035273,
+      "handler_started_us": 171869462,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2571,
+      "operation": "agent.startConversationTurn",
+      "owner": 10,
+      "provider_key": "root-10-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035282,
+      "handler_started_us": 172025869,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2572,
+      "operation": "agent.startConversationTurn",
+      "owner": 11,
+      "provider_key": "root-11-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035291,
+      "handler_started_us": 171869452,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2573,
+      "operation": "agent.startConversationTurn",
+      "owner": 12,
+      "provider_key": "root-12-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035299,
+      "handler_started_us": 172235077,
+      "responded_us": null,
+      "response_bytes": 0
+    },
+    {
+      "id": 2574,
+      "operation": "agent.startConversationTurn",
+      "owner": 13,
+      "provider_key": "root-13-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035308,
+      "handler_started_us": 172264968,
+      "responded_us": null,
+      "response_bytes": 0
+    }
+  ],
+  "first_missing_read": {
+    "id": 2583,
+    "operation": "storage.loadConversation",
+    "owner": 3,
+    "provider_key": null,
+    "scheduled_us": 171533067,
+    "offered_us": 171554694,
+    "handler_started_us": 171561422,
+    "responded_us": null,
+    "response_bytes": 0,
+    "messages": null
+  },
+  "last_received_read": {
+    "id": 2582,
+    "operation": "storage.loadConversation",
+    "owner": 2,
+    "provider_key": null,
+    "scheduled_us": 171033067,
+    "offered_us": 171047187,
+    "handler_started_us": 171100581,
+    "responded_us": 171863128,
+    "response_bytes": 3482213,
+    "messages": 160
+  },
+  "largest_received_read": {
+    "id": 2581,
+    "operation": "storage.loadConversation",
+    "owner": 1,
+    "provider_key": null,
+    "scheduled_us": 170533067,
+    "offered_us": 170543270,
+    "handler_started_us": 170611908,
+    "responded_us": 171851474,
+    "response_bytes": 3525738,
+    "messages": 162
+  },
+  "outbound_accounting": {
+    "raw_outbound": {
+      "merged_events": 602,
+      "peak_bytes": 7021568,
+      "peak_frames": 161,
+      "serialized_bytes": 782055578
+    },
+    "rpc_serialized": {
+      "bytes": 623644611,
+      "count": 2569,
+      "max_bytes": 3525741,
+      "max_us": 4090,
+      "operation": "rpc.response",
+      "p50_upper_us": 3,
+      "p95_upper_us": 1663,
+      "p99_upper_us": 2559,
+      "stage": "outbound.serialize",
+      "total_us": 450023
+    },
+    "rpc_dequeued": {
+      "bytes": 620118870,
+      "count": 2568,
+      "max_bytes": 3525739,
+      "max_us": 818617,
+      "operation": "rpc.response",
+      "p50_upper_us": 30719,
+      "p95_upper_us": 196607,
+      "p99_upper_us": 327679,
+      "stage": "outbound.queue",
+      "total_us": 136958911
+    },
+    "serialized_minus_dequeued_frames": 1,
+    "serialized_minus_dequeued_bytes": 3525741,
+    "agent_event_counts_and_bytes_equal": true,
+    "delta_serialized_minus_dequeued_count": 602,
+    "delta_merged_count": 602,
+    "ordinary_queue_total_capacity_bytes": 9437184,
+    "peak_plus_missing_frame_bytes": 10547309,
+    "conclusion": "Exactly one serialized RPC response of 3,525,741 bytes was not dequeued; other event differences are accounted for by merging. This is below the 9 MiB single-frame oversize threshold. Queue saturation from concurrent ordinary frames is strongly supported, not a proven oversized-single-frame failure. Peak and missing frame are aggregate values, not necessarily simultaneous; failure snapshot/time/request ID were not exported."
+  },
+  "durable_conservation": {
+    "observed_ack_roots": 1527,
+    "ack_runs_with_provider_marker": 1527,
+    "ack_runs_with_observed_done": 1513,
+    "ack_runs_without_observed_done": 14,
+    "observed_done_counts": {
+      "completed": 1333,
+      "cancelled": 180
+    },
+    "all_observed_done_runs_have_ack": true,
+    "provider_unique_roots": 2678,
+    "provider_roots_without_ack": 1151,
+    "provider_first_after_last_receipt": 1153,
+    "recovered_roots": 2678,
+    "recovered_terminal_counts": {
+      "Cancelled": 180,
+      "Completed": 2456,
+      "Failed": 42
+    },
+    "in_progress_before_cleanup": 0,
+    "pre_close_in_progress": 0,
+    "post_reopen_in_progress": 0,
+    "drained_before_cleanup": true,
+    "shutdown_timed_out": false,
+    "aggregate_equality": "2678 unique provider roots = 1527 observed ACK roots + 1151 provider roots with lost/missing ACK = 2456 Completed + 180 Cancelled + 42 Failed after reopen.",
+    "limit": "No per-root reopened identity/status list was exported. Counts support aggregate conservation and do not show loss, but cannot independently certify a bijection or final durable status for every ACK, especially the 14 ACKs without observable Done. root_starts_durably_accepted is derived from received start replies, not a second durable-admission count."
+  },
+  "ack_without_observed_done": [
+    {
+      "id": 2504,
+      "operation": "agent.startConversationTurn",
+      "owner": 11,
+      "provider_key": "root-11-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035703,
+      "handler_started_us": 166735464,
+      "responded_us": 167082198,
+      "response_bytes": 668,
+      "run_id": "run-d042e2d6e9044bd085b4f440ef14688f"
+    },
+    {
+      "id": 2505,
+      "operation": "agent.startConversationTurn",
+      "owner": 12,
+      "provider_key": "root-12-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035710,
+      "handler_started_us": 167835068,
+      "responded_us": 168162483,
+      "response_bytes": 668,
+      "run_id": "run-10922d40294040fbbcb60efee70cf447"
+    },
+    {
+      "id": 2507,
+      "operation": "agent.startConversationTurn",
+      "owner": 14,
+      "provider_key": "root-14-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035723,
+      "handler_started_us": 166911074,
+      "responded_us": 167372751,
+      "response_bytes": 668,
+      "run_id": "run-4471a6e10d3a4feb92feb4ed70198b75"
+    },
+    {
+      "id": 2508,
+      "operation": "agent.startConversationTurn",
+      "owner": 15,
+      "provider_key": "root-15-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035729,
+      "handler_started_us": 166926027,
+      "responded_us": 167372756,
+      "response_bytes": 668,
+      "run_id": "run-e81a918009ee464daeb012cee3db86dd"
+    },
+    {
+      "id": 2509,
+      "operation": "agent.startConversationTurn",
+      "owner": 16,
+      "provider_key": "root-16-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035736,
+      "handler_started_us": 167588119,
+      "responded_us": 167921666,
+      "response_bytes": 668,
+      "run_id": "run-17bb727a9bef4b6e84d3c243a9f0418c"
+    },
+    {
+      "id": 2510,
+      "operation": "agent.startConversationTurn",
+      "owner": 17,
+      "provider_key": "root-17-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035743,
+      "handler_started_us": 167249069,
+      "responded_us": 167645660,
+      "response_bytes": 668,
+      "run_id": "run-d6dc0509ffca46e2a16e105d588db474"
+    },
+    {
+      "id": 2511,
+      "operation": "agent.startConversationTurn",
+      "owner": 18,
+      "provider_key": "root-18-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035749,
+      "handler_started_us": 167250662,
+      "responded_us": 167638474,
+      "response_bytes": 668,
+      "run_id": "run-b55f5d681c934bf4a8a4ab82032de552"
+    },
+    {
+      "id": 2512,
+      "operation": "agent.startConversationTurn",
+      "owner": 19,
+      "provider_key": "root-19-wave-83",
+      "scheduled_us": 166033067,
+      "offered_us": 166035756,
+      "handler_started_us": 167632924,
+      "responded_us": 168162477,
+      "response_bytes": 668,
+      "run_id": "run-ab592887f04449f0b4e3576c6887a573"
+    },
+    {
+      "id": 2562,
+      "operation": "agent.startConversationTurn",
+      "owner": 1,
+      "provider_key": "root-1-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035193,
+      "handler_started_us": 170044715,
+      "responded_us": 170140042,
+      "response_bytes": 662,
+      "run_id": "run-18db953fe6a944528e0b6d0f816b5c92"
+    },
+    {
+      "id": 2563,
+      "operation": "agent.startConversationTurn",
+      "owner": 2,
+      "provider_key": "root-2-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035200,
+      "handler_started_us": 170044726,
+      "responded_us": 170140197,
+      "response_bytes": 662,
+      "run_id": "run-28c7a812371c4ca39408ffcb167c25cd"
+    },
+    {
+      "id": 2564,
+      "operation": "agent.startConversationTurn",
+      "owner": 3,
+      "provider_key": "root-3-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035207,
+      "handler_started_us": 170140041,
+      "responded_us": 170919138,
+      "response_bytes": 662,
+      "run_id": "run-4683b1f4f19d4e029fa524beb6356840"
+    },
+    {
+      "id": 2565,
+      "operation": "agent.startConversationTurn",
+      "owner": 4,
+      "provider_key": "root-4-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035227,
+      "handler_started_us": 170140208,
+      "responded_us": 170919147,
+      "response_bytes": 662,
+      "run_id": "run-d8bf78e5357146e48940bc2ff1120042"
+    },
+    {
+      "id": 2566,
+      "operation": "agent.startConversationTurn",
+      "owner": 5,
+      "provider_key": "root-5-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035236,
+      "handler_started_us": 170247583,
+      "responded_us": 171857062,
+      "response_bytes": 662,
+      "run_id": "run-b9441012e58c43269a6fc14c2deedab6"
+    },
+    {
+      "id": 2567,
+      "operation": "agent.startConversationTurn",
+      "owner": 6,
+      "provider_key": "root-6-wave-85",
+      "scheduled_us": 170033067,
+      "offered_us": 170035245,
+      "handler_started_us": 170248995,
+      "responded_us": 171857050,
+      "response_bytes": 662,
+      "run_id": "run-f69f6106e91443c687b473fcf2c56cd2"
+    }
+  ],
+  "workload_after_receipt_loss": {
+    "provider_cycles": {
+      "0": 577,
+      "1": 620,
+      "2": 627,
+      "3": 632,
+      "4": 222
+    },
+    "ack_cycles": {
+      "0": 345,
+      "1": 324,
+      "2": 339,
+      "3": 339,
+      "4": 180
+    },
+    "noack_provider_cycles": {
+      "0": 232,
+      "1": 296,
+      "2": 288,
+      "3": 293,
+      "4": 42
+    },
+    "provider_requests": 3394,
+    "approval_rpc_offers": 632,
+    "extra_requests_beyond_unique_plus_approvals": 84,
+    "stop_rpc_offers": 180,
+    "potential_uncontrolled_stop_roots": 42,
+    "explanation": "ready_stops is populated only from received start ACKs. The 42 provider-started stop-cycle roots with no ACK receive no fixture Stop; the provider waits up to 120s. There are 42 durable Failed roots and 84 extra provider requests, arithmetically consistent with two retries each (LLM_MAX_ATTEMPTS=3). Missing per-attempt and per-root recovered statuses prevent proving that attribution from raw alone. Approval polling continues from service state; absent ACK mapping defaults its owner label to 0, so post-loss aggregate RPC owner fairness is distorted."
+  },
+  "fixture_vs_production": "BaselineDispatcher wraps the production bounded RPC dispatcher but not request_loop. Production request_loop selects outbound.failed(), begins RPC/fork shutdown and returns BrokenPipe. The fixture keeps offering all scheduled requests after outbound closure, so post-loss silent execution is not evidence that production stdin keeps accepting after transport failure. The pre-closure bounded-outbound failure remains real and must not be discarded.",
+  "per_owner_start_and_provider_totals": [
+    {
+      "owner": 0,
+      "offered_starts": 301,
+      "acknowledged_starts": 78,
+      "observed_start_errors": 7,
+      "no_response_starts": 216,
+      "provider_unique_roots": 163,
+      "provider_without_ack": 85,
+      "observed_done_for_ack": 78,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 600915586
+    },
+    {
+      "owner": 1,
+      "offered_starts": 301,
+      "acknowledged_starts": 81,
+      "observed_start_errors": 5,
+      "no_response_starts": 215,
+      "provider_unique_roots": 165,
+      "provider_without_ack": 84,
+      "observed_done_for_ack": 80,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 580402429
+    },
+    {
+      "owner": 2,
+      "offered_starts": 301,
+      "acknowledged_starts": 80,
+      "observed_start_errors": 6,
+      "no_response_starts": 215,
+      "provider_unique_roots": 163,
+      "provider_without_ack": 83,
+      "observed_done_for_ack": 79,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 588941571
+    },
+    {
+      "owner": 3,
+      "offered_starts": 301,
+      "acknowledged_starts": 81,
+      "observed_start_errors": 5,
+      "no_response_starts": 215,
+      "provider_unique_roots": 164,
+      "provider_without_ack": 83,
+      "observed_done_for_ack": 80,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 589450079
+    },
+    {
+      "owner": 4,
+      "offered_starts": 301,
+      "acknowledged_starts": 77,
+      "observed_start_errors": 9,
+      "no_response_starts": 215,
+      "provider_unique_roots": 157,
+      "provider_without_ack": 80,
+      "observed_done_for_ack": 76,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 600567158
+    },
+    {
+      "owner": 5,
+      "offered_starts": 301,
+      "acknowledged_starts": 80,
+      "observed_start_errors": 6,
+      "no_response_starts": 215,
+      "provider_unique_roots": 162,
+      "provider_without_ack": 82,
+      "observed_done_for_ack": 79,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 600651682
+    },
+    {
+      "owner": 6,
+      "offered_starts": 301,
+      "acknowledged_starts": 76,
+      "observed_start_errors": 10,
+      "no_response_starts": 215,
+      "provider_unique_roots": 155,
+      "provider_without_ack": 79,
+      "observed_done_for_ack": 75,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 589582505
+    },
+    {
+      "owner": 7,
+      "offered_starts": 301,
+      "acknowledged_starts": 78,
+      "observed_start_errors": 7,
+      "no_response_starts": 216,
+      "provider_unique_roots": 156,
+      "provider_without_ack": 78,
+      "observed_done_for_ack": 78,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 589975117
+    },
+    {
+      "owner": 8,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 93,
+      "provider_without_ack": 18,
+      "observed_done_for_ack": 75,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 600650689
+    },
+    {
+      "owner": 9,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 89,
+      "provider_without_ack": 14,
+      "observed_done_for_ack": 75,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 589825351
+    },
+    {
+      "owner": 10,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 88,
+      "provider_without_ack": 13,
+      "observed_done_for_ack": 75,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 590030060
+    },
+    {
+      "owner": 11,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 91,
+      "provider_without_ack": 16,
+      "observed_done_for_ack": 74,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 590154541
+    },
+    {
+      "owner": 12,
+      "offered_starts": 301,
+      "acknowledged_starts": 73,
+      "observed_start_errors": 12,
+      "no_response_starts": 216,
+      "provider_unique_roots": 217,
+      "provider_without_ack": 144,
+      "observed_done_for_ack": 72,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 560431850
+    },
+    {
+      "owner": 13,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 90,
+      "provider_without_ack": 15,
+      "observed_done_for_ack": 75,
+      "ack_without_observed_done": 0,
+      "last_provider_first_us": 590599806
+    },
+    {
+      "owner": 14,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 88,
+      "provider_without_ack": 13,
+      "observed_done_for_ack": 74,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 590481469
+    },
+    {
+      "owner": 15,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 83,
+      "provider_without_ack": 8,
+      "observed_done_for_ack": 74,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 559759119
+    },
+    {
+      "owner": 16,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 151,
+      "provider_without_ack": 76,
+      "observed_done_for_ack": 74,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 590954681
+    },
+    {
+      "owner": 17,
+      "offered_starts": 301,
+      "acknowledged_starts": 75,
+      "observed_start_errors": 10,
+      "no_response_starts": 216,
+      "provider_unique_roots": 88,
+      "provider_without_ack": 13,
+      "observed_done_for_ack": 74,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 580641384
+    },
+    {
+      "owner": 18,
+      "offered_starts": 301,
+      "acknowledged_starts": 74,
+      "observed_start_errors": 11,
+      "no_response_starts": 216,
+      "provider_unique_roots": 92,
+      "provider_without_ack": 18,
+      "observed_done_for_ack": 73,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 590820960
+    },
+    {
+      "owner": 19,
+      "offered_starts": 301,
+      "acknowledged_starts": 74,
+      "observed_start_errors": 11,
+      "no_response_starts": 216,
+      "provider_unique_roots": 223,
+      "provider_without_ack": 149,
+      "observed_done_for_ack": 73,
+      "ack_without_observed_done": 1,
+      "last_provider_first_us": 601262406
+    }
+  ],
+  "full_history_response_growth": [
+    {
+      "start_epoch_s": 0,
+      "end_epoch_s": 30,
+      "offered": 60,
+      "received": 60,
+      "response_bytes": 20218530,
+      "max_response_bytes": 660606,
+      "max_messages": 30
+    },
+    {
+      "start_epoch_s": 30,
+      "end_epoch_s": 60,
+      "offered": 60,
+      "received": 60,
+      "response_bytes": 59709760,
+      "max_response_bytes": 1321010,
+      "max_messages": 60
+    },
+    {
+      "start_epoch_s": 60,
+      "end_epoch_s": 90,
+      "offered": 60,
+      "received": 60,
+      "response_bytes": 98766292,
+      "max_response_bytes": 1938242,
+      "max_messages": 88
+    },
+    {
+      "start_epoch_s": 90,
+      "end_epoch_s": 120,
+      "offered": 60,
+      "received": 60,
+      "response_bytes": 134250619,
+      "max_response_bytes": 2509187,
+      "max_messages": 114
+    },
+    {
+      "start_epoch_s": 120,
+      "end_epoch_s": 150,
+      "offered": 60,
+      "received": 60,
+      "response_bytes": 167256620,
+      "max_response_bytes": 3038985,
+      "max_messages": 138
+    },
+    {
+      "start_epoch_s": 150,
+      "end_epoch_s": 172,
+      "offered": 44,
+      "received": 43,
+      "response_bytes": 138706059,
+      "max_response_bytes": 3525738,
+      "max_messages": 162
+    },
+    {
+      "start_epoch_s": 172,
+      "end_epoch_s": 300,
+      "offered": 256,
+      "received": 0,
+      "response_bytes": 0,
+      "max_response_bytes": null,
+      "max_messages": null
+    },
+    {
+      "start_epoch_s": 300,
+      "end_epoch_s": 600,
+      "offered": 600,
+      "received": 0,
+      "response_bytes": 0,
+      "max_response_bytes": null,
+      "max_messages": null
+    },
+    {
+      "start_epoch_s": 600,
+      "end_epoch_s": 811,
+      "offered": 1,
+      "received": 0,
+      "response_bytes": 0,
+      "max_response_bytes": null,
+      "max_messages": null
+    }
+  ],
+  "raw_telemetry_limits": [
+    "raw.errors is empty because it is collected through the failed outbound stream; it does not negate 42 durable Failed roots.",
+    "Full history response content is intentionally reduced to ID/message count after byte accounting; payload-field attribution cannot be reconstructed.",
+    "No failure_snapshot, outbound-close timestamp, failed frame ID, per-request handler return, per-provider-attempt trace, or recovered run identity/status list is exported.",
+    "Clean shutdown/reopen, not crash/power loss. No SQLite quick_check result or whole data-root restore is exported.",
+    "Latency quantiles after this cutoff exclude every missing reply, and totals thereafter reflect changed control delivery. This run fails the soak gate and cannot establish stable performance."
+  ]
+}

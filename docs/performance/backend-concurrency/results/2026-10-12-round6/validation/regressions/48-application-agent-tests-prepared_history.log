@@ -1,0 +1,19 @@
+
+running 14 tests
+test application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget ... ok
+test application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes ... ok
+test application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly ... ok
+test application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id ... ok
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id ... ok
+test application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix ... ok
+test application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas ... ok
+test application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged ... ok
+test application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 1238 filtered out; finished in 1.54s
+

@@ -1,0 +1,80 @@
+
+running 14 tests
+test application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix ... 
+thread 'application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix' (59541562) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix ... 
+thread 'application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix' (59541563) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix ... 
+thread 'application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix' (59541564) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget ... 
+thread 'application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget' (59541565) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes ... 
+thread 'application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes' (59541566) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly ... 
+thread 'application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly' (59541567) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix ... 
+thread 'application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix' (59541568) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline ... 
+thread 'application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline' (59541569) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id ... 
+thread 'application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id' (59541570) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id ... 
+thread 'application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id' (59541571) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix ... 
+thread 'application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix' (59541572) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas ... 
+thread 'application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas' (59541573) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged ... 
+thread 'application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged' (59541574) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+test application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload ... 
+thread 'application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload' (59541575) panicked at crates/core-server/src/application/agent/tests/prepared_history.rs:7:91:
+called `Result::unwrap()` on an `Err` value: "production storage requires an explicit model credential backend"
+FAILED
+
+failures:
+
+failures:
+    application::agent::tests::prepared_history::history_warm_admission_preserves_cold_history_and_reuses_measured_prefix
+    application::agent::tests::prepared_history::history_warm_attachment_change_invalidates_materials_and_measured_prefix
+    application::agent::tests::prepared_history::history_warm_authoritative_change_cannot_reuse_old_measured_prefix
+    application::agent::tests::prepared_history::history_warm_baseline_does_not_survive_a_changed_model_budget
+    application::agent::tests::prepared_history::history_warm_cache_reuses_projection_and_detects_message_change_without_ui_changes
+    application::agent::tests::prepared_history::history_warm_cold_concurrent_readers_share_one_assembly
+    application::agent::tests::prepared_history::history_warm_identical_trace_replay_preserves_materials_and_measured_prefix
+    application::agent::tests::prepared_history::history_warm_same_version_republish_preserves_measured_baseline
+    application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_assistant_content_with_same_id
+    application::agent::tests::prepared_history::history_warm_terminal_publication_rejects_changed_user_prefix_with_same_assistant_id
+    application::agent::tests::prepared_history::history_warm_trace_change_invalidates_materials_and_measured_prefix
+    application::agent::tests::prepared_history::history_warm_trace_only_change_before_preparation_cannot_drop_the_admission_cas
+    application::agent::tests::prepared_history::history_warm_ui_only_updates_leave_model_source_and_history_unchanged
+    application::agent::tests::prepared_history::model_history_large_tool_definitions_preserve_exact_input_and_append_without_display_payload
+
+test result: FAILED. 0 passed; 14 failed; 0 ignored; 0 measured; 1238 filtered out; finished in 0.00s
+

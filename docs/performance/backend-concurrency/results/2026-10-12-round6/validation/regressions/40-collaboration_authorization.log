@@ -1,0 +1,8 @@
+
+running 3 tests
+test application::collaboration_authorization::tests::durable_nodes_authorize_root_writes_observer_reads_and_tree_management_without_leaks ... ok
+test application::collaboration_authorization::tests::task_name_resolution_is_exact_tree_scoped_and_never_falls_back_to_ids_or_paths ... ok
+test transport::tests::collaboration_authorization::ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1249 filtered out; finished in 0.32s
+

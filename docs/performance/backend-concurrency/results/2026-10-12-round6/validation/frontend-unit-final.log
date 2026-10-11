@@ -1,0 +1,23 @@
+
+ RUN  v4.1.10 <repo>
+
+ ✓ |unit| src/renderer/src/features/chat/__tests__/storageConversationActivityRecovery.test.ts (8 tests) 23ms
+ ✓ |unit| src/renderer/src/features/agentCollaboration/collaborationStore.test.ts (26 tests) 1489ms
+     ✓ invalidates approvals only for durable approval mutations and full recovery  420ms
+ ✓ |unit| src/main/workspaceFiles/ReadToolFileSource.test.ts (17 tests) 37ms
+ ✓ |unit| src/renderer/src/app/__tests__/chatMessagePersistence.test.ts (8 tests) 61ms
+ ✓ |unit| src/preload/AgentIpcBridge.test.ts (17 tests) 24ms
+ ✓ |unit| src/preload/StorageIpcBridge.test.ts (9 tests) 8ms
+ ✓ |unit| src/main/core/coreServer.conversationReads.test.ts (9 tests) 10ms
+ ✓ |unit| src/main/core/rpcDiagnostics.test.ts (6 tests) 12ms
+ ✓ |unit| src/renderer/src/app/__tests__/actionDiagnostics.test.ts (7 tests) 16ms
+ ✓ |unit| src/renderer/src/features/chat/__tests__/persistedAgentRunProjectionContract.test.ts (17 tests) 9ms
+ ✓ |unit| src/renderer/src/features/agentCollaboration/collaborationStoreCache.test.ts (3 tests) 5ms
+ ✓ |unit| src/renderer/src/features/agentCollaboration/trailingRefresh.test.ts (2 tests) 6ms
+
+ Test Files  12 passed (12)
+      Tests  129 passed (129)
+   Start at  23:42:02
+   Duration  5.07s (transform 1.19s, setup 0ms, import 1.90s, tests 1.70s, environment 1ms)
+
+JSON report written to <repo>/.cache/backend-concurrency/round6-validation-20261011/frontend-unit-final.json

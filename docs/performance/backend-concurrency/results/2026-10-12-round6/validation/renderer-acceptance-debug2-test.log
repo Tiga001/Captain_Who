@@ -1,0 +1,30 @@
+
+ RUN  v4.1.10 <repo>
+
+ ❯ |electron-fixtures| src/main/core/backendAcceptance.electron.test.ts (1 test | 1 failed) 26732ms
+     × keeps admission, approval receipts, Stop receipts and durable terminals distinct 26731ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |electron-fixtures| src/main/core/backendAcceptance.electron.test.ts > production Renderer hooks through native Electron IPC and the real Core pipe > keeps admission, approval receipts, Stop receipts and durable terminals distinct
+AssertionError: expected 'failed' to be 'completed' // Object.is equality
+
+Expected: "completed"
+Received: "failed"
+
+ ❯ src/main/core/backendAcceptance.electron.test.ts:119:29
+    117|       }
+    118|       expect(result.code, result.output).toBe(0)
+    119|       expect(report.status).toBe('completed')
+       |                             ^
+    120|       expect(report.offeredActions).toBe(50)
+    121|       expect(report.completedActions).toBe(50)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  22:59:47
+   Duration  26.88s (transform 17ms, setup 0ms, import 86ms, tests 26.73s, environment 0ms)
+

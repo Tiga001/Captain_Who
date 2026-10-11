@@ -1,0 +1,18 @@
+{
+  "storage": {
+    "passed": 1227,
+    "failed": 0,
+    "ignored": 1,
+    "log_sha256": "6fc0695c3f714f4da00c18c482d4d041b2a71712a6aef997098c452e16e62b8d",
+    "inventory_count": 1228
+  },
+  "performance": {
+    "passed": 7,
+    "failed": 0,
+    "ignored": 0,
+    "log_sha256": "65a86cba4e61bb3b72b47bc6561540cf678ad4c6a20e1f260e94c046f8829398",
+    "inventory_count": 7
+  },
+  "storage_source_changed_since_test_start": [],
+  "unique_ordinary_passed": 1234
+}

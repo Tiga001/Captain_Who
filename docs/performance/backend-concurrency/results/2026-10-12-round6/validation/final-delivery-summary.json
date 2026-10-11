@@ -1,0 +1,134 @@
+{
+  "date": "2026-10-12",
+  "verdict": "FAIL: overall performance acceptance not achieved",
+  "delivery_scope": "Round 6 correctness fixes, independent reviews, representative benchmarks, failure evidence and local commits delivered. No push or publish. No claim that all six optimization rounds met acceptance.",
+  "commits": {
+    "production": "b1744ab98e6eb5db633e351d983bbe9d401a76f6",
+    "collector_recovery_rate": "0d70c62398da930a95be5ada3450bd3418ef779e",
+    "diagnostics_entry": "d4390ac3a57c0fc20eee3524e0abbbbc9ae09a8e"
+  },
+  "formal_report": "../../../round6-results.md",
+  "correctness": {
+    "rust_distinct_tests": 1795,
+    "rust_passed_executions": 1849,
+    "rust_final_failures": 0,
+    "count_scope": "Named tests deduplicated across the recorded runs. Includes subprocess helpers, not 1795 distinct fault scenarios. Benchmark acceptance failures are separate.",
+    "frontend_unit_passed": 129,
+    "frontend_browser_passed": 254,
+    "native_electron_runs": {
+      "baseline": 1,
+      "current": 1
+    },
+    "final_node_infrastructure_subtests": 28,
+    "evidence": "resume-test-summary.json",
+    "latest_diagnostics_entry_validation": [
+      "build-diagnostics-final.stdout.log",
+      "clippy-diagnostics-final.log",
+      "rustfmt-diagnostics-final.log",
+      "diagnostics-comparison-final.json"
+    ],
+    "clippy_preexisting_cli_exclusions": [
+      "clippy::collapsible_match",
+      "clippy::useless_conversion",
+      "clippy::unnecessary_lazy_evaluations",
+      "deprecated"
+    ]
+  },
+  "matrix": {
+    "cases": 36,
+    "offered_rpc_each_side": 1608,
+    "successful_rpc_each_side": 1572,
+    "existing_capacity_rejections_each_side": 36,
+    "no_response_each_side": 0,
+    "roots_each_side": 1420,
+    "completed_roots_each_side": 1316,
+    "cancelled_roots_each_side": 104,
+    "completed_children_each_side": 158,
+    "all_cases_naturally_drained": false,
+    "short50_send_p95_ms": {
+      "baseline": 1002.674,
+      "current": 755.424,
+      "target_inclusive_upper_bound": 500
+    },
+    "aggregate_cpu_change_percent": 38.7,
+    "sampled_rss_peak_change_percent": 9.7,
+    "sampled_threads_peak": {
+      "baseline": 26,
+      "current": 48
+    },
+    "evidence": [
+      "final-matrix-success-latencies.json",
+      "matrix-vs-original.json"
+    ]
+  },
+  "long_mixed": {
+    "plan": "20 owners; fixed 2s start waves for 600s, reads every 500ms, reactive control traffic",
+    "comparison": "Node22.23.1 baseline r3 and current r2 with identical fixture; previous baseline r2 used Node23 and remains diagnostic only",
+    "current": {
+      "transport_failed_at_seconds": 239.861333,
+      "failure": "rpc.response enqueue exceeded existing 9MiB total outbound budget",
+      "starts_offered": 6020,
+      "starts_success": 1873,
+      "start_business_errors": 526,
+      "start_no_response": 3621,
+      "total_no_response": 4346,
+      "locally_transport_rejected_after_failure": 4344,
+      "handler_started_without_response": 2,
+      "ack_recovered_exact_identity": 1873,
+      "recovered_completed": 1719,
+      "recovered_cancelled": 154,
+      "naturally_drained": false
+    },
+    "baseline": {
+      "starts_offered": 6020,
+      "starts_success": 3027,
+      "active_run_errors": 2355,
+      "dispatch_overload_errors": 638,
+      "no_response": 0,
+      "ack_recovered_exact_identity": 3027,
+      "naturally_drained": true,
+      "successful_send_p95_ms": 9658.655
+    },
+    "sustainable_capacity_established": false,
+    "hardened_throughput_both": null,
+    "evidence": "resume-soak-final-comparison.json"
+  },
+  "native_electron": {
+    "renderer_full_saves": {
+      "baseline": 293,
+      "current": 0
+    },
+    "host_requests": {
+      "baseline": 636,
+      "current": 223
+    },
+    "request_bytes": {
+      "baseline": 10369347,
+      "current": 48046
+    },
+    "scope_limit": "Local 30-root fixture; not full AppShell, hardware click/paint, or high-concurrency UI SLO evidence."
+  },
+  "diagnostics": {
+    "evidence": "diagnostics-comparison-final.json",
+    "same_final_binary": true,
+    "on_and_off_starts_each": 500,
+    "on_and_off_exact_recovered_each": 500,
+    "both_naturally_drained": true,
+    "both_send_p95_fail_500ms": true,
+    "observed_on_cpu_relative_to_off_percent": 0.9006649399805777,
+    "limit": "One ordered pair, not a repeated randomized overhead estimate or maximum sustainable capacity. Missing off stage/queue samples are unavailable, not zero.",
+    "initial_failed_trial": "Explicit off was rejected by startup assertion before any case; retained original logs, then repaired and rerun both modes."
+  },
+  "compatibility_limits": [
+    "Clean shutdown/reopen proves only its stated boundary.",
+    "No real OS IOERR/fsync/power-cut coverage claimed.",
+    "No complete old-application downgrade run claimed.",
+    "No full AppShell visual or real-provider end-to-end capacity certification."
+  ],
+  "required_remaining_work": [
+    "Profile and reduce measured service time within the existing two write execution slots without weakening authorization, lifecycle or CAS.",
+    "Implement and validate bounded backpressure for growing full-history responses while preserving complete model/display data and durable acknowledgement.",
+    "Rerun 50-owner short history, sustained mixed traffic and full UI SLO after production changes."
+  ],
+  "archive_policy": "Dedicated evidence archive excludes executables, databases, WAL/SHM and screenshots. Path redaction and gzip hashes are documented by TRANSFORM-MANIFEST.json; prior hashes embedded in evidence refer to originals."
+}

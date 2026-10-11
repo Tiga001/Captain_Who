@@ -1,0 +1,7 @@
+{
+  "binary_sha256": "bf222b0992317f83ec8ed7ad2fe90812dc9427cdc76ae5b9fdb2115c4b88123d",
+  "fixture_sha256": "2ed3e2f6c025b6da9cfe75a7c715da9e302b47cfbd50e5c486897f05cb2f8b15",
+  "change_from_delivery": "Only fixture startup assertion permits explicitly configured 0 or 1 for CAPTAIN_PERFORMANCE_DIAGNOSTICS; no measured workload or production behavior change.",
+  "build_log": "build-diagnostics-final.stdout.log",
+  "final_fixture_commit": "d4390ac3a57c0fc20eee3524e0abbbbc9ae09a8e"
+}

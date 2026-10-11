@@ -1,0 +1,19 @@
+
+running 14 tests
+test application::agent::tests::collaboration_harness::advanced_child_approval_prevents_the_old_segment_from_rewriting_waiting ... ok
+test application::agent::tests::collaboration_harness::advanced_child_approval_retires_obsolete_waiting_notifications ... ok
+test application::agent::tests::collaboration_harness::fake_provider_drives_all_six_tools_through_runtime_host_and_server_services ... ok
+test application::agent::tests::collaboration_harness::interrupt_agent_closes_a_child_approval_handoff_before_pending_store ... ok
+test application::agent::tests::collaboration_harness::interrupt_agent_closes_a_child_approval_handoff_before_publication_arbitration ... ok
+test application::agent::tests::collaboration_harness::interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session ... ok
+test application::agent::tests::collaboration_harness::lazy_root_has_a_stable_parent_name_for_child_messages_during_approval ... ok
+test application::agent::tests::collaboration_harness::long_precommitted_wait_reaches_the_provider_in_full_and_completes ... ok
+test application::agent::tests::collaboration_harness::long_precommitted_wait_survives_cancellation_of_the_next_provider_request ... ok
+test application::agent::tests::collaboration_harness::long_precommitted_wait_survives_failure_of_the_next_provider_request ... ok
+test application::agent::tests::collaboration_harness::precommitted_wait_survives_cancellation_of_the_next_provider_request ... ok
+test application::agent::tests::collaboration_harness::precommitted_wait_survives_failure_of_the_next_provider_request ... ok
+test application::agent::tests::collaboration_harness::process_start_dispatcher_recovers_a_queued_child_without_a_new_root_turn ... ok
+test application::agent::tests::collaboration_harness::user_root_run_cancellation_stops_running_and_queued_descendants ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 1238 filtered out; finished in 4.33s
+

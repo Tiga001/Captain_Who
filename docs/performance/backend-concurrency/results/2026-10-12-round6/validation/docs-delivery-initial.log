@@ -1,0 +1,6 @@
+Documentation checks failed (5):
+- docs/performance/backend-concurrency/results/2026-10-12-round6/README.md: not linked from docs/README.md
+- docs/performance/backend-concurrency/round6-results.md: not linked from docs/README.md
+- docs/performance/backend-concurrency/PROGRESS.md: ambiguous standalone “Core”; use “Core Server” or “Rust Core”
+- docs/performance/backend-concurrency/acceptance.md: ambiguous standalone “Core”; use “Core Server” or “Rust Core”
+- docs/performance/backend-concurrency/round6-results.md: ambiguous standalone “Core”; use “Core Server” or “Rust Core”

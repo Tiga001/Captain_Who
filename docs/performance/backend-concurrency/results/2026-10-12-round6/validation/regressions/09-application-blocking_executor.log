@@ -1,0 +1,20 @@
+
+running 11 tests
+test application::blocking_executor::tests::captured_runtime_context_can_launch_async_runtime_work ... ok
+test application::blocking_executor::tests::count_and_byte_limits_include_reservations_and_release_on_drop ... ok
+test application::blocking_executor::tests::final_shutdown_drains_submitted_work_but_fences_unused_reservations ... ok
+test application::blocking_executor::tests::paired_reservations_are_atomic_and_tail_retains_its_budget ... ok
+test application::blocking_executor::tests::panic_returns_error_releases_capacity_and_worker_survives ... 
+thread 'blocking-test-0' (59544917) panicked at crates/core-server/src/application/blocking_executor/tests.rs:150:28:
+injected failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test application::blocking_executor::tests::queued_cancel_does_not_run_and_started_drop_is_drained ... ok
+test application::blocking_executor::tests::reservation_accepted_before_shutdown_can_finish_after_close ... ok
+test application::blocking_executor::tests::resizing_reservations_is_atomic_and_preserves_settlement_after_overload ... ok
+test application::blocking_executor::tests::shrinking_wakes_capacity_waiter_and_final_shutdown_rejects_resize ... ok
+test application::blocking_executor::tests::slow_preparation_does_not_block_control_lease_or_runtime_timer ... ok
+test application::blocking_executor::tests::waiting_reservation_wakes_when_capacity_released_or_executor_closed ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1241 filtered out; finished in 0.06s
+

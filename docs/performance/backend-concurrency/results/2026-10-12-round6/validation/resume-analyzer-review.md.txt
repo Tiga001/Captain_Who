@@ -1,0 +1,45 @@
+# 接手后的 benchmark / transport 审查与 analyzer 修补
+
+日期：2026-10-12。审查对象为当前未提交 fixture、outbound 诊断 getter / 测试、runner 校验器，以及本目录 `analyze.py`。只改本目录 analyzer / 报告，未修改正在运行的 Rust、runner、transport、基准负载或任何原始结果；没有构建或执行性能测试。
+
+## 已修复：不可信恢复分子仍输出吞吐
+
+原 `analyze.py` 在自然 drain 时先用 clean shutdown/reopen 后的 `Completed` / 总终态数量除以 cleanup 前 `measured_us`，之后仅在缺少响应或 `transport_failure` / `state.failed` 时清空。逐 Run 身份不匹配、恢复数量不匹配、shutdown timeout 等虽然令最终 pass=false，仍能留下数值吞吐；`closed` / `overloaded` / failure snapshot 也未独立参与 transport healthy。
+
+现在集中计算 `throughput_eligible`，同时输出 `throughput_ineligible_reasons`。须满足：自然 drain、完整响应、transport 健康、runner raw integrity、恢复数量/无 in-progress、一致的 starts / controls / replies 生命周期、无 runtime error、无 shutdown timeout、已知正常终态、无意外 compaction，以及有效正测量时长，才输出 completed / settled 两个速率。否则均为 null，保留 recovered / acknowledged 原数量供诊断。
+
+transport 健康检查保留旧归档兼容性：两种新字段都不存在时允许 legacy；一旦任一存在则要求两者齐全，failure 必须为 null，closed / failed / overloaded 必须严格为 false，snapshot 必须存在且为 null。
+
+延迟 SLO 超标本身不影响一个已证实完成的吞吐数值；显式分类的正常负载拒绝也不单独抹去自然排空后可信的完成速率。它们仍使严格的 sustainability pass=false，报告仍不能据数值宣称最大容量或长期稳定性。
+
+## 轻量验证（仅一次）
+
+命令：
+
+```sh
+python3 .cache/backend-concurrency/round6-validation-20261011/analyze.py --self-test .cache/backend-concurrency/round6-final-full-20261012-r1/cases.jsonl
+```
+
+退出 0，日志 `resume-analyzer-self-test.log`。使用归档中的第一个健康小场景，在内存补出可验证的逐 Run 证据；未改原始文件。覆盖 21 个无效派生样本，均 pass=false、两种吞吐=null：runtime error、compaction、空对象 transport failure、shutdown timeout、未 drain、starts / controls / replies incomplete、零测量时长、closed / failed / overloaded、failure snapshot、partial transport evidence、recovery count / unfinished、同数量 wrong Run、wrong owner / message / terminal，以及无响应。另验证健康样本有吞吐，以及延迟人为整体加 10 秒时 SLO fail 但可信吞吐仍保留。
+
+修补后 analyzer SHA256：`a44b3440e8c4c9986429117918b512fbfb5bd5a28872998f8bd075009c0fdc8c`。
+
+## 待主代理应用：Rust raw 仍有未设门槛的吞吐字段
+
+`backend_concurrency_baseline.rs:1420` 的 `completed_root_turns_per_second` 始终用 cleanup/reopen 后 Completed 数除以 cleanup 前时长。实际旧失败证据 `round6-final-soak-u20-20261012-r1` 有 5,465 RPC 无回复、仅 1,527 ACK、恢复 2,678 root（2,456 Completed / 180 Cancelled / 42 Failed），raw 仍报告 **3.0318810464 turns/s**。最终矩阵中未自然 drain 的 approval50 也输出 10.6096890996。此 raw 字段不得用于第六轮结论；本次修补的 analyzer 从原始计数自行验证并计算，不读取它。
+
+最小后续 Rust patch：在组装 lifecycle 前将该数值改为 `Option<f64>`；仅在上述有效性条件成立时 `Some(Completed / measured_seconds)`，否则 `None`（JSON null）。至少同时检查 drained、starts/replies/controls、shutdown timeout、post-reopen in-progress、recovered=ACK、ACK identity errors 为空、transport failure 为空、outbound 四个健康字段、无 runtime error/意外 compaction、正时长。该改动纯统计，不得改变 submit、collector、provider、固定时间表或 admission。建议额外输出 eligibility / 原因字段，与 analyzer 保持可解释的一致性。
+
+正在运行的 r2 binary 含旧 raw 字段，不能事后声称其二进制已包含上述 Rust 修补。保留该原始输出与 hash，在结果文档声明忽略旧吞吐字段，使用本次经验证的 analyzer 派生值；源码后续修补应独立记录。
+
+## 其余审查结论与边界
+
+- 正常 collector 路径确实仍经过生产序列化/FIFO/字节预算。改为 `recv_frame` 后使用真实 wire bytes，完整 decode、history 摘要与大 Value 释放均在 Events 锁外；没有新增无界队列、扩大预算或删减历史输入。
+- `failure_state_for_test` 仅 cfg(test) getter；Serialize derive 也限 test。没有发现生产 transport 行为改变。
+- 当前 baseline/current fixture SHA256 相同：`75fc4fad46311d39942dc4bdca61125527790d2306d8919d84b44efd3e84828a`；runner 相同：`4ea7aeb1948b4a3b99dc091d811876c72010febda7ccde3ed6853eafbc8b50e3`。outbound 当前两侧同为 `90a7e668fd894a530a87b1b78bbfa065a511d7a1fd37078b805d5e40866e2be9`。这些是本次实际读取文件得到的 hash，不只采用旧报告声明。
+- 新 runner 的 ACK runId / owner / assistantMessageId / terminal 核对、唯一性、分布 / 数量核对有效；同数量替换 Run 不再只靠 aggregate counts 通过。Rust 的 `root_starts_durably_accepted` 实际统计已收到成功 ACK，失联时不是所有 durable admission；analyzer 的 `acknowledged_starts` / `durable_recovered_roots` 已将其分开。
+- submit 的 closed 检查确实阻止检查之后的新调用进入 dispatcher，记录的 `transport_rejected_us` 没有 fake response，也未混为 lane capacity rejection。但 failure watcher 只记录证据，不调用生产 request loop 的 `rpc.begin_shutdown()`；关闭前已排队但未开始的 handler 仍可能随后执行，`is_closed` 与 submit 之间也存在竞态。现有文档已声明不模拟完整生产 shutdown；健康 r2 若 transport 没有失败不受此边界影响，失败后的执行/资源不得用于产品 shutdown 结论。本次未改变工作负载。
+- 分母仍需清楚：`offered` 包括固定计划的本地失联尝试，`transport_rejected` 单列但同时属于没有 RPC response；它不是 Core 已接纳数。现有 `rpc_unanswered` 时间线也将失联后本地拒绝计为永不收到 RPC 回执，故只能叫“尝试但未收到 RPC 回复”，不能解释为 Core 队列持续增长。分析这类失败时应单独给已提交未回复 / 本地终止两条计数，或者在 rejection 时关闭本地 outstanding；不应从失败时间线推出健康系统 backlog。
+- 当前无独立逐 RPC timeout 标记，只有 starts/replies 等整体等待结果和最终 no_response。不能把所有 no_response 等同于已进入 handler 后 timeout，尤其含 transport rejection。新 analyzer 吞吐 gate 已覆盖整体等待失败，但没有伪造逐 RPC timeout 分类。
+
+以上未观察到新的健康负载路径正确性问题；明确残留集中在 raw 吞吐字段和失联场景的统计/模拟边界。未以审查替代 Rust 测试结果，也未把旧故障数据改为通过。

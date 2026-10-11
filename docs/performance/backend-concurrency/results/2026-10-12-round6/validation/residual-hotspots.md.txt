@@ -1,0 +1,56 @@
+# Round 6 剩余性能路径：基线证据与当前源码候选
+
+状态：最终 current 20-unit soak 尚未交叉分析。本文只读源代码和既有基线原始数据，没有改 tracked source、编译或启动负载。不能用本文代替最终 SLO 判定。
+
+## 证据边界
+
+基线目录 `../round6-baseline-soak-u20-20261011-r1/` 的 `metadata.json`、`cases.jsonl`、`resources.jsonl`；本目录已有 `baseline-soak-u20-analysis.json`、`baseline-soak-storage-crosscheck.json`。额外从 raw 生成的 60 秒窗口和阶段占比在 `residual-hotspots-baseline-evidence.json`。
+
+基线 HEAD `acae06623b7ce6031b90795e730968fb36e38107`，binary SHA256 `a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522`，运行期间 source manifest 不变。它使用 SQLite 3.46.0 / DELETE / synchronous 2 / schema 71。当前源码使用 WAL、单 writer、两个 reader 和新的隔离执行器；下文旧全局连接/旧 lane 等待是历史证据，**不证明当前仍然阻塞于同一路径**。
+
+所有 RPC 分位来自 raw scheduled/offered/handler/response 时间戳；stage 分位是 histogram bucket 上界。stage 聚合包含并行/嵌套等待，不能相加成单请求耗时，也不能作为 CPU 火焰图。进程 CPU、I/O、RSS 包含同进程本地 fake provider 和测试记录；不是产品独占 heap、SQLite-only 写入或物理 SSD/NAND 写入。
+
+## 旧基线能确定什么
+
+20 owners 每 2 秒固定发一波，共 301 波、6020 次 root start，计量期 612.416 秒。3038 次 durable accepted；2238 次同 owner 仍有 active Run 的业务拒绝，744 次 dispatch overload。全部 RPC 有回复，最终 2706 Completed、332 Cancelled，drain 与 clean reopen 后 in-progress 都为 0。旧 runner 将业务 active_run 拒绝列入 unexpected_rpc_errors，其原始失败状态完整保留。
+
+| 成功 RPC | n | scheduled→response p95 / p99 | offered→handler p95 / p99（所有已启动 handler） |
+| --- | ---: | ---: | ---: |
+| start | 3038 | 10499.921 / 14414.156 ms | 9836.042 / 13414.153 ms，n=5276 |
+| approve | 971 | 3713.505 / 5121.112 ms | 3459.156 / 4838.025 ms |
+| cancel | 332 | 6656.281 / 9807.035 ms | 6509.361 / 9605.488 ms |
+| loadConversation | 1201 | 10733.241 / 14375.474 ms | 10553.021 / 13990.543 ms |
+
+这是旧基线明显不满足 1–20 units 控制 p95 ≤250 ms / p99 ≤1 s、短历史 send p95 ≤500 ms 的直接证据。Core synthetic scheduled intake 不包含完整 Electron click/paint。长稳态历史会增长，不能把 600 秒后已有数百条消息的请求继续无条件称作“短历史”。
+
+**直接测得的延迟所在阶段：**write lane wait 19284.906 秒，占该 lane queue 聚合 19314.745 秒的 99.85%；read queue 中 lane wait 60.16%、dependency 39.84%；approval dependency 占 queue 90.93%；cancel dependency 占 99.97%。旧 lane handler_execution p95 上界依次为 write 360.447、read 81.919、approve 98.303、cancel 180.223 ms。多秒尾部主要已经出现在 handler 启动之前，不能把所有尾延迟归于 handler 内的一次 SQL。
+
+**旧同连接竞争与同步占用确实存在，但还不是最细因果：**530882 次 sqlite.wait 共 927.691 秒，connection hold 共 376.901 秒；history hold 72.528 秒、other hold 229.266 秒，trace publication wait 103.211 秒。已有 trace/admission/terminal transaction p95 上界仅 2.815 / 6.655 / 11.263 ms，commit p95 上界仅 0.959 / 1.663 / 2.303 ms。这支持“许多操作共享资源形成排队”，不支持“某次 commit 本身每次都卡几秒”。other 仍未细分，不能凭名称归给 checkpoint 或某 SQL。
+
+**输出出现调度/消费延迟，序列化总量不是同等级热点：**agent.event / delta / response 的 outbound.queue p95 上界为 655.359 / 786.431 / 655.359 ms；三者序列化聚合耗时仅 0.308 / 0.016 / 0.174 秒。timer lag p95 407.821 ms、p99 870.109 ms、max 1805.565 ms。二者同时恶化与执行线程被阻塞/调度变慢一致；现有聚合还不能区分 executor starvation、consumer 调度或操作系统压力，不能宣称已证明某个锁的因果关系。
+
+**持续退化而非只有一次突发：**按 scheduled start 所在分钟重算，0–60 秒 600/600 accepted、send p95 760.601 ms、write queue 采样峰值 7；60–120 秒 567/600、p95 1918.327 ms；240–300 秒 218/600、p95 7752.225 ms；540–600 秒 140/600、p95 16768.690 ms、write queue 峰值 63。各分钟结果包含该分钟请求稍后才收到的响应；t=600 最后一波 20 次单独存在于全程统计。固定 offered load 下接受量下降、等待增长，是有限时段内不稳态的实测证据。history、模型输入、DB、进程存储同时增长是相关性，缺少 profile 不能唯一归因给历史重建。
+
+全程进程 CPU 1250.143 秒 / 612.416 秒，约 2.04 个逻辑核；不是十核全机耗尽的证据。首分钟采样 CPU 增量 51.480 秒，最后一分钟 122.442 秒。4009 次 provider requests（3038 initial +971 approval continuation）累计模型请求 921957999 bytes，输出 89535 events /339500526 bytes；同一模型上下文天然随历史增长，模型正文不能为性能目标删减。磁盘归属写 21108514816 bytes，logical writes 10364717284 bytes，DB 结束 535347200 bytes；缺少 SQLite 专属 syscall 与稳态回收 profile，不能推出 SSD 写放大倍数或内存泄漏。
+
+owner 各 accepted 143–157，Completed 128–140，所有 owner 均持续到约 600.9–605.5 秒有进展，最长连续 accepted ACK 间隔约 21.135 秒。未见永久饿死，但不满足充分的长期公平性证明。固定 owner 发包顺序造成 overload 明显偏后：0–4 owner 没有 overload，owner 19 有 79 次。应同时保留每 owner offered/accepted/terminal/最大无进展间隔，不能只用总体吞吐隐藏尾 owner。
+
+## 当前源码最值得验证的剩余路径
+
+以下均为**静态候选**，需 current 原始数据确认。排列按“最能解释随历史增长及控制尾部的路径”而非未经测量的 CPU 排名；不建议先扩线程/队列/业务容量。
+
+1. **历史相关工作量增长与双 reader/准备执行器排队。** `core/src/storage/service/history_snapshot.rs:360` 的版本验证已避免读取大 Trace JSON，但仍遍历各 Trace revision 与多类 side journals、排序/JSON row/hash；cache hit 也先进行这一检查。`load_history_snapshot:501` 在 active Run 时不缓存，cold path 从同一 reader transaction 取完整模型事实后在连接外 decode；model-only SQL 去掉历史展示 JSON，却不能去掉模型正文、Trace、附件或 compaction。ordinary append 的 `to_append_record:100` 仍 clone model message records；`core-server/src/application/blocking_executor.rs:431` 只有两个 preparation workers，这是有意的容量约束。验证：比较短历史与增长历史下 turn/history_prepare、prepare_and_commit、blocking.queue_wait/preparation、sqlite.read_wait/reader、sqlite.read_hold/reader、storage.read_decode、storage.projection 的 count、total、尾部及 per-accepted/provider-byte CPU。debug 连续 warm test已证明稳定历史的 cache work 不会重复，但不能证明所有 20 owner 活跃/失效/容量驱逐场景都命中。
+
+2. **新的 Runtime checkpoint/Trace/terminal 在单 writer 上的总工作。** `runtime_checkpoint.rs:208` 只合并最新 patch 与一个未确认请求，Arc 不再反复复制 pending，但每次新 request 仍复制当前正文；300 ms timer 和 terminal/pending barriers 保留原耐久语义。`storage/service/runtime_checkpoints.rs:144,310` 的 apply 在 writer transaction 读取完整旧 display JSON，校验、merge patch、再校验、序列化和 UPDATE；presentation-only tick 已避开 content/status 触发器。这是合理但仍可能随单轮展示状态增长的 CPU/写入候选。验证：storage.queue_wait/writer、storage.worker_wait/writer、sqlite.operation_hold 与 blocking.queue_wait/maintenance/completion；同步看持有时间、queue oldest、checkpoint数/正文 bytes、WAL增长、terminal接纳率。当前 metrics 未给 runtime-checkpoint 单独 transaction 标签，若只看到 other hold 变大，只能定位到 writer，不得直接证明 checkpoint 占比。旧 baseline 没有同一 Core checkpoint工作，必须按 accepted/completed/provider-request/body bytes 报告增量，不能只比绝对 CPU。
+
+3. **RPC owner resolution、合法依赖与公平 execution permit。** `bounded_dispatch.rs:276` 之后会解析/必要时刷新 scope，等待前驱，再取得按 owner 公平的 permit；scope 未确定时全局回退保留安全性。同 owner cancel/approval有真实依赖，不能为低延迟越过 durable admission/owner边界。当前已让 dependency wait 不占 physical handler slots，并有独立 rpc_control/rpc_approval workers。验证 current rpc.owner_resolution、dependency_wait、execution_permit_wait、blocking_pool_wait 分开：如果 lane_wait已降却 control尾部仍高，先查 scope/dependency；如果 dependency很低而 permit很高，查公平执行/worker实际服务时间。必须按 exact owner+Run predecessor 关联；只对同 owner 有因果证据的拒绝按业务规则解释，不把所有错误归成正常容量拒绝。
+
+4. **checkpoint byte estimation 或其他同步 CPU段仍可能拖慢 async timer/outbound。** `runtime_checkpoint.rs:272,320` 的 estimated_bytes 在进入异步 reserve之前锁 projection并遍历 dirty JSON，`record`同步更新 projection；巨量活动时可出现单次同步 CPU。checkpoint SQL主体已卸到专属 maintenance worker，不能继续用旧版 timer lag证明 SQL仍在 runtime线程上。验证 current timer_lag与outbound.queue是否同时降到目标内；如果 writer/read等待小、timer/outbound仍高，再用同一 workload采样栈定位这个候选。serialization很小则不应先优化 wire JSON编码。现有无栈profile，不能把 estimated_bytes判定为已测主因。
+
+5. **WAL checkpoint 与回收、full presentation background reads。** `storage/state.rs:391` 记录 passive/truncate checkpoint与log/checkpointed/busy frames；read transaction虽在decode前释放，长SQL snapshot仍可钉住WAL。raw/full历史读取仍有Renderer/导出所需的safe JSON和projection，不受model-only SQL优化覆盖。验证 current sampled WAL bytes随时间是否收敛、busy/log-checkpointed差、writer hold spike是否与reader hold重叠；同时看background loadConversation response bytes与projection时间。仅停机truncate后WAL=0不足以证明运行期回收。旧 baseline DELETE 的WAL=0没有对比意义。
+
+## 最终 20-unit 数据到达后的判别顺序
+
+先核对 source/binary SHA、SQLite模式、fixed offered workload、实际 accepted/Completed/Cancelled、provider请求与bytes、compaction和错误分类；拒绝不能混入成功延迟分位。然后用同一 60 秒窗口看 send/control SLO、每 owner进度、业务 backlog与最后drain。再把 handler前等待按 owner-resolution/dependency/permit/worker拆开；writer/reader/maintenance若有队列，结合实际hold确认服务压力。最后检查CPU per-work、WAL、RSS/footprint趋势与timer/outbound。
+
+如果成功SLO改善但接受量显著下降，不能判为容量提升；如果接受量/模型bytes显著上升但绝对CPU上升，应同时报告归一化效率与目标SLO。最终 single-run block bootstrap只约束本次synthetic记录，不能替代独立机器/运行批次或真实Provider置信证据。

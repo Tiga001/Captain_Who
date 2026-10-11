@@ -1,0 +1,21 @@
+
+running 16 tests
+test transport::tests::request_loop::artifact_read_admission_is_bounded_and_does_not_block_core_requests ... ok
+test transport::tests::request_loop::changed_enablement_emits_one_invalidation_notification ... ok
+test transport::tests::request_loop::core_shutdown_settles_the_managed_playwright_runtime_before_outbound_closes ... ok
+test transport::tests::request_loop::fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract ... ok
+test transport::tests::request_loop::image_artifact_permit_is_held_until_the_large_response_is_flushed ... ok
+test transport::tests::request_loop::indeterminate_direct_mutation_emits_catalog_invalidation_without_claiming_success ... ok
+test transport::tests::request_loop::indeterminate_workflow_commit_emits_catalog_invalidation_without_claiming_success ... ok
+test transport::tests::request_loop::office_status_probe_runs_off_the_request_loop_and_returns_a_strict_result ... ok
+test transport::tests::request_loop::office_status_rejects_even_empty_parameter_objects ... ok
+test transport::tests::request_loop::ordinary_direct_mutation_failure_does_not_emit_an_invalidation ... ok
+test transport::tests::request_loop::outbound_failure_stops_admission_without_another_stdin_line ... ok
+test transport::tests::request_loop::outbound_writer_finishes_after_draining_with_a_lingering_sender ... ok
+test transport::tests::request_loop::request_loop_remains_responsive_while_filesystem_workers_are_blocked ... ok
+test transport::tests::request_loop::request_loop_routes_skills_list_through_the_bounded_dispatcher ... ok
+test transport::tests::request_loop::saturated_rpc_reads_preserve_ping_cancel_ids_and_eof_responses ... ok
+test transport::tests::request_loop::shutdown_stops_queued_forks_before_waiting_for_other_services ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 1236 filtered out; finished in 3.69s
+

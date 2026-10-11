@@ -1,0 +1,87 @@
+# 第六轮 Host / Renderer 独立收尾
+
+状态：源码审查、验收夹具补强、383 项前端正确性检查与真实 Electron A/B 已完成。A/B 两侧各 1 项测试通过；未提交。不能从本次受控串行样本认定完整生产 UI 并发 SLO 达标。
+
+## 源码范围
+
+从第一轮基线 `acae06623b7ce6031b90795e730968fb36e38107` 到当前工作区，人工审阅了 `src` 下全部 20 个生产文件的差异，文件 SHA-256 见 `frontend-scope-audit.json`。无 CSS、视觉资源、图标、动画、文案、布局或交互入口变化。`AppShell.tsx` 只改变审批失效序列输入。业务额度、审批决策、权限、取消及删除规则没有在这些改动中放宽。
+
+保存责任相关文件：
+
+- `src/renderer/src/app/useRequestAssistantResponse.ts`：持久接纳或精确重放确认后、缓冲事件重放前绑定 Core 所有权。
+- `src/renderer/src/app/useAgentRunLifecycle.ts`：基于精确 conversation/message/run 绑定或 Core checkpoint 跳过运行消息重复全量保存；Done 继续做权威回读，同会话后继发送等待对账；legacy 保存保留。
+- `src/renderer/src/app/useAppShellMessageSubmission.ts`：接纳事务拥有正常输入 pair/metadata，未接纳失败仍保存本地事实并恢复输入。
+- `src/renderer/src/app/useConversationPersistence.ts`、`chatMessagePersistence.ts`、`persistenceDrain.ts`：按作用域顺序保存，失败保留 payload；显式 flush/退出传播失败；metadata/UI/inserts 的退出排空保留。
+- `src/renderer/src/app/useAppShellRunControls.ts`、`useProjectRemoval.ts`、`src/renderer/src/features/agentRun/useAgentActionDecisionHandlers.ts`：Core owner 控制动作不被无关全量保存阻塞，等待权威 RPC；不让本地 fallback 覆盖运行终态。
+- `src/renderer/src/features/chat/chatTypes.ts`、`src/renderer/src/features/storage/persistedAgentRun.ts`、`storageConversationMapping.ts`：校验并恢复 Core checkpoint 投影。允许合法失败 read 的空 display path 不等同授权访问文件。
+
+读取/刷新相关文件：
+
+- `src/main/core/coreServerStorageApi.ts`、`rpcDiagnostics.ts`、`src/main/workspaceFiles/ReadToolFileSource.ts`：读取单个 call 的同快照窄 proof DTO；保留项目/消息/call/内建身份/path 检查和既有文件访问解析。
+- `src/renderer/src/features/agentCollaboration/collaborationStore.ts`、`trailingRefresh.ts`、`useCollaborationApprovals.ts`、`useObserverConversation.ts` 和 `src/renderer/src/app/AppShell.tsx`：真实审批事件定向失效、同 scope 单飞/尾随合并、导航身份 fencing、观察器 live cursor 精确回放。
+
+本次接管保留前会话 round6 两个生产 hook 修复：持续 invalidation 不再让所有已完成快照失效；Observer 固定 75 ms 合并窗口不被不断重置，active/trailing 各自持有独立 live suffix。新增一项回归，验证慢历史分页完成后优先读取尾随近期快照，不继续让旧页链饿死刷新。
+
+## 本次验收夹具补强
+
+- 修复遗留 Web TypeScript `project` 可能 undefined 的捕获窄化问题。
+- 强制 30 submit / 10 approve / 10 stop，40 次本地合成 Provider 请求、20 completed / 10 cancelled；保存每个终态的正文长度/hash。
+- 校验全部 16 个生成片段、取消 prefix；每个动作 ACK 后检查精确 assistant 已存在，终态 DOM 和持久正文完全一致；重开进程后比较所有消息正文、status 和完整 agentRun JSON。
+- fixture-only RPC 方法计数；Host/Renderer 50 个主动作 trace 通过 session nonce + action sequence 唯一连接，拒绝 omitted trace。
+- `analyze-renderer.py` 保留 offered/completed/failed/unfinished、provider 工作量、RPC 方法计数与终态内容比较。n=10/30 的 nearest-rank p99 明确为探索性样本最大值。
+
+## 真实边界与未覆盖
+
+夹具是程序触发 DOM 回调 → 当前版本生产 submit/lifecycle/persistence/decision/Stop hooks → 原生 Electron preload/IPC → Core stdio → 真实临时磁盘 SQLite / loopback 合成模型。两个版本使用各自生产 Host/Renderer 源码和相同夹具/依赖。没有真实模型计费、真实用户数据库或外发。
+
+它不是完整 AppShell/Markdown 渲染、硬件点击或满载 UI。双 requestAnimationFrame 仅表示 frame opportunity，不证明 compositor paint；Stop RPC 回执也不等于 durable terminal，后者单独等待检查。Host 总量包含固定的 81 次计时区间外校验读取（另有重开进程 1 次）；不得把它们全部归因产品 UI，也不得从本次串行 50 动作推断并发 UI p99/SLO 或物理磁盘写入收益。全局最终门禁还需结合 Core 长稳态、故障及租约结果。
+
+## 本次已执行验证
+
+- `pnpm typecheck:node`、`pnpm typecheck:web`、涉及 9 个 TS/TSX 文件的 ESLint、10 个 fixture/刷新文件的 Prettier：均 exit 0。
+- 定向 unit：12 文件 **129 / 129 通过**，0 failed/skip。覆盖保存失败/重试、投影契约、恢复映射、刷新store/queue、Host窄读取/诊断及生产preload桥。
+- 定向 Chromium browser：7 文件 **254 / 254 通过**，0 failed/skip。覆盖持续刷新与分页优先级、保存责任/失败排空、AppShell接纳/流式/审批/停止/恢复、账号及许可证切换、人类交互恢复。
+- 机器可读总表与测试文件 hash：`frontend-verification-summary.json`；完整逐测试 JSON：`frontend-unit-final.json`、`frontend-browser-final.json`。CPU约束下均 `--maxWorkers=1 --no-file-parallelism`，与父任务Cargo构建并行的检查仅用于正确性，不作为性能数据。
+- 基线夹具最终同步：`baseline-renderer-final-preparation.json`。6文件与current逐字节一致，未适配hook API、未改变baseline生产源码或Rust bootstrap。
+
+## 最终原生 Electron A/B（2026-10-12，Asia/Shanghai）
+
+在父任务提供的独占测量窗口内，按 baseline → final 顺序各运行一次。current 的最终 fixture 与 20 个生产 src 审查文件在审查至完成期间 hash 未变化；两侧 fixture 完全相同、无 API 适配，使用各自生产源码。所有中间 debug 输出保留，只有 `*-final.json` 用于以下统计。
+
+- baseline Core test binary SHA-256：`a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522`。
+- final Core test binary SHA-256：`99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082`（固定 `binaries/core-server-final`）。
+- 两侧均 **50 offered / 50 completed / 0 failed / 0 unfinished**；30 submit、10 approve、10 Stop；40 次合成 Provider 请求；**20 Completed + 10 Cancelled**；重开后全部 30 assistant 的正文、status、完整 agentRun JSON 与关机前一致。
+- 两侧 30 个终态的正文长度/hash 逐项完全相同；各 50 个主动作 Host/Renderer trace 完整且唯一关联，0 omitted；各 920 个通知，没有以少投递事件制造改善。
+- 固定各 111 次 `storage.loadConversation`：其中 81 次为 fixture 的计时外校验，剩余 30 次属于生产终态对账；另有重开进程 1 次校验。
+
+| 原始 Renderer 单调跨度 | baseline | final |
+| --- | ---: | ---: |
+| Submit receipt p50 / p95 / max，n=30 | 13.9 / 21.4 / 43.4 ms | 11.2 / 19.6 / **199.9 ms** |
+| Approve receipt p50 / p95 / max，n=10 | 2.1 / 8.0 / 8.0 ms | 2.0 / 3.2 / 3.2 ms |
+| Stop receipt p50 / p95 / max，n=10 | 2.9 / 3.2 / 3.2 ms | 2.5 / 3.0 / 3.0 ms |
+| Submit double-rAF p95 / max | 31.1 / 46.1 ms | 32.1 / **201.1 ms** |
+| Approve double-rAF p95 / max | 14.2 / 14.2 ms | 15.7 / 15.7 ms |
+| Stop double-rAF p95 / max | 17.5 / 17.5 ms | 16.8 / 16.8 ms |
+
+final 最慢样本是首次 Submit，没有剔除或改为仅暖态。该样本主 start RPC 的 Host span 为 95.499 ms、Renderer `turn.start_rpc` 为 98.6 ms；全回调到 receipt 是 199.9 ms，现有分段不足以给其余时间确证归因。经验 p99 在 n=10/30 均等于最大样本，不能包装为可靠尾部推断；不能忽略首次动作回退而宣称整体更快。
+
+| Host 实际观测 | baseline | final |
+| --- | ---: | ---: |
+| Renderer `saveChatMessageState` RPC | 293 | 0 |
+| Renderer `saveConversationMeta` RPC | 120 | 0 |
+| 全部发出 RPC（包括 shutdown） | 636 | 223 |
+| 请求序列化 UTF-8 字节 | 10,369,347 | 48,046 |
+| 请求序列化同步墙钟合计 | 16.579 ms | 1.005 ms |
+| 接收 JSON 字节（回执 + 通知） | 83,443,412 | 83,124,387 |
+| 接收 JSON parse 同步墙钟合计 | 99.992 ms | **101.576 ms** |
+| Host pending 采样峰值 | 4 | 3 |
+
+因此本次直接证明冗余 Renderer 写回调用与 Host 请求字节被移除；完整历史回读仍存在，接收字节基本相同，解析时间没有改善。Host 合计包含上述固定校验读取与 shutdown，不能当作纯生产 UI 总量；请求字节也不是 SQLite 或物理磁盘写入。原始样本和全部逐方法指标保存在 `renderer-acceptance-{baseline,current}-final.json`、`renderer-comparison-final.json`，测试过程日志/JSON 是 `renderer-acceptance-{baseline,current}-test-final.*`。
+
+分析复现：
+
+```sh
+python3 .cache/backend-concurrency/round6-validation-20261011/analyze-renderer.py .cache/backend-concurrency/round6-validation-20261011/renderer-acceptance-baseline-final.json .cache/backend-concurrency/round6-validation-20261011/renderer-acceptance-current-final.json .cache/backend-concurrency/round6-validation-20261011/renderer-comparison-final.json
+```
+
+Native 测试复现：在对应版本工作目录运行 `CAPTAIN_CORE_ACCEPTANCE_BINARY=<该版本test binary> CAPTAIN_RENDERER_ACCEPTANCE_REPORT=<新输出.json> pnpm exec vitest run --project electron-fixtures src/main/core/backendAcceptance.electron.test.ts`。profile 由夹具创建/清理；不要复用真实用户库。

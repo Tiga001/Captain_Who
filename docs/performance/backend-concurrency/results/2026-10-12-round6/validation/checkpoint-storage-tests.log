@@ -1,0 +1,21 @@
+
+running 16 tests
+test storage::service::runtime_checkpoints::tests::begin_reauthorizes_resume_read_display_ids_from_builtin_trace_identity ... ok
+test storage::service::runtime_checkpoints::tests::checked_checkpoint_begin_rechecks_live_owner_and_rolls_back_generation ... ok
+test storage::service::runtime_checkpoints::tests::checkpoint_failed_commit_keeps_sequence_retryable_and_does_not_ack ... ok
+test storage::service::runtime_checkpoints::tests::checkpoint_fence_and_replay_survive_reopening_the_same_temporary_database ... ok
+test storage::service::runtime_checkpoints::tests::checkpoint_fingerprint_streaming_matches_existing_json_bytes ... ok
+test storage::service::runtime_checkpoints::tests::checkpoint_preserves_durable_fields_waiting_status_and_anchored_timeline ... ok
+test storage::service::runtime_checkpoints::tests::checkpoint_replays_lost_ack_and_rejects_divergent_or_skipped_sequence ... ok
+test storage::service::runtime_checkpoints::tests::core_lifecycle_settlement_retains_deferred_tool_projection_but_legacy_stays_strict ... ok
+test storage::service::runtime_checkpoints::tests::failed_read_without_a_path_does_not_poison_the_next_stream_checkpoint ... ok
+test storage::service::runtime_checkpoints::tests::newer_generation_terminal_and_wrong_turn_retire_old_publications ... ok
+test storage::service::runtime_checkpoints::tests::read_activity_result_can_resolve_its_path_but_cannot_change_call_tool_identity ... ok
+test storage::service::runtime_checkpoints::tests::read_display_tool_patches_merge_by_exact_identity_without_replacing_other_tools ... ok
+test storage::service::runtime_checkpoints::tests::renderer_cannot_install_a_checkpoint_marker_on_a_legacy_or_new_message ... ok
+test storage::service::runtime_checkpoints::tests::sparse_activity_patches_preserve_other_items_and_do_not_reopen_settled_status ... ok
+test storage::service::runtime_checkpoints::tests::stale_renderer_history_and_full_save_cannot_overwrite_or_drop_core_owned_message ... ok
+test storage::service::runtime_checkpoints::tests::writer_blocked_checkpoint_observes_terminal_commit_before_it_can_ack ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 3467 filtered out; finished in 1.23s
+

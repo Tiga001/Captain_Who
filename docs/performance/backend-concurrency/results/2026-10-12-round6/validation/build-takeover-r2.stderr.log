@@ -1,0 +1,3 @@
+   Compiling mycopilot-protocol-rs v0.1.0 (<repo>/crates/protocol-rs)
+   Compiling mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+    Finished `release` profile [optimized] target(s) in 1m 56s

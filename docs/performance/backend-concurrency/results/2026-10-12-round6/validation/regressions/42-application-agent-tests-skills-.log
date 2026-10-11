@@ -1,0 +1,19 @@
+
+running 14 tests
+test application::agent::tests::skills::admission::failed_final_admission_fence_rolls_back_selected_skills_with_messages_and_trace ... ok
+test application::agent::tests::skills::admission::selected_skills_are_durable_before_runtime_and_survive_reopen_and_canonicalization ... ok
+test application::agent::tests::skills::bundled_skill_activates_without_a_project_in_turn_and_preview_paths ... ok
+test application::agent::tests::skills::bundled_skill_crosses_the_production_turn_boundary_without_public_instruction_leakage ... ok
+test application::agent::tests::skills::conversation_turn_and_pending_restore_use_the_model_connection_override ... ok
+test application::agent::tests::skills::conversation_turn_resolves_skill_snapshot_before_persisting_the_run ... ok
+test application::agent::tests::skills::disabled_global_skill_is_rejected_by_turn_and_preview_paths ... ok
+test application::agent::tests::skills::existing_conversation_rejects_cross_project_skill_turn_and_preview ... ok
+test application::agent::tests::skills::installed_skill_crosses_the_production_turn_boundary_without_instruction_leakage ... ok
+test application::agent::tests::skills::omitted_model_context_window_uses_the_same_backend_default_for_turn_and_preview ... ok
+test application::agent::tests::skills::projectless_turn_discovers_enabled_managed_skills_without_explicit_activation ... ok
+test application::agent::tests::skills::stale_skill_selection_fails_before_conversation_mutation ... ok
+test application::agent::tests::skills::trusted_pdf_skill_discloses_full_instructions_only_after_activation ... ok
+test application::agent::tests::skills::workspace_skill_without_a_project_is_rejected_explicitly ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 1238 filtered out; finished in 1.25s
+

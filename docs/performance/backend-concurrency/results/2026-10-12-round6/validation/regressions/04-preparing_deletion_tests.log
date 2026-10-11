@@ -1,0 +1,10 @@
+
+running 5 tests
+test application::agent::run_lifecycle::preparing_deletion_tests::conversation_delete_drains_its_effect_without_blocking_same_project_work ... ok
+test application::agent::run_lifecycle::preparing_deletion_tests::deleting_one_preparing_conversation_allows_another_to_progress ... ok
+test application::agent::run_lifecycle::preparing_deletion_tests::preparation_drain_timeout_keeps_data_and_never_revives_cancelled_generation ... ok
+test application::agent::run_lifecycle::preparing_deletion_tests::project_delete_drains_moved_conversation_effects_frozen_in_old_project ... ok
+test application::agent::run_lifecycle::preparing_deletion_tests::unsettled_effect_prevents_deletion_after_its_worker_exits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1247 filtered out; finished in 0.74s
+

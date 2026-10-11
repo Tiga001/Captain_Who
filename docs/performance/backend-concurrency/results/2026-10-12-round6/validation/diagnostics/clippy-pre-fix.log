@@ -1,0 +1,20 @@
+    Checking mycopilot-core v0.1.0 (<repo>/crates/core)
+    Checking mycopilot-protocol-rs v0.1.0 (<repo>/crates/protocol-rs)
+    Checking mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+error: this `MutexGuard` is held across an await point
+   --> crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs:938:17
+    |
+938 |             let state = events.lock().unwrap();
+    |                 ^^^^^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs:947:59
+    |
+947 |             tokio::time::sleep(Duration::from_millis(20)).await;
+    |                                                           ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#await_holding_lock
+    = note: `-D clippy::await-holding-lock` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::await_holding_lock)]`
+
+error: could not compile `mycopilot-core-server` (bin "core-server" test) due to 1 previous error

@@ -1,0 +1,18 @@
+
+running 13 tests
+test transport::outbound::tests::adjacent_delta_merge_preserves_unicode_escaping_empty_parts_and_all_boundaries ... ok
+test transport::outbound::tests::byte_and_count_budgets_reserve_control_space_and_fail_the_entire_connection ... ok
+test transport::outbound::tests::command_output_and_observer_progress_use_data_budget_without_merging ... ok
+test transport::outbound::tests::disconnect_wakes_admission_even_when_producers_ignore_send_errors ... ok
+test transport::outbound::tests::large_terminal_keeps_its_existing_payload_without_a_new_size_cap_or_fifo_reordering ... ok
+test transport::outbound::tests::multiple_regular_responses_exhaust_total_bytes_and_preserve_failure_evidence ... ok
+test transport::outbound::tests::observer_cursor_and_unknown_stage_fields_are_never_merged ... ok
+test transport::outbound::tests::one_oversized_response_is_leased_until_its_owned_frame_is_released ... ok
+test transport::outbound::tests::overload_diagnostics_distinguish_bytes_and_oversize_without_payloads ... ok
+test transport::outbound::tests::overload_drains_accepted_fifo_then_emits_independent_failure_frame ... ok
+test transport::outbound::tests::slow_stream_first_character_has_no_coalescing_timer ... ok
+test transport::outbound::tests::stalled_writer_has_no_normal_deadline_but_shutdown_interrupts_blocked_write ... ok
+test transport::outbound::tests::writer_batches_ready_frames_and_flushes_tail_before_terminal_and_shutdown ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 0.05s
+

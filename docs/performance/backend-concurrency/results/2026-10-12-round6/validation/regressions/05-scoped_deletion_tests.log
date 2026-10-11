@@ -1,0 +1,8 @@
+
+running 3 tests
+test application::agent::run_lifecycle::scoped_deletion_tests::conversation_mutations_do_not_fence_other_conversations_in_same_project ... ok
+test application::agent::run_lifecycle::scoped_deletion_tests::failed_tree_scope_extension_does_not_leave_partial_tombstones ... ok
+test application::agent::run_lifecycle::scoped_deletion_tests::project_deletion_waits_for_local_mutations_without_holding_registry ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1249 filtered out; finished in 0.00s
+

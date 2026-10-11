@@ -1,0 +1,18 @@
+{
+  "command": [
+    "<build>/release/deps/mycopilot_core-7748a31bd053ad1f",
+    "--ignored",
+    "--exact",
+    "storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "sha256": "3696d25b57e9c271814ccace77b38f439aff96da687341367068e4fc9b4f4563",
+  "environment": {
+    "MYCOPILOT_MULTI_AGENT_PROFILE_FACTS": "10000",
+    "MYCOPILOT_MULTI_AGENT_PROFILE_RESTARTS": "20"
+  },
+  "scope": "isolated functional release gate; concurrency with compilation/other regression may affect elapsed performance metrics",
+  "returncode": 0,
+  "elapsed_seconds": 16.2285105
+}

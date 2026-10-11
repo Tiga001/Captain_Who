@@ -1,0 +1,13 @@
+{
+  "implementation_commit": "b1744ab98e6eb5db633e351d983bbe9d401a76f6",
+  "release_binary_sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082",
+  "baseline_commit": "acae06623b7ce6031b90795e730968fb36e38107",
+  "baseline_binary_sha256": "a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522",
+  "baseline_adaptation_patch_sha256": "56f72ea41856ff6c64e8c4f82457ddc6d0a6f7539c6bb7cdcd14081217f98ea4",
+  "release_build_log": "build-final.stdout.log",
+  "changes_after_release_build": [
+    "Debug-only prepared_history_continuous_send.rs assertions updated to Core checkpoint ownership; entire module cfg(debug_assertions) and absent from release executable.",
+    "Documentation schema correction and local commit; no release production or benchmark code changed."
+  ],
+  "fixture_reproduction": "Apply baseline-adaptation.patch to baseline commit; copy six native fixture files listed in baseline-renderer-final-preparation.json from implementation commit. Baseline fixture lexical lock scope differs without behavior change; workload-equivalence.json records it."
+}

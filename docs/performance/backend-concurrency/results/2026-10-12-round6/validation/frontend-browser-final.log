@@ -1,0 +1,37 @@
+
+ RUN  v4.1.10 <repo>
+
+stderr | src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx > authoritative run cancellation and conversation forking > shows the localized active-command explanation for a typed fork rejection
+Failed to continue conversation in a new task [HostInvocationError: Conversation fork was rejected.]
+stderr | src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx > authoritative run cancellation and conversation forking > keeps the fork request identity when retrying an uncertain response and clears pending state
+Failed to continue conversation in a new task [Error: response connection closed]
+stderr | src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx > authoritative run cancellation and conversation forking > uses a new fork identity when latest refers to a newer source history
+Failed to continue conversation in a new task [Error: response connection closed]
+stderr | src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx > authoritative run cancellation and conversation forking > shows a localized busy explanation when fork admission is full
+Failed to continue conversation in a new task [HostInvocationError: fork queue is full]
+stderr | src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx > authoritative run cancellation and conversation forking > does not expose an unknown Core, IPC, or database failure in the fork toast
+Failed to continue conversation in a new task [Error: Error invoking remote method 'host:storage.forkConversation': CoreJsonRpcError: UNIQUE constraint failed]
+ ✓ |browser (chromium)| src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx (173 tests) 22005ms
+     ✓ retries a rejected transcript read without rolling back the applied Session status  551ms
+     ✓ auto-sends the frozen queue settings without replacing newer composer choices  460ms
+     ✓ keeps newer composer choices when a queued message finishes its confirmed model transition  307ms
+     ✓ guides any selected item in the active run and auto-sends the remaining head item  314ms
+     ✓ upgrades a legacy pending run only after an accepted decision ACK  528ms
+     ✓ upgrades a legacy run on Started after Core installs its checkpoint generation  439ms
+     ✓ restores a running projection with Core ownership true while retaining legacy saves  493ms
+     ✓ flushes final text before readiness without persisting or completing the run for the marker  318ms
+     ✓ orders activity after buffered text without persisting activity or touching the conversation  315ms
+ ✓ |browser (chromium)| src/renderer/src/features/chat/__tests__/ObserverConversationHook.browser.test.tsx (29 tests) 2773ms
+   ✓ publishes recent snapshots during uninterrupted same-scope invalidations  311ms
+ ✓ |browser (chromium)| src/renderer/src/app/__tests__/TurnAccessSubmission.browser.test.tsx (14 tests) 896ms
+ ✓ |browser (chromium)| src/renderer/src/features/agentCollaboration/__tests__/useCollaborationApprovals.browser.test.tsx (15 tests) 800ms
+ ✓ |browser (chromium)| src/renderer/src/app/__tests__/HumanInteractionConversationSync.browser.test.tsx (13 tests) 725ms
+ ✓ |browser (chromium)| src/renderer/src/app/__tests__/McpActionDecisionSafety.browser.test.tsx (3 tests) 74ms
+ ✓ |browser (chromium)| src/renderer/src/app/__tests__/useConversationPersistence.browser.test.tsx (7 tests) 161ms
+
+ Test Files  7 passed (7)
+      Tests  254 passed (254)
+   Start at  23:42:21
+   Duration  32.20s (transform 0ms, setup 0ms, import 3.13s, tests 27.43s, environment 0ms)
+
+JSON report written to <repo>/.cache/backend-concurrency/round6-validation-20261011/frontend-browser-final.json

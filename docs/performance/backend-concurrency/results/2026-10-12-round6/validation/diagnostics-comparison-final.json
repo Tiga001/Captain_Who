@@ -1,0 +1,217 @@
+{
+  "status": "same binary and source, complete healthy recovery; SLO evaluated separately",
+  "scope": "One ordered on then off pair of 50-owner, 10-wave finite text workload. This is not a randomized or repeated-process estimate, capacity frontier, or sustainable load result. Missing stage/queue diagnostics when off are unavailable, not zero cost.",
+  "source": {
+    "head": "0d70c62398da930a95be5ada3450bd3418ef779e",
+    "tracked_diff_sha256": "4769a073ee7c1297a04359bf54506d9a2fbdba1115776bd2a3318f432dd0cbce",
+    "source_manifest_sha256": "504c1f53105e9b08b81a37ce97f7af4a1ab8307a31dba1f813483943aa950819"
+  },
+  "initial_off_trial": "Original delivery binary rejected explicit diagnostics=0 at test startup, zero cases. Retained as diagnostics-off-initial-test stdout/stderr; final fixture accepts explicit 0 or 1.",
+  "runs": {
+    "on": {
+      "path": ".cache/backend-concurrency/round6-diagnostics-on-20261012-r2",
+      "binary_sha256": "bf222b0992317f83ec8ed7ad2fe90812dc9427cdc76ae5b9fdb2115c4b88123d",
+      "run_exit": 0,
+      "source_unchanged": true,
+      "input": {
+        "history_pairs": 0,
+        "roots": 50,
+        "slow_seconds": 0,
+        "units": 50,
+        "waves": 10,
+        "work": "text"
+      },
+      "acknowledged_starts": 500,
+      "recovery_roots": 500,
+      "recovery_statuses": {
+        "Completed": 500
+      },
+      "identity_errors": [],
+      "naturally_drained": true,
+      "integrity_errors": [],
+      "outbound_state": {
+        "closed": false,
+        "failed": false,
+        "failure_snapshot": null,
+        "overloaded": false
+      },
+      "provider_requests": 500,
+      "provider_request_bytes": 40847260,
+      "output_events": 6500,
+      "output_bytes": 41347950,
+      "compaction_events": 0,
+      "start": {
+        "offered": 500,
+        "dispatch_admitted": 500,
+        "handler_started": 500,
+        "transport_rejected": 0,
+        "success": 500,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 500,
+          "p50_ms": 394.897,
+          "p95_ms": 773.752,
+          "p99_ms": 829.59,
+          "max_ms": 899.432
+        },
+        "all_scheduled": {
+          "n": 500,
+          "p50_ms": 394.897,
+          "p95_ms": 773.752,
+          "p99_ms": 829.59,
+          "max_ms": 899.432
+        },
+        "success_actual": {
+          "n": 500,
+          "p50_ms": 390.928,
+          "p95_ms": 769.891,
+          "p99_ms": 826.506,
+          "max_ms": 894.885
+        },
+        "queue": {
+          "n": 500,
+          "p50_ms": 342.713,
+          "p95_ms": 728.758,
+          "p99_ms": 785.782,
+          "max_ms": 857.739
+        },
+        "provider_start": {
+          "n": 500,
+          "p50_ms": 424.933,
+          "p95_ms": 808.549,
+          "p99_ms": 857.959,
+          "max_ms": 918.169
+        },
+        "response_bytes": 330292,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 2
+        }
+      },
+      "cpu_seconds": 25.452783,
+      "sampled_rss_peak_bytes": 120537088,
+      "sampled_threads_peak": 33,
+      "lifetime_maxrss_bytes": 120913920,
+      "measured_seconds": 18.958973,
+      "timer_lag": {
+        "count": 948,
+        "max_us": 3897,
+        "p50_us": 2369,
+        "p95_us": 3657,
+        "p99_reliable": false,
+        "p99_us": 3820
+      },
+      "stage_metric_count": 62,
+      "queue_metric_count": 8,
+      "finite_completed_turns_per_second": 26.372736540106892,
+      "raw_throughput_matches_hardened_analysis": true,
+      "empirical_slo_and_drain_pass": false
+    },
+    "off": {
+      "path": ".cache/backend-concurrency/round6-diagnostics-off-20261012-r2",
+      "binary_sha256": "bf222b0992317f83ec8ed7ad2fe90812dc9427cdc76ae5b9fdb2115c4b88123d",
+      "run_exit": 0,
+      "source_unchanged": true,
+      "input": {
+        "history_pairs": 0,
+        "roots": 50,
+        "slow_seconds": 0,
+        "units": 50,
+        "waves": 10,
+        "work": "text"
+      },
+      "acknowledged_starts": 500,
+      "recovery_roots": 500,
+      "recovery_statuses": {
+        "Completed": 500
+      },
+      "identity_errors": [],
+      "naturally_drained": true,
+      "integrity_errors": [],
+      "outbound_state": {
+        "closed": false,
+        "failed": false,
+        "failure_snapshot": null,
+        "overloaded": false
+      },
+      "provider_requests": 500,
+      "provider_request_bytes": 40847257,
+      "output_events": 6500,
+      "output_bytes": 41347950,
+      "compaction_events": 0,
+      "start": {
+        "offered": 500,
+        "dispatch_admitted": 500,
+        "handler_started": 500,
+        "transport_rejected": 0,
+        "success": 500,
+        "errors": 0,
+        "no_response": 0,
+        "success_scheduled": {
+          "n": 500,
+          "p50_ms": 384.368,
+          "p95_ms": 761.235,
+          "p99_ms": 836.714,
+          "max_ms": 858.635
+        },
+        "all_scheduled": {
+          "n": 500,
+          "p50_ms": 384.368,
+          "p95_ms": 761.235,
+          "p99_ms": 836.714,
+          "max_ms": 858.635
+        },
+        "success_actual": {
+          "n": 500,
+          "p50_ms": 382.306,
+          "p95_ms": 758.689,
+          "p99_ms": 832.54,
+          "max_ms": 854.443
+        },
+        "queue": {
+          "n": 500,
+          "p50_ms": 338.845,
+          "p95_ms": 715.3,
+          "p99_ms": 788.361,
+          "max_ms": 817.565
+        },
+        "provider_start": {
+          "n": 500,
+          "p50_ms": 423.276,
+          "p95_ms": 803.443,
+          "p99_ms": 853.798,
+          "max_ms": 876.303
+        },
+        "response_bytes": 330292,
+        "confidence": {
+          "status": "insufficient_blocks",
+          "blocks": 2
+        }
+      },
+      "cpu_seconds": 25.225585000000002,
+      "sampled_rss_peak_bytes": 117522432,
+      "sampled_threads_peak": 34,
+      "lifetime_maxrss_bytes": 117555200,
+      "measured_seconds": 18.979562,
+      "timer_lag": {
+        "count": 949,
+        "max_us": 4009,
+        "p50_us": 2647,
+        "p95_us": 3864,
+        "p99_reliable": false,
+        "p99_us": 3976
+      },
+      "stage_metric_count": 0,
+      "queue_metric_count": 0,
+      "finite_completed_turns_per_second": 26.344127435606783,
+      "raw_throughput_matches_hardened_analysis": true,
+      "empirical_slo_and_drain_pass": false
+    }
+  },
+  "observed_on_relative_to_off_percent": {
+    "cpu_seconds": 0.9006649399805777,
+    "sampled_rss_peak_bytes": 2.565174961661798,
+    "measured_seconds": -0.10847984795434584
+  }
+}

@@ -1,0 +1,12 @@
+
+running 7 tests
+test application::agent::preparing::tests::preparing_deletion_fences_registration_and_cancels_only_its_scope ... ok
+test application::agent::preparing::tests::preparing_old_generation_and_boot_cannot_validate_or_retire_successor ... ok
+test application::agent::preparing::tests::preparing_run_identity_cannot_alias_a_different_conversation ... ok
+test application::agent::preparing::tests::preparing_same_conversation_has_one_owner_while_independent_preparations_coexist ... ok
+test application::agent::preparing::tests::preparing_scope_drain_wait_does_not_block_other_conversation_registration ... ok
+test application::agent::preparing::tests::preparing_shutdown_waits_for_real_retirement_without_losing_wakeup ... ok
+test application::agent::preparing::tests::preparing_snapshot_retains_authoritative_owner_revision_and_phase ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1245 filtered out; finished in 0.04s
+

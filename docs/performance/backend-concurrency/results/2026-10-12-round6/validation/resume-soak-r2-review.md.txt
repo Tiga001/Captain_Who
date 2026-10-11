@@ -1,0 +1,79 @@
+# Current r2 20-unit mixed soak 独立复核
+
+结论：**本次长测失败，不能称 600 秒持续运行健康、吞吐达标、资源收敛或无泄漏。** 在 fixture 时间 239.861333 s，outbound 因 RPC response 队列总字节超限而关闭；后续到 600 s 的计划投放大部分由夹具本地拒发。成功 ACK 的身份/恢复核对通过，但这不能弥补响应丢失、未自然 drain 和 SLO 失败。
+
+本次仅轻量解析 `../round6-final-soak-u20-20261012-r2/{metadata.json,cases.jsonl,resources.jsonl}`，独立交叉核对 `final-soak-r2-analysis.json`，并只读相关源码。无构建、测试、新负载或生产/正式文档修改。紧凑证据与逐 owner 数据见 `resume-soak-r2-review.json`。
+
+## 身份及失败边界
+
+- HEAD `b1744ab98e6eb5db633e351d983bbe9d401a76f6`，binary SHA256 `a79d93917cd199819e5f5656d49bfd1ff220d2856f1a352e575e498c5b180fb9`；source_changed_during_run=false，raw invalidLines=0。metadata status=failed，exit code=101；七项 integrity failure 保持原样，不因 JSON 可解析就称完整性验收通过。
+- SQLite 3.53.2 / WAL / synchronous inspection=2 / schema 71。计划 20 owner 每 2 秒一波，共 301 波、6020 starts，背景 loadConversation 每 500 ms；实际 case 计量 855.061 s，进程 859.536 s。增加的时间包含等待回复、drain 与失败收尾，不能当作有效 steady workload。
+- `raw.transport_failure.at_us=239861333`；failure snapshot：category=`rpc.response`，queue_bytes=7,933,685，frame_bytes=3,882,503，byte_limit=true；frame_limit、data_byte_limit、data_frame_limit、oversize_busy 均为 false。当前源码 `crates/core-server/src/transport/outbound.rs:16–19,267–293` 的总预算为 8 MiB+1 MiB；仅 queue+wire size 已超过预算。直接原因是 RPC response 总字节边界，不是线程数、帧数或超大单帧占用限制。
+- 相邻背景 read 回复实际 wire 为 3,926,406 B（id3478）、3,884,102 B（id3482）；大历史 response 是强关联候选。失败 snapshot 不含 request ID，不能直接宣称已记录触发者就是某个具体 read。失联前已入队帧继续到 240.125358 s 被 collector 接收，符合队列排空，不表示通道恢复。
+
+## no_response 必须拆分
+
+| 操作 | offered | Core dispatch/handler started | 成功 | RPC错误 | 无回复 | 夹具本地拒发 | Core已投递但未答 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| start | 6020 | 2400 | 1873 | 526 | 3621 | 3620 | 1 |
+| approve | 457 | 454 | 454 | 0 | 3 | 3 | 0 |
+| cancel | 151 | 151 | 151 | 0 | 0 | 0 | 0 |
+| loadConversation | 1201 | 480 | 479 | 0 | 722 | 721 | 1 |
+| 合计 | 7829 | 3485 | 2957 | 526 | 4346 | 4344 | 2 |
+
+`backend_concurrency_baseline.rs:634–661` 先记录 offer，再在 outbound 已关闭时填 `transport_rejected_us` 并直接返回，未调用 Core dispatcher。这 4344 次不是 Core overload RPC 回复，也不是已耐久接受任务；首次为 id3486 /240.033853 s，最后为 id7829 /600.035859 s。
+
+仅两个请求 dispatch_admitted=true 且 handler_started 有值、却无回复：
+
+- id3468，start，owner12 /wave119，scheduled 238.032887 s，offered 238.066831 s，handler 239.801046 s。raw 没有 `root-12-wave-119` 的 provider_first，reopen 全量 Trace 清单没有 `output-12-119`。只能称“已进入 Core handler 未收到回复”，**没有证据称其 durable commit 成功**。
+- id3485，loadConversation，owner19，scheduled 239.532887 s，offered 239.550618 s，handler 239.801070 s。
+
+526 个 RPC 错误全部为 `-32000 / provider_transition_blocked / preflight.reason=active_run`，没有 dispatch overload 回复，也没有账号 lease 错误。它们是同会话仍在占用的业务拒绝；原 runner 的 unexpected_rpc_errors 仍保留失败分类，不混入成功延迟。execution grants 共43次、续租到840.094474 s，fixture覆盖900.025 s；本次失联不应误归为固定60秒许可过期。
+
+## ACK、终态及每 owner 进展
+
+独立从 RPC success 提取 1873 个唯一 runId，核对 owner、conversationId、assistantMessageId、嵌入消息 ID、userMessageId及 wave 预期；与 reopen 全量 root Trace 一一对应，0 身份错误、0 ACK 缺失恢复、0 多余未ACK root。原 recovery 检查也为1873/0。相关收集/清点源码为 `backend_concurrency_baseline.rs:1385–1401,1446–1447`。
+
+- durable reopen：1719 Completed +154 Cancelled；raw 已收到 Done：1704 completed +151 cancelled，共1855。另18个 durable终态未观察到 Done，不应全部叫作持久化失败。
+- 计量前 cleanup 尚有3个 in-progress，drained_before_cleanup=false；pre-close也是3，clean shutdown/reopen后0。shutdown未超时。它证明这次干净关停/重开的最终状态，不是自然drain、crash或断电耐久证明。
+- 各 owner 成功 start ACK 88–103、active_run错误17–32；所有 owner 都有成功与最终 durable 状态，最后 ACK 在236.083033–238.789519 s，最后观察到的全局Done为240.119671 s。失联前同owner相邻ACK最大间隔7.690074 s；失联后每个owner又计划181个start，全被本地拒发。不能从前四分钟有进展推出完整600秒公平/无饿死。
+
+按 start scheduled 所在分钟重新算成功：
+
+| 时间 | offered/成功/错误 | 成功 send p95 |
+| --- | --- | ---: |
+| 0–60 s | 600/585/15 | 671.184 ms |
+| 60–120 s | 600/502/98 | 1242.189 ms |
+| 120–180 s | 600/439/161 | 1684.398 ms |
+| 180–240 s | 600/347/252，另1已投递未答 | 2027.720 ms |
+| 240–600 s | 3600/0/0，全部本地拒发 | 无成功样本 |
+
+t=600最后一波20个另计，亦全本地拒发。起始 history_pairs=0，但历史随运行增长，后续不能统称固定短历史。成功全程 send p95/p99=1615.386/2087.307 ms，approve=700.078/1186.232 ms，cancel=206.954/548.098 ms。cancel本次成功分位达门槛，不能覆盖整体失败或代表失联后控制可用。
+
+## 失联前后资源，不作健康归一化
+
+以下使用与失联时钟一致的 raw `proc_pid_rusage_v4` 样本，单位 bytes；最接近失联的两侧为239.366070 s和240.033849 s，并非精确瞬间。
+
+| raw时点 | 累计CPU秒 | resident | physical footprint | DB | WAL | active |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.034 s | 0.110 | 29,851,648 | 14,320,144 | 2,523,136 | 824,032 | 0 |
+| 60.035 s | 74.611 | 245,612,544 | 245,957,376 | 59,564,032 | 6,917,512 | 0 |
+| 120.035 s | 217.060 | 372,391,936 | 365,642,688 | 123,396,096 | 16,121,592 | 0 |
+| 180.034 s | 413.121 | 417,775,616 | 564,741,200 | 193,458,176 | 16,121,592 | 17 |
+| 239.366 s | 615.723 | 469,958,656 | 671,614,176 | 258,015,232 | 16,121,592 | 20 |
+| 240.034 s | 618.467 | 489,668,608 | 689,374,456 | 259,698,688 | 16,121,592 | 17 |
+| 300.035 s | 623.527 | 39,960,576 | 565,609,672 | 261,328,896 | 16,121,592 | 3 |
+| 600.036 s | 624.987 | 39,763,968 | 566,052,040 | 261,328,896 | 16,121,592 | 3 |
+| 690.038 s（最后raw资源样本） | 625.991 | 41,566,208 | 534,414,536 | 261,328,896 | 16,121,592 | 3 |
+
+失联前240个样本的resident/footprint峰值499,040,256 /760,120,544；失联后451个样本峰值489,668,608 /692,208,888。前段CPU增加615.613 s；240.034→690.038 s仅增加7.525 s，因为有效新业务输入已经中止。后段resident下降与WAL/DB停止增长不能称负载下资源改善或收敛；footprint仍约0.53–0.69GB，也不能据此单独断言泄漏。
+
+外部 `resources.jsonl` 是进程启动相对时间，每秒采样；与fixture epoch不假定精确对齐。其全程RSS采样峰值574,242,816 B、线程峰值41，最后RSS574,242,816 B。保留其与raw resident/footprint不同口径，不能挑较小值代表产品内存。全case CPU增量626.973 s、kernel归属写8,328,757,248 B、logical writes6,631,821,480 B；包含Core、fake provider及夹具，不能折算为物理SSD写放大或用855秒含长空闲的分母报健康吞吐。
+
+WAL在前约120秒达到16,121,592 B，此后样本不再增长；但后约450秒没有正常持续新投放，缺少checkpoint busy/frame差与正常600秒持续写入，无法证明运行期长期回收。队列、DB、读写和恢复均属于隔离fixture，不涉及用户真实会话。
+
+## 与既有分析交叉核对及下一步边界
+
+独立计数及全部四类成功分位与 `final-soak-r2-analysis.json` 一致；其 throughput_eligible=false、throughput值未发布是正确处理。保留七项失败：transport_failure、outbound_not_healthy、transport_request_rejected、missing_rpc_response、unexpected_rpc_errors、invalid_background_read、mixed_cancel_count_mismatch。后两项不能无证据扩写成“已收到错误历史正文”或“cancel RPC失败”；本次读样本缺失且失联中断后续混合控制。
+
+后续优先定位大背景历史response的排队/消费及与同通道控制共享字节预算的关系，在保持payload、成功ACK/错误语义与现有容量约束下制定修复；同时保留前四分钟服务时间/active_run拒绝增长这一独立退化事实。需新的独占600秒验证通过响应完整、正常drain、每owner进展及资源时序后，才可重新讨论持续吞吐和资源健康。本报告不提前解释尚在运行的baseline r2。

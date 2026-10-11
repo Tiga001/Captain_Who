@@ -1,0 +1,30 @@
+[
+  {
+    "label": "original_matrix",
+    "cases": 36,
+    "failures": []
+  },
+  {
+    "label": "final_matrix_before_new_fields",
+    "cases": 36,
+    "failures": []
+  },
+  {
+    "label": "failed_soak_r1",
+    "cases": 1,
+    "failures": [
+      {
+        "case": "mixed-u20-r20-h0-s0",
+        "errors": [
+          "recovered_root_count_mismatch",
+          "invalid_root_terminal_distribution",
+          "root_terminal_count_mismatch",
+          "missing_rpc_response",
+          "unexpected_rpc_errors",
+          "invalid_background_read",
+          "mixed_missing_controls:agent.approveAction"
+        ]
+      }
+    ]
+  }
+]

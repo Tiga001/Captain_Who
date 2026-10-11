@@ -1,0 +1,34 @@
+[
+  {
+    "index": 47,
+    "kind": "server",
+    "filter": "transport::automation_rpc::tests::host_notification_rpc_",
+    "returncode": 0,
+    "duration_s": 2.549,
+    "log": "47-transport-automation_rpc-tests-host_notification_rpc_.log",
+    "counts": [
+      "ok",
+      "2",
+      "0",
+      "0"
+    ],
+    "binary": "core-server-final",
+    "sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082"
+  },
+  {
+    "index": 48,
+    "kind": "server",
+    "filter": "application::agent::tests::prepared_history",
+    "returncode": 0,
+    "duration_s": 1.58,
+    "log": "48-application-agent-tests-prepared_history.log",
+    "counts": [
+      "ok",
+      "14",
+      "0",
+      "0"
+    ],
+    "binary": "core-server-final",
+    "sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082"
+  }
+]

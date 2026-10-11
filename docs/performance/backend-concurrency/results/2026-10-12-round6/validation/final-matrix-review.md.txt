@@ -1,0 +1,69 @@
+# 最终 36 场景矩阵独立复核
+
+结论：raw integrity 与相同业务工作量核对通过；当前 50 root 同时发送仍未达到普通短历史 send p95 ≤500 ms。失败主要落在当前两槽 write execution permit 的等待，旧 baseline 的全局连接/旧 lane dependency 解释不适用于这个结论。20 root 短历史 send、已接纳的控制响应、60 秒 steady-text 的本次分位达到对应 Core 指标；600 秒 mixed soak 与最终 Electron/Renderer 结论另列。
+
+本复核只读取已有文件、做小规模聚合并写缓存报告；未改 tracked source、编译或运行 benchmark。原始证据为 `../round6-final-full-20261012-r1/{metadata.json,cases.jsonl,resources.jsonl}`，分析 `final-full-analysis.json`，原矩阵对照 `matrix-vs-original.{json,csv,txt}`。独立聚合和选定 stage/具体尾请求见 `final-matrix-review-evidence.json`。
+
+## 身份与工作量
+
+- 最终矩阵 HEAD `b1744ab98e6eb5db633e351d983bbe9d401a76f6`；binary SHA256 `99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082`。运行期间 source unchanged，metadata completed / exit 0 / invalidLines 0 / integrityFailures []。
+- 本次使用 SQLite 3.53.2 / WAL / synchronous 2 / schema 71。本文 stage 全部来自当前最终矩阵，不取旧 DELETE 基线的指标作当前因果证据。
+- 36 场景、1608 offered RPC、1572 admitted 且成功回复、36 拒绝、0 无回复；1420 durable root、reopen 1420 root/158 child。root 最终 1316 Completed +104 Cancelled，child 158 Completed。以上与 2026-10-11 原矩阵逐场景完全一致，comparison 36/36 same_workload 与 same_actual_outcomes，violations []。
+- 两组拒绝分别是 `approval-u50-r50-h0-s0` 的 18 次 approve 和 `stop-u50-r50-h0-s0` 的 18 次 cancel；共 36 次均为 `-32001/rpc_dispatch_error/overloaded/retryable=true`，均 `dispatch_admitted=false`、`handler_started_us=null`。既有 32 容量边界保留；不是进入 handler 后的失败，也不能加入成功延迟分位。
+- 两组在 cleanup 之前各有 18 个未结束 root，因此两组 `drained_before_cleanup=false`，不声称整个矩阵自然 drain。approval 在 pre-close 仍有 18 个，stop 的 pre-close 已为 0；clean shutdown/reopen 后全部 in-progress 0。这不等同于 crash/power-loss 耐久证明。
+- provider requests 1679→1679，output events 22271→22271，compaction 0→0。request bytes 194424455→194439588（+15133，约 +0.0078%），output bytes 137273343→137273355（+12）；因此工作量相同指场景、请求数、接纳任务、终态及事件数，不宣称逐字节完全相同。
+
+## SLO 与明确复现
+
+| 场景 | 成功 n | send scheduled→response p95 / p99 / max（ms） | 本次结论 |
+| --- | ---: | --- | --- |
+| text-u20-r20-h0-s0 | 60 | 247.969 /268.257 /268.257 | 短历史 send 通过 |
+| text-u20-r20-h128-s0 | 60 | 401.915 /464.909 /464.909 | 长历史诊断参照；不冒充短历史 |
+| text-u50-r50-h0-s0 | 150 | 755.424 /795.807 /795.827 | 普通短历史 send 失败，p95 为门槛 1.51 倍 |
+| text-u50-r50-h128-s0 | 150 | 1106.118 /1192.683 /1192.706 | 长历史进一步变慢；500 ms 对照为 2.21 倍 |
+| steadytext-u20-r20-h0-s0 | 620 | 380.394 /439.710 /498.966 | 60 秒 finite-run 通过，不代替 600 秒 mixed soak |
+
+50-unit approval 的成功 32 个 p95 143.462 ms /max151.384 ms，cancel 成功 32 个 p95 67.916 /max69.138 ms；各18拒绝仍单列。20-unit approval 成功20个 p95 60.206 ms、cancel成功20个 p95 38.993 ms。approval-behind-preparation 50-unit 的单次控制观测为13.883 ms，只能称单次观测，不包装稳定p95。矩阵所有1–20控制成功观测与50控制成功观测均在相应目标内，样本量不足以证明长期p99。
+
+原 raw 可直接定位尾请求：短50 `id=50,owner=49,phase=cold_history`，scheduled 30150 μs、offered32451、handler782480、response825977；offered→handler **750029 μs**，handler→response43497 μs，总 scheduled→response795827 μs。长50同一 id/owner/phase，scheduled33403、offered35586、handler1172937、response1226109；offered→handler **1137351 μs**，handler→response53172 μs，总1192706 μs。尾部并非单个 handler 自己计算一秒。
+
+后续独占窗口需要定向复现时使用现有 runner 与冻结 binary，不自动重编：
+
+```sh
+node scripts/run-backend-concurrency-baseline.mjs --mode full --waves 3 --filter text-u50-r50-h0-s0 --binary .cache/backend-concurrency/round6-validation-20261011/binaries/core-server-final --output-dir .cache/backend-concurrency/round6-followup-text50-short
+```
+
+长历史将 filter 改为 `text-u50-r50-h128-s0` 并使用新的独立输出目录。以上命令本次**未执行**，不能在正在运行的 soak 中并发启动。
+
+## 当前 stage 直接定位
+
+| 当前场景 | rpc.queue 聚合 | execution_permit_wait 聚合 /占 queue | write handler 平均 /p95 上界 | turn history_prepare /prepare_and_commit p95 上界 |
+| --- | ---: | ---: | ---: | ---: |
+| text20 short | 5605.595 ms | 5386.076 ms /96.08% | 24.105 /40.959 ms | 10.239 /18.431 ms |
+| text50 short | 52592.784 ms | 51846.393 ms /98.58% | 30.580 /45.055 ms | 13.311 /20.479 ms |
+| text50 long | 74021.055 ms | 73366.964 ms /99.12% | 44.971 /61.439 ms | 18.431 /26.623 ms |
+
+`bounded_dispatch.rs:530` write lane concurrency 明确为 2；`execute_job:344` 取得 fair execution permit 后持有至 handler 返回及回复入队。上述 execution permit 阶段 p95 上界为 short50 **720.895 ms**、long50 **1048.575 ms**，与最终尾延迟量级一致。short/long50 lane_wait 聚合只有2.050/2.295 ms，dependency_wait只有2.235/2.352 ms；owner resolution p95上界11.012/5.978 ms。故“写入执行名额等待占绝大多数 handler 前排队”是**当前实测定位**；不是旧 lane queue 队头阻塞，也没有证据说同 owner dependency 是这两组尾部主因。
+
+同一 write handler 的平均服务时间从20短的24.1 ms增到50短30.6 ms、50长45.0 ms。50个近同时请求在两槽上排队会放大几十毫秒服务时间；简单均匀服务近似下，靠近第48个完成需要约24批，500ms对应每批约20.8ms服务预算。这只是定位用吞吐近似，真实服务分布/并发/入队顺序并不满足恒定服务，不能作为保证或据此更改业务额度。
+
+`turn.rs:309` 的 admission_hold 是**每 Conversation** fence，不是全局锁；其总时长 short50 4558.164 ms、long50 6673.068 ms，接近各 handler_execution 4586.982/6745.634 ms。admission_wait 聚合只有0.130/0.175ms。不能把名为 admission_hold 的span误读成50 owner互相争抢同一个锁。真正下一步应进一步分解 handler 持有 execution permit 期间的业务工作和串行小storage调用。
+
+writer/read是服务时间贡献候选，但当前证据未证明它们单独造成整段尾部：short/long50 writer queue_wait p95上界同为5.631ms，max14.122/21.774ms；read_wait p950.447/1.407ms，max3.689/10.553ms；writer hold p952.559ms（长50），turn_admission transaction p95短5.119/长6.655ms。很多小读写的总量与history prepare/commit会占用handler，不能把所有write permit排队都加到一个SQLite commit上。旧连接mutex等待此时几乎为零（short50全程0.109ms、long50 0.161ms），因为等待已显式迁到writer gate，单看sqlite.wait接近0也不能宣称storage无排队。
+
+completion backlog仍值得跟进，但不应混成 durable admission 的直接阻塞：short/long50 completion queue_wait p95上界147.455/163.839ms，execution p95 36.863/53.247ms；60秒steady20 queue_wait p95为180.223ms。这些终态/投影/维护任务会和新发送共享storage与CPU，是否通过它们延长send handler需per-request关联或profile确认。prepare worker queue_wait p95短0.703/长3.071ms，相比write permit排队小，不能先称“两preparation workers饱和”。
+
+当前timer lag p95短50 3.099ms、长50 2.894ms，max5.654/3.097ms；outbound.response queue p95上界24.575/32.767ms、max30.129/46.369ms，serialize p95仅10/7μs。因此此矩阵没有旧600秒baseline那种数百毫秒timer lag证据，优先改async runtime starvation/JSON wire encoding不能由当前数据支持。
+
+## 代价与安全下一步
+
+相同业务工作量下，总进程CPU **67.348→93.420秒（+38.71%）**、采样RSS峰值305086464→334626816 bytes、thread峰值26→48。text50短CPU +47.77%，长+23.85%，steady20 +67.07%；不能把当前延迟改善概括为CPU效率改善。增加了Core-owned耐久checkpoint等工作，进程还包含fake provider/harness；没有调用栈和per-feature CPU，不能据此定量归责给checkpoint。线程隔离是当前实现成本，不能再无证据增加lane或worker数“达标”。
+
+1. 保留本次50短SLO失败，并等待600秒结果完成。后续profiling优先选短50/长50相同工作量，标记每个send handler在metadata/root access、history version/clone、model准备、writer准入/commit、resume/readiness/runtime handoff上的时间；现有两个粗span不足以确定剩余CPU函数。
+2. 先减少两槽handler内重复small reads、同一不可变输入的重复clone/hash/assembly；只有确认同一个snapshot/版本内冗余后才消除。必须保留最终writer中的history/revision CAS、Preparing owner、execution access token、删除/关停围栏以及模型完整输入；账户license仍只约束新root准入。
+3. 若profile指向checkpoint/terminal竞争，减少同一语义内的重复序列化/全量展示处理，仍保留exact sequence/fingerprint replay、terminal/pending flush及late terminal fence；不能减少模型正文、去掉终态耐久、合并不同owner或延长lease来换指标。
+4. 任何后续代码变化先做定向correctness，再用独占A/B验证short50、long50与20mixed（含每owner进展和拒绝），同时报告CPU per accepted/provider request、logical/kernel I/O与payload bytes。提升吞吐、降低接纳量或稀释成功分位不能替代SLO达标。
+
+本文结论只覆盖这个36场景finite matrix；没有新增负载、未证明长期无饿死/无内存增长，也没有把core scheduled intake当成完整界面操作延迟。
+
+补充小表：`final-matrix-success-latencies.json` 包含1/5/10/20/50 units的short/long send及approve/cancel共20行，每行成功p50/p95/p99/max/n并列offered、错误/拒绝、无回复。p99为有限样本探索性描述，尤其n=1不赋予稳定尾分布意义。

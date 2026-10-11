@@ -1,0 +1,14 @@
+# completed_root_throughput 独立静态复核
+
+复核对象：commit `0d70c62398da930a95be5ada3450bd3418ef779e` 中新增的 `completed_root_throughput` 纯函数、报告接线及其测试。仅只读源码/diff；没有编译、执行测试或修改生产文件。父任务报告已有测试/Clippy结果，本复核不冒称重新执行。
+
+结论：**未发现本范围内需要阻断的明确问题。** 新gate只控制“有限观察窗内已证明完成的root数量/该窗时长”是否可发布，不表示SLO通过或可持续吞吐。
+
+- `crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs:147–255` 仅读取完整JSON报告；没有storage/RPC调用、任务派发、计时等待或容量变更。`:1538` 初值为null，`:1568–1569` 在完整报告组装后调用/赋值。`:1331–1334` 计量已结束并取完性能快照，之后也已完成关停/reopen，因此这次gate遍历不进入业务负载计量路径。此判断仅针对新增纯统计gate，不把整份commit中collector/传输证据改动泛称为无测量路径变化。
+- 拒绝发布条件覆盖：零/缺失时长、未自然drain、未完整回复、controls未就绪、关停超时、cleanup前仍in-progress、raw/runtime或unexpected RPC错误、非计划compaction、失联、outbound非健康、reopen残留、ACK恢复身份错误、计数不一致。关键显式null/false字段缺失也按None处理；None序列化成JSON null。
+- 每个raw RPC必须有response时间、合法result/error互斥及明确transport_rejected=null；成功start必须曾dispatch且handler启动。每个ACK的run/message非空且唯一，owner有效并与reopen的确切run/message身份对应；成功集合大小与accepted/recovery一致。root仅允许completed/cancelled，汇总数量必须与逐root事实吻合。无法以“总数相同但恢复到另一Run”绕过。
+- root offered总数必须等于roots×waves；已分类的明确负载拒绝仍计入offered检查，不成为成功ACK。测试最后一个正例允许明确dispatch拒绝且成功root正常完成，这是可描述的有限运行完成速率，并不代表未过载或容量提高。SLO miss也故意独立于统计gate，不能把Some(rate)读成验收通过。
+- `:1943–2045` 测试包含有效完成、逐项坏证据/missing字段、错误run身份、Cancelled→0完成速率，以及显式拒绝仍不充当成功ACK；与函数意图相符。无响应、本地拒发、outbound失败、晚于计量的cleanup恢复均不能靠最终Completed计数获得速率。
+- 依据现存r2报告做静态条件核对：current的drained/replies/transport多项门禁失败，baseline的unexpected_rpc_errors非空，二者都会返回None。历史冻结binary输出的旧raw数值不能被这次修改追溯改写；归档分析仍必须将其标为不可发布，原始证据保持原样。
+
+范围限制：该纯函数不是整个fixture正确性验证器；provider/Tree/background-read等场景完整性仍由既有fixture和runner检查。有限完成速率、场景验收与持续负载健康是不同结论，报告应继续同时保留门禁结果、拒绝/未答、每owner进展、业务工作量与资源时序，不能仅凭该字段非null作整体成功声明。

@@ -1,0 +1,29 @@
+
+running 23 tests
+test application::agent::tests::mcp_approval_expiry::expiry_tick_does_not_arbitrate_or_rewrite_durable_action_status ... ok
+test application::agent::tests::mcp_approval_expiry::expiry_tick_preserves_human_approval_tickets_and_does_not_touch_payloads ... ok
+test application::agent::tests::mcp_approval_lifecycle::agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durable_state ... ok
+test application::agent::tests::mcp_approval_lifecycle::approval_restart_preserves_default_and_legacy_output_policy_on_tool_continuation ... ok
+test application::agent::tests::mcp_approval_lifecycle::authoritative_truncation_reaches_the_terminal_lifecycle_event ... ok
+test application::agent::tests::mcp_approval_lifecycle::automatic_mcp_tool_error_keeps_model_arguments_live_but_not_durable ... ok
+test application::agent::tests::mcp_approval_lifecycle::cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_replay ... ok
+test application::agent::tests::mcp_approval_lifecycle::concurrent_double_reject_has_one_durable_winner_and_one_model_continuation ... ok
+test application::agent::tests::mcp_approval_lifecycle::deepseek_disabled_tool_turn_without_reasoning_survives_restart_and_approval ... ok
+test application::agent::tests::mcp_approval_lifecycle::deepseek_enabled_reasoning_restarts_privately_and_replays_byte_exact_with_budget_parity ... ok
+test application::agent::tests::mcp_approval_lifecycle::deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_provider_results ... ok
+test application::agent::tests::mcp_approval_lifecycle::deepseek_provider_default_tool_turn_with_reasoning_survives_restart_and_rejection ... ok
+test application::agent::tests::mcp_approval_lifecycle::mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_replay ... ok
+test application::agent::tests::mcp_approval_lifecycle::pending_deepseek_run_stays_frozen_when_next_run_switches_to_generic ... ok
+test application::agent::tests::mcp_approval_lifecycle::pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek ... ok
+test application::agent::tests::mcp_approval_lifecycle::post_cas_bare_cancellation_is_outcome_unknown_and_model_sees_certainty ... ok
+test application::agent::tests::mcp_approval_lifecycle::predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispatch ... ok
+test application::agent::tests::mcp_approval_lifecycle::recovered_approved_mcp_rejection_keeps_feedback_and_resumes_with_normal_tool_result ... ok
+test application::agent::tests::mcp_approval_lifecycle::rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_prefix ... ok
+test application::agent::tests::mcp_approval_lifecycle::rejecting_mcp_approval_with_reason_returns_feedback_without_dispatch ... ok
+test application::agent::tests::mcp_approval_lifecycle::rejecting_mcp_approval_without_reason_returns_a_normal_tool_result_without_dispatch ... ok
+test application::agent::tests::mcp_approval_lifecycle::restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch ... failed to append in-progress conversation trace for run run-976a4fe60dc144689a973505b235f613: 本地数据库操作失败：conversation trace updates must preserve every committed item as an exact prefix
+ok
+test application::agent::tests::mcp_approval_lifecycle::server_is_error_is_a_completed_tool_response_not_outcome_unknown ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 1229 filtered out; finished in 5.53s
+

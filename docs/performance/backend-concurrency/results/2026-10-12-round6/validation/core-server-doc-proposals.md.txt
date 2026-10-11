@@ -1,0 +1,41 @@
+docs/architecture/core-server.md 建议修正文案（仅cache，交主代理合并）
+来源：当前6e7bd1cc生产源码、round4-resource-scheduling.md、round5-persistence-ownership.md。
+不把第六轮尚未验证指标写成通过。
+
+1. 请求 admission 表：替换普通修改/控制/审批三行，并补身份解析行
+
+| 普通修改 RPC | 2 并发，运行与排队合计 64 项 / 64 MiB估算预算 | 按完整资源集合保留冲突顺序；同lane按root轮转，资源等待不占handler槽 |
+| 停止/取消与账号发布 RPC | 2并发，运行与排队合计32项 / 16 MiB估算预算 | 独立控制worker；已证明的Preparing Stop与账户撤销有专门越过规则，未知全局操作仍形成围栏 |
+| 普通批准/拒绝 RPC | 2并发，运行与排队合计32项 / 16 MiB估算预算 | 独立审批worker；等待相同Run/Conversation/树/Project或全局前序，不占停止执行槽 |
+| 共享身份解析 | 2专属worker | 请求仍持原lane数量/字节预算；解析队列上限为四lane接纳数量之和，另有1MiB估算预算 |
+
+普通查询表可补“64项 / 64 MiB估算预算”。物理worker和默认全局50逻辑Turn额度是不同预算。
+
+2. 替换第122段的全局依赖描述
+
+组织按具体operation分类；未知操作保守进入修改队列，再由原handler拒绝非法输入。Core Server从Conversation、Agent图、冻结pending Action与运行注册表解析完整Run/Conversation/树/Project资源集合；客户端ID仅作查询提示，不构成授权。相同资源的精确读写保留前序顺序，无关资源可以并行。审计过的概览读取观察一致快照，不使后续局部控制等待；未知全局修改仍保持屏障。归属变化完成后重新解析后续请求，准备和依赖等待不占handler槽。身份解析使用共享有界worker，stdin循环不执行SQL。领域最终事务继续检查权限、revision、claim和终态，单writer以及相同Conversation的必要顺序仍可能产生等待。
+
+3. 替换第126段“开始/重写/删除全部全局”的陈旧枚举
+
+agent.approveAction与agent.rejectAction使用审批队列，不占停止队列的执行许可。当前已审计的开始、继续、重写、删除及局部存档按权威资源排序；审批同时声明原冻结Project与当前Conversation Project。未知owner、未经审计的配置或多资源操作保守采用全局围栏。无持久metadata的新Turn保持GlobalTurnPreparation顺序，仅账号发布以及已登记且匹配的Preparing Stop可以按规则越过。每lane按root公平轮转，同一已识别root同时最多一个handler；这不是逻辑Turn额度，也不保证无抢占同步工作在任意输入下都有固定最长等待。详见第四轮资源调度契约。
+
+4. 第128段最后一句建议改为
+
+删除先发布范围标记，再在registry锁之外等待真实准备/副作用/持久发布活动退出；pending/cancellation registry仅保留短内存检查，较长审批与Run发布分别由对应资源gate排序。最终身份CAS和持久化保证保持。
+
+5. 第130段最后一句“本次后端优化不修改Renderer提交前存档等待”已与第五轮冲突
+
+建议改为：运行正文和安全展示检查点由Core Server每300ms合并保存；Renderer确认精确Core checkpoint owner后，不再全量写回运行消息或执行无关的前置flush。用户草稿、metadata和UI状态仍由原专用保存路径负责，保存失败保留payload并在显式flush/退出时传播错误。视觉与审批交互规则保持，终态Done仍等待原持久终态事务成功。
+
+6. shutdown第6、7项之间遗漏BlockingWork和storage关闭
+
+建议在第6项后加入：
+完成Automation最终reconciliation后，按preparation→control→completion→recovery→maintenance→lease关闭并排空已提交的同步执行器；尚未提交的reservation被late-submit fence拒绝。已开始的同步SQL或文件工作不能因外层future取消而被视为停止。随后关闭剩余事件notifier，刷出workflow runtime publication，停止周期WAL checkpoint并关闭storage；storage close等待已接纳写作业与正在执行的checkpoint完成。成功/失败由最终shutdown响应报告。
+
+第207段和第216段不宜称“完整shutdown最多两个grace”：两个grace只是通常的观察/取消窗口，agent_dispatcher.rs:1444-1451在非可中断Preparing或scan尚未退出时继续等待。应写“通常先观察一个grace，再取消并扫描一个grace；已开始同步准备/扫描必须交接真实结果，可能超过这两个窗口”。既有Main 6秒watchdog与实际drain时长不一致仍属需实测的边界，不通过文档改成有硬上限。
+
+7. 可在Multi-Agent边界增补本轮修复说明（测试通过后再标验证状态）
+
+子Turn的captured Wake capability在checkpoint writer事务内检查，更新前和commit前均需原claim、Run/assistant、树停止状态与新鲜lease有效；失效会回滚checkpoint generation。全部阻塞setup结束后模型启动前再次检查Wake。账户execution access只用于新root Turn的原子准入，账户退出/续租失效不取消已接纳回合；两类lease不得混用。
+
+对应源码：bounded_dispatch.rs/bounded_dispatch_resources.rs、application/agent/rpc_resources.rs、preparing.rs、keyed_admission.rs、turn_executor/runtime_segment.rs、storage/service/runtime_checkpoints.rs、transport/bootstrap.rs:639-677。

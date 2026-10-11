@@ -1,0 +1,91 @@
+{
+  "status": "prepared_not_executed",
+  "baselineRoot": "<baseline-worktree>",
+  "baselineHead": "acae06623b7ce6031b90795e730968fb36e38107",
+  "currentRoot": "<repo>",
+  "currentHead": "6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e",
+  "fixtures": [
+    {
+      "path": "src/main/core/backendAcceptance.electron.test.ts",
+      "sha256": "606383fb43865d6e3f2af0d8b29d5288c65cf0c32ec4d0e931fffee7f7df7c18",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.electron.ts",
+      "sha256": "9a563d9dc115d4f53103b1d04c1d461caaee398618c17ef739eb9c9606c44163",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.preload.ts",
+      "sha256": "20b14e1a21cae24bd905e46f6d38f3303a88b526caaf2d30b0b89e3995b75a42",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/main/core/fixtures/backendAcceptance.types.ts",
+      "sha256": "eacd776d1d42f3ed1b9c616fd19f45d8b2de9864ebcd78f9ccc18df4787357cc",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/renderer/src/app/__fixtures__/backendAcceptance.html",
+      "sha256": "e0e5b068ea8a82522ee3938c201eca2c3344e0a3693648343c4b6e6afb9cbaed",
+      "identicalToCurrent": true
+    },
+    {
+      "path": "src/renderer/src/app/__fixtures__/backendAcceptance.tsx",
+      "sha256": "1055be1510eeb0ee4bfe36f7862e357fa668752acbdc89329692ced492fd05c1",
+      "identicalToCurrent": true
+    }
+  ],
+  "hookApiAdaptations": [],
+  "workloadDifferences": [],
+  "baselineProductionChanges": "Only exact current cfg(test) isolated acceptance bootstrap entry transplanted; no other production changes by Renderer acceptance preparation. Existing Core benchmark backports belong to parent task.",
+  "bootstrapPatch": "baseline-renderer-bootstrap.patch",
+  "dependencies": {
+    "installationPerformed": false,
+    "external": "Symlink tree reuses current installed node_modules entries. @mycopilot namespace is a local directory, not a symlink to current.",
+    "workspacePackages": {
+      "@mycopilot/host-api": "<baseline-worktree>/packages/host-api",
+      "@mycopilot/protocol": "<baseline-worktree>/packages/protocol"
+    },
+    "lockAndManifestHashes": {
+      "pnpm-lock.yaml": {
+        "currentSha256": "6f82dc57e58ce9708f6c33f3facb1c913707f8fe0eda5bdfef8b044a33384bc5",
+        "baselineSha256": "6f82dc57e58ce9708f6c33f3facb1c913707f8fe0eda5bdfef8b044a33384bc5"
+      },
+      "package.json": {
+        "currentSha256": "1c77f580f41c85e407689239d8fb5703ad0bd2576db376063597423fb9d08778",
+        "baselineSha256": "1c77f580f41c85e407689239d8fb5703ad0bd2576db376063597423fb9d08778"
+      },
+      "pnpm-workspace.yaml": {
+        "currentSha256": "29a27ce5fbfb40c3e22da80ec70f70c1752adee5f2b593adcd56addc2b68bd8e",
+        "baselineSha256": "29a27ce5fbfb40c3e22da80ec70f70c1752adee5f2b593adcd56addc2b68bd8e"
+      }
+    }
+  },
+  "workload": {
+    "scenarios": [
+      "text",
+      "approval",
+      "stop"
+    ],
+    "iterationsPerScenario": 10,
+    "submitActions": 30,
+    "approvalActions": 10,
+    "stopActions": 10,
+    "providerTextChunks": 16,
+    "providerChunkIntervalMs": 20,
+    "permissionMode": "default",
+    "workspace": "fresh isolated temporary project",
+    "approvalCommand": "printf 'acceptance-approved-once\\n'",
+    "sampleBoundary": "programmatic DOM callback → actual version-specific hooks/Host/pipe/Core ACK → double rAF opportunity; durable DOM+storage and Core reopen checked separately",
+    "verificationReadsOutsideTimedActions": {
+      "measuredCore": 81,
+      "reopenedCore": 1
+    }
+  },
+  "expectedImplementationDifferences": [
+    "Baseline uses its original Renderer metadata/state saves and approval preflush; current uses Core checkpoint ownership cutover. These are measured production behavior differences, not fixture work reductions.",
+    "Both sides use their own Host/Renderer/workspace protocol sources, with identical fixture source and external dependency versions."
+  ],
+  "commandsRun": "Only read/copy/symlink/patch preparation and git diff --check; no Cargo, test, typecheck or Vite build."
+}

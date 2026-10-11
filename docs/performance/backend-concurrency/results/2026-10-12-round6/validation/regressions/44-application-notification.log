@@ -1,0 +1,8 @@
+
+running 3 tests
+test application::notification::tests::claim_response_omits_a_lease_expired_during_display_reads_without_extending_it ... ok
+test application::notification::tests::response_keeps_the_exact_live_claim_and_all_display_items_before_expiry ... ok
+test application::notification::tests::validation_response_omits_a_lease_expired_during_display_reads ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1249 filtered out; finished in 0.20s
+

@@ -1,0 +1,20 @@
+{
+  "baseline_head": "acae06623b7ce6031b90795e730968fb36e38107",
+  "same_fixture_files": [
+    {
+      "path": "crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs",
+      "identical": true,
+      "sha256": "854692a1a6200f13903663bc8a8d2f165b4f56931dbe7d728d409222290b468f"
+    }
+  ],
+  "version_change_scope": "Production sqlite/rayon and bounded execution differences are intentional optimization changes; each revision lockfile and schema recorded by runner. Same fixture roots/waves/history/context/output/tool/query settings. Mixed controls are reactive to readiness, so count differences under rejected starts must remain explicit.",
+  "baseline_schema_version": 71,
+  "candidate_schema_version": 71,
+  "baseline_adaptations": " .../agent/tests/backend_concurrency_baseline.rs    | 363 +++++++++++++++++++--\n crates/core-server/src/transport/bootstrap.rs      |  25 ++\n scripts/run-backend-concurrency-baseline.mjs       | 104 +++++-\n 3 files changed, 462 insertions(+), 30 deletions(-)\n",
+  "final_fixture_scope_only_change": {
+    "baseline_sha256": "854692a1a6200f13903663bc8a8d2f165b4f56931dbe7d728d409222290b468f",
+    "candidate_sha256": "bb2fa8b7f46aca88bdc6515f4ef0c71ddf614a6c1037f9ee0fda0083ea7f77fa",
+    "reason": "Replace explicit drop(MutexGuard) with lexical block for clippy await_holding_lock; both release the same guard before the same sleep. No workload, timing, processing, or provider output changes.",
+    "diff": "--- <baseline-worktree>/crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs\t2026-10-11 23:03:27\n+++ crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs\t2026-10-11 23:50:55\n@@ -935,9 +935,10 @@\n         let drain = tokio::time::Instant::now() + Duration::from_secs(90);\n         loop {\n             drive_mixed(&mut next_id);\n-            let state = events.lock().unwrap();\n-            let awaiting = state.rpcs.values().any(|record| record.response.is_none());\n-            drop(state);\n+            let awaiting = {\n+                let state = events.lock().unwrap();\n+                state.rpcs.values().any(|record| record.response.is_none())\n+            };\n             if !awaiting && service.turn_concurrency_gate().active() == 0 {\n                 break;\n             }\n"
+  }
+}

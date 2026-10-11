@@ -1,0 +1,11 @@
+
+running 6 tests
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_closed_transport_never_invokes_a_later_handler ... ok
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_only_classifies_explicit_load_rejections ... ok
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_payloads_use_current_protocol_contracts ... ok
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_quantiles_are_exact_and_small_p99_is_labelled ... ok
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_recovery_checks_exact_acknowledged_identity_and_terminal ... ok
+test application::agent::tests::backend_concurrency_baseline::backend_baseline_throughput_is_null_without_complete_healthy_recovery ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1250 filtered out; finished in 0.10s
+

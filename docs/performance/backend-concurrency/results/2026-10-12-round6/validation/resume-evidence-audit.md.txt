@@ -1,0 +1,38 @@
+# 接手后的既有证据独立核验
+
+核验日期：2026-10-12。只读取已有源码、原始日志、JSON、逐测试全名清单与 SHA-256；未构建、未测试、未运行负载。本次只新增本页和 `resume-test-summary.json`，没有修改 tracked source 或正式 docs。以下结论保留各二进制和运行的边界，不把旧记录当成新 collector 的长测通过证明。
+
+## 已核对且可复用
+
+- **Rust 旧完整记录：1,791 项不同测试、1,812 次通过执行、0 最终失败。** 用 `storage-final-evidence/all-unique-passed.txt` 的 1,235 个 Core 全名、`regressions/server-tests-deduplicated.txt` 的 555 个 release Server 全名，以及 `debug-history-final-r3.log` 的 15 个通过全名重算，debug 仅新增 1 项。旧执行次数分解为 1,235 + 562 + 15。包括 subprocess helper，不能把 helper 计成新增故障场景。
+- **后续 collector 定向回归：18 次通过，新增加 3 项不同测试，15 次为旧测试重复。** `current-outbound-r2-tests.log` 13/13、`current-fixture-r2-tests.log` 5/5。合并后 **1,794 项不同 Rust 测试、1,830 次通过执行、0 最终失败**。新项全名、重复项、输入文件 hash 均在 `resume-test-summary.json`。本数字只计这些已见日志，不含将来回归。
+- **Storage 可复用：** `storage-final-evidence/metadata.json` 的 318 个源码文件当前 SHA 全匹配；storage 1,227、performance 7、ignored profile 显式补跑 1，合计 1,235。`final-summary.json` 记录 storage source 未变。无需仅因接手重跑该组。
+- **前端可复用：** `frontend-scope-audit.json` 的 20 个生产 src 文件、`frontend-verification-summary.json` 的 19 个测试文件当前 SHA 全匹配；`frontend-SHA256SUMS` 24/24 项匹配。`frontend-unit-final.json` 129/129、`frontend-browser-final.json` 254/254；两侧原生 Electron 各 1 项通过。全部原始日志存在，不只是 handoff 摘要。
+- **其他日志确实存在且通过：** `debug-history-final-r3.log` 15/15；`clippy-final.log` release 完成（保留既有四类 CLI exclusions）；`rustfmt-final.log` 26 文件 exit 0；`infrastructure-takeover.log` 25/25；`docs-pre-delivery.log` 66 docs/70 Markdown/schema71 通过；前端 node/web typecheck、ESLint 与 Prettier 日志存在。`regressions/SERVER-SHA256SUMS` 6/6 匹配。
+- **新增 validator 回归：** `runner-outbound-recovery-tests.log` 17/17，`runner-outbound-recovery-crosscheck.json` 保持原矩阵和最终矩阵各 36/36 无 violations，并保留失败 soak 的 7 类 integrity 问题。17 是后续 runner suite 执行数，未经 Node 全名去重不能直接与旧基础设施 25 相加为不同测试数。
+
+## Host / Renderer 范围和可直接补齐的数据
+
+原独立审查覆盖 baseline `acae0662` 至本轮全部 20 个生产 src 文件；当前 hash 相同，因此该范围审查仍有效。`frontend-handoff.md` 逐文件说明保存所有权、失败排空、刷新合并、导航 generation、窄 proof 读取及 backend 授权边界；未发现 CSS、视觉资产、图标、动画、文案、布局、入口变更。`AppShell.tsx` 只改变审批 invalidation sequence 输入。此结论是差异审查，不是全 AppShell 视觉截图验收。
+
+`renderer-acceptance-{baseline,current}-final.json` 与 `renderer-comparison-final.json` 两侧均 50 offered /50 completed /0 failed /0 unfinished；30 submit、10 approve、10 stop，40 Provider 请求，20 Completed +10 Cancelled。30 终态正文长度/hash 相同，重开全部 agentRun JSON 相同。审计至验收结束 fixture 和生产文件 hash 没有变化。
+
+草稿的 Stop「待核对」可填：baseline p50/p95/p99=max **2.9/3.2/3.2 ms**，final **2.5/3.0/3.0 ms**，n=10。submit final 最大值 199.9ms 的首个冷动作回退必须保留。Renderer full save 293→0、metadata save120→0、Host RPC636→223、请求字节10,369,347→48,046；Host parse99.992→101.576ms 没有改善。81次计时外验收读取+1次重开读取不能都算产品成本。夹具范围仅 DOM handler→生产hooks→真实ElectronIPC/Host→Core；低并发串行、double-rAF，不证明真实点击、compositor paint、完整AppShell/Markdown或满载界面SLO。
+
+## 独立审查与性能门槛
+
+`audit-scheduler.md.txt`、`audit-storage.md.txt`、`runtime-handoff.md`、`storage-handoff.md`、`frontend-handoff.md` 具备具体发现、修复及对应测试全名。审查早期文本中的「待运行」由最终逐测试清单/日志补足；保留早期状态，不应覆盖原始失败记录。
+
+`final-matrix-review.md`、`final-matrix-review-evidence.json` 对 `round6-final-full-20261012-r1` 独立核对：36场景、1,608 offered、1,572成功+36原容量拒绝、0无回复；1,420 root/158 child 与旧矩阵逐场景结果相同。最终 binary99349b2f；运行期间source不变。50单位短历史发送成功p95 **755.424ms**，仍超过500ms，长历史1106.118ms。50单位approve/cancel成功p95 **143.462/67.916ms**，各18拒绝必须单列。20单位短历史send247.969ms，60秒steady380.394ms；不能取代10分钟mixed。两组拒绝场景在cleanup前还有18个root，不能写全矩阵自然drain。完整回读和两槽write permit的等待是现有明确残余；不要用旧baseline全局锁解释当前测量。
+
+旧baseline600秒和current soak r1均未通过长期门槛。current r1在约171秒后outbound关闭，4,314次start、293次approve、858次read无回复，另有179次已回复start错误；后续仍进入handler是旧夹具偏差。`final-soak-outbound-investigation.md` 证明单次3,525,741字节响应叠加使总bytes超限，且collector持Events锁重复编码放大测量开销；不能预先断言修collector即修复产品或把前171秒成功样本当600秒SLO。逐ACK恢复、关闭后拒绝新handler和直接FailureSnapshot现已补回归，新对照仍须同collector、同负载、单独目录记录。
+
+## 归档与最终报告必须补齐
+
+1. 正式 `PROGRESS.md` 当前仍停在第五轮；`round6-results-draft.md` 缺最终matrix/长测/诊断开关/容量边界、资源与公平性、门禁汇总；开头「第六轮验收已完成」需要按真实最终状态更新，不能因实现/正确性完成就写整体达标。旧 `delivery-checklist.json` 的remaining已过时，应生成最终清单。
+2. 汇总必须记录collector修正提交与新binary/source/fixture SHA、r2构建和18项回归；旧 `binary-source-provenance.json`、`correctness-summary.json` 只描述b1744ab9/99349b2f，不能作为新binary完整身份。可以保留旧文件并增加明确新版本provenance，避免改写旧证据。
+3. 新baseline/current同collector600秒对照、诊断开关A/B、已测容量边界与backlog/每root进度/CPU-RSS-WAL-threads-io表；成功、业务拒绝、transport失败、unfinished须分别报告。任何未完成项列为未满足，不以统计措辞降级门槛。
+4. 保存r1失败原件、首次凭据fixture16失败、debug旧所有权2次失败、FTS最小复现与fresh只读检查修正原因；明确FTS内部原因未被上游确认。SQLite FULL≠OS ENOSPC；process kill≠断电；StorageService20次重开≠20次强杀。
+5. 恢复范围保留：schema71/WAL/FULL、Backup API包含已提交WAL，附件/continuation/OS凭据不在SQLite快照；第五轮6e7bd1cc只是隔离回退候选。IOERR、短写、fsync/断电、完整数据根及旧应用端到端降级未测，不能写已认证最低安全版本。
+6. 使用已修 `archive-evidence.py` 的新staging、allowlist、symlink拒绝、路径脱敏和三层hash manifest正式归档；此前只有dry-run。确认目的目录新鲜、没有DB/二进制/真实本机路径；证据归档和文档完成后才做最终文档检查、本地提交。压测期间不改变tracked diff，不推送、不发布。
+7. 正式报告应引用本次复用证据的适用边界：Storage/前端和旧36矩阵无需因接手全部重跑；修改仅test/cfg(test)诊断时优先现有18项定向回归和新长测。若后续变更生产代码，再按影响范围补测。

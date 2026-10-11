@@ -1,0 +1,9 @@
+{
+  "candidate_binary": "<repo>/.cache/backend-concurrency/round6-validation-20261011/binaries/core-server-final-r2",
+  "candidate_binary_sha256": "a79d93917cd199819e5f5656d49bfd1ff220d2856f1a352e575e498c5b180fb9",
+  "baseline_binary_sha256": "d4caef036c88b5d67268dfc97b98b3a1fc6a700b3d9831eac9d93fbbadf4745d",
+  "fixture_sha256": "75fc4fad46311d39942dc4bdca61125527790d2306d8919d84b44efd3e84828a",
+  "fixture_identical": true,
+  "head": "b1744ab98e6eb5db633e351d983bbe9d401a76f6",
+  "baseline_head": "acae06623b7ce6031b90795e730968fb36e38107"
+}

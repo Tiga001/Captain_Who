@@ -1,0 +1,11 @@
+
+running 6 tests
+test storage::service::notifications::tests::notification_claim_expiring_in_its_transaction_rolls_back_the_claim ... ok
+test storage::service::notifications::tests::notification_claim_lease_starts_after_the_writer_barrier ... ok
+test storage::service::notifications::tests::notification_late_delivery_ack_preserves_the_real_receipt ... ok
+test storage::service::notifications::tests::notification_replayed_claim_and_validation_recheck_expiry_before_returning ... ok
+test storage::service::notifications::tests::notification_successor_fences_late_delivery_ack_and_release ... ok
+test storage::service::notifications::tests::notification_validate_rejects_a_lease_expired_behind_the_writer_barrier ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3477 filtered out; finished in 0.38s
+

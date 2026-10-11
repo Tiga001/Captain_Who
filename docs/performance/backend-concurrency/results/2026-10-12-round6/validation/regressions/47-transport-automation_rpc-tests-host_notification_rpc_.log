@@ -1,0 +1,7 @@
+
+running 2 tests
+test transport::automation_rpc::tests::host_notification_rpc_claims_and_acknowledges_the_durable_outbox ... ok
+test transport::automation_rpc::tests::host_notification_rpc_revalidates_the_claim_at_the_native_display_boundary ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1250 filtered out; finished in 0.19s
+

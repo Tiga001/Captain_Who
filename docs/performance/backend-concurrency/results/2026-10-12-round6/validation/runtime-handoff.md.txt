@@ -1,0 +1,119 @@
+# 第六轮 Runtime / 准备期 / 租约独立复核
+
+基线 HEAD：`6e7bd1ccd41fa3dc22d2c6e00e96d72faafbda9e`，在已有未提交第六轮实现之上继续。
+未发现仓库或祖先目录 `AGENTS.md`；已读 `PROGRESS.md`、`acceptance.md`、第五轮结果及本目录
+`audit-scheduler.md.txt`、既有回归日志。没有提交、连接真实用户数据库/模型、操作用户软件。
+
+## 本代理补充修复
+
+### 通知 lease 不能在 response 组装等待后被当作有效交付权返回
+
+`application/notification.rs` 的 storage claim/validate 返回后仍读取 settings 和 batch items。
+reader 排队/SQL/DTO 组装可能耗尽 lease；原代码直接返回旧 claim DTO。现在入口建立 wall/Instant
+下限时钟，所有数据读取完成后采新时间，以原 `claim_expires_at > completed_at` 过滤。
+不新建事务、不延长 claim、不删除 durable claim，也不改变真实 native delivery 后旧 token ACK 的原收据语义。
+
+新增 `application/notification/tests.rs` 三项测试：claim 响应期间过期、validate 响应期间过期、
+截止前完整原样返回。使用临时磁盘/内存 credential backend 和确定性 response clock，隔离验证
+storage 已发放有效 claim 后的最终响应边界，并断言过滤不改变 token/期限/attempt。
+这是 Server 返回时的新鲜性检查；现有 DTO 不带 lease deadline，不能据此承诺任意 IPC 延迟之后仍有效。
+
+### 陈旧 prepared history 不能降级并移除最终 model-history CAS
+
+`agent_support/conversation.rs` 曾在传入 snapshot 的 `is_conversation_history_snapshot_current`
+为 false 时将 `prepared_history` 置空，随后分开重读 trace/context，并让最终 append 的
+`history_version` 变为 None。Trace-only 更新不会提升 conversation revision，因此这个 fallback
+会丢失本来应保留的独立 model-history 围栏，也可能混用旧消息与新 trace/context。
+
+现在这种陈旧输入直接返回既有 `Conversation changed after Turn preparation began; retry from
+fresh history.` 错误；正常路径仍在最终 writer 事务验证完整 history version。新增测试仅更新旧
+Trace `completed_at`，证明 conversation revision 不变但旧 source 不能接纳、不能插入新消息/Trace；
+新的 coherent snapshot 可以接纳同一请求。
+
+## 复用实现的静态审查结论
+
+- `runtime_segment.rs` 已有 checked checkpoint begin 在 writer 获得连接之后和提交前检查精确
+  Runtime generation、取消/关机、原 captured Wake token 与新鲜 lease；checkpoint 完成后再查 Wake。
+  失效 token 不可给后继安装/覆盖 generation，不能通过读取当前 token 领用后继权力。
+- checked begin callback 只短读 cancellation registry，guard 在后续 SQL 之前释放。复核未见该
+  registry 跨 writer 等待的反向锁序；不将此结论外推到所有 registry。
+- `RuntimeCheckpoint.pending` 从值变成 Arc，不改变序号、fingerprint、未确认精确重放及终态围栏。
+- Preparing 仍是有界作业的 boot/generation owner，不另占或扩大逻辑额度。取消/删除保留 owner
+  到实际退出；同 writer 最终准入验证、Project/Conversation scope 和全局未知 owner 回退保留。
+- workflow 的运行期恢复仍只处理精确已终态 Run；claim→Trace 空窗由活跃 Preparing 保护，启动
+  orphan reconciliation 与运行期 recover_run 没有混用。
+- acceptance stdio 入口及凭据覆盖仅 `cfg(test)` 生效，要求 canonical temporary root 含
+  `captain-acceptance-` 路径组件；普通生产 executable 没有此选择入口。
+
+## 窄模型历史审查
+
+SQL 只省略历史 `agent_run_json` 与 `chat_message_ui_states`，消息身份/角色/正文/时间/status、
+folder refs、HumanInteraction投影、附件仍由原流程取得；Trace、model-context、有效 compaction
+及 superseded-message 过滤仍来自同一 SQLite read transaction。模型组装函数只提取原有模型字段，
+没有读取被省略的展示 JSON。Skill 选择/激活和新工具 schema 仍按本次 input、当前设置和冻结 workspace
+生成，历史展示工具定义不作为运行授权或模型 schema 源。
+
+`ConversationModelHistorySnapshot` 类型和 `to_append_record()` 明确用途；生产唯一转换调用是普通
+append Turn 准备。函数入口拒绝把该 source 传给 rewrite/automation/continuation 等全保存路径。
+最终 append 只写新消息，历史展示 JSON 不会被空字段覆盖。raw/full snapshot API 与 cache 分别以
+model-only flag 索引，共享原有 entry/byte 上限；Renderer/full DTO 不会收到窄 cache 的条目。
+prepared cache 仍是 32 entries / 128 MiB，未提高线程、队列或业务容量。
+
+## 账户许可与 Wake lease 的不同契约
+
+依据 `docs/subsystems/local-token-usage-and-license.md`：账户 license/本机 execution-access lease
+只约束新的 root Turn 原子准入；退出或续租失败不取消已经准入的任务、审批、工具、子任务或自动化。
+因此没有给已接纳 Runtime/checkpoint 加入账户许可复查。Wake execution lease 则是子任务持续的执行
+能力，必须按 captured claim 在准备最终边界和终态写入验证。不能为了测试租约硬门槛而混淆两者。
+
+## 验证状态
+
+已做：本代理修改文件 rustfmt、`git diff --check`，均无输出。统一构建发现原窄历史入口 guard
+使用 `&str.into()`，已按 `AgentServiceError` 的既有 String conversion 修复；后续统一构建成功。
+
+接手前旧 binary `core_server-f7a97b10b9960ccf` 含 checkpoint writer expiry/replacement 新测试，
+但 `--list` 仍含旧 UI history 测试名且缺少 large-tool-definitions model-history 测试，故不能视为
+最新窄历史的测试证据。既有 `results-11-37-44.json` 的 index44 `application::notification`
+匹配 0 项，不能计通过。本轮已加入 3 项该 module 测试，并在缓存回归脚本尾部追加 index47
+host-notification RPC 两项、index48 prepared-history 分组，保持原 index 不变。
+旧 regressions 四文件已完整迁移至 `diagnostics/pre-takeover-regressions/`。
+
+**当前工作区统一 release 验证：47 个 Server 分组，555 项不同测试，562 次执行通过，0 失败、0 ignored。**
+实际执行脚本 index 0..48 排除由 storage agent 负责的 31/32。每组测试名与对应 binary 的完整
+`--list` inventory 核对，非零数量、逐日志 SHA、组间重复测试完整记录；没有靠筛选器零匹配计通过。
+
+- 主批 binary SHA256 `64ea54218183e6415ab0d99893d5b2e5aed3b24333c696dd924ffbf4117bee2b`。
+  新 notification 响应边界 3 项、runtime isolation 10 项、runtime checkpoint 16 项通过；
+  Preparing/resource、执行许可、取消/删除、human_input、workflow、终态恢复、审批等其余分组均通过。
+- 首批 index47 的 2 项、index48 的 14 项均在旧测试 fixture 的 `StorageService::open()` 失败，
+  原因是 release core 要求显式 model credential backend。改为测试专属内存 backend，未放宽生产防护，
+  未修改业务断言。失败及原始优先组 5 份日志均保存在 `diagnostics/server-credential-fixture-first-run/`。
+- 最终 snapshot `binaries/core-server-final` SHA256
+  `99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082` 重跑受影响 47/48，
+  2/14 项全部通过，包含窄历史大展示 JSON 等价/append保留与 trace-only CAS 新回归。
+  其余不受测试 fixture 改动影响的组保留原已通过证据，未无故重跑；最终汇总明确保留两枚 binary SHA。
+
+完整结果：`regressions/results-all-server.json`；逐测试去重清单：
+`regressions/server-tests-deduplicated.json` / `.txt`；统计：`regressions/server-regression-summary.json`。
+汇总程序 `summarize-server-regressions.py` 可重复执行，原始组结果及日志保留。
+
+`prepared_history_continuous_send.rs` 的诊断计数回归由 `cfg(debug_assertions)` 门控，**release 没有执行**。
+独立 target 的 debug 专项最终 **15/15 通过**，日志 `debug-history-final-r3.log`，其中 14 项是 release
+prepared-history 重复覆盖，continuous-warm-send 是新增的 1 项不同测试。因此本报告覆盖 556 项不同
+Server 测试，release 555 + debug 独占 1；不将 15 项全部重复加到去重数量。
+
+初次 debug 与 r2 都暴露同一旧测试规则：伪造 Renderer `firstResponseAt` 后期待覆盖 Core-owned
+terminal projection，与第五轮所有权契约冲突。只修改 `cfg(debug_assertions)` 测试：先保存 raw/full
+canonical JSON，尝试更改 Renderer timestamp/finishReason/usage 后检查完整 JSON、正文、status 不变；
+第二轮结束再检查同一完整 canonical JSON。独立 UI 与 metadata freshness、模型实际 HTTP message
+出现次数、Trace/current bootstrap、授权路径，以及 full-load/decode/assembly/rebuild/measured-install
+精确工作计数全部保留。没有削弱生产防护、cache 断言或改变编译门控；此 debug-only 变化不影响
+最终 release binary。原失败日志保存在 `diagnostics/debug-history-owner-assertion-first-run/`。
+
+最终命令：`CARGO_TARGET_DIR=<build> CARGO_BUILD_JOBS=4
+CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked
+-p mycopilot-core-server --bin core-server application::agent::tests::prepared_history -- --test-threads=1`。
+本代理诊断并修前半部，主代理接手末尾重复断言及最终 r3 重跑；最终日志确认 15 passed / 0 failed /
+0 ignored，3.79 秒。clippy、真实 Electron 与性能矩阵仍由主代理统筹。
+
+长稳态、物理磁盘写入、端到端 paint、持续 root 公平性由主代理统筹；本静态审查不代替这些实测。

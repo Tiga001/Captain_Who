@@ -1,0 +1,196 @@
+{
+  "status": "completed_frontend_correctness_and_isolated_electron_comparison",
+  "checks": {
+    "unit": {
+      "numTotalTests": 129,
+      "numPassedTests": 129,
+      "numFailedTests": 0,
+      "numPendingTests": 0,
+      "success": true
+    },
+    "browser": {
+      "numTotalTests": 254,
+      "numPassedTests": 254,
+      "numFailedTests": 0,
+      "numPendingTests": 0,
+      "success": true
+    },
+    "typecheck_node": {
+      "exitCode": 0,
+      "log": "frontend-typecheck-node.log"
+    },
+    "typecheck_web": {
+      "exitCode": 0,
+      "log": "frontend-typecheck-web.log"
+    },
+    "eslint": {
+      "exitCode": 0,
+      "log": "frontend-eslint-final.log"
+    },
+    "prettier": {
+      "exitCode": 0,
+      "log": "frontend-prettier-final.log"
+    },
+    "electron_baseline": {
+      "exitCode": 0,
+      "status": "completed",
+      "testCount": 1,
+      "binarySha256": "a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522",
+      "offeredActions": 50,
+      "completedActions": 50,
+      "verifiedTerminals": 30,
+      "reopenedAssistantMessages": 30,
+      "report": "renderer-acceptance-baseline-final.json"
+    },
+    "electron_current": {
+      "exitCode": 0,
+      "status": "completed",
+      "testCount": 1,
+      "binarySha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082",
+      "offeredActions": 50,
+      "completedActions": 50,
+      "verifiedTerminals": 30,
+      "reopenedAssistantMessages": 30,
+      "report": "renderer-acceptance-current-final.json"
+    }
+  },
+  "test_files": [
+    {
+      "group": "unit",
+      "path": "src/preload/AgentIpcBridge.test.ts",
+      "sha256": "e5c95ae132aa72ce85beae79d258f97ca75b8e1f4d708e02ddf1e5db6daea04b",
+      "tests": 17,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/preload/StorageIpcBridge.test.ts",
+      "sha256": "8807b1572af81020d2a8dac20ba61113a3452f0cbd78e51d1a28d97cb6e061e3",
+      "tests": 9,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/main/core/coreServer.conversationReads.test.ts",
+      "sha256": "57ce8b8c42f85ad9dc97ac41b9f7f338f7eba539295eb674ff4b7cdd121594f2",
+      "tests": 9,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/main/core/rpcDiagnostics.test.ts",
+      "sha256": "c88b69147cb29984326358f30c5e131534b0119cdcb569a19496a4e2a4c92be1",
+      "tests": 6,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/main/workspaceFiles/ReadToolFileSource.test.ts",
+      "sha256": "4b8a0d863bd4624530971cfa18b74da9b2a45180f01c9e8c94d122c2d2db4abc",
+      "tests": 17,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/app/__tests__/actionDiagnostics.test.ts",
+      "sha256": "2a627a73733bbffab091499079c9c58c38511431bf17299a1f6ee696e02d618e",
+      "tests": 7,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/app/__tests__/chatMessagePersistence.test.ts",
+      "sha256": "16068f89ff01d1cddd089123d108a5b019d7540da3ce1c06654bd116895c69ed",
+      "tests": 8,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/features/agentCollaboration/collaborationStore.test.ts",
+      "sha256": "6b18f430d96bfa5a3c0160af07028563b8783ff015193b0d0638c05859a595a6",
+      "tests": 26,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/features/agentCollaboration/collaborationStoreCache.test.ts",
+      "sha256": "e9feb3705af79d7c054e1e14da46e413a6631bf48633b0a7a851a71b28e9d4fb",
+      "tests": 3,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/features/agentCollaboration/trailingRefresh.test.ts",
+      "sha256": "664c7bd7cb08eb89aae50c3ce6a2d4781feec4a13dfc47216cbcadf1b630c402",
+      "tests": 2,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/features/chat/__tests__/persistedAgentRunProjectionContract.test.ts",
+      "sha256": "5492b96a814ecc00da468c7b36a9790648fe188d443b928aed7e7616ebe19dd9",
+      "tests": 17,
+      "status": "passed"
+    },
+    {
+      "group": "unit",
+      "path": "src/renderer/src/features/chat/__tests__/storageConversationActivityRecovery.test.ts",
+      "sha256": "5e8e45980f87a610ef0c0afaee766b847ce47dfca9d3cd8aa891b495fea9e63c",
+      "tests": 8,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/app/__tests__/AppShellSkillRecovery.browser.test.tsx",
+      "sha256": "151de15217ae49d003116840d758d2bbd0782b7e119fe574aebab724dbdd2294",
+      "tests": 173,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/app/__tests__/HumanInteractionConversationSync.browser.test.tsx",
+      "sha256": "4d2ac0700d2ed4c0bf94fc91e2e09fbb372fd90313ecae3e14bd7911f4427284",
+      "tests": 13,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/app/__tests__/McpActionDecisionSafety.browser.test.tsx",
+      "sha256": "fea6b7b5b0db9777dfb1330f2aa8466b5e4727bbdb574aaf0e17c228a80a4e98",
+      "tests": 3,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/app/__tests__/TurnAccessSubmission.browser.test.tsx",
+      "sha256": "f9dceced5b7ea48fd5d8fc07f6eb39ead8040013e4beca4e337ae77dec5a1450",
+      "tests": 14,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/app/__tests__/useConversationPersistence.browser.test.tsx",
+      "sha256": "8b616b05beb0c6ed2ca2ba4f7c37e0c5793a9701cecffd2703c52b7367748ce6",
+      "tests": 7,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/features/agentCollaboration/__tests__/useCollaborationApprovals.browser.test.tsx",
+      "sha256": "0d9c9d7a1773a629d03792296995250c39db288a6cf57ee252dfa96b57fcb39b",
+      "tests": 15,
+      "status": "passed"
+    },
+    {
+      "group": "browser",
+      "path": "src/renderer/src/features/chat/__tests__/ObserverConversationHook.browser.test.tsx",
+      "sha256": "bebaa0d7e5f614068f9bf6e2103b71712a0d37f00eb8d13b6b628d61d702d36b",
+      "tests": 29,
+      "status": "passed"
+    }
+  ],
+  "sourceStability": {
+    "fixtureHashesStillMatch": true,
+    "productionHashesStillMatch": true
+  }
+}

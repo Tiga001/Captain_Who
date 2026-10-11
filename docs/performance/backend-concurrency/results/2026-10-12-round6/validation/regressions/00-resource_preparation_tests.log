@@ -1,0 +1,17 @@
+
+running 12 tests
+test application::agent::turn_executor::resource_preparation_tests::preparing_delete_fences_owner_before_drain_and_preserves_unrelated_work ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_history_revision_change_rejects_stale_snapshot ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_independent_conversations_reach_snapshot_and_stop_without_global_wait ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_model_revision_change_rejects_stale_snapshot ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_model_switch_waits_for_same_conversation_and_runs_for_other_conversation ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_permission_revocation_is_ordered_before_initial_trace_commit ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_relogin_does_not_revive_old_account_preparation ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_same_conversation_concurrent_sends_admit_exactly_one_turn ... ok
+test application::agent::turn_executor::resource_preparation_tests::preparing_workflow_claim_survives_other_real_turn_completion_and_run_recovery ... ok
+test application::agent::turn_executor::resource_preparation_tests::run_publication_shutdown_fence_cancels_late_generation_and_preserves_exact_retirement ... ok
+test application::agent::turn_executor::resource_preparation_tests::run_publication_slow_owner_only_orders_its_own_cancellation ... ok
+test application::agent::turn_executor::resource_preparation_tests::terminal_activity_releases_registry_before_writer_delete_and_drains_before_removal ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1240 filtered out; finished in 1.80s
+

@@ -1,0 +1,1120 @@
+{
+  "baseline": {
+    "path": ".cache/backend-concurrency/round6-validation-20261011/renderer-acceptance-baseline-final.json",
+    "binary_sha256": "a71882a451aa596b88435dd432def613036d5480f54f33bbb195f787675c9522",
+    "status": "completed",
+    "offeredActions": 50,
+    "completedActions": 50,
+    "failedActions": 0,
+    "unfinishedActions": 0,
+    "verifiedTerminals": 30,
+    "reopenedAssistantMessages": 30,
+    "providerRequests": 40,
+    "verificationReads": {
+      "measuredCore": 81,
+      "reopenedCore": 1
+    },
+    "terminal_counts": {
+      "completed": 20,
+      "cancelled": 10
+    },
+    "actions": {
+      "submit": {
+        "accepted": 30,
+        "receipt": {
+          "n": 30,
+          "p50_ms": 13.900000095367432,
+          "p95_ms": 21.40000009536743,
+          "p99_ms": 43.39999985694885,
+          "max_ms": 43.39999985694885
+        },
+        "frame_opportunity": {
+          "n": 30,
+          "p50_ms": 26.09999990463257,
+          "p95_ms": 31.100000143051147,
+          "p99_ms": 46.09999990463257,
+          "max_ms": 46.09999990463257
+        }
+      },
+      "approve": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 2.1000001430511475,
+          "p95_ms": 8,
+          "p99_ms": 8,
+          "max_ms": 8
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 9.099999904632568,
+          "p95_ms": 14.199999809265137,
+          "p99_ms": 14.199999809265137,
+          "max_ms": 14.199999809265137
+        }
+      },
+      "stop": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 2.8999998569488525,
+          "p95_ms": 3.200000047683716,
+          "p99_ms": 3.200000047683716,
+          "max_ms": 3.200000047683716
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 8,
+          "p95_ms": 17.5,
+          "p99_ms": 17.5,
+          "max_ms": 17.5
+        }
+      },
+      "submit/text": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 12.400000095367432,
+          "p95_ms": 17.5,
+          "p99_ms": 17.5,
+          "max_ms": 17.5
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 17.799999952316284,
+          "p95_ms": 30.299999952316284,
+          "p99_ms": 30.299999952316284,
+          "max_ms": 30.299999952316284
+        }
+      },
+      "submit/approval": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 13.400000095367432,
+          "p95_ms": 21.40000009536743,
+          "p99_ms": 21.40000009536743,
+          "max_ms": 21.40000009536743
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 27.200000047683716,
+          "p95_ms": 31.100000143051147,
+          "p99_ms": 31.100000143051147,
+          "max_ms": 31.100000143051147
+        }
+      },
+      "submit/stop": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 14,
+          "p95_ms": 43.39999985694885,
+          "p99_ms": 43.39999985694885,
+          "max_ms": 43.39999985694885
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 26,
+          "p95_ms": 46.09999990463257,
+          "p99_ms": 46.09999990463257,
+          "max_ms": 46.09999990463257
+        }
+      }
+    },
+    "rpc_counts": {
+      "storage.saveConversationMeta": 120,
+      "core.setExecutionAccess": 30,
+      "agent.listPendingActions": 1,
+      "agent.commandSessions.list": 1,
+      "agent.startConversationTurn": 30,
+      "storage.saveChatMessageState": 293,
+      "storage.loadConversation": 111,
+      "agent.preflightProviderTransition": 29,
+      "agent.approveAction": 10,
+      "agent.cancelRun": 10
+    },
+    "host_outcomes": {
+      "offered:other": 180,
+      "offered:agent.listPendingActions": 1,
+      "completed:other": 180,
+      "offered:agent.startConversationTurn": 30,
+      "completed:agent.listPendingActions": 1,
+      "completed:agent.startConversationTurn": 30,
+      "offered:storage.saveChatMessageState": 293,
+      "completed:storage.saveChatMessageState": 293,
+      "offered:storage.loadConversation": 111,
+      "completed:storage.loadConversation": 111,
+      "offered:agent.approveAction": 10,
+      "completed:agent.approveAction": 10,
+      "offered:agent.cancelRun": 10,
+      "completed:agent.cancelRun": 10,
+      "offered:core.shutdown": 1,
+      "completed:core.shutdown": 1
+    },
+    "host_samples": {
+      "request.serialize:other": {
+        "count": 180,
+        "total_ms": 0.5667940000012095,
+        "bytes": 54200
+      },
+      "request.stdin_written:other": {
+        "count": 180,
+        "total_ms": 2.696419999995669,
+        "bytes": 0
+      },
+      "request.serialize:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.004292000000077678,
+        "bytes": 61
+      },
+      "request.stdin_written:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.021208000000115135,
+        "bytes": 0
+      },
+      "response.parse:other": {
+        "count": 360,
+        "total_ms": 1.5352109999862478,
+        "bytes": 160115
+      },
+      "response:other": {
+        "count": 180,
+        "total_ms": 411.1706339999937,
+        "bytes": 0
+      },
+      "request.serialize:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.13625000000183718,
+        "bytes": 18972
+      },
+      "request.stdin_written:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.3336670000007871,
+        "bytes": 0
+      },
+      "response.parse:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.001374999999825377,
+        "bytes": 36
+      },
+      "response:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 1.2845420000003287,
+        "bytes": 0
+      },
+      "response.parse:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.290619999998853,
+        "bytes": 22804
+      },
+      "response:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 361.9527489999987,
+        "bytes": 0
+      },
+      "request.serialize:storage.saveChatMessageState": {
+        "count": 293,
+        "total_ms": 15.457294999981968,
+        "bytes": 10278782
+      },
+      "request.stdin_written:storage.saveChatMessageState": {
+        "count": 293,
+        "total_ms": 15.045212000009997,
+        "bytes": 0
+      },
+      "response.parse:storage.saveChatMessageState": {
+        "count": 293,
+        "total_ms": 0.5859609999943132,
+        "bytes": 11681
+      },
+      "response:storage.saveChatMessageState": {
+        "count": 293,
+        "total_ms": 1115.9640429999845,
+        "bytes": 0
+      },
+      "notification.dispatch:other": {
+        "count": 180,
+        "total_ms": 5.607455999985177,
+        "bytes": 0
+      },
+      "response.parse:agent.event": {
+        "count": 740,
+        "total_ms": 9.906075999998848,
+        "bytes": 3312470
+      },
+      "notification.dispatch:agent.event": {
+        "count": 740,
+        "total_ms": 45.69459000000052,
+        "bytes": 0
+      },
+      "request.serialize:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 0.33903599999439393,
+        "bytes": 14080
+      },
+      "request.stdin_written:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 26.946916999987025,
+        "bytes": 0
+      },
+      "response.parse:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 87.55478900000526,
+        "bytes": 79932074
+      },
+      "response:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 1758.0669989999978,
+        "bytes": 0
+      },
+      "event_loop.delay:other": {
+        "count": 12,
+        "total_ms": 9.630957999998827,
+        "bytes": 0
+      },
+      "request.serialize:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.02849800000058167,
+        "bytes": 2080
+      },
+      "request.stdin_written:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.1123330000000351,
+        "bytes": 0
+      },
+      "response.parse:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.04783399999814719,
+        "bytes": 3150
+      },
+      "response:agent.approveAction": {
+        "count": 10,
+        "total_ms": 16.819331999995484,
+        "bytes": 0
+      },
+      "request.serialize:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.04191500000524684,
+        "bytes": 1120
+      },
+      "request.stdin_written:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.2951259999990725,
+        "bytes": 0
+      },
+      "response.parse:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.05846000000019558,
+        "bytes": 1010
+      },
+      "response:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 25.7071660000056,
+        "bytes": 0
+      },
+      "request.serialize:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.004833000000871834,
+        "bytes": 52
+      },
+      "request.stdin_written:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.02466699999968114,
+        "bytes": 0
+      },
+      "response.parse:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.011749999999665306,
+        "bytes": 72
+      },
+      "response:core.shutdown": {
+        "count": 1,
+        "total_ms": 22.855000000001382,
+        "bytes": 0
+      }
+    },
+    "host_outgoing_requests": {
+      "count": 636,
+      "total_ms": 16.578912999986187,
+      "bytes": 10369347
+    },
+    "host_incoming_json_replies_and_notifications": {
+      "count": 1556,
+      "total_ms": 99.99207599998135,
+      "bytes": 83443412
+    },
+    "host_notification_dispatch": {
+      "count": 920,
+      "total_ms": 51.302045999985694,
+      "bytes": 0
+    },
+    "host_pending_peak": 4,
+    "host_omitted_traces": 0,
+    "renderer_omitted_traces": 0,
+    "terminal_content": [
+      {
+        "work": "text",
+        "index": 0,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 1,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 2,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 3,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 4,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 5,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 6,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 7,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 8,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 9,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 0,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 1,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 2,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 3,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 4,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 5,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 6,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 7,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 8,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 9,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "stop",
+        "index": 0,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 1,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 2,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 3,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 4,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 5,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 6,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 7,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 8,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 9,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      }
+    ]
+  },
+  "current": {
+    "path": ".cache/backend-concurrency/round6-validation-20261011/renderer-acceptance-current-final.json",
+    "binary_sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082",
+    "status": "completed",
+    "offeredActions": 50,
+    "completedActions": 50,
+    "failedActions": 0,
+    "unfinishedActions": 0,
+    "verifiedTerminals": 30,
+    "reopenedAssistantMessages": 30,
+    "providerRequests": 40,
+    "verificationReads": {
+      "measuredCore": 81,
+      "reopenedCore": 1
+    },
+    "terminal_counts": {
+      "completed": 20,
+      "cancelled": 10
+    },
+    "actions": {
+      "submit": {
+        "accepted": 30,
+        "receipt": {
+          "n": 30,
+          "p50_ms": 11.200000047683716,
+          "p95_ms": 19.59999990463257,
+          "p99_ms": 199.89999985694885,
+          "max_ms": 199.89999985694885
+        },
+        "frame_opportunity": {
+          "n": 30,
+          "p50_ms": 16.09999990463257,
+          "p95_ms": 32.09999990463257,
+          "p99_ms": 201.09999990463257,
+          "max_ms": 201.09999990463257
+        }
+      },
+      "approve": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 2,
+          "p95_ms": 3.1999998092651367,
+          "p99_ms": 3.1999998092651367,
+          "max_ms": 3.1999998092651367
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 11.399999856948853,
+          "p95_ms": 15.700000047683716,
+          "p99_ms": 15.700000047683716,
+          "max_ms": 15.700000047683716
+        }
+      },
+      "stop": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 2.5,
+          "p95_ms": 3,
+          "p99_ms": 3,
+          "max_ms": 3
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 8.5,
+          "p95_ms": 16.799999952316284,
+          "p99_ms": 16.799999952316284,
+          "max_ms": 16.799999952316284
+        }
+      },
+      "submit/text": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 11.700000047683716,
+          "p95_ms": 199.89999985694885,
+          "p99_ms": 199.89999985694885,
+          "max_ms": 199.89999985694885
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 16.09999990463257,
+          "p95_ms": 201.09999990463257,
+          "p99_ms": 201.09999990463257,
+          "max_ms": 201.09999990463257
+        }
+      },
+      "submit/approval": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 11.099999904632568,
+          "p95_ms": 19.59999990463257,
+          "p99_ms": 19.59999990463257,
+          "max_ms": 19.59999990463257
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 13.099999904632568,
+          "p95_ms": 32.09999990463257,
+          "p99_ms": 32.09999990463257,
+          "max_ms": 32.09999990463257
+        }
+      },
+      "submit/stop": {
+        "accepted": 10,
+        "receipt": {
+          "n": 10,
+          "p50_ms": 10.799999952316284,
+          "p95_ms": 14.200000047683716,
+          "p99_ms": 14.200000047683716,
+          "max_ms": 14.200000047683716
+        },
+        "frame_opportunity": {
+          "n": 10,
+          "p50_ms": 14.900000095367432,
+          "p95_ms": 28.600000143051147,
+          "p99_ms": 28.600000143051147,
+          "max_ms": 28.600000143051147
+        }
+      }
+    },
+    "rpc_counts": {
+      "core.setExecutionAccess": 30,
+      "agent.listPendingActions": 1,
+      "agent.startConversationTurn": 30,
+      "agent.commandSessions.list": 1,
+      "storage.loadConversation": 111,
+      "agent.preflightProviderTransition": 29,
+      "agent.approveAction": 10,
+      "agent.cancelRun": 10
+    },
+    "host_outcomes": {
+      "offered:other": 60,
+      "offered:agent.listPendingActions": 1,
+      "completed:other": 60,
+      "offered:agent.startConversationTurn": 30,
+      "completed:agent.listPendingActions": 1,
+      "completed:agent.startConversationTurn": 30,
+      "offered:storage.loadConversation": 111,
+      "completed:storage.loadConversation": 111,
+      "offered:agent.approveAction": 10,
+      "completed:agent.approveAction": 10,
+      "offered:agent.cancelRun": 10,
+      "completed:agent.cancelRun": 10,
+      "offered:core.shutdown": 1,
+      "completed:core.shutdown": 1
+    },
+    "host_samples": {
+      "request.serialize:other": {
+        "count": 60,
+        "total_ms": 0.20358700000224417,
+        "bytes": 11723
+      },
+      "request.stdin_written:other": {
+        "count": 60,
+        "total_ms": 1.0452089999976124,
+        "bytes": 0
+      },
+      "request.serialize:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.007875000000012733,
+        "bytes": 61
+      },
+      "request.stdin_written:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.03012499999999818,
+        "bytes": 0
+      },
+      "response.parse:other": {
+        "count": 240,
+        "total_ms": 1.3489100000241478,
+        "bytes": 122558
+      },
+      "response:other": {
+        "count": 60,
+        "total_ms": 131.9846289999988,
+        "bytes": 0
+      },
+      "request.serialize:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.14787000000285389,
+        "bytes": 18963
+      },
+      "request.stdin_written:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.37804100000153085,
+        "bytes": 0
+      },
+      "response.parse:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.002374999999915417,
+        "bytes": 36
+      },
+      "response:agent.listPendingActions": {
+        "count": 1,
+        "total_ms": 0.41829199999995126,
+        "bytes": 0
+      },
+      "response.parse:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 0.31258199999729186,
+        "bytes": 22795
+      },
+      "response:agent.startConversationTurn": {
+        "count": 30,
+        "total_ms": 391.13074700000175,
+        "bytes": 0
+      },
+      "request.serialize:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 0.5444520000094144,
+        "bytes": 14051
+      },
+      "request.stdin_written:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 22.43895300000122,
+        "bytes": 0
+      },
+      "response.parse:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 88.68179100000839,
+        "bytes": 79662300
+      },
+      "response:storage.loadConversation": {
+        "count": 111,
+        "total_ms": 1420.4176230000048,
+        "bytes": 0
+      },
+      "notification.dispatch:other": {
+        "count": 180,
+        "total_ms": 6.063165000007075,
+        "bytes": 0
+      },
+      "response.parse:agent.event": {
+        "count": 740,
+        "total_ms": 11.08396100000914,
+        "bytes": 3312470
+      },
+      "notification.dispatch:agent.event": {
+        "count": 740,
+        "total_ms": 47.31699199999139,
+        "bytes": 0
+      },
+      "event_loop.delay:other": {
+        "count": 12,
+        "total_ms": 15.386790999999903,
+        "bytes": 0
+      },
+      "request.serialize:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.042416000001139764,
+        "bytes": 2076
+      },
+      "request.stdin_written:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.29729300000235526,
+        "bytes": 0
+      },
+      "response.parse:agent.approveAction": {
+        "count": 10,
+        "total_ms": 0.06304099999942991,
+        "bytes": 3146
+      },
+      "response:agent.approveAction": {
+        "count": 10,
+        "total_ms": 17.33233400000063,
+        "bytes": 0
+      },
+      "request.serialize:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.05358399999931862,
+        "bytes": 1120
+      },
+      "request.stdin_written:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.33500099999764643,
+        "bytes": 0
+      },
+      "response.parse:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 0.07179100000030303,
+        "bytes": 1010
+      },
+      "response:agent.cancelRun": {
+        "count": 10,
+        "total_ms": 22.046042999996644,
+        "bytes": 0
+      },
+      "request.serialize:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.005250000000160071,
+        "bytes": 52
+      },
+      "request.stdin_written:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.025666999999884865,
+        "bytes": 0
+      },
+      "response.parse:core.shutdown": {
+        "count": 1,
+        "total_ms": 0.011292000001049018,
+        "bytes": 72
+      },
+      "response:core.shutdown": {
+        "count": 1,
+        "total_ms": 26.623708999999508,
+        "bytes": 0
+      }
+    },
+    "host_outgoing_requests": {
+      "count": 223,
+      "total_ms": 1.0050340000151436,
+      "bytes": 48046
+    },
+    "host_incoming_json_replies_and_notifications": {
+      "count": 1143,
+      "total_ms": 101.57574300003967,
+      "bytes": 83124387
+    },
+    "host_notification_dispatch": {
+      "count": 920,
+      "total_ms": 53.38015699999846,
+      "bytes": 0
+    },
+    "host_pending_peak": 3,
+    "host_omitted_traces": 0,
+    "renderer_omitted_traces": 0,
+    "terminal_content": [
+      {
+        "work": "text",
+        "index": 0,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 1,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 2,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 3,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 4,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 5,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 6,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 7,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 8,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "text",
+        "index": 9,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 0,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 1,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 2,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 3,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 4,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 5,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 6,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 7,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 8,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "approval",
+        "index": 9,
+        "status": "completed",
+        "contentBytes": 166,
+        "contentSha256": "fb62a25a6b7d8220168de19660ec80c4363b5ced75b868070b4ef0a4844e6d90"
+      },
+      {
+        "work": "stop",
+        "index": 0,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 1,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 2,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 3,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 4,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 5,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 6,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 7,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 8,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      },
+      {
+        "work": "stop",
+        "index": 9,
+        "status": "cancelled",
+        "contentBytes": 23,
+        "contentSha256": "9471aeda1ac59a5a5b54566835380117d87a632cf058f3207fe2f010e1e3a769"
+      }
+    ]
+  },
+  "same_terminal_content": true,
+  "same_action_counts": true,
+  "quantiles": "Nearest rank of raw within-Renderer monotonic spans; n=10/30, so p99 is an observed maximum and not a reliable population tail.",
+  "scope": "Sequential low-load programmatic DOM handlers, production hooks, native Electron IPC and Core stdio. Double rAF is a frame opportunity, not proof of compositor paint. Core admission/decision receipt and terminal durability are separately checked.",
+  "verification_overhead": "Host totals include 81 separately counted verification reads and Core shutdown outside timed actions; 1 reopened read belongs to the fresh Core process. These are fixed on both sides.",
+  "limits": [
+    "No hardware click latency, saturated Renderer queue, full AppShell render, real Provider latency or physical disk-write comparison.",
+    "One run per version cannot establish statistical significance or a production SLO. Do not convert RPC bytes to physical disk writes.",
+    "Storage call reduction includes removal of redundant Renderer saves and addition of Core persistence; it is not a complete physical-write accounting."
+  ]
+}

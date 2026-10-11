@@ -1,0 +1,28 @@
+
+running 23 tests
+test application::agent::tests::workflow_execution::awareness::organization_configuration_query_exposes_only_executable_choices_and_actual_caller_grants ... ok
+test application::agent::tests::workflow_execution::awareness::workflow_awareness_tools_query_real_members_and_own_outbox_without_delivery ... ok
+test application::agent::tests::workflow_execution::history_warmup::durable_terminal_warms_unopened_conversation_without_starting_another_turn ... ok
+test application::agent::tests::workflow_execution::history_warmup::workflow_capacity_wait_warms_history_without_claiming_pending_letter ... ok
+test application::agent::tests::workflow_execution::history_warmup::workflow_claim_preserves_warmed_history_and_reuses_measured_prefix_without_human_replay ... ok
+test application::agent::tests::workflow_execution::personnel::workflow_organization_edit_real_host_preserves_roles_enforces_actual_authority_and_refreshes_state ... ok
+test application::agent::tests::workflow_execution::runtime_publication::workflow_runtime_publication_real_storage_drains_final_mail_metadata ... ok
+test application::agent::tests::workflow_execution::workflow_capacity_release_retries_waiting_owner_without_clearing_configuration ... ok
+test application::agent::tests::workflow_execution::workflow_config_repair_wakes_before_fallback_and_uses_current_model_once ... ok
+test application::agent::tests::workflow_execution::workflow_execution_accept_claims_pending_mail_at_safe_boundary_in_same_turn ... ok
+test application::agent::tests::workflow_execution::workflow_execution_semantic_send_and_reply_deliver_trusted_inputs_to_independent_roots ... ok
+test application::agent::tests::workflow_execution::workflow_execution_sources_deliver_independent_letters_without_waiting_for_peers ... ok
+test application::agent::tests::workflow_execution::workflow_execution_stop_fences_queued_inputs_even_after_the_worker_disappears ... ok
+test application::agent::tests::workflow_execution::workflow_scheduler_reaches_ready_owner_after_thousand_ineligible_heads ... ok
+test application::agent::tests::workflow_execution::workflow_scheduler_read_microbenchmark ... ok
+test application::agent::tests::workflow_execution::workflow_scheduler_wakes_queued_recipient_after_busy_turn_finishes_without_polling ... ok
+test application::agent::tests::workflow_execution::workflow_waiting_population_microbenchmark ... ok
+test application::agent::workflow_execution::awareness::tests::awareness_host_clears_stale_estimates_and_marks_missing_bindings_unknown ... ok
+test application::agent::workflow_execution::awareness::tests::awareness_host_distinguishes_async_questions_from_blocking_sync_waits_and_approvals ... ok
+test application::agent::workflow_execution::awareness::tests::awareness_host_requires_live_worker_evidence_and_preserves_pause_and_compaction ... ok
+test application::agent::workflow_execution::awareness::tests::batched_awareness_keeps_sync_wait_boundaries_and_approval_over_pause_priority ... ok
+test application::agent::workflow_execution::organization_permission_tests::organization_edit_context_uses_exact_run_grant_and_rejects_unrepresentable_inheritance ... ok
+test application::agent::workflow_execution::publication_tests::workflow_send_waiting_for_writer_only_orders_its_own_stop ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 1229 filtered out; finished in 3.63s
+

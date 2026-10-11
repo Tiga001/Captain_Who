@@ -1,0 +1,37 @@
+# 接手复核：剩余 send 门槛与安全修改边界
+
+日期：2026-10-12。仅复核已有报告与源码；未修改生产行为、编译、运行测试或启动负载。本文件是缓存归档，不替代矩阵/soak 原始证据。
+
+## 结论与证据
+
+50 root 普通短历史 send 仍未达到 p95 ≤500 ms：最终矩阵为 **755.424 ms**。当前没有足够测量证据支持一个能安全补足差额的最小修复，不能据此把本轮判为全面达标。依据为同目录 `final-matrix-review.md`、`final-matrix-review-evidence.json`、`residual-hotspots.md`，当前性能因果以最终矩阵为准，不能沿用旧 DELETE/全局连接基线的因果解释。
+
+- 短 50 的 execution permit wait 占 rpc.queue 聚合 **98.58%**，write handler 均值 **30.580 ms**；长 50 为 99.12% /44.971 ms。两槽将几十毫秒服务时间放大为数百毫秒等待。
+- 当前短 50 lane/dependency 等待聚合仅 2.050/2.235 ms；admission_wait 仅 0.130 ms。不是同 owner 依赖或全局 admission mutex 的证据。
+- writer queue、history prepare、completion backlog 都可能贡献 handler 服务时间，但聚合/嵌套 span 不能归因某个小读、一次 commit 或 checkpoint。没有请求级关联或栈 profile，不能宣称某项静态候选已经是已测热点。
+
+## 持有关系与源码定位
+
+以下路径相对仓库根目录 `<repo>`，行号为本次只读检查时的源码。
+
+1. `crates/core-server/src/transport/bounded_dispatch.rs:344` 获取公平 execution permit；作用域持续到 handler 返回、回复入队和 completion 发布。`:530` 将 write concurrency 设为 2。当前 task 是一个同步 `FnOnce` handler，不能只在外层改一行就安全拆出 preparation/commit/handoff。
+2. `crates/core-server/src/application/agent/turn.rs:305` 获取每 Conversation admission guard，持有至 `:834` 的 launch 完成；`:309` 的 admission_hold 不是全局锁。`:360–370` 取得 authoritative project 并注册 Preparing；`:411–508` history/provider/world-state 准备；`:510–537` workflow run 绑定及逻辑 Turn/owner/cancellation 预留。
+3. `turn.rs:552–568` 的最终 access 检查包含 Preparing→Committing、关停和 execution-access token；`crates/core-server/src/application/agent_support/conversation.rs:1213–1227` 的 append admission 携带 revision/history version 进入 writer 校验；`:1236–1245` 从 durable Run 读取冻结的上下文模式与工作区并验证。
+4. `turn.rs:667–677` 在 durable admission 后、worker 采样前解除显式新用户 Turn 的 workflow Stop。`crates/core-server/src/application/agent/turn_executor/launch.rs:14–33` 仍做历史缓存和工具投影，`:77–114` 处理删除围栏与失败结算，`:116–139` 注册控制/turn diff，`:206–218` 才 spawn Runtime，`:220` 返回 ACK。
+5. `launch.rs:251–286` 的 completion reservation 和实际 Runtime 在 spawn 后执行，ACK 不直接等待其终态。但这些任务会通过共享 storage/CPU 间接影响后续 send，是否及影响多少需关联测量。
+
+## 不能为门槛删除的步骤
+
+- `conversation.rs:828` 的准备期间 history version 检查与 `:1213` 的 writer 内最终 CAS 跨越不同时间边界；不可凭“重复”删除。保留完整模型正文、Trace、附件、compaction 与确切消息投影。
+- `turn.rs:299,379` 的授权/生命周期检查位于不同围栏阶段；模型配置也可在准备期间变化。复用读结果需要定义相同 snapshot/版本，不能直接相信早先的读。
+- `crates/core/src/storage/workflow_execution_repository/delivery.rs:501–535` 的 bind_run 在无组织关系时仍保存 `None` snapshot；它限定该 Run 后续绑定/重放语义。不能按普通短场景“没有 workflow”跳过。`:252–266` 的 resume 是实际持久化 Stop 解除，不能挪到 ACK 后任意延迟。
+- 保留 Preparing owner、final writer access token、删除/关停围栏、现有队列/线程/业务容量、终态耐久与成功响应语义。已有接纳量和工作量必须单列核对，不能靠拒绝更多请求稀释成功分位。
+
+## 最小剩余工作
+
+1. **先定位 handler 内剩余服务时间。** 对 metadata/root access、history version/clone、model/skills/attachments 准备、writer queue/commit、postcommit frozen-state reads、resume/readiness、launch/tool projection 分阶段记录请求关联；优先独占短 50 与长 50，相同冻结输入、请求数及配置。现有 history_prepare/prepare_and_commit 两个粗 span 不足以确定 CPU 函数。
+2. **仅在同一 snapshot 内消除经测量的冗余。** 静态候选：`provider_transition.rs:85,539` metadata 重读；`turn.rs:426,651` 将共享 model history 转 owned append record 后再次 clone；`conversation.rs:1236–1241` 读取同一 durable Run 的两个冻结字段。可考虑合并查询或共享不可变记录，但尚无单项耗时/收益证据，不能承诺补足 255 ms；短历史下 clone 收益尤其未证实。
+3. **若局部优化不足，再单独设计阶段拆分。** 将 preparation 移出两槽或提前释放 permit 涉及通用 RPC handler、owner 公平性、Preparing/commit、关停 join、错误回滚与 runtime handoff。提前 ACK 会改变 launch 失败的返回语义；新增无界并行则突破容量约束。这不是本轮应临时拼接的安全小修。
+4. **验证后再声称达标。** 任何后续行为变化先过同 owner、撤权、删除、模型切换、history CAS、shutdown 和 launch 失败/回滚回归，再独占 A/B 短 50、长 50、20 mixed，报告每 owner 进展、拒绝/成功/终态、provider/body bytes、CPU per accepted/provider request、logical/kernel I/O。保留本次 50 短门禁失败事实。
+
+当前阻塞是剩余服务时间缺少细粒度因果证据，且显著放宽 permit 持有范围需要跨阶段设计与重新验收；不是工具不可用，也不是需要扩大队列/线程。此前修复与本次正确性通过不能替代这一性能门槛。

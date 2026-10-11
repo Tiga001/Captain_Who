@@ -1,0 +1,165 @@
+   Compiling mycopilot-core v0.1.0 (<repo>/crates/core)
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/conversation_fork_repository/tests/planning_reuse.rs:148:16
+    |
+148 |     connection.trace(Some(record_fork_plan_sql));
+    |                ^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/conversation_fork_repository/tests/planning_reuse.rs:157:16
+    |
+157 |     connection.trace(None);
+    |                ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/human_interaction_repository/attention_tests.rs:43:16
+   |
+43 |     connection.trace(Some(|sql| {
+   |                ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/workflow_member_state.rs:101:15
+    |
+101 |             c.trace(Some(count_query));
+    |               ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/workflow_member_state.rs:103:15
+    |
+103 |             c.trace(None);
+    |               ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/service/tests/conversations.rs:74:20
+   |
+74 |         connection.trace(Some(record_storage_sql));
+   |                    ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/service/tests/conversations.rs:79:24
+   |
+79 |             connection.trace(Some(record_storage_sql))
+   |                        ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/service/tests/conversations.rs:84:70
+   |
+84 |         .configure_read_connections_for_test(|connection| connection.trace(None));
+   |                                                                      ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/service/tests/conversations.rs:87:20
+   |
+87 |         connection.trace(None);
+   |                    ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+    --> crates/core/src/storage/service/tests/settings.rs:2855:24
+     |
+2855 |             connection.trace(Some(|sql| {
+     |                        ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+    --> crates/core/src/storage/service/tests/settings.rs:2906:24
+     |
+2906 |             connection.trace(None);
+     |                        ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/tests/workflow_timeline.rs:180:14
+    |
+180 |             .trace(Some(count_history_queries));
+    |              ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/tests/workflow_timeline.rs:184:28
+    |
+184 |                 connection.trace(Some(count_history_queries))
+    |                            ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/tests/workflow_timeline.rs:194:45
+    |
+194 |         service.state.connection().unwrap().trace(None);
+    |                                             ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/service/tests/workflow_timeline.rs:197:74
+    |
+197 |             .configure_read_connections_for_test(|connection| connection.trace(None));
+    |                                                                          ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+  --> crates/core/src/storage/workflow_execution_repository/awareness/tests/request_observation.rs:97:11
+   |
+97 |         c.trace(Some(record_summary_sql));
+   |           ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/workflow_execution_repository/awareness/tests/request_observation.rs:101:11
+    |
+101 |         c.trace(None);
+    |           ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/workflow_execution_repository/awareness/tests.rs:444:7
+    |
+444 |     c.trace(Some(record_summary_sql));
+    |       ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/workflow_execution_repository/awareness/tests.rs:446:7
+    |
+446 |     c.trace(None);
+    |       ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/workflow_execution_repository/awareness/tests.rs:728:7
+    |
+728 |     c.trace(Some(record_summary_sql));
+    |       ^^^^^
+
+warning: use of deprecated method `rusqlite::trace::<impl rusqlite::Connection>::trace`: use trace_v2 instead
+   --> crates/core/src/storage/workflow_execution_repository/awareness/tests.rs:730:7
+    |
+730 |     c.trace(None);
+    |       ^^^^^
+
+   Compiling mycopilot-core-server v0.1.0 (<repo>/crates/core-server)
+error[E0277]: `std::sync::mpsc::Receiver<()>` cannot be shared between threads safely
+   --> crates/core-server/src/application/agent/turn_executor/runtime_isolation_tests.rs:608:49
+    |
+608 |                       .coordinate_runtime_control(|| {
+    |  ______________________--------------------------_^
+    | |                      |
+    | |                      required by a bound introduced by this call
+609 | |                         writer_entered.send(()).unwrap();
+610 | |                         writer_released
+611 | |                             .recv_timeout(Duration::from_secs(10))
+612 | |                             .unwrap();
+613 | |                         Ok(())
+614 | |                     })
+    | |_____________________^ `std::sync::mpsc::Receiver<()>` cannot be shared between threads safely
+    |
+    = help: the trait `std::marker::Sync` is not implemented for `std::sync::mpsc::Receiver<()>`
+    = note: required for `&std::sync::mpsc::Receiver<()>` to implement `std::marker::Send`
+note: required because it's used within this closure
+   --> crates/core-server/src/application/agent/turn_executor/runtime_isolation_tests.rs:608:49
+    |
+608 |                     .coordinate_runtime_control(|| {
+    |                                                 ^^
+note: required by a bound in `mycopilot_core::storage::service::execution_access_boundary::<impl mycopilot_core::storage::service::StorageService>::coordinate_runtime_control`
+   --> crates/core/src/storage/service/execution_access_boundary.rs:14:55
+    |
+ 12 |     pub fn coordinate_runtime_control<T: Send>(
+    |            -------------------------- required by a bound in this associated function
+ 13 |         &self,
+ 14 |         publish: impl FnOnce() -> Result<T, String> + Send,
+    |                                                       ^^^^ required by this bound in `mycopilot_core::storage::service::execution_access_boundary::<impl StorageService>::coordinate_runtime_control`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `mycopilot-core-server` (bin "core-server" test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: `mycopilot-core` (lib test) generated 21 warnings

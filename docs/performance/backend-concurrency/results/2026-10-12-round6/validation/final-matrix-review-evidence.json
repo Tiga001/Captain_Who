@@ -1,0 +1,752 @@
+{
+  "scope": "lightweight readonly final matrix review; no new benchmark",
+  "source_head": "b1744ab98e6eb5db633e351d983bbe9d401a76f6",
+  "binary_sha256": "99349b2fa8a57731222722a455f1f0637ac3d9cda61b1ad6f14e7ee06b3aa082",
+  "cases": 36,
+  "rpc_offered": 1608,
+  "root_accepted": 1420,
+  "root_reopened": 1420,
+  "child_reopened": 158,
+  "all_scenario_workloads_match": true,
+  "all_actual_outcomes_match": true,
+  "rejections": [
+    {
+      "case": "approval-u50-r50-h0-s0",
+      "count": 18,
+      "operation": "agent.approveAction",
+      "all_overload": true,
+      "none_dispatch_admitted": true,
+      "none_handler_started": true,
+      "not_drained_before_cleanup": true,
+      "in_progress_before_cleanup": 18,
+      "pre_close_in_progress": 18,
+      "post_reopen_in_progress": 0
+    },
+    {
+      "case": "stop-u50-r50-h0-s0",
+      "count": 18,
+      "operation": "agent.cancelRun",
+      "all_overload": true,
+      "none_dispatch_admitted": true,
+      "none_handler_started": true,
+      "not_drained_before_cleanup": true,
+      "in_progress_before_cleanup": 18,
+      "pre_close_in_progress": 0,
+      "post_reopen_in_progress": 0
+    }
+  ],
+  "focus": {
+    "text-u20-r20-h0-s0": {
+      "send": {
+        "n": 60,
+        "p50_ms": 121.854,
+        "p95_ms": 247.969,
+        "p99_ms": 268.257,
+        "max_ms": 268.257
+      },
+      "handler_mean_ms": 24.1053,
+      "execution_permit_fraction_of_rpc_queue": 0.9608393043022195,
+      "timer_lag": {
+        "count": 219,
+        "max_us": 3033,
+        "p50_us": 2144,
+        "p95_us": 2748,
+        "p99_reliable": false,
+        "p99_us": 2993
+      },
+      "tail_rpc": {
+        "id": 20,
+        "owner": 19,
+        "phase": "cold_history",
+        "scheduled_us": 30071,
+        "offered_us": 32027,
+        "handler_started_us": 259416,
+        "responded_us": 298328
+      },
+      "stages": {
+        "rpc.execution_permit_wait/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 241191,
+          "operation": "write",
+          "p50_upper_us": 73727,
+          "p95_upper_us": 229375,
+          "p99_upper_us": 241191,
+          "stage": "rpc.execution_permit_wait",
+          "total_us": 5386076
+        },
+        "rpc.queue/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 241705,
+          "operation": "write",
+          "p50_upper_us": 73727,
+          "p95_upper_us": 229375,
+          "p99_upper_us": 241705,
+          "stage": "rpc.queue",
+          "total_us": 5605595
+        },
+        "rpc.lane_wait/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 41,
+          "operation": "write",
+          "p50_upper_us": 8,
+          "p95_upper_us": 35,
+          "p99_upper_us": 41,
+          "stage": "rpc.lane_wait",
+          "total_us": 678
+        },
+        "rpc.owner_resolution/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 10616,
+          "operation": "write",
+          "p50_upper_us": 511,
+          "p95_upper_us": 10616,
+          "p99_upper_us": 10616,
+          "stage": "rpc.owner_resolution",
+          "total_us": 218443
+        },
+        "rpc.dependency_wait/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 15,
+          "operation": "write",
+          "p50_upper_us": 3,
+          "p95_upper_us": 9,
+          "p99_upper_us": 15,
+          "stage": "rpc.dependency_wait",
+          "total_us": 205
+        },
+        "rpc.handler_execution/write": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 54907,
+          "operation": "write",
+          "p50_upper_us": 24575,
+          "p95_upper_us": 40959,
+          "p99_upper_us": 54907,
+          "stage": "rpc.handler_execution",
+          "total_us": 1446318
+        },
+        "storage.queue_wait/writer": {
+          "bytes": 30524070,
+          "count": 2690,
+          "max_bytes": 44396,
+          "max_us": 13565,
+          "operation": "writer",
+          "p50_upper_us": 287,
+          "p95_upper_us": 4607,
+          "p99_upper_us": 7167,
+          "stage": "storage.queue_wait",
+          "total_us": 2898770
+        },
+        "sqlite.read_wait/reader": {
+          "bytes": 0,
+          "count": 5771,
+          "max_bytes": 0,
+          "max_us": 2255,
+          "operation": "reader",
+          "p50_upper_us": 0,
+          "p95_upper_us": 191,
+          "p99_upper_us": 767,
+          "stage": "sqlite.read_wait",
+          "total_us": 185379
+        },
+        "turn/history_prepare": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 12449,
+          "operation": "history_prepare",
+          "p50_upper_us": 3071,
+          "p95_upper_us": 10239,
+          "p99_upper_us": 12449,
+          "stage": "turn",
+          "total_us": 198841
+        },
+        "turn/prepare_and_commit": {
+          "bytes": 0,
+          "count": 60,
+          "max_bytes": 0,
+          "max_us": 25217,
+          "operation": "prepare_and_commit",
+          "p50_upper_us": 9215,
+          "p95_upper_us": 18431,
+          "p99_upper_us": 25217,
+          "stage": "turn",
+          "total_us": 602938
+        },
+        "blocking.queue_wait/completion": {
+          "bytes": 8887920,
+          "count": 60,
+          "max_bytes": 165100,
+          "max_us": 143754,
+          "operation": "completion",
+          "p50_upper_us": 114687,
+          "p95_upper_us": 143754,
+          "p99_upper_us": 143754,
+          "stage": "blocking.queue_wait",
+          "total_us": 6382711
+        },
+        "blocking.execution/completion": {
+          "bytes": 8887920,
+          "count": 60,
+          "max_bytes": 165100,
+          "max_us": 35068,
+          "operation": "completion",
+          "p50_upper_us": 20479,
+          "p95_upper_us": 32767,
+          "p99_upper_us": 35068,
+          "stage": "blocking.execution",
+          "total_us": 1202298
+        }
+      }
+    },
+    "text-u50-r50-h0-s0": {
+      "send": {
+        "n": 150,
+        "p50_ms": 394.077,
+        "p95_ms": 755.424,
+        "p99_ms": 795.807,
+        "max_ms": 795.827
+      },
+      "handler_mean_ms": 30.57988,
+      "execution_permit_fraction_of_rpc_queue": 0.9858081101011881,
+      "timer_lag": {
+        "count": 246,
+        "max_us": 5654,
+        "p50_us": 1475,
+        "p95_us": 3099,
+        "p99_reliable": false,
+        "p99_us": 3244
+      },
+      "tail_rpc": {
+        "id": 50,
+        "owner": 49,
+        "phase": "cold_history",
+        "scheduled_us": 30150,
+        "offered_us": 32451,
+        "handler_started_us": 782480,
+        "responded_us": 825977
+      },
+      "stages": {
+        "rpc.execution_permit_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 739047,
+          "operation": "write",
+          "p50_upper_us": 360447,
+          "p95_upper_us": 720895,
+          "p99_upper_us": 739047,
+          "stage": "rpc.execution_permit_wait",
+          "total_us": 51846393
+        },
+        "rpc.queue/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 750011,
+          "operation": "write",
+          "p50_upper_us": 360447,
+          "p95_upper_us": 720895,
+          "p99_upper_us": 750011,
+          "stage": "rpc.queue",
+          "total_us": 52592784
+        },
+        "rpc.lane_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 92,
+          "operation": "write",
+          "p50_upper_us": 10,
+          "p95_upper_us": 39,
+          "p99_upper_us": 79,
+          "stage": "rpc.lane_wait",
+          "total_us": 2050
+        },
+        "rpc.owner_resolution/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 11012,
+          "operation": "write",
+          "p50_upper_us": 3071,
+          "p95_upper_us": 11012,
+          "p99_upper_us": 11012,
+          "stage": "rpc.owner_resolution",
+          "total_us": 741446
+        },
+        "rpc.dependency_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 63,
+          "operation": "write",
+          "p50_upper_us": 14,
+          "p95_upper_us": 35,
+          "p99_upper_us": 47,
+          "stage": "rpc.dependency_wait",
+          "total_us": 2235
+        },
+        "rpc.handler_execution/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 58309,
+          "operation": "write",
+          "p50_upper_us": 32767,
+          "p95_upper_us": 45055,
+          "p99_upper_us": 58309,
+          "stage": "rpc.handler_execution",
+          "total_us": 4586982
+        },
+        "storage.queue_wait/writer": {
+          "bytes": 78304780,
+          "count": 6945,
+          "max_bytes": 44396,
+          "max_us": 14122,
+          "operation": "writer",
+          "p50_upper_us": 575,
+          "p95_upper_us": 5631,
+          "p99_upper_us": 7679,
+          "stage": "storage.queue_wait",
+          "total_us": 9757491
+        },
+        "sqlite.read_wait/reader": {
+          "bytes": 0,
+          "count": 15226,
+          "max_bytes": 0,
+          "max_us": 3689,
+          "operation": "reader",
+          "p50_upper_us": 0,
+          "p95_upper_us": 447,
+          "p99_upper_us": 959,
+          "stage": "sqlite.read_wait",
+          "total_us": 990383
+        },
+        "turn/history_prepare": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 17711,
+          "operation": "history_prepare",
+          "p50_upper_us": 5631,
+          "p95_upper_us": 13311,
+          "p99_upper_us": 15359,
+          "stage": "turn",
+          "total_us": 969764
+        },
+        "turn/prepare_and_commit": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 34003,
+          "operation": "prepare_and_commit",
+          "p50_upper_us": 13311,
+          "p95_upper_us": 20479,
+          "p99_upper_us": 34003,
+          "stage": "turn",
+          "total_us": 1869577
+        },
+        "blocking.queue_wait/completion": {
+          "bytes": 22219980,
+          "count": 150,
+          "max_bytes": 165100,
+          "max_us": 156512,
+          "operation": "completion",
+          "p50_upper_us": 114687,
+          "p95_upper_us": 147455,
+          "p99_upper_us": 156512,
+          "stage": "blocking.queue_wait",
+          "total_us": 16867869
+        },
+        "blocking.execution/completion": {
+          "bytes": 22219980,
+          "count": 150,
+          "max_bytes": 165100,
+          "max_us": 45253,
+          "operation": "completion",
+          "p50_upper_us": 26623,
+          "p95_upper_us": 36863,
+          "p99_upper_us": 40959,
+          "stage": "blocking.execution",
+          "total_us": 3850270
+        }
+      }
+    },
+    "text-u50-r50-h128-s0": {
+      "send": {
+        "n": 150,
+        "p50_ms": 543.72,
+        "p95_ms": 1106.118,
+        "p99_ms": 1192.683,
+        "max_ms": 1192.706
+      },
+      "handler_mean_ms": 44.970893333333336,
+      "execution_permit_fraction_of_rpc_queue": 0.9911634466706803,
+      "timer_lag": {
+        "count": 262,
+        "max_us": 3097,
+        "p50_us": 1361,
+        "p95_us": 2894,
+        "p99_reliable": false,
+        "p99_us": 3062
+      },
+      "tail_rpc": {
+        "id": 50,
+        "owner": 49,
+        "phase": "cold_history",
+        "scheduled_us": 33403,
+        "offered_us": 35586,
+        "handler_started_us": 1172937,
+        "responded_us": 1226109
+      },
+      "stages": {
+        "rpc.execution_permit_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 1131460,
+          "operation": "write",
+          "p50_upper_us": 491519,
+          "p95_upper_us": 1048575,
+          "p99_upper_us": 1131460,
+          "stage": "rpc.execution_permit_wait",
+          "total_us": 73366964
+        },
+        "rpc.queue/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 1137332,
+          "operation": "write",
+          "p50_upper_us": 491519,
+          "p95_upper_us": 1048575,
+          "p99_upper_us": 1137332,
+          "stage": "rpc.queue",
+          "total_us": 74021055
+        },
+        "rpc.lane_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 135,
+          "operation": "write",
+          "p50_upper_us": 9,
+          "p95_upper_us": 59,
+          "p99_upper_us": 103,
+          "stage": "rpc.lane_wait",
+          "total_us": 2295
+        },
+        "rpc.owner_resolution/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 5978,
+          "operation": "write",
+          "p50_upper_us": 5631,
+          "p95_upper_us": 5978,
+          "p99_upper_us": 5978,
+          "stage": "rpc.owner_resolution",
+          "total_us": 648701
+        },
+        "rpc.dependency_wait/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 48,
+          "operation": "write",
+          "p50_upper_us": 14,
+          "p95_upper_us": 35,
+          "p99_upper_us": 47,
+          "stage": "rpc.dependency_wait",
+          "total_us": 2352
+        },
+        "rpc.handler_execution/write": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 86687,
+          "operation": "write",
+          "p50_upper_us": 45055,
+          "p95_upper_us": 61439,
+          "p99_upper_us": 86687,
+          "stage": "rpc.handler_execution",
+          "total_us": 6745634
+        },
+        "storage.queue_wait/writer": {
+          "bytes": 109055452,
+          "count": 7248,
+          "max_bytes": 174459,
+          "max_us": 21774,
+          "operation": "writer",
+          "p50_upper_us": 703,
+          "p95_upper_us": 5631,
+          "p99_upper_us": 7679,
+          "stage": "storage.queue_wait",
+          "total_us": 10992852
+        },
+        "sqlite.read_wait/reader": {
+          "bytes": 0,
+          "count": 15241,
+          "max_bytes": 0,
+          "max_us": 10553,
+          "operation": "reader",
+          "p50_upper_us": 0,
+          "p95_upper_us": 1407,
+          "p99_upper_us": 2815,
+          "stage": "sqlite.read_wait",
+          "total_us": 3325157
+        },
+        "turn/history_prepare": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 23034,
+          "operation": "history_prepare",
+          "p50_upper_us": 10239,
+          "p95_upper_us": 18431,
+          "p99_upper_us": 22527,
+          "stage": "turn",
+          "total_us": 1661656
+        },
+        "turn/prepare_and_commit": {
+          "bytes": 0,
+          "count": 150,
+          "max_bytes": 0,
+          "max_us": 42745,
+          "operation": "prepare_and_commit",
+          "p50_upper_us": 18431,
+          "p95_upper_us": 26623,
+          "p99_upper_us": 42745,
+          "stage": "turn",
+          "total_us": 2769844
+        },
+        "blocking.queue_wait/completion": {
+          "bytes": 60312780,
+          "count": 150,
+          "max_bytes": 419052,
+          "max_us": 178307,
+          "operation": "completion",
+          "p50_upper_us": 147455,
+          "p95_upper_us": 163839,
+          "p99_upper_us": 178307,
+          "stage": "blocking.queue_wait",
+          "total_us": 20412653
+        },
+        "blocking.execution/completion": {
+          "bytes": 60312780,
+          "count": 150,
+          "max_bytes": 419052,
+          "max_us": 70522,
+          "operation": "completion",
+          "p50_upper_us": 45055,
+          "p95_upper_us": 53247,
+          "p99_upper_us": 70522,
+          "stage": "blocking.execution",
+          "total_us": 5910192
+        }
+      }
+    },
+    "steadytext-u20-r20-h0-s0": {
+      "send": {
+        "n": 620,
+        "p50_ms": 157.803,
+        "p95_ms": 380.394,
+        "p99_ms": 439.71,
+        "max_ms": 498.966
+      },
+      "handler_mean_ms": 34.67685,
+      "execution_permit_fraction_of_rpc_queue": 0.9914607068630942,
+      "timer_lag": {
+        "count": 3033,
+        "max_us": 3328,
+        "p50_us": 2318,
+        "p95_us": 3164,
+        "p99_reliable": false,
+        "p99_us": 3234
+      },
+      "tail_rpc": {
+        "id": 600,
+        "owner": 19,
+        "phase": "warm_history",
+        "scheduled_us": 58030615,
+        "offered_us": 58033284,
+        "handler_started_us": 58453777,
+        "responded_us": 58529581
+      },
+      "stages": {
+        "rpc.execution_permit_wait/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 418519,
+          "operation": "write",
+          "p50_upper_us": 114687,
+          "p95_upper_us": 327679,
+          "p99_upper_us": 393215,
+          "stage": "rpc.execution_permit_wait",
+          "total_us": 83232121
+        },
+        "rpc.queue/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 420463,
+          "operation": "write",
+          "p50_upper_us": 114687,
+          "p95_upper_us": 327679,
+          "p99_upper_us": 393215,
+          "stage": "rpc.queue",
+          "total_us": 83948986
+        },
+        "rpc.lane_wait/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 120,
+          "operation": "write",
+          "p50_upper_us": 10,
+          "p95_upper_us": 31,
+          "p99_upper_us": 59,
+          "stage": "rpc.lane_wait",
+          "total_us": 7074
+        },
+        "rpc.owner_resolution/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 10671,
+          "operation": "write",
+          "p50_upper_us": 703,
+          "p95_upper_us": 2559,
+          "p99_upper_us": 10671,
+          "stage": "rpc.owner_resolution",
+          "total_us": 703959
+        },
+        "rpc.dependency_wait/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 54,
+          "operation": "write",
+          "p50_upper_us": 4,
+          "p95_upper_us": 13,
+          "p99_upper_us": 23,
+          "stage": "rpc.dependency_wait",
+          "total_us": 3367
+        },
+        "rpc.handler_execution/write": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 80443,
+          "operation": "write",
+          "p50_upper_us": 32767,
+          "p95_upper_us": 61439,
+          "p99_upper_us": 73727,
+          "stage": "rpc.handler_execution",
+          "total_us": 21499647
+        },
+        "storage.queue_wait/writer": {
+          "bytes": 320481998,
+          "count": 27343,
+          "max_bytes": 44396,
+          "max_us": 22668,
+          "operation": "writer",
+          "p50_upper_us": 143,
+          "p95_upper_us": 5119,
+          "p99_upper_us": 7679,
+          "stage": "storage.queue_wait",
+          "total_us": 27368966
+        },
+        "sqlite.read_wait/reader": {
+          "bytes": 0,
+          "count": 58461,
+          "max_bytes": 0,
+          "max_us": 23038,
+          "operation": "reader",
+          "p50_upper_us": 0,
+          "p95_upper_us": 831,
+          "p99_upper_us": 7679,
+          "stage": "sqlite.read_wait",
+          "total_us": 15039765
+        },
+        "turn/history_prepare": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 31078,
+          "operation": "history_prepare",
+          "p50_upper_us": 3327,
+          "p95_upper_us": 18431,
+          "p99_upper_us": 22527,
+          "stage": "turn",
+          "total_us": 3409624
+        },
+        "turn/prepare_and_commit": {
+          "bytes": 0,
+          "count": 620,
+          "max_bytes": 0,
+          "max_us": 35294,
+          "operation": "prepare_and_commit",
+          "p50_upper_us": 13311,
+          "p95_upper_us": 24575,
+          "p99_upper_us": 32767,
+          "stage": "turn",
+          "total_us": 8786946
+        },
+        "blocking.queue_wait/completion": {
+          "bytes": 239107280,
+          "count": 620,
+          "max_bytes": 640190,
+          "max_us": 216133,
+          "operation": "completion",
+          "p50_upper_us": 131071,
+          "p95_upper_us": 180223,
+          "p99_upper_us": 212991,
+          "stage": "blocking.queue_wait",
+          "total_us": 79761421
+        },
+        "blocking.execution/completion": {
+          "bytes": 239107280,
+          "count": 620,
+          "max_bytes": 640190,
+          "max_us": 68910,
+          "operation": "completion",
+          "p50_upper_us": 30719,
+          "p95_upper_us": 57343,
+          "p99_upper_us": 61439,
+          "stage": "blocking.execution",
+          "total_us": 19663954
+        }
+      }
+    }
+  },
+  "work_counters": {
+    "before": {
+      "provider_requests": 1679,
+      "provider_request_bytes": 194424455,
+      "output_events": 22271,
+      "output_bytes": 137273343,
+      "context_compaction_events": 0
+    },
+    "after": {
+      "provider_requests": 1679,
+      "provider_request_bytes": 194439588,
+      "output_events": 22271,
+      "output_bytes": 137273355,
+      "context_compaction_events": 0
+    }
+  }
+}

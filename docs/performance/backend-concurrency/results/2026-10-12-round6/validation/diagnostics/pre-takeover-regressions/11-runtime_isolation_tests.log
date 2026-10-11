@@ -1,0 +1,16 @@
+
+running 10 tests
+test application::agent::turn_executor::runtime_isolation_tests::checkpoint_writer_wait_expired_claim_preserves_generation_and_never_samples ... ok
+test application::agent::turn_executor::runtime_isolation_tests::checkpoint_writer_wait_replaced_claim_preserves_successor_and_never_samples ... ok
+test application::agent::turn_executor::runtime_isolation_tests::closed_control_keeps_recovery_fence_but_closes_steering ... runtime startup steering retirement retained for recovery: blocking executor is closed
+ok
+test application::agent::turn_executor::runtime_isolation_tests::completion_rejection_retires_steering_on_control_worker ... ok
+test application::agent::turn_executor::runtime_isolation_tests::durable_tree_stop_after_host_preparation_fences_before_token_delivery ... ok
+test application::agent::turn_executor::runtime_isolation_tests::expired_claim_after_host_preparation_does_not_start_runtime ... ok
+test application::agent::turn_executor::runtime_isolation_tests::receipt_recovery_wait_does_not_occupy_completion_worker ... ok
+test application::agent::turn_executor::runtime_isolation_tests::replaced_claim_after_host_preparation_does_not_start_runtime ... ok
+test application::agent::turn_executor::runtime_isolation_tests::reserved_terminal_settlement_survives_completion_admission_close ... ok
+test application::agent::turn_executor::runtime_isolation_tests::terminal_persistence_wait_keeps_runtime_responsive_and_done_follows_commit ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1237 filtered out; finished in 5.33s
+

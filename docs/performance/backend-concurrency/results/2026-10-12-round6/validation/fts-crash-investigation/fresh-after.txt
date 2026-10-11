@@ -1,0 +1,12 @@
+version=3.53.2
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=
+SQL: SELECT rowid,ref_key,content FROM conversation_history_fts
+rowid=1 ref_key=message:fault-user content=hello 
+rowid=2 ref_key=message:fault-assistant content=committed terminal 🐈 
+rowid=3 ref_key=trace:fault-assistant:0 content={"type":"assistant_narration","sequence":0,"content":"committed terminal 🐈","truncated":false} 
+rc=0 error=
+SQL: PRAGMA quick_check
+quick_check=ok 
+rc=0 error=

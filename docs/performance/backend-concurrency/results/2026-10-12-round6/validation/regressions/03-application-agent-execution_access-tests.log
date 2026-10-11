@@ -1,0 +1,19 @@
+
+running 10 tests
+test application::agent::execution_access::tests::execution_access_defaults_denied_and_all_reasons_have_stable_codes ... ok
+test application::agent::execution_access::tests::execution_access_delay_does_not_extend_a_received_lease ... ok
+test application::agent::execution_access::tests::execution_access_expired_preparation_token_cannot_be_revived_by_late_renewal ... ok
+test application::agent::execution_access::tests::execution_access_expires_at_wall_or_monotonic_deadline ... ok
+test application::agent::execution_access::tests::execution_access_fences_both_revision_and_account_epoch ... ok
+test application::agent::execution_access::tests::execution_access_publication_waits_for_writer_without_holding_registry ... ok
+test application::agent::execution_access::tests::execution_access_rejects_clock_jumps_permanently_for_same_revision ... ok
+test application::agent::execution_access::tests::execution_access_restart_does_not_restore_previous_in_memory_grant ... ok
+test application::agent::execution_access::tests::execution_access_token_survives_renewal_but_not_denial_or_account_change ... ok
+test application::agent::execution_access::tests::queued_account_token_is_scoped_to_one_handler_and_survives_neither_relogin_nor_panic ... 
+thread 'application::agent::execution_access::tests::queued_account_token_is_scoped_to_one_handler_and_survives_neither_relogin_nor_panic' (59544061) panicked at crates/core-server/src/application/agent/execution_access.rs:334:61:
+handler fixture
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 0.29s
+

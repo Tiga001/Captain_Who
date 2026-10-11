@@ -1,0 +1,6 @@
+
+thread 'application::agent::tests::backend_concurrency_baseline::backend_concurrency_disk_baseline' (59862763) panicked at crates/core-server/src/application/agent/tests/backend_concurrency_baseline.rs:1578:5:
+assertion `left == right` failed: stage metrics must be enabled before process startup
+  left: Ok("0")
+ right: Ok("1")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
