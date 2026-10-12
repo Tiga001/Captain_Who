@@ -3,7 +3,7 @@ import type {
   AgentProviderTransitionOperation
 } from '@mycopilot/protocol'
 import { HostInvocationError } from '@mycopilot/host-api'
-import { useState } from 'react'
+import { act, StrictMode, useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 
@@ -47,7 +47,7 @@ const completed: Extract<AgentProviderTransitionOperation, { status: 'completed'
   conversationUpdatedAt: 21
 }
 
-function TransitionHarness() {
+function TransitionHarness({ loadOnMount = false }: { loadOnMount?: boolean }) {
   const [outcome, setOutcome] = useState('idle')
   const [currentModelId, setCurrentModelId] = useState('model-1')
   const transition = useProviderTransition({
@@ -59,6 +59,10 @@ function TransitionHarness() {
     onRequestError: service.onRequestError
   })
   const operations = transition.store.operations['conversation-1'] ?? []
+  const { loadStatus } = transition
+  useEffect(() => {
+    if (loadOnMount) void loadStatus('conversation-1')
+  }, [loadOnMount, loadStatus])
 
   return (
     <div>
@@ -118,6 +122,9 @@ function TransitionHarness() {
       >
         load history
       </button>
+      <button onClick={() => transition.clearConversation('conversation-1')} type="button">
+        clear history
+      </button>
     </div>
   )
 }
@@ -170,6 +177,138 @@ async function startRunningTransition() {
 }
 
 describe('useProviderTransition terminal reconciliation', () => {
+  it('keeps known state without a switch error or retries when a passive read is overloaded', async () => {
+    service.getStatus.mockRejectedValue(
+      new HostInvocationError({
+        message: 'RPC request queue is full. Retry shortly.',
+        code: -32001
+      })
+    )
+    const screen = await render(<TransitionHarness />)
+    await act(async () => transitionHandler?.(completed))
+
+    await screen.getByRole('button', { name: 'load history' }).click()
+    vi.useFakeTimers()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    await expect
+      .element(screen.getByTestId('operations'))
+      .toHaveTextContent(`${completed.operationId}:completed`)
+    expect(service.getStatus).toHaveBeenCalledTimes(1)
+    expect(service.onRequestError).not.toHaveBeenCalled()
+    expect(service.preflight).not.toHaveBeenCalled()
+    expect(service.start).not.toHaveBeenCalled()
+  })
+
+  it('coalesces pending passive reads and permits another read after settlement', async () => {
+    const status = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    service.getStatus.mockReturnValueOnce(status.promise)
+    const screen = await render(<TransitionHarness />)
+
+    for (let index = 0; index < 5; index += 1) {
+      await screen.getByRole('button', { name: 'load history' }).click()
+    }
+    expect(service.getStatus).toHaveBeenCalledTimes(1)
+    await act(async () => status.resolve({ operations: [completed] }))
+    await screen.getByRole('button', { name: 'load history' }).click()
+
+    expect(service.getStatus).toHaveBeenCalledTimes(2)
+    expect(service.onRequestError).not.toHaveBeenCalled()
+  })
+
+  it('discards a passive snapshot predating a newer conversation notification', async () => {
+    const status = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    service.getStatus.mockReturnValueOnce(status.promise)
+    const screen = await render(<TransitionHarness />)
+    await screen.getByRole('button', { name: 'load history' }).click()
+
+    await act(async () => transitionHandler?.(completed))
+    await act(async () =>
+      status.resolve({ operations: [{ ...running, operationId: 'older-running-operation' }] })
+    )
+
+    await expect
+      .element(screen.getByTestId('operations'))
+      .toHaveTextContent(`${completed.operationId}:completed`)
+    expect(screen.getByTestId('operations').element().textContent).not.toContain('older-running')
+    expect(service.getStatus).toHaveBeenCalledTimes(1)
+    expect(service.onCompleted).not.toHaveBeenCalled()
+  })
+
+  it('does not revive cleared history or release a newer pending read with an old reply', async () => {
+    const oldStatus = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    const newStatus = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    service.getStatus.mockReturnValueOnce(oldStatus.promise).mockReturnValueOnce(newStatus.promise)
+    const screen = await render(<TransitionHarness />)
+    await screen.getByRole('button', { name: 'load history' }).click()
+    await screen.getByRole('button', { name: 'clear history' }).click()
+    await screen.getByRole('button', { name: 'load history' }).click()
+    await act(async () => oldStatus.resolve({ operations: [running] }))
+
+    expect(screen.getByTestId('operations').element().textContent).toBe('')
+    await screen.getByRole('button', { name: 'load history' }).click()
+    expect(service.getStatus).toHaveBeenCalledTimes(2)
+    await act(async () => newStatus.resolve({ operations: [completed] }))
+    await expect
+      .element(screen.getByTestId('operations'))
+      .toHaveTextContent(`${completed.operationId}:completed`)
+  })
+
+  it('ignores a late read from the StrictMode cleanup without invalidating the remounted read', async () => {
+    const oldStatus = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    const newStatus = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    service.getStatus.mockReturnValueOnce(oldStatus.promise).mockReturnValueOnce(newStatus.promise)
+    const screen = await render(
+      <StrictMode>
+        <TransitionHarness loadOnMount />
+      </StrictMode>
+    )
+    expect(service.getStatus).toHaveBeenCalledTimes(2)
+    await act(async () => oldStatus.resolve({ operations: [running] }))
+    expect(screen.getByTestId('operations').element().textContent).toBe('')
+    await screen.getByRole('button', { name: 'load history' }).click()
+    expect(service.getStatus).toHaveBeenCalledTimes(2)
+    await act(async () => newStatus.resolve({ operations: [completed] }))
+    await expect
+      .element(screen.getByTestId('operations'))
+      .toHaveTextContent(`${completed.operationId}:completed`)
+  })
+
+  it('settles a passive read after unmount without reporting a switch failure', async () => {
+    const status = deferred<{ operations: AgentProviderTransitionOperation[] }>()
+    service.getStatus.mockReturnValueOnce(status.promise)
+    const screen = await render(<TransitionHarness loadOnMount />)
+    await screen.unmount()
+    await act(async () =>
+      status.reject(new HostInvocationError({ message: 'overloaded', code: -32001 }))
+    )
+
+    expect(service.getStatus).toHaveBeenCalledTimes(1)
+    expect(service.onRequestError).not.toHaveBeenCalled()
+    expect(service.onCompleted).not.toHaveBeenCalled()
+  })
+
+  it.each(['request transition', 'request queued transition'])(
+    'still reports a rejected active preflight for %s',
+    async (buttonName) => {
+      service.preflight.mockRejectedValue(
+        new HostInvocationError({ message: 'overloaded', code: -32001 })
+      )
+      const screen = await render(<TransitionHarness />)
+      await screen.getByRole('button', { name: buttonName }).click()
+
+      await expect.element(screen.getByTestId('outcome')).toHaveTextContent('failed')
+      expect(service.preflight).toHaveBeenCalledTimes(1)
+      expect(service.preflight).toHaveBeenCalledWith({
+        conversationId: 'conversation-1',
+        targetModelId: 'model-2',
+        ...(buttonName === 'request queued transition' ? { forSend: true } : {})
+      })
+      expect(service.onRequestError).toHaveBeenCalledTimes(1)
+      expect(service.start).not.toHaveBeenCalled()
+    }
+  )
+
   it('waits for lightweight Host readiness before allowing a send without a transition', async () => {
     const ready = {
       conversationId: 'conversation-1',
@@ -502,8 +641,10 @@ describe('useProviderTransition terminal reconciliation', () => {
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise
+    reject = rejectPromise
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }

@@ -233,8 +233,8 @@ impl StorageState {
         })
     }
 
-    /// Queued cancellation drops its ticket. Once started, the job owns its data and admission
-    /// until completion even if its awaiter disappears; shutdown drains those mutations.
+    /// Queued cancellation drops its ticket. Once claimed for writer submission, the job owns
+    /// its data and admission until completion even if its awaiter disappears; shutdown drains it.
     #[track_caller]
     pub fn write_async<R: Send + 'static>(
         &self,
@@ -253,30 +253,33 @@ impl StorageState {
             check_not_nested()?;
             // Constructing but never polling a future is not submission and cannot pin drain.
             let permit = writer.gate.reserve(estimated_bytes, class)?;
-            permit.ready().await;
             let (send, receive) = tokio::sync::oneshot::channel();
-            let scheduled = crate::performance::enabled().then(Instant::now);
-            worker.spawn(move || {
-                if let Some(scheduled) = scheduled {
-                    crate::performance::record(
-                        "storage.worker_wait",
-                        "writer",
-                        scheduled.elapsed(),
-                        0,
-                    );
-                }
-                #[cfg(test)]
-                let _metrics = super::trace_performance_metrics::install(metrics);
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut connection = writer.lock(operation, Some(permit))?;
-                    let value = work(&mut connection);
-                    if !connection.is_autocommit() {
-                        return Err("storage_transaction_left_open".into());
+            let _queued = permit.dispatch(move |permit| {
+                // This callback only submits owned work. It runs on the retiring predecessor's
+                // thread, so neither database work nor waiting for admission may happen here.
+                let scheduled = crate::performance::enabled().then(Instant::now);
+                worker.spawn(move || {
+                    if let Some(scheduled) = scheduled {
+                        crate::performance::record(
+                            "storage.worker_wait",
+                            "writer",
+                            scheduled.elapsed(),
+                            0,
+                        );
                     }
-                    Ok(value)
-                }))
-                .unwrap_or_else(|_| Err("storage_worker_panicked".into()));
-                let _ = send.send(result);
+                    #[cfg(test)]
+                    let _metrics = super::trace_performance_metrics::install(metrics);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut connection = writer.lock(operation, Some(permit))?;
+                        let value = work(&mut connection);
+                        if !connection.is_autocommit() {
+                            return Err("storage_transaction_left_open".into());
+                        }
+                        Ok(value)
+                    }))
+                    .unwrap_or_else(|_| Err("storage_worker_panicked".into()));
+                    let _ = send.send(result);
+                });
             });
             receive
                 .await
@@ -578,3 +581,6 @@ mod tests;
 
 #[cfg(test)]
 mod review_tests;
+
+#[cfg(test)]
+mod admission_tests;

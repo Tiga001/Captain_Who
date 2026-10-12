@@ -1,8 +1,9 @@
 //! Finite database execution admission. A reservation is not a commit or a successful RPC.
 //! Sync adapters use Rayon scoped `install`: borrowed domain inputs cannot outlive their caller,
-//! and the caller waits for the actual transaction. Async jobs transfer their permit to the worker.
+//! and the caller waits for the actual transaction. Releasing a predecessor submits a ready async
+//! job directly to the worker: a blocked sync caller must never depend on its runtime polling again.
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Instant;
 use tokio::sync::Notify;
 
@@ -22,7 +23,50 @@ struct Admission {
     next: u64,
     bytes: usize,
     normal: usize,
-    queue: VecDeque<u64>,
+    queue: VecDeque<Entry>,
+}
+struct Entry {
+    ticket: u64,
+    // The awaiting future owns the cancellable job. A strong reference here would form
+    // gate -> job -> permit -> gate and retain queued work after its future is dropped.
+    pending: Option<Weak<PendingWrite>>,
+}
+struct WriteJob {
+    permit: WritePermit,
+    submit: Box<dyn FnOnce(WritePermit) + Send>,
+}
+struct PendingWrite {
+    job: Mutex<Option<WriteJob>>,
+}
+pub(super) struct QueuedWrite {
+    pending: Arc<PendingWrite>,
+}
+impl PendingWrite {
+    fn start(&self) {
+        // Taking the job wins against cancellation. From this point the submit callback
+        // owns it, just as spawning the writer did previously, even if its awaiter disappears.
+        let job = self.job.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(WriteJob { permit, submit }) = job {
+            permit.record_wait();
+            submit(permit);
+        }
+    }
+}
+impl Drop for QueuedWrite {
+    fn drop(&mut self) {
+        let job = self
+            .pending
+            .job
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(WriteJob { permit, submit }) = job {
+            // Both destructors run outside both mutexes. Release admission first: a captured
+            // value's destructor may itself enter storage and must not wait for this ticket.
+            drop(permit);
+            drop(submit);
+        }
+    }
 }
 pub(super) struct WriteGate {
     state: Mutex<Admission>,
@@ -82,7 +126,10 @@ impl WriteGate {
             .next
             .checked_add(1)
             .ok_or("storage_executor_ticket_exhausted")?;
-        state.queue.push_back(ticket);
+        state.queue.push_back(Entry {
+            ticket,
+            pending: None,
+        });
         state.bytes += bytes;
         if class == StorageWriteClass::Normal {
             state.normal += 1;
@@ -125,38 +172,45 @@ impl WriteGate {
 impl WritePermit {
     pub fn wait(&self) {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        while state.queue.front() != Some(&self.ticket) {
+        while state.queue.front().map(|entry| entry.ticket) != Some(self.ticket) {
             state = self
                 .gate
                 .ready
                 .wait(state)
                 .unwrap_or_else(|e| e.into_inner());
         }
-        crate::performance::record(
-            "storage.queue_wait",
-            "writer",
-            self.admitted.elapsed(),
-            self.bytes,
-        );
+        drop(state);
+        self.record_wait();
     }
-    pub async fn ready(&self) {
-        loop {
-            let changed = self.gate.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if self
-                .gate
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+    /// Register a nonblocking submission callback, not the database operation itself. Only
+    /// the FIFO head may submit to the single writer; it must never wait on admission there.
+    pub fn dispatch(self, submit: impl FnOnce(WritePermit) + Send + 'static) -> QueuedWrite {
+        let gate = self.gate.clone();
+        let ticket = self.ticket;
+        let pending = Arc::new(PendingWrite {
+            job: Mutex::new(Some(WriteJob {
+                permit: self,
+                submit: Box::new(submit),
+            })),
+        });
+        let is_head = {
+            let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = state
                 .queue
-                .front()
-                == Some(&self.ticket)
-            {
-                break;
-            }
-            changed.await;
+                .iter_mut()
+                .find(|entry| entry.ticket == ticket)
+                .expect("a live permit owns its queued ticket");
+            entry.pending = Some(Arc::downgrade(&pending));
+            state.queue.front().map(|entry| entry.ticket) == Some(ticket)
+        };
+        // The predecessor may already have retired before registration. Checking the head
+        // under the same mutex as retirement covers that race without an executor wakeup.
+        if is_head {
+            pending.start();
         }
+        QueuedWrite { pending }
+    }
+    fn record_wait(&self) {
         crate::performance::record(
             "storage.queue_wait",
             "writer",
@@ -171,15 +225,27 @@ impl Drop for WritePermit {
         // the enforced capacity solely because the next caller acquired a released permit.
         drop(self._probe.take());
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(index) = state.queue.iter().position(|ticket| *ticket == self.ticket) {
+        if let Some(index) = state
+            .queue
+            .iter()
+            .position(|entry| entry.ticket == self.ticket)
+        {
             state.queue.remove(index);
         }
         state.bytes -= self.bytes;
         if self.class == StorageWriteClass::Normal {
             state.normal -= 1;
         }
+        let next = state
+            .queue
+            .front()
+            .and_then(|entry| entry.pending.as_ref())
+            .and_then(Weak::upgrade);
         drop(state);
         self.gate.ready.notify_all();
         self.gate.changed.notify_waiters();
+        if let Some(next) = next {
+            next.start();
+        }
     }
 }

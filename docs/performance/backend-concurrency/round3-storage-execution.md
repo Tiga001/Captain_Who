@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-11
+last_verified: 2026-10-12
 ---
 
 # 第三轮：存储执行架构与迁移边界
@@ -39,6 +39,18 @@ Trace epoch/revision、不可变发布链和失败时游标失效规则保持不
 一个固定命名阻塞线程执行已迁移的完整领域操作。同步适配使用 scoped `Rayon::install` 安全借用输入，
 异步入口把拥有的数据、回执与 reservation 移交 worker；没有借用 lifetime 延长、每请求新线程或默认
 spawn_blocking 回退。排队使用独立 FIFO ticket，**先取得轮次再进入唯一 worker**，不依赖 Rayon 内部顺序。
+
+2026-10-12 修正异步接纳的推进方式：首次 poll 注册拥有输入和 permit 的待执行任务；前一 ticket
+释放后，直接把就绪任务提交给现有 writer，future 只等待结果。队列仅弱引用任务，取消与提交以同一
+互斥槽位决定唯一归属，提交和取消析构均在锁外执行。同步后继即使占住 Tokio 调度线程，也不再需要
+该线程再次 poll 异步前驱才能前进。旧实现依赖 `Notify` 唤醒后重新 poll，在同步调用挡住非可窃取的
+Tokio LIFO 待运行任务时形成循环等待；已有空闲调度线程不能解除这一依赖。
+
+`storage::state::admission_tests` 使用真实磁盘库验证：异步写入或 WAL checkpoint 首次 poll 后不再
+poll，释放旧连接时仍须提交并让同步后继完成。两项测试在旧实现失败，修复后通过；另覆盖迟注册、
+取消析构重入、提交/取消竞争、提交后等待者取消及 panic 后排空。早期并发基准直接构造服务，未启动
+生产 bootstrap 的周期性 WAL 任务，因此不能用此前基准通过推断这一运行路径已被覆盖。
+本次修复未重跑完整性能矩阵，不改变第六轮已记录的性能验收未通过结论。
 
 初始预算：64 个已接纳操作、64 MiB 估算保留载荷，其中普通操作最多 56 个 / 56 MiB，给控制操作保留
 8 个 / 8 MiB 接纳空间。控制操作仍不越过已经接纳的事务；不能以优先级中断正在提交的事务，亦不能
@@ -120,7 +132,9 @@ completion reservation 跨模型等待保留，对生成结果仅原子调整同
 关机先 join 这些有归属的后台任务，再关闭阻塞通道；取消 shutdown 等待者不丢弃后台 JoinSet。
 SQLite 关闭失败不得发送成功的 shutdown 回执。
 
-未 poll 的 future 不算接纳；queued future 取消撤票；worker 开始后等待者消失不会取消实际 SQL。
+未 poll 的 future 不算接纳；尚未被提交路径取得的 queued future 取消撤票，并先释放 permit 再析构
+业务输入。任务被取得并进入 worker 提交路径后，等待者消失不会取消实际 SQL，预算保留至实际完成；
+此处的“开始”边界是提交路径取得任务，而非 SQL 第一条指令执行。
 操作遗留事务先回滚，回滚失败且事务仍开放的连接隔离，不复用给下一请求。panic、I/O 错误或不确定
 提交不能推断成“必定没有变更”，恢复仍依赖原持久化 Trace、claim、receipt 和 journal。
 

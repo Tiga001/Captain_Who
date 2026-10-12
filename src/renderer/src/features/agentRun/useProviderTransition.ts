@@ -33,6 +33,11 @@ interface ActiveProviderTransitionAttempt {
   terminal?: TerminalProviderTransitionOperation
 }
 
+interface PendingProviderTransitionStatus {
+  promise: Promise<void>
+  invalidated: boolean
+}
+
 function providerTransitionOperationKey(operation: AgentProviderTransitionOperation): string {
   return `${operation.conversationId}\u0000${operation.operationId}`
 }
@@ -95,6 +100,8 @@ export function useProviderTransition({
   const requestEpochsRef = useRef(new Map<string, number>())
   const completedCallbacksRef = useRef(new Set<string>())
   const activeAttemptsRef = useRef(new Map<string, ActiveProviderTransitionAttempt>())
+  const statusLoadsRef = useRef(new Map<string, PendingProviderTransitionStatus>())
+  const mountedRef = useRef(false)
   const onBlockedRef = useRef(onBlocked)
   const onOperationCompletedRef = useRef(onOperationCompleted)
   const onOperationFailedRef = useRef(onOperationFailed)
@@ -154,6 +161,9 @@ export function useProviderTransition({
 
   const receiveNotification = useCallback(
     (operation: AgentProviderTransitionOperation) => {
+      // A snapshot requested before this notification must not restore older running state.
+      const pendingStatus = statusLoadsRef.current.get(operation.conversationId)
+      if (pendingStatus) pendingStatus.invalidated = true
       // Every valid Host notification is presentation state. Only the exact operation explicitly
       // bound to the current local start attempt may mutate the selected conversation model.
       dispatch({ type: 'operation_received', operation })
@@ -169,27 +179,48 @@ export function useProviderTransition({
 
   useEffect(() => onProviderTransition(receiveNotification), [receiveNotification])
 
-  useEffect(
-    () => () => {
-      for (const attempt of activeAttemptsRef.current.values()) {
+  useEffect(() => {
+    mountedRef.current = true
+    const statusLoads = statusLoadsRef.current
+    const activeAttempts = activeAttemptsRef.current
+    return () => {
+      mountedRef.current = false
+      statusLoads.clear()
+      for (const attempt of activeAttempts.values()) {
         attempt.controller?.abort()
       }
-      activeAttemptsRef.current.clear()
-    },
-    []
-  )
-
-  const loadStatus = useCallback(async (conversationId: string, reportError = true) => {
-    try {
-      const output = await getProviderTransitionStatus({ conversationId })
-      dispatch({
-        type: 'operations_loaded',
-        conversationId,
-        operations: output.operations
-      })
-    } catch {
-      if (reportError) onRequestErrorRef.current()
+      activeAttempts.clear()
     }
+  }, [])
+
+  const loadStatus = useCallback((conversationId: string): Promise<void> => {
+    if (!mountedRef.current) return Promise.resolve()
+    const existing = statusLoadsRef.current.get(conversationId)
+    if (existing) return existing.promise
+
+    const pending: PendingProviderTransitionStatus = {
+      invalidated: false,
+      promise: getProviderTransitionStatus({ conversationId })
+        .then((output) => {
+          if (statusLoadsRef.current.get(conversationId) !== pending || pending.invalidated) return
+          dispatch({
+            type: 'operations_loaded',
+            conversationId,
+            operations: output.operations
+          })
+        })
+        .catch(() => {
+          // Passive history refresh is not a model-switch request. Keep the known state and
+          // allow a later conversation visit to read again; overload must not trigger a loop.
+        })
+        .finally(() => {
+          if (statusLoadsRef.current.get(conversationId) === pending) {
+            statusLoadsRef.current.delete(conversationId)
+          }
+        })
+    }
+    statusLoadsRef.current.set(conversationId, pending)
+    return pending.promise
   }, [])
 
   const reconcileActiveAttempt = useCallback(
@@ -412,6 +443,7 @@ export function useProviderTransition({
     (conversationId: string) => {
       cancelActiveAttempt(conversationId)
       requestEpochsRef.current.delete(conversationId)
+      statusLoadsRef.current.delete(conversationId)
       dispatch({ type: 'conversation_cleared', conversationId })
     },
     [cancelActiveAttempt]
