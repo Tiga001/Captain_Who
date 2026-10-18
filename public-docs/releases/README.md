@@ -4,13 +4,15 @@ description: 获取 Captain Who 正式版本、核验下载文件并了解升级
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-23
+last_verified: 2026-10-18
 release_version: 1.0.5
 ---
 
 # 版本与发布
 
 本区域记录已经正式发布、并且可以由用户核验的 Captain Who 安装包。源码中的版本号、开发构建或打包配置本身，不等于某个平台已经对外发行。
+
+2026-10-18 核验的仓库开发版本为 `1.0.6`，本区域已登记的正式发行基线仍为 `1.0.5`。新功能和开发阶段的限制集中列在[当前开发进展](development-status.md)，不作为 `1.0.6` 已发布的证明。
 
 ## 当前正式版本
 
@@ -30,6 +32,7 @@ Windows、Intel Mac 和 Linux 目前没有正式安装包，也不在当前公�
 - [平台与构建状态](supported-platforms.md)：了解当前正式支持的平台边界。
 - [升级指南](upgrade-guide.md)：使用应用内更新，或通过官网 DMG 手动升级。
 - [发行说明](release-notes/README.md)：查看每个已经正式发布版本的用户可见变更。
+- [当前开发进展](development-status.md)：了解尚未登记为正式发行的代码变化与限制。
 
 ## 版本信息的使用方式
 

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-28
+last_verified: 2026-10-18
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -26,6 +26,14 @@ last_verified: 2026-09-28
 持久 assistant message 在 pending 阶段以空 `content` 开始；正常流式与完成路径保存模型生成的用户可见正文。模型请求中断以 failed 终态保存，可保留最后一次失败采样的公开部分正文，但不能保存私有思考或残缺工具参数。Host 在同一个终态事务中追加 `RuntimeError`，通过 `agent.model_interruption.<reason>` 代码持久化 typed interruption；历史投影从 Trace 重建原因，而不是依赖 Renderer 收到的实时事件。错误提示不拼入 message content，不重复显示原始诊断；已完成工具记录保留。其他受控错误或取消结算仍可能写入 Host 生成的终态可见正文。审批、Tool 状态、MCP/FileChange 卡片和系统恢复细节进入 Agent Run/Event/Trace 各自投影，不能为了 UI 方便拼接进 message content；否则历史重载会把系统生成文本误当成模型回复。
 
 受控失败通过 `Error` 与 `Done.content` 传递同一终态文案时，Renderer 在同一 Run 内只展示一次：展开时使用可见错误条目，折叠后仍保留失败说明。实时事件和持久历史均不删除；与错误不同的模型正文、其他 Run 的相同错误分别保留。
+
+## Core Server-owned 展示检查点
+
+当前根/子 Agent 的 Runtime segment 在 Core Server 内持有公开正文与稀疏展示 checkpoint，以固定 300 ms 窗口合并脏字段；writer 拥塞可能延迟写入，这不是每 300 ms 必然落盘的保证。关闭 Renderer、没有打开 child observer 或遗漏通知均不移交持久化所有权。该 checkpoint 保存公开流式正文、未闭合展示流及必要的 Tool/Skill/文件活动投影；已锚定的工具时间线从 Durable Trace 重建，不在每次文本更新重写整条历史。
+
+存储只接受精确 conversation/assistant-message/Run、当前 segment generation 与逐次递增 sequence，并对安全 patch 计算 fingerprint；同一未确认写入可原样重试，错序或同身份不同内容拒绝。新 generation、消息删除/重写或已持久化的终态会使旧发布失效；收到取消信号后，当前段仍可在结算前完成必要的最后一次展示刷新。开始新 generation 在 writer 准入后重新检查 live owner。通知不是写入 ACK，checkpoint 不能写 Trace、审批决定、Usage 或成功终态，也不是恢复执行权限的私有 Runtime checkpoint。
+
+Renderer 可以独立保存展开等 UI 状态，但普通消息保存/历史 upsert 不得覆盖 Core Server-owned message content/Agent Run projection、通过省略抹去该消息或伪造 `coreCheckpoint` 标记；显式删除仍走独立领域操作。历史读取合并权威 Trace 与有效展示 patch；read-tool 文件证明按选中消息读取，即使 Renderer 从未写回完整 `agent_run_json` 也能恢复。最终回复与终态仍由原有结算事务提交；崩溃恢复只保留已经确认落盘的公开正文，不能承诺未落盘尾部无损。
 
 ## Trace 生命周期
 
@@ -125,13 +133,13 @@ Index 的内部 Archive 引用不赋予 `conversation_history` 原始输出读�
 
 ## 分叉性能与响应边界
 
-长程任务的分叉仍完整复制所选历史及可见子树，不截短历史、不省略 Archive，也不跳过身份、父子归属、终态和 Provider continuation 校验。准备阶段在同一数据库连接持锁期间复用一次解析的 Conversation、Trace、摘要链、guidance 和 FileChange；缓存只属于本次分叉，最终构建移动大块内容，避免多轮读取和深拷贝。Trace sequence 使用集合匹配，避免上下文与 Trace 两层逐项扫描。
+长程任务的分叉仍完整复制所选历史及可见子树，不截短历史、不省略 Archive，也不跳过身份、父子归属、终态和 Provider continuation 校验。准备阶段先在一致读取快照中冻结 Conversation、Trace、摘要链、guidance、FileChange 和源版本，随后释放 reader，再克隆私有 continuation、复制附件并发布本次文件；加密与文件 I/O 不占用数据库快照或 writer。最终单 writer 事务复核源版本及相关旁路记录、权限和幂等身份后提交，成功后用新的读快照取得结果。失败仅清理本次未被持久引用的文件；COMMIT 结果未知时保留可能已被引用的字节，不把读回失败当成回滚。实现见 [projects_and_history.rs](../../crates/core/src/storage/service/conversations/projects_and_history.rs)。
 
 v48 的 `conversation_history_index_entries` 是派生身份索引，通过 `ref_key` / `archive_ref` 定位 FTS rowid。消息、Trace 和 Archive 的写入、更新、克隆与删除必须同时维护该索引；不能直接按 FTS 的 UNINDEXED 身份列逐条全表扫描。升级保留原始搜索全文，不用有界 Trace 重新生成 Exact Archive 的检索正文。可重建索引不作为分支历史或执行授权复制。
 
 v60 的 `conversation_history_timeline` 为 message / trace_item 增加普通顺序投影，以 `(conversation_id, position, within_message_order)` 索引定位有界分页，再按 entry rowid 读取 FTS 展示字段；archive 正文继续通过原身份与全文检索路径读取。exact v59 升级从既有 FTS position 和回合内顺序回填，不用当前消息位置重排已记录的 Trace，也不改写正文、Trace 或 FTS。正常写入随 identity 触发器同步生成投影，删除以外键级联清理，fork 在目标归属下重建。范围、around、重写隐藏与权限语义保持不变。
 
-Core Server 将 fork 交给单工作线程的有界队列（运行与排队合计最多 4 项），避免在 stdio 请求循环同步执行整个克隆。关闭时未开始的请求明确失败，已开始的事务等待完成；不能把超时当成回滚。Renderer 显示创建中状态并阻止重复点击；稳定边界的失败重试复用 requestId，latest 的源版本或消息边界变化后使用新 identity。所有历史和 SQL 写入仍在原有一致性锁与原子事务下完成，其他需要该连接的数据库操作可能短暂等待。
+Core Server 将 fork 交给单工作线程的有界队列（运行与排队合计最多 4 项），避免在 stdio 请求循环同步执行整个克隆。关闭时未开始的请求明确失败，已开始的事务等待完成；不能把超时当成回滚。Renderer 显示创建中状态并阻止重复点击；稳定边界的失败重试复用 requestId，latest 的源版本或消息边界变化后使用新 identity。最终 SQL 提交仍经过有界单 writer；一致性由冻结快照、提交前复验和原子事务共同保证，不再依赖整个分叉期间持有共享数据库锁。
 
 历史回复上的分支按钮持续绑定用户点击的 assistant message，等待持久保存期间不会悄悄改为最新回复；`latest` 只用于显式最新边界入口。文件夹引用复制的是原 name/path 与 Host 冻结目录身份，当前离线不会阻止历史加载或分支，真正读取时再验证可用性；不会递归复制目录内容或把新目录实体当成原授权。附件复制与 queued guidance 复用仍由独立附件归属和摘要校验，见[会话输入](../subsystems/conversation-inputs.md)。
 
@@ -157,6 +165,7 @@ Core Server 将 fork 交给单工作线程的有界队列（运行与排队合�
 - 历史查询：`crates/core/src/storage/conversation_history_repository.rs`、`conversation_history_open.rs`、`crates/core/src/tools/conversation_history.rs`
 - Rewrite/fork：`storage/conversation_turn_rewrite_repository.rs`、`conversation_fork_repository.rs`
 - 终态与修复：`crates/core/src/storage/service/messages.rs`、`trace_reconciliation.rs`
+- Core Server-owned 展示检查点：[runtime_checkpoint.rs](../../crates/core-server/src/application/agent/runtime_checkpoint.rs)、[runtime_checkpoints.rs](../../crates/core/src/storage/service/runtime_checkpoints.rs)、[history_projection.rs](../../crates/core/src/storage/service/conversations/history_projection.rs)
 - Tool 投影入口：`crates/core/src/tools/mod.rs`
 - FileChange observation/audit：`crates/core/src/file_change/observation.rs`、`crates/core/src/storage/file_change_repository.rs`
 - Collaboration 冻结：`crates/core-server/src/application/agent/turn_executor.rs`、`crates/core/src/storage/agent_collaboration_event_repository.rs`、`crates/core/src/storage/chat_repository/agent_run_projection.rs`
@@ -171,6 +180,7 @@ Core Server 将 fork 交给单工作线程的有界队列（运行与排队合�
 - `crates/core/src/storage/service/tests/trace_reconciliation.rs`
 - `crates/core/src/storage/service/tests/turn_rewrites.rs`
 - `crates/core-server/src/application/agent/tests/context_history.rs`
+- [runtime_checkpoint_tests.rs](../../crates/core-server/src/application/agent/runtime_checkpoint_tests.rs)、[runtime_checkpoint_child_tests.rs](../../crates/core-server/src/application/agent/runtime_checkpoint_child_tests.rs)：无 Renderer/observer、进程退出与已确认正文恢复；[runtime_checkpoints/tests.rs](../../crates/core/src/storage/service/runtime_checkpoints/tests.rs)：丢 ACK、generation/终态 fence 与 Renderer 越权写入。
 - `crates/core/src/runtime/tests/trace_and_projection.rs`
 - `crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
 - `crates/core-server/src/application/automation/scheduler/tests.rs`

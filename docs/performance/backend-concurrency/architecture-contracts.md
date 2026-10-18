@@ -1,14 +1,15 @@
 ---
-status: draft
+status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-11
+last_verified: 2026-10-18
 ---
 
 # 后端并发优化：资源、事务与恢复契约
 
-本文是六轮后端优化的迁移契约。第一轮对照 `aac5fa6b` 核验当前实现；后续测量代码和实际验证范围以
-[PROGRESS.md](./PROGRESS.md) 与 [results.md](./results.md) 为准。标为“目标”的内容不代表已经实现。
+本文是六轮后端优化的当前实现与持续验收契约，2026-10-18 对照 `5a31c635` 核验。第一轮起点为
+`aac5fa6b`，历史测量仍以各轮结果原件为准；[PROGRESS.md](./PROGRESS.md) 汇总交付，
+[第六轮结果](round6-results.md)记录整体性能验收未通过。后续 writer 推进修复不替代完整复测。
 既有架构真源仍为 [Core Server](../../architecture/core-server.md)、
 [存储生命周期](../../architecture/storage-and-data-lifecycle.md) 和
 [多 Agent](../../architecture/multi-agent.md)，本文只维护本次迁移的差异和门槛。
@@ -19,9 +20,9 @@ last_verified: 2026-10-11
 消息顺序、组织/工作流、归档/删除和历史恢复规则不因性能改造改变。必要的数据调用、保存和订阅调整必须保持
 用户可观察的功能语义。禁止通过扩大上限、无界线程、提前宣称成功、减少处理内容或降低落盘可靠性取得收益。
 
-目标仍为单 Core Server、各 Run 独立异步执行、按资源保留必要顺序、有界阻塞执行，以及短事务单写通道和
-小型读取池。不同 Conversation 不因同属一个 Project 就自动串行。模型请求已经可并行；本次重点是准备、
-控制、持久化和调度中的共享阻塞，不把“Agent 现在完全串行”当作事实。
+当前采用单 Core Server、各 Run 独立异步执行、按资源保留必要顺序、有界阻塞执行，以及短事务单写通道和
+小型读取池。不同 Conversation 不因同属一个 Project 就自动串行。单 writer、有限 handler 槽、同步兼容
+入口及大型原子操作仍会产生等待；架构已接线不表示达到延迟、长期背压或容量目标。
 
 ## 2. 已有实现必须保留
 
@@ -36,7 +37,7 @@ last_verified: 2026-10-11
 
 ## 3. 资源归属与排序
 
-下表是目标操作分类，不是现有 DTO 字段清单，也不授权立即去掉全局锁。
+下表是当前资源契约，不是 DTO 字段清单，也不授权移除未知归属或未审计路径的全局围栏。
 
 | 资源范围                    | 权威身份来源                                                   | 需要协调的操作                                                               | 不应被该范围阻塞的工作                                                           |
 | --------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -78,12 +79,13 @@ Preparing、按 Run 发布、项目及其实际成员删除、RPC 归属重解�
 5. 不持有全局生命周期锁等待文件副作用 drain；先安装范围标记，使新 effect 注册与删除互斥，再锁外等待，最后短
    事务删除。旧 worker 必须受 tombstone/generation 约束，不能重建已删除资源。
 
-具体锁类型和 coordinator API 在第 2、4 轮实现时确定；以上是禁止死锁/越权的边界，不是声称当前所有路径已遵循的
-完整锁顺序证明。
+实现由 [Preparing registry](../../../crates/core-server/src/application/agent/preparing.rs)、
+[keyed admission](../../../crates/core-server/src/application/agent/keyed_admission.rs) 和 bounded dispatch 协调；
+以上边界不意味着所有同步路径已迁移，也不是整个仓库的完整锁顺序证明。
 
 ## 4. Preparing、最终 CAS 与执行生命周期
 
-目标生命周期：
+当前主生命周期：
 
 ```text
 收到请求 → 校验身份/容量 → 安装 Preparing(token, generation)
@@ -97,8 +99,9 @@ Preparing、按 Run 发布、项目及其实际成员删除、RPC 归属重解�
                  原子终态 + 回执 + 释放占用
 ```
 
-`Preparing` 是本次迁移的逻辑状态，不表示当前 schema 已有该枚举。是否持久化 preparation record，或者使用与恢复
-协调的进程 epoch/claim 协议，须在移除 admission 锁前落实，不能把内存 reservation 当跨重启 authority。
+`Preparing` 是进程内逻辑状态，不是 schema 新枚举。token 绑定 boot ID、generation、Conversation/Run；
+持有它的任务已经受 RPC/执行器容量约束。重启丢弃 token，并以 durable trigger claim 和初始 Trace 判断是否已接纳；
+不能把内存 reservation 当跨重启 authority。只有启动恢复可作孤儿 claim 扫描，普通完成只恢复精确 Run。
 
 最终 admission 至少复核：Conversation/Project 存在与归属、允许的归档/删除状态、历史 revision、当前 Run 占用、
 模型迁移/压缩边界、Preparing token/generation、树停止、源消息/claim 身份、账号授权 epoch/revision 和有效期。
@@ -118,7 +121,7 @@ generation 或持久围栏；晚到的准备结果不能重新启动。已提交
 中同步调用 `executor.start`，随后才进入包含续租 tick 的 observe/settle。将 start 移到线程池时，排队和准备时间
 会成为明确的租约风险；不能只加 `spawn_blocking` 而忽略 claim。
 
-第二轮已在 claim 前取得物理准备容量，并从 claim 起独立续租；第四轮另限制同一 root 的未接纳准备。目标仍须经过竞态测试：在 claim 前取得准备容量，或从 claim 起覆盖排队/准备全过程续租。最终 commit 再次
+第二轮已在 claim 前取得物理准备容量，并从 claim 起独立续租；第四轮另限制同一 root 的未接纳准备。两者共同覆盖排队/准备全过程，且必须继续保留竞态测试。最终 commit 再次
 验证 claim token/有效状态，失去租约的 worker 不得执行或结算另一 owner 的工作。续租、停止和取消不能被普通准备
 队列耗尽；共享无限 blocking pool 不是隔离。
 
@@ -137,8 +140,9 @@ generation 或持久围栏；晚到的准备结果不能重新启动。已提交
 
 第三轮已迁移到专属 writer、两条只读连接和显式 WAL/FULL；详见 [存储执行契约](round3-storage-execution.md)。
 
-存储目标是一个专属阻塞 writer 拥有写连接，小型有界只读连接池负责适合的查询。初始读取池大小是待测参数，不是固定产品
-承诺。禁止直接把整个 StorageService 方法塞进 writer：方法内部可能有附件复制、解压或其它慢计算。
+当前一个专属阻塞 writer 执行已迁移的完整写操作，两条只读连接负责已审计查询；兼容 guard 共享相同写 gate 和连接。
+写预算 64 项/64 MiB 估算载荷（控制预留 8 项/8 MiB），读租借最多 32 个在途；它们不是 RSS 或产品容量承诺。
+禁止直接把整个 StorageService 方法塞进 writer：方法内部可能有附件复制、解压或其它慢计算。
 读方法必须按真实效果审计，`get/list/poll` 命名不构成只读证明。多查询快照在同一个短 read transaction 中捕获数据和
 cursor，释放事务后再解压/序列化；权威授权和执行决策仍走最终写事务复核。
 
@@ -149,39 +153,44 @@ cursor，释放事务后再解压/序列化；权威授权和执行决策仍走�
 - 审批：精确 Action 的状态 CAS、tree-stop 检查、dispatch 授权与通知结算。
 - 组织投递：输入/事件/幂等回执，及 claim/bind/settlement 的原有原子关系。
 
-当前 `update_hook` 在 INSERT 时唤醒 watch，发生在事务真正提交前；单连接锁目前使消费者读取通常等到连接释放。
-独立 read connection 会打破这个隐含顺序。因此多连接启用前，须以统一 transaction envelope 收集受影响 stream，
-仅在 `commit()` 成功返回后通知，rollback 丢弃通知。不要把 SQLite 的提交前 callback 当成“持久提交成功”。
+当前 `update_hook` 仅标记受影响 journal dirty。操作退出且 autocommit 恢复后核对实际已提交头，头推进才通知；
+rollback、savepoint 回滚或 COMMIT 失败不产生假成功。一次操作先提交后回滚时保留前一提交的通知；核对失败保留 dirty，
+不能把已提交业务改报失败。真源见 [commit_notifications.rs](../../../crates/core/src/storage/commit_notifications.rs)。
 watch 只是加速信号，durable journal sequence/cursor 才是事实；重连、漏信号、同批合并和回退 catch-up 必须保留。
 当前存在回退轮询，不能把上述风险表述成必然永久丢事件。
 
 Trace cursor 的 instance identity 属于整个数据库实例，不能在增加连接后变成“每个连接独立身份”。只有成功 commit
 才推进 trusted cursor，任何事务失败或外部修订不一致仍需失效并完整校验。
 
-WAL 引入前需完成 SQLite bundled 依赖与已修复版本核验，显式确定可靠性与 checkpoint 策略，测试长 reader、磁盘满、
-提交失败、备份和重启。禁止为改善延迟默默降低 synchronous。备份继续用
+WAL 已启用，当前依赖锁定 bundled SQLite 3.53.2，磁盘库验证 WAL/FULL 并设置 1000 页自动 checkpoint，
+Core Server 每 30 秒执行有界 PASSIVE。长 reader、SQLite FULL、备份与进程强杀的已测边界见第六轮报告；
+这些不构成 OS IOERR/fsync/真实断电认证。禁止为改善延迟默默降低 synchronous。备份继续用
 [database_snapshot.rs](../../../crates/core/src/storage/database_snapshot.rs) 的 SQLite backup API，不能只复制主文件。
+
+`5a31c635` 修复异步写推进：首次 poll 注册拥有输入/permit 的任务，FIFO 前驱释放后直接提交就绪任务，不依赖
+awaiting future 再次 poll。提交前取消撤票；提交路径取得后 writer 拥有真实完成与 drain，不能靠取消等待者撤销 SQL。
+磁盘测试覆盖无 repoll 的写入/周期 WAL、迟注册、取消析构重入、竞争及 panic 排空；这不是第六轮性能重验。
 
 ## 7. 文件、持久化所有权与关停
 
 ### 文件准备
 
-[fork 路径](../../../crates/core/src/storage/service/conversations/projects_and_history.rs) 当前在 connection guard
-内进行 continuation clone、附件复制和 rename。后续应先形成不可变计划，锁外在本次专属 staging 中准备，最后事务
-复核 source identity/revision 并发布引用；失败只清理自身文件。文件系统与 SQLite 不是联合 ACID，须接受可回收的
+[fork 路径](../../../crates/core/src/storage/service/conversations/projects_and_history.rs) 已先形成冻结历史/旁路记录计划，
+释放读快照后 clone continuation、复制/fsync 并以不覆盖方式发布文件；最后 writer 事务复核 source identity/revision、
+side-journal 摘要、权限/模型/额度/停止及幂等回执，再发布引用；失败只清理自身文件，结果不确定时保留恢复证据。
+文件系统与 SQLite 不是联合 ACID，须接受可回收的
 孤儿文件而避免已提交行指向未发布文件。不要从少数 fsync 路径推断所有现有附件都已具备断电零损失保证。
 
 ### Core Server 与 Renderer
 
-当前普通对话 [审批 handler](../../../src/renderer/src/features/agentRun/useAgentActionDecisionHandlers.ts) 先等待
-Renderer message persistence，再发决策 RPC；
-[chatMessagePersistence.ts](../../../src/renderer/src/app/chatMessagePersistence.ts) 做按消息 single-flight 与流式
-checkpoint，但不是全局预算。子 Agent [observer adapter](../../../src/renderer/src/features/agentCollaboration/observerConversationAdapter.ts)
-是展示投影，不能声称所有子 Agent 都走普通对话同一全量回存链。
+当前 Core Server 拥有流式正文和安全展示 checkpoint，按 300 ms 窗口合并，最多保留一个最新投影和一个未确认请求。
+generation 安装在 writer 内校验当前 segment 与适用 lease，进入 Runtime 前再查 lease；后续补丁复核精确 Run、终态与 generation/sequence/fingerprint。丢 ACK 先重试同一请求，确认后才推进。
+审批/同步交互公开前有保存屏障，终态仍提交 Trace/model-context/usage/通知等原原子事实。详见
+[第五轮所有权契约](round5-persistence-ownership.md)。
 
-目标由 Core Server 持有运行状态、流式恢复、Trace、审批 checkpoint、终态和执行回执的权威保存，Renderer 保留草稿和 UI
-状态等本来属于它的状态。第 5 轮必须先证明 Core Server 在流中、等待审批/交互、取消、断连、正常终态和重启中的恢复等价，
-才切断普通审批前置全量保存。不能先移除 flush 再补恢复。
+Renderer 确认精确 Core Server owner 后省去全量运行保存和无关前置 flush；legacy/未接纳消息及草稿、metadata、UI 保存保留，
+失败保留原 payload 并在显式 flush/退出时传播。子 Agent observer 同样不成为磁盘 owner。
+300 ms 是调度窗口，不是落盘 SLA；展示 checkpoint 不授权崩溃后重放模型，恢复仍需合法 pending/suspension。
 
 每个 RPC 区分“收到”“入队”“持久接纳”“开始执行”“执行结束”；优化不改变既有返回字段含义。
 Main [JSON-RPC client](../../../src/main/core/jsonRpcClient.ts) 已可同时挂起多个 request ID；没有全局逐请求等待响应。
@@ -193,10 +202,11 @@ Main [JSON-RPC client](../../../src/main/core/jsonRpcClient.ts) 已可同时挂�
 新 admission、未开始的 handler 返回明确结果，已开始的 blocking mutation 必须等待或纳入可恢复结算，不能 abort
 JoinHandle 后宣称没有提交；EOF 与显式 shutdown 的排空语义按现有协议保留。
 
-关闭 claim 和新 effect 登记后取消运行、持续处理必要续租/结算、在界限内 drain。超时必须明确未完成和未知结果，
+关闭 claim 和新 effect 登记后取消运行、持续处理必要续租/结算、drain 阻塞作业与有归属的 Provider transition 后台任务。
+业务生产者停止后再停周期 checkpoint、drain 存储、关闭读池/TRUNCATE/writer；关闭失败返回错误。超时必须明确未完成和未知结果，
 不把“发出取消信号”等同于外部进程退出或持久终态。恢复仍从 durable facts 进行，不依赖 Renderer 在退出前保存成功。
 
-## 8. 后续轮次依赖
+## 8. 实施顺序与当前验收状态
 
 | 轮次         | 可做的改造                                            | 合入前置条件                                                                      |
 | ------------ | ----------------------------------------------------- | --------------------------------------------------------------------------------- |
@@ -206,5 +216,7 @@ JoinHandle 后宣称没有提交；EOF 与显式 shutdown 的排空语义按现�
 | 5 保存链解耦 | Core Server checkpoint parity、Renderer/Host 调用调整 | Core Server 全生命周期恢复证据；终态与旧 checkpoint 围栏、RPC 语义不变            |
 | 6 综合验收   | 固定负载对比、故障、长期运行与独立审查                | 前五轮门禁与可回退方案；不能以仅提高吞吐掩盖尾延迟或正确性回归                    |
 
-第 2、3 轮部分实现可以并行开发，但依赖接口及提交顺序应先明确。回滚代码与回滚数据库 schema 是两件事；任何
-DDL 改动都需单独迁移/备份/兼容检查，不以重置用户数据作为回退方案。对应验证映射见 [acceptance.md](./acceptance.md)。
+上表保留迁移的依赖顺序，第 2–5 轮实现已落地；第 6 轮证据已归档，但整体性能验收失败。50 单元短历史发送未达目标、
+长测 outbound overload、资源代价和完整 UI SLO 缺口必须继续列为未完成项，不能用局部正确性通过替代。
+回滚代码与回滚数据库 schema 是两件事；任何 DDL 改动都需单独迁移/备份/兼容检查，不以重置用户数据作为回退方案。
+对应验证映射见 [acceptance.md](./acceptance.md)。

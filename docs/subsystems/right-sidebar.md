@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-18
 ---
 
 # 右侧栏平台
@@ -157,7 +157,7 @@ AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store �
 
 实际活动 owner 正在运行时，活动在事件事务中记录其 assistant-message 和 trace boundary，插入对应回复的时间线；该回复结算时保存冻结活动列表，并用可选的 `collaborationFinalResponseBoundary` 保持活动在最终正文前后的顺序；边界之后的活动不会被删除。owner 空闲时，新活动记录在其会话最后一条消息之后；空会话则记录在首条消息之前，后续新轮次不能改变它的位置。结构父 Agent 不一定是 Task requester，跨级派发的完成反馈应归属真正请求者。普通 Message 的 updated 属于实际接收方，自动 Result 唤醒的终态由后端语义投影隐藏，Renderer 不能依据后续终态删除真实的早期 updated。渲染按持久事件 sequence 排序，不按通知抵达顺序或墙钟时间猜测位置。圆角状态栏仍可进入对应子 Agent 详情，observer 保持只读。
 
-Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。加载快照同时读取持久 Conversation 与进程内当前回复的完整流式正文，并返回 generation/sequence 游标；Renderer 只追加游标之后的文本，避免中途打开、切回或刷新时丢失前缀。该游标不替代其他事件的持久身份。正文提交或会话删除后释放流式缓存；Core Server 重启后仍以持久 Conversation 和 collaboration event log 为恢复依据。
+Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。首个快照只读取最近一页持久消息及该页所需关联投影，同时带回当前回复的完整流式正文和 generation/sequence 游标；Renderer 只追加游标之后的文本，避免中途打开、切回或刷新时丢失前缀。旧消息按 exact child 身份后台分页，不在侧栏首屏预读全部历史；页前插保持消息锚点，新鲜读取优先于旧页。账号隔离缓存须经新鲜授权才能复用，不能代替 Host 归属检查，具体预算见[前端架构](../architecture/frontend.md#appshell-编排边界)。正文提交或会话删除后释放流式缓存；Core Server 重启后以持久 Trace、Core Server-owned 展示 checkpoint 和 collaboration event log 恢复，不依赖 observer 写回消息。
 
 Agent Center 的设置入口打开通用 Agent template 设置页。模板定义现在是 workspace-wide library，CRUD 不绑定单个 project；每个模板以独立 assignment 关联零到多个 project，只有分配给当前 project 且 enabled 的模板可用于该树。模板保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。表单的 description/instructions 提供 guidance-oriented placeholder，但 placeholder 不会写入空字段。模板编辑或 assignment 变化只影响后续 Agent，现有 Agent 显示创建时快照。
 

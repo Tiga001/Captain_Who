@@ -2,13 +2,16 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-12
+last_verified: 2026-10-18
 ---
 
 # 第三轮：存储执行架构与迁移边界
 
 起点 `f073d86d`。交付状态、最终提交与测量结果见 [PROGRESS](PROGRESS.md)。本文描述实现契约，
 不把一次连接池迁移视为全部后端性能目标已经达到。
+
+本页保留第三轮实施边界，并已加入后续 `5a31c635` 的 writer 推进修复；综合当前态见[架构契约](architecture-contracts.md)。
+历史实测不重算，第四/五轮已接线的资源调度和保存所有权分别以各轮契约及当前架构文档为准。
 
 ## 依赖与磁盘连接
 
@@ -142,7 +145,11 @@ SQLite 关闭失败不得发送成功的 shutdown 回执。
 备份方式保留数据；旧 SQLite 3.46.0 不能直接作为多连接 WAL 回退运行版本。任何 journal mode 切换必须在
 连接全部关闭后执行，不在正在运行的用户数据库上实验。
 
-## 下一轮的明确清理任务
+## 第三轮结束时的后续要求
+
+本节记录当时交给后续轮次的要求，不表示这些工作截至当前仍全部待做。第四轮已建立 Preparing/资源围栏，
+第五轮已接入 Core Server 展示 checkpoint，第六轮补充 checkpoint 安装与通知响应的 lease 检查；
+未全量迁移的同步桥和大型原子工作仍见当前架构契约，完整性能验收仍未通过。
 
 第四轮建立按资源排序与 Preparing/恢复 owner 时，逐个把已经迁移的 admission、terminal、approval、
 lease 服务接到拥有数据的异步写入口，再移除对应第二轮桥接等待；必须同时覆盖 queued/started/commit-unknown

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-05
+last_verified: 2026-10-18
 ---
 
 # Agent Runtime 与模型 Provider
@@ -76,14 +76,19 @@ Host 的 [`ModelProjection`](../../crates/core/src/storage/service/model_project
 
 `AgentEventStream` 默认同时实时发送并保留完整事件日志；无 emitter 时，返回的 `output.events` 仍是完整回放入口。Core Server 的统一 `run_prepared_turn_segment` 明确启用 transient message delta：实时消费者已经接收的 `MessageDelta` 直接移交，不再复制并保留到回合结束。该选项在没有 emitter 时不删除 delta，且不删除流边界、工具、批准、错误、终态或 Usage；Host 的完成、持久化和累计 Usage 逻辑仍使用这些事件。
 
-此优化只适用于 Host 后台运行段，不作用于 Renderer 会回放的普通 Runtime/动作输出协议。子 Agent 仍保留普通与 observer 两条有消费者的路由；复用一次脱敏投影，observer 快照仍在同一发布锁内递增 cursor。不能为了减少消息量删除身份封装、改变脱敏范围，或把带 cursor 的多次事件合并成无法按快照切分的正文。
+此优化只适用于 Host 后台运行段，不作用于 Renderer 会回放的普通 Runtime/动作输出协议。子 Agent 在 Core Server transport 只发一份 `childEvent`，Main 校验后扇出到 ordinary 与 observer 消费路由；observer 快照仍在同一发布锁内递增 cursor。不能为了减少消息量删除身份封装、改变脱敏范围，或把带 cursor 的多次事件合并成无法按快照切分的正文。
+
+Core Server 的 [`RuntimeCheckpoint`](../../crates/core-server/src/application/agent/runtime_checkpoint.rs) 另持有流式正文和白名单展示补丁，每个 segment 至多保留一个最新投影和一个未确认写请求，按 300 ms 窗口合并；Trace/model-context、审批私有 checkpoint 和终态事务仍各有原 owner。`coreCheckpoint` 的 generation/sequence/fingerprint 是安全展示身份，不是恢复执行权限。begin 在 writer 事务安装 generation 时复核当前 segment 和适用 Wake lease，进入 Runtime 前再查 lease；后续 apply 校验精确 Run、终态、generation/sequence/fingerprint，不将展示写入变成新的执行授权。丢 ACK 先重试相同请求，确认后再推进后续序号。
+
+公开待审批/同步提问前完成展示保存屏障并封存旧段；普通结束/取消先停止 timer、补刷检查点，再进入权威终态提交。Stop 回执仅确认请求已接收，不是最终正文已落盘。300 ms 不构成磁盘拥塞下的耐久时限，崩溃只保证已确认内容；没有合法 pending/suspension 的普通运行不能凭展示 checkpoint 自动重放模型。Renderer 确认精确所有权后不再全量保存该运行消息，仍负责草稿、metadata 和 UI 状态。实现/测试边界见[运行数据所有权](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
 ## 一次 Run 的主流程
 
 ```text
-用户请求或 AutomationScheduler 预留 Conversation Turn
+用户请求或 AutomationScheduler 注册按 Conversation 的 Preparing 预约
   -> 读取会话、模型、权限和可用服务
   -> 构造 Runtime input 与 Provider-neutral 历史
+  -> writer 内复核 Preparing/历史/权限/lease，并原子接纳消息与初始 Trace
   -> 恢复可选 Checkpoint / Provider continuation
   -> 建立 World State epoch 与逻辑 ContextFrame
   -> 每次自然请求边界冻结能力策略快照、EffectiveToolSet 和 World State diff
@@ -279,11 +284,11 @@ cargo test -p mycopilot-core-server provider
 
 ## 当前限制
 
-- 当前仅注册上表三类 Provider；兼容端点仍必须满足对应 Adapter 的 wire 契约。
+- 当前注册范围以上表及注册表为准；兼容端点仍必须满足对应 Adapter 的 wire 契约。
 - Provider-native continuation 不是跨 Provider 的通用格式；切换模型可能要求显式适配。
 - Runtime 仍有固定的 Tool 迭代与压缩尝试保险上限，不保证任意长度任务永不终止。
 - 进程崩溃后只能恢复已进入持久边界的状态；纯内存中且未提交的模型流片段会丢失。
-- 诊断和测试大量依赖 SQLite 开发 schema；非当前 schema 的开发数据库不会原地升级。
+- 诊断和测试依赖精确 SQLite catalog；受支持旧 schema 按[存储迁移边界](storage-and-data-lifecycle.md#schema-发布策略)升级，不支持任意旧库、私有 checkpoint 或 Provider continuation 转换。
 - 人工审批没有通用自动超时；ticket 可长期 pending，而短生命周期执行材料可能在用户决定前失效。
 
 忽略非阻塞问题现在产生一次普通后端历史事件，下一次自然请求获知；它不再是 RequestOnly 尾部状态。运行结束后的事件使用通用 after-message 位置，后续与普通历史一起压缩。不会新建 User、guidance、Wake 或额外模型请求。

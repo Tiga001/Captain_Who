@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # 恢复与故障处理 Runbook
@@ -31,9 +31,19 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 1. 停止新的用户操作和 release gate；不要让第二个 Core Server 指向同一数据库。
 2. 优先正常退出应用，使 `core.shutdown`、Dispatcher、MCP Manager 和 outbound writer 有机会收口。
-3. 若进程已退出，保留原 `storage.sqlite`、`storage-backups/` 和相关日志；不要立即覆盖。
+3. 若进程已退出，保留原 `storage.sqlite`、存在的 `storage.sqlite-wal`/`storage.sqlite-shm`、`storage-backups/` 和相关日志；不要立即覆盖或单独删除 WAL。
 4. 区分“可从 SQLite 自动恢复”和“需要显式开发 reset/人工确认”的故障。
 5. 在副本或仓库 fixture 上复现。不要让测试命令打开或迁移真实用户数据库。
+
+### WAL、写队列与运行展示故障
+
+当前磁盘存储为 WAL/FULL、单 FIFO writer 与两条只读连接。尚未 checkpoint 的已提交内容可能仍在 WAL；在线复制主文件不构成一致备份。使用受支持的 SQLite Backup API，或在全部连接关闭、正常退出后保留整套数据根；不在运行库执行 journal mode 切换、删 WAL 或改 `synchronous`。长读取快照可能阻止 PASSIVE checkpoint 完成，WAL 变大本身不证明损坏。
+
+`storage_executor_overloaded`、`storage_executor_job_too_large`、`storage_executor_closed` 分别表示预算、单任务大小或生命周期拒绝；不能将其当成成功接纳。writer 已取得的任务即使 RPC 等待者消失也可能提交，按原 identity/Trace/receipt 查询，不盲重发外部副作用。`storage_writer_quarantined` 表示连接无法安全复用，先保留证据、停止新操作并正常关停/重开，不能手工把未结算记录改为成功。
+
+若表现为 writer 空闲、RPC 等待不断积累，先核对运行二进制是否包含 `5a31c635`：旧异步写需要 Tokio 再次 poll，可能被同步后继阻塞；修复让 FIFO 前驱释放时直接提交就绪写，覆盖生产 30 秒周期 WAL 任务。该修复不解决或否定第六轮已记录的 outbound overload、发送尾延迟和性能门禁失败；不要靠扩大队列掩盖问题。源码与磁盘回归见 [state.rs](../../crates/core/src/storage/state.rs)、[admission_tests.rs](../../crates/core/src/storage/state/admission_tests.rs)。
+
+流式正文由 Core Server 每 300 ms 合并安全展示检查点，UI 已显示 token 不等于已确认落盘。重开只能恢复最后确认内容；只有合法 pending/suspension 才能按原冻结身份续跑，普通展示 `coreCheckpoint` 不是执行恢复权限。Renderer 不再负责精确 Core Server owner 的全量运行回存，因此页面关闭或没有 observer 不应成为持久化前提。Stop 接收回执也不是终态保存 ACK。详见[运行保存与恢复契约](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
 ## 3. Schema/reset-required
 
@@ -146,18 +156,20 @@ SQLite 是 Wake、Turn、Mailbox、receipt、Approval 和 event 的恢复真相�
 
 ### Wake 分类
 
-| 持久状态                                                 | 恢复动作                                                          |
-| -------------------------------------------------------- | ----------------------------------------------------------------- |
-| `queued`                                                 | 按 FIFO 等待 Dispatcher claim                                     |
-| 过期 `claimed`，无 Run identity                          | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed     |
-| `running`，已有 terminal trace                           | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime |
-| `waiting_for_approval` 且 pending action 存在            | 保持等待；根 Agent UI 从 durable projection 恢复                  |
-| `running` 且有合法 checkpoint                            | 按原 identity/permissions/capability snapshot 恢复                |
-| `running` 且无可证明安全的 checkpoint                    | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用               |
-| exact run 被 durable tree fence 覆盖，且可证明未有副作用 | 取消未终态 action，将 Wake/Trace 安全结算为 `interrupted`         |
-| exact run 被 fence 覆盖，但外部副作用是否发生不确定      | 保留证据并结算 `outcome_unknown`；不得以“已停止”为由盲重放        |
+| 持久状态                                                 | 恢复动作                                                                                  |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `queued`                                                 | 按 FIFO 等待 Dispatcher claim                                                             |
+| 过期 `claimed`，无 Run identity                          | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed                             |
+| `running`，已有 terminal trace                           | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime                         |
+| `waiting_for_approval` 且 pending action 存在            | 保持等待；根 Agent UI 从 durable projection 恢复                                          |
+| `running` 且有合法 checkpoint                            | 按原 identity/permissions/capability snapshot 恢复                                        |
+| `running` 且无可证明安全的 checkpoint                    | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用                                       |
+| exact run 被 durable tree fence 覆盖，且可证明未有副作用 | 取消未终态 action，Wake 结算为 `interrupted`，对应 Trace 为 `cancelled`                   |
+| exact run 被 fence 覆盖，但外部副作用是否发生不确定      | 保留证据，Wake 结算为 `outcome_unknown`，对应 Trace 为 `failed`；不得以“已停止”为由盲重放 |
 
 Wake lease 为 60 秒，Dispatcher 每 20 秒续租、每 1 秒 durable fallback scan。新 Core Server 启动时旧 lease 尚未过期属于正常窗口；周期扫描会在 deadline 后处理，不需要再次重启。
+
+续租从 claim 起覆盖排队和准备，由独立 lease lane 执行；最终 admission、checkpoint generation 安装与 settlement 在 writer 边界核验 lease，实际进入 Runtime 前再次检查；后续展示 apply 只检查 Run/终态与 generation/sequence/fingerprint CAS，不逐次重新读取 lease。观察排队时同时检查物理 preparation 容量、按 root 的未接纳准备和逻辑 Turn gate，不能仅看模型是否已开始。进程 Preparing token 不是跨重启 authority；一个 Run 结束不会释放另一个正在准备的 claim。
 
 ### 树级停止与 `interrupt_agent` 排障
 
@@ -302,13 +314,13 @@ notification settings/batch/系统权限，不能改变 Run 结果。
 
 ## 10. 强制终止与关停超时
 
-正常 `core.shutdown` 的顺序是：停止/取消 Browser risk → Managed Playwright runtime settlement（期间只继续接收反向 bridge 收口请求）→ MCP management stop admission → expiry reconciler → 各 dispatcher、图片执行、Multi-Agent Dispatcher、active Run、MCP tasks/Manager 有界并行收口 → 返回 shutdown response → drain outbound。
+正常 `core.shutdown` 的顺序是：关闭新 admission/取消 Browser risk → Managed Playwright runtime settlement（期间只继续接收反向 bridge 收口请求）→ MCP management stop admission → expiry reconciler → 各 dispatcher、图片执行、Multi-Agent Dispatcher、active Run、MCP tasks/Manager 并行收口 → Automation 最终 Trace reconciliation 与 Agent 阻塞/后台结算 drain → 组织运行发布收尾 → 停止周期 WAL 任务 → drain 存储读写、关闭读池、TRUNCATE checkpoint/关闭 writer → 返回 shutdown response → drain outbound。阻塞或存储关闭失败不能返回成功。
 
 当前 Main watchdog 为 6 秒；Multi-Agent Dispatcher 的单阶段 `shutdown_grace` 为 5 秒，且算法最多经历“等待自行完成”和“取消后再扫描”两个阶段，理论最坏接近 10 秒。若 Main 先到 6 秒并强制终止 Core Server，不得把它记录为优雅关停；应保留 SQLite，并按 Wake/trace/checkpoint 分类恢复。
 
 若 Main 的 shutdown watchdog 或子系统 grace 到期：
 
-- 已接受但未完成的异步任务由 owner abort/join 或保留 durable recovery fact；
+- 尚未取得执行归属的任务可取消；已开始的同步准备、SQLite 写入或外部副作用不能仅靠 abort 等待者撤销，必须由 owner 等待真实结果或保留 durable recovery fact；
 - 不应伪造成功终态来释放数据库 owner；
 - 下一次启动按上述 reconciliation 分类；
 - 连续复现应保存具体 subsystem shutdown report，并添加确定性测试，不能无限扩大 watchdog 掩盖泄漏。
@@ -349,7 +361,7 @@ reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保�
 
 ## 13. 当前限制
 
-- 仅提供开发 reset，不提供生产原地迁移或通用 backup restore 工具。
+- 提供精确 catalog 的有限启动升级与显式开发 reset；不提供任意旧库转换、schema 降级或通用 backup restore 工具。
 - 备份没有自动 retention、加密或异地复制；当前 SQLite snapshot 不含当前模型/搜索 secret，但旧 schema backup 或未签名 macOS 开发环境的整根备份可能含明文凭据。
 - `outcome_unknown` 没有通用自动补偿，需要核验外部状态后显式发起新任务。
 - Windows MCP stdio 没有 Job Object 进程树隔离保证。
@@ -392,4 +404,4 @@ reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保�
 
 若提交结果未知，前端保留原 payload 和 submissionId，重试必须使用同一身份；已结算批次不可编辑。已保存但恢复失败时保留权威回答和错误事实，先排查原 Provider 身份、凭据、检查点及停止围栏，再由用户明确继续。
 
-验证入口为 `pnpm test:human-interaction-core-e2e` 和[人机交互子系统验收矩阵](../subsystems/human-interaction.md)。上述恢复仅适用于同版本 canonical schema；旧开发库按第 3 节 reset，不迁移旧聊天或检查点。
+验证入口为 `pnpm test:human-interaction-core-e2e` 和[人机交互子系统验收矩阵](../subsystems/human-interaction.md)。恢复还须满足 checkpoint 版本与冻结身份校验；旧数据库先按第 3 节核对有限启动升级或 reset 条件，不能因 schema 可升级就推断旧私有 checkpoint 可转换。

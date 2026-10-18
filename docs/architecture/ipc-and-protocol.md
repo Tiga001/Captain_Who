@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # IPC 与协议
@@ -124,8 +124,7 @@ Electron 对 handler 抛出的 Error 通常只可靠保留 message。需要结�
 
 ```ts
 type HostInvocationResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: { message: string; code?: number; data?: unknown } }
+  { ok: true; value: T } | { ok: false; error: { message: string; code?: number; data?: unknown } }
 ```
 
 Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data，Renderer client 使用 `unwrapHostInvocation()` 还原 `HostInvocationError`。MCP、Skill、图片生成、部分 Agent 与 Artifact 操作依赖这种结构化错误进行 revision refresh、重试或明确的不重试处理。
@@ -143,6 +142,14 @@ Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data�
 - Main ↔ Core Server JSON-RPC notification：长任务事件、Automation/Notification event/resync 和 Managed Playwright 反向桥命令。
 
 选用单向传输不等于不需要校验。必须有 owner、session/Run/request id、序列或 generation，并定义服务退出时如何终止。
+
+### 并发、保存与回执含义
+
+普通 RPC 按 read/write/control/approval lane 接纳，完整资源身份由 Core Server 从 registry、Conversation/Trace、Agent 树和 frozen action 解析；DTO 中的 ID 只是定位提示，不是权限。未知归属保留全局围栏，同资源前序顺序继续保留。独立控制/审批槽位和 storage 控制预留不等于无等待或延迟 SLA，最终写入仍受单 writer 和领域事务约束。细节见[Core Server](core-server.md#请求-admission)。
+
+区分请求到达、队列接纳、durable admission、实际执行和终态提交。Stop 的旧回执仍只确认停止请求接收；流式 notification 不是落盘 ACK。安全 `agentRun.coreCheckpoint` 投影让 Renderer 识别当前 Core Server 保存 owner，不授予重新执行、审批或构造私有 checkpoint 的权限。确认精确 Conversation/assistant/Run 所有权后可省去运行消息全量回存及无关审批前 flush；legacy、本地未接纳消息、草稿和 UI 保存仍走原有契约。
+
+Main 的完整会话读取采用有界排队/尾随合并，不缓存旧正文快照。需要单条文件读取证明时改用同快照窄查询 `storage.loadReadToolFileContext`，不通过全历史读取授权文件。子 Agent 的 `agent.collaboration.childEvent` 在 Core Server→Main 只传一份，Main 严格校验后分别转到既有 ordinary/observer 路由；cursor、快照切分和终态顺序不改变。真源与恢复边界见[第五轮保存契约](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
 ## Automation 协议边界
 

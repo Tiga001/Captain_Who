@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-11
+last_verified: 2026-10-18
 ---
 
 # Core Server 架构与运行时
@@ -78,6 +78,14 @@ mycopilot-core       adapters
 
 有阻塞文件或子进程工作的 adapter 必须使用显式 dispatcher/admission，不得在 Tokio request loop 内无界执行。
 
+### 阻塞任务与存储所有权
+
+[`BlockingWork`](../../crates/core-server/src/application/blocking_executor.rs) 为 preparation、maintenance、lease、control、completion 和 recovery 分配独立、有数量及估算字节预算的物理执行器。RPC lane、阻塞执行槽、存储 writer 和逻辑 Turn gate 是不同层次的容量：控制或续租不借用已被准备占满的 worker，但最终 SQL 仍需经过同一个 writer。已开始的同步作业不能靠取消外层 future 停止；completion/receipt 必须保留 owner 和预算到真实结束，旧 Run owner 退役后才进入 recovery，避免删除等自己的收尾锁。
+
+普通 Turn 的长准备使用按 Conversation 的逻辑预约，注册 [`PreparingToken`](../../crates/core-server/src/application/agent/preparing.rs)（进程 boot ID、generation、Conversation/Run），外部准备在锁外执行；最终 writer 事务复核 token、历史 revision、权限、停止/删除及 claim。Preparing 不是新持久状态或新增 Run 配额，重启后以 durable claim/初始 Trace 区分是否已接纳。完成尾段只恢复精确 Run，不能扫描并释放其他仍在准备的 owner。
+
+磁盘存储使用 WAL/FULL、单 FIFO writer 与两条只读连接，旧同步 guard 共享写 gate。`5a31c635` 后，前序 ticket 退役直接提交就绪异步写，等待 future 无需再次 poll；queued cancellation 与 writer 取得任务按唯一归属竞争，已取得的操作在等待者取消后仍 drain。不能把异步返回句柄或入队视作持久成功。详见[存储生命周期](storage-and-data-lifecycle.md#wal执行器与连接所有权)。
+
 ## 3. JSON-RPC 契约
 
 ### Framing 与消息方向
@@ -129,7 +137,7 @@ Electron Main 的 [`QueuedConversationReads`](../../src/main/core/queuedConversa
 
 World State 同步与恢复复用一次当前格式投影，用 origin 索引匹配已有记录；只有 ledger 所属记录实际不匹配时，才按需生成旧显示格式作精确校验。当前 Run 的独立快照不会触发 Conversation 旧格式回放。缺失、重复、伪造内容、scope 和观察状态检查仍保留。运行正文与安全展示检查点由 Core Server 每 300ms 合并保存；Renderer 确认精确运行保存归属后不再全量写回运行消息，也不等待无关前置 flush。用户草稿、元信息及 UI 状态仍走专用保存路径，失败保留待保存数据并在显式 flush/退出时传播。视觉和审批交互规则保持，详见[第五轮保存契约](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
-普通 append Turn 使用独立的模型历史快照，只省略历史展示 JSON 与 UI 状态读取，保留正文、附件、Trace、模型上下文及压缩边界。完整展示读取保持原路径，两类快照共用原缓存预算。准备后的历史 revision 失效必须重取快照，不能通过回退读取丢弃最终提交 CAS；窄快照不能进入全量保存、重写或 continuation。运行检查点在 writer 队列后及执行前复核原 Wake lease，通知 claim/validate 在事务结束与响应组装后检查原到期时间，不延长租约或更改晚到 ACK 的事实语义。
+普通 append Turn 使用独立的模型历史快照，只省略历史展示 JSON 与 UI 状态读取，保留正文、附件、Trace、模型上下文及压缩边界。完整展示读取保持原路径，两类快照共用原缓存预算。准备后的历史 revision 失效必须重取快照，不能通过回退读取丢弃最终提交 CAS；窄快照不能进入全量保存、重写或 continuation。运行展示检查点在 writer 事务安装 generation 时复核原 Wake lease，实际进入 Runtime 前再次检查；后续 apply 只校验 Run/终态与 generation/sequence/fingerprint，不是每次展示保存都重新核验 lease。通知 claim/validate 在事务结束与响应组装后检查原到期时间，不延长租约或更改晚到 ACK 的事实语义。
 
 普通输出由 `outbound.rs` 拥有序列化后的行：8 MiB 正文预算，另为响应和非正文事件预留 1 MiB / 64 帧，总帧上限 8192。普通、单份 childEvent 及旧 observer 路的 `message_delta`、`command_output`、`tool_input_progress` 都计入正文预算，工具输出不占用控制预留。只合并队尾相邻、非 delta 字段完全相同的普通 `agent.event.message_delta`，单个合并帧最多 64 KiB。工具、重置、终态及不同 Run/stream 都形成边界；childEvent 与旧 observer 带快照 cursor，不能合并后跨越快照水位重复应用前缀。低速首条立即写入并 flush，无额外计时窗口；仅已经就绪的积压按最多 64 帧 / 64 KiB 批量写入，Renderer 原有合并时限不变。
 
@@ -207,8 +215,9 @@ Managed Playwright 的 Tool execution 预算由 Electron Main 拥有：显式 Br
 3. 已经开始的普通阻塞 handler 和受管图片响应由各自 owner 等待完成，再离开 request loop；不能 abort 外层 future 后假称 SQLite 修改已经取消。组织 scheduler 停止准入并 drain 已开始的扫描，然后停止 Automation 的新 due scan/claim admission。已 admission 的 Automation HumanRoot Turn 和 observer 暂时保留，让后续 Agent shutdown 写出权威 Trace 终态。
 4. Core Server 停止 MCP management admission，终止 collaboration notifier 和可选 MCP startup coordinator，关闭短生命周期执行材料 reconciler，并使仅进程内可恢复的 MCP action 失效。Automation 与 shared Notification notifier 此时仍保持工作，以发送关停结算产生的持久事件。
 5. Git/Skill/Skill acquisition/图片配置 dispatcher、图片执行、Multi-Agent Dispatcher、活动 Run、已接纳 MCP management 请求和 MCP Manager 并行有界关停；当前显式外层 grace 多为 2 秒。Multi-Agent Dispatcher 的 `shutdown_grace` 默认为 5 秒，算法可先等待一个 grace，再在请求取消后扫描第二个 grace，因此最坏路径可接近 10 秒。
-6. Automation Scheduler 做一次最终 bound-Run Trace reconciliation，随后终止本地 observer；真正仍为非终态的 Trace 留给下次启动恢复。完成后才终止 Automation notifier，并在持久通知事件已可重放后终止 Notification notifier。
-7. Core Server 最后入队 `core.shutdown` 响应，关闭 outbound admission，并让单一 writer 刷完已接纳消息。超时任务不得伪造成功；持久事实留给下一次启动对账。
+6. Automation Scheduler 做一次最终 bound-Run Trace reconciliation，随后终止本地 observer；真正仍为非终态的 Trace 留给下次启动恢复。接着 drain Agent 阻塞任务与有归属的 Provider transition 后台结算，再终止 Automation/Notification notifier，刷新组织运行发布。
+7. 停止周期 WAL checkpoint 任务，Storage 停止新接纳并等待已接纳写和读取结束，关闭读池、TRUNCATE checkpoint 和 writer。取消 checkpoint 等待者不撤销已提交给 worker 的 SQL；阻塞任务或存储关闭失败使 shutdown 返回错误。
+8. Core Server 最后入队 `core.shutdown` 响应，关闭 outbound admission，并让单一 outbound writer 刷完已接纳消息。超时任务不得伪造成功；持久事实留给下一次启动对账。
 
 EOF 或 request-loop 错误没有 shutdown response；已经接纳的普通请求仍 drain 并尝试发送原 request ID 的响应。显式 `core.shutdown` 才将尚未开始的普通任务结算为关停错误。新增长期任务必须明确插入上述 owner/admission/drain 顺序。当前 Main 的 6 秒 watchdog 小于 Multi-Agent Dispatcher 的理论最坏收口路径，已经开始的阻塞 handler 也无法由 Tokio 安全强停；超时后 Main 会强制停止 Core Server，正确性依赖 SQLite 恢复。修改任一预算时必须同步修正并测试两端。
 
@@ -216,6 +225,7 @@ EOF 或 request-loop 错误没有 shutdown response；已经接纳的普通请�
 
 - 根 Agent Human Turn 与子 Agent Wake Turn 共用一个 `AgentTurnConcurrencyGate`，默认全局并发 50。
 - Dispatcher 默认每 20 秒续 Wake lease、每 1 秒作 durable fallback scan；单个 shutdown grace 为 5 秒，完整 shutdown 最多可经历两个 grace 阶段。
+- claim 前预留有界物理准备容量，同一 root 的未接纳准备受限；续租从 claim 起由独立 lease lane 覆盖排队、准备与执行。admission、checkpoint generation 安装和 terminal/settlement 在 writer 边界复核 exact claim 与活跃 lease，进入 Runtime 前再查 lease；后续展示 apply 由 Run/终态与 generation/sequence/fingerprint CAS 保护。
 - claimed 但未 admission 的过期 Wake 可安全重新排队；running 且缺少可恢复 checkpoint 的外部效果不能盲重放，结算为 `outcome_unknown`。
 - `AgentWaitKernel` 用 SQLite check/register/recheck 和 50ms durable polling 保证正确性；`Notify` 只降延迟。
 
@@ -282,6 +292,7 @@ pnpm test:automation-core-e2e
 - `notifications.*` 的 delivery 子集的 Host-only 隔离由 Main/Preload invoke allowlist 实现；Core Server stdin 是受信 Main transport，不提供逐请求调用方身份鉴别。
 - 组织管理 RPC 维护模板、草稿、独立实例、在线成员/部门配置、绑定与启停状态；人员工具 Host 在实时职级和部门权限事务后发布 roster 变更。就绪变更只发出调度唤醒，由独立调度器按持久输入、实例版本与对话占用规则执行后续投递，见[组织定义与画布编辑](../subsystems/organizations.md)。
 - Main 的 6 秒 shutdown watchdog 与 Multi-Agent Dispatcher 最坏约 10 秒的内部收口预算尚未对齐；超时路径必须按强制终止与启动恢复处理，不能宣称所有 Run 都已优雅结束。
+- [第六轮综合验收](../performance/backend-concurrency/round6-results.md)保留失败门禁：50 单元短历史发送 p95 未达目标，600 秒混合负载在中途输出超载，最大 SLO 内可持续吞吐未建立。后续 writer 无 repoll 修复有专项回归和生产 bootstrap 短测，不是完整矩阵/长测重验。
 
 ## 13. 变更检查表
 

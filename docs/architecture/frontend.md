@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-06
+last_verified: 2026-10-18
 ---
 
 # 前端架构
@@ -85,6 +85,8 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 
 阅读位置保存 message ID、相对视口偏移、scrollTop 与贴底状态，兼容旧数字位置；图片迟到、侧栏宽度变化和历史段补齐时按消息锚点修正，不把阅读旧内容的用户强制送回底部。缓存由会话导航持有并限制数量，切换/卸载会话会清理测量引用、监听器和未完成展开任务。长对话保持按需渲染，默认没有“展开全部历史”或搜索的常驻按钮；Cmd/Ctrl+F 打开查找面板，全选和跨段选择复制也会按需补齐未挂载的历史，展开期间显示进度和“停止展开”按钮。这些路径不能把尚未挂载的正文当作不存在，也不能静默复制缺段内容。
 
+Observer 的数据读取分页与 DOM 分段是两层独立优化。`useObserverConversation` 先请求最近 40 条消息并叠加当前 Run 的完整流式快照，先显示可读内容，再逐页在后台前插旧历史；新鲜快照刷新优先于继续读取旧页。每页重新校验 exact root/child/Conversation，旧账号、旧 child 或旧请求的响应不能写回。前插页面、跨越分段阈值和测量高度变化保持已有卡片身份、阅读锚点及贴底状态，不将页下标当作消息身份。账号隔离的展示缓存最多保留 4 个会话，每项至多 200 条/估算 4 MiB；复用前仍须取得新鲜授权，完整后台重读会替换已删除的旧前缀。同 scope 刷新失败保留已授权正文并提供重试，首次读取或身份变化失败则不显示上一目标内容。
+
 `ChatMessageItem` 的正文有独立 memo 边界，只接收正文实际消费的属性。新 Turn 引起的历史按钮可用性、最后回复标记和 Token 操作开关变化不应重新执行未变化的回复正文及工具时间线；正文、展开状态及有效交互变化仍正常更新。此边界不改变发送确认时序、消息显示顺序或按需挂载策略。
 
 复杂流程应提取为 `app/use*.ts` 或相应 feature hook；AppShell 只保留跨领域组合与顶层回调。Feature 不得反向导入 AppShell。
@@ -141,7 +143,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 - 明确的登录、许可或结构化 Skill 校验拒绝会撤回乐观消息并恢复原草稿；期间新增的草稿连同附件、Skill 和配置移入待发送队列，关闭自动发送。传输失败则先按原消息 ID 回读后端，已受理的轮次恢复绑定；无法确认时保留本次消息和 `admission_unconfirmed` 异常状态，不自动重发或恢复进输入框。
 - `runId` 返回前到达的事件进入有界缓冲；绑定建立后再按顺序归并。
 - command session 事件按其持久 owner 路由，不简单依赖当前活动 Run。
-- 流式 delta 先短暂批处理，再更新 React 状态和持久化投影，避免每 token 重渲染。
+- 流式 delta 先短暂批处理再更新 React 状态，避免每 token 重渲染。当前 Run 的公开正文与展示 checkpoint 由 Core Server 持久化，不依赖 Renderer 收到事件、打开页面或写回完整消息。
 - 现有运行占位仅在收到明确的模型推理活动信号时显示 `Thinking`，其余空档显示 `Waiting for next action`；正文输出和工具、审批、重试等专用状态保留原有展示优先级。活动信号只携带 Run、stream、attempt 和状态，不携带推理正文，不进入持久历史；子 Agent observer 通过实时快照和 cursor 同步同一状态。
 - Runtime 确认最终回复并通过追加输入、取消和文件事务检查后，以瞬态 `final_answer_ready` 隐藏收尾期间的通用等待占位；它不提前完成 Run、不触发队列发送，也不进入持久历史。不能仅凭当前未收到 Tool Call 或流已提交来推断最终回复，observer 实时快照须保留此展示标记。
 - stop 只是请求；最终 completed/failed/cancelled 状态必须来自后端事件或权威存储对账。
@@ -152,6 +154,10 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 - 审批按钮只在提交期间锁定；Host 返回未接受或请求失败时必须重新启用，pending ticket 是否结算仍以 Rust Core 的权威决定为准，不能由一次前端点击乐观终止。
 - 流式 Markdown 保持已完成代码块的组件身份和 wrap/copy 状态；代码仅追加时可保留已高亮前缀，非追加修改必须丢弃旧 highlight snapshot，避免展示与源码不一致。
 - `FileChange` 统一承载 staged 与 direct 文本写入。活动交易按 transaction id 分页读取 diff；历史卡片以 conversation/assistant message/Run/tool call 精确身份惰性读取 durable action audit。Renderer 只显示路径、统计、状态与有界 diff，不持有执行 authority；完整执行契约见 [FileChange 子系统](../subsystems/file-change.md)。
+
+当前 Runtime segment 安装 durable `coreCheckpoint` generation 后才发布 Started。Renderer 对带该标记或已绑定为 Core Server-owned 的消息只更新本地展示，不再把 live/终态快照作为整条 `saveMessageState` 写回；旧消息保留兼容保存路径。会话元数据、插入、消息 UI 状态分别按 conversation/message scope 排队，同 scope 前置写入保持顺序，不让无关会话的保存阻塞 stop/approval。失败 payload 留待后续 enqueue/显式 flush 重试，flush 必须拒绝失败而不是报告已落盘；quit 仍排空元数据、插入和 UI 状态。存储侧独立拒绝 Renderer 覆盖或伪造 Core Server-owned checkpoint，不能只靠前端判断保护。
+
+连续的内置读取、搜索、工作区/附件/历史查询、编辑及命令活动按时间线相邻区间合并，使用汇总标题和可展开条目。公开叙述、协作事件、最终正文及其他工具边界切断分组，同一 FileChange transaction 在组内使用稳定条目。只有明确 builtin identity 才可进入该分组，MCP 或其他扩展借用同名工具不能继承此展示语义。读取条目的文件名可进入 Files 侧栏；Host 按原 read call 和冻结工作区复验，详见[工作区文件](../subsystems/workspace-files.md#从读取工具打开文件)。
 
 后端上下文算法见 [上下文管理](./context-management.md)；Tool 结果投影规则见 [Tool 结果消费者矩阵](../subsystems/tool-result-consumer-matrix.md) 和 [Tool 结果限制](../subsystems/tool-result-limits.md)。
 
@@ -232,6 +238,9 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - Storage 投影：`src/renderer/src/features/storage/storageClient.ts`
 - 会话能力面：`src/renderer/src/features/chat/ConversationSurface.tsx`
 - 会话滚动跟随与回到底部：`src/renderer/src/features/chat/useConversationBottomFollow.ts`、`src/renderer/src/features/chat/components/ConversationScrollToBottomButton.tsx`
+- 分段与分页 observer：[useConversationSegments.ts](../../src/renderer/src/features/chat/useConversationSegments.ts)、[useObserverConversation.ts](../../src/renderer/src/features/agentCollaboration/useObserverConversation.ts)、[observerConversationCache.ts](../../src/renderer/src/features/agentCollaboration/observerConversationCache.ts)
+- 分组 Tool 时间线：[basicToolTimeline.ts](../../src/renderer/src/features/chat/components/basicToolTimeline.ts)
+- Renderer 保存边界：[useConversationPersistence.ts](../../src/renderer/src/app/useConversationPersistence.ts)、[persistenceDrain.ts](../../src/renderer/src/app/persistenceDrain.ts)；Core Server 持久事实见 [Conversation Trace](./conversation-trace-and-archive.md#core-server-owned-展示检查点)
 - FileChange 展示：`src/renderer/src/features/chat/components/toolActivities/FileChangeToolActivity.tsx`、`FileChangeDiffCard.tsx`
 - 通知：`src/renderer/src/features/notifications/`
 - Browser：`src/renderer/src/features/browser/`
@@ -253,6 +262,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - 真实 React 交互、焦点、生命周期和截图使用 Vitest browser project。
 - Electron Main/Preload 契约使用 Node 环境单元测试；跨进程高风险路径另有 Electron fixture 或 managed-playwright E2E。
 - Automation 的 cache/realtime/schedule/validation 使用 unit project；drawer、表单、Run 历史、AppShell 导航和布局使用 browser project。
+- 分段锚点、后台分页与账号/child 切换见 [ConversationSegments.browser.test.tsx](../../src/renderer/src/features/chat/__tests__/ConversationSegments.browser.test.tsx) 和 [ObserverConversationHook.browser.test.tsx](../../src/renderer/src/features/chat/__tests__/ObserverConversationHook.browser.test.tsx)；Core Server-owned 消息与失败 flush 见 [useConversationPersistence.browser.test.tsx](../../src/renderer/src/app/__tests__/useConversationPersistence.browser.test.tsx)。
 
 常规验证命令：
 

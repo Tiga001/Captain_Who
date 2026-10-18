@@ -4,7 +4,7 @@ description: 使用项目文件、只读预览、Agent 文件工具和“审阅�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-20
+last_verified: 2026-10-18
 ---
 
 # 文件与 Git
@@ -55,6 +55,8 @@ Captain Who 中有三种容易混淆的文件操作：右侧栏“文件”用�
 关键限制：文本最多读取约 1 MiB、最多渲染 5,000 行；图片最多 12 MiB；PDF 最多 32 MiB。过大的内容会显示明确提示。符号链接可以出现在目录树中，但不能展开、预览或用来跳出项目边界。
 
 Word、Excel 和 PowerPoint 文件不能在“文件”中预览。可以在外部应用中打开，或交给对应 [Office Skill](../capabilities/artifacts-and-office.md)。
+
+当前开发版本也支持点击聊天中“读取文件”等活动里的文件名，直接打开右侧“文件”面板。工作区文件或当前任务有权访问的附件仍按相同的格式、大小和路径规则预览；工具能提取 Office 正文，不代表“文件”面板就能渲染该格式。预览当前可访问的文件也不代表还原到 Agent 当时读取的历史版本。
 
 ## 让 Agent 读取或修改文件
 

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # 测试策略与矩阵
@@ -45,7 +45,7 @@ pnpm check
 
 `pnpm test` 当前包含：
 
-- 测试基础设施 checker 自测；
+- 测试布局 checker 与后端并发基准收集器自测；
 - OfficeCLI prepare 脚本测试；
 - Office renderer 与 Word/PDF renderer prepare/package verifier 测试；
 - Core Server release path-remap、macOS signing/frozen Mach-O/privacy/package verifier 的 JavaScript 逻辑测试；
@@ -66,7 +66,7 @@ pnpm check
 | ---------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | `unit`                       | Node                                      | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，排除真实 Electron/Core Server E2E                 | 常规并行                                   |
 | `browser`                    | Vitest Browser + locked Chromium          | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
-| `electron-fixtures`          | 真实 Electron                             | Browser surface failure/manager/target broker 三个 `.electron.test.ts` fixture                                  | 文件串行；仅 macOS 执行用例                |
+| `electron-fixtures`          | 真实 Electron                             | `src/main/core/**/*.electron.test.ts`，排除 Managed Playwright 专项；包含浏览器、队列、文件读取与后端验收夹具   | 文件串行；部分用例按平台与显式环境变量启用 |
 | `managed-playwright-e2e`     | Node 启动真实 Electron fixture            | `managedPlaywrightBridge.electron.test.ts`                                                                      | 文件串行                                   |
 | `human-interaction-core-e2e` | Node + locked Chromium + 真实 Core Server | 人机交互生产 Renderer/Preload/Main → Harness → 本地可控 Provider                                                | 文件串行；临时数据库和配置                 |
 | `automation-core-e2e`        | Node + 真实 Core Server 进程              | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                       | 文件串行；不启动真实 Electron/系统原生通知 |
@@ -112,7 +112,7 @@ cargo test --locked --workspace
 | 命令                            | 覆盖                                                                        |
 | ------------------------------- | --------------------------------------------------------------------------- |
 | `pnpm check:test-layout`        | Vitest project 唯一归属与 Rust ignored-test registry                        |
-| `pnpm test:test-infrastructure` | 两个测试布局 checker 的 Node 自测                                           |
+| `pnpm test:test-infrastructure` | 两个测试布局 checker 与并发基准参数、原始结果完整性校验的 Node 自测         |
 | `pnpm test:officecli`           | manifest、下载边界、hash、receipt、原子发布                                 |
 | `pnpm test:office-renderer`     | Chromium/LibreOffice prepare 与 packaged verifier                           |
 | `pnpm test:artifact-runtime`    | runtime 构建、supply-chain evidence、PPTX notes/SDK                         |
@@ -178,6 +178,9 @@ cargo test --locked -p mycopilot-core-server workspace_instructions --bin core-s
 启用实例的归档保护、成员移除/改绑后旧身份永不恢复、管理员低职级和部门子树权限、原子批量编辑及幂等回执。
 邮件需覆盖查询不领取、空闲 FIFO 唤醒、轮内主动接手、领取/撤回竞争、终态原子结算、手动停止屏障及重启恢复；
 看板需覆盖部门布局、动态事件去重、六态邮箱和当前连续运行时长，详见[组织邮件网络](../subsystems/organizations.md)。
+
+模板 Markdown 还需验证语言声明、导入新身份、同名不覆盖、默认权限、模型重新绑定，以及本机凭据/对话/布局不被导出。
+看板与观察器需验证按组织/账户隔离、隐藏页面暂停刷新、分页先显示最近消息、历史前插时阅读位置不跳动，以及持续失效下的尾随刷新不被旧结果覆盖。
 
 ```bash
 pnpm exec vitest run --project unit packages/protocol/src/workflows.test.ts src/main/core/coreServer.workflows.test.ts
@@ -285,20 +288,46 @@ cargo test -p mycopilot-core-server --test mcp_stdio_runtime_e2e
 
 stress 包含 100 次 connect/close、重启、并发 fixture、refresh、call 中 stop/remove、crash recovery 和 1,024/1,025 Tool 边界。官方 MCP Conformance Framework 当前未以锁定 runner 接入，不得把本地通过表述为官方 conformance。
 
+### 后端并发、持久化与端到端测量
+
+常规测试会检查收集器和并发契约，但不会自动执行完整性能矩阵或长稳态实验。使用
+[并发基准 runner](../../scripts/run-backend-concurrency-baseline.mjs) 显式运行：
+
+```bash
+pnpm benchmark:backend-concurrency --mode smoke
+pnpm benchmark:backend-concurrency --mode full
+pnpm benchmark:backend-concurrency --mode soak --duration-seconds 600 --units 20 --interval-ms 2000
+```
+
+runner 使用隔离 Cargo target、临时磁盘库、合成历史、本地假 Provider 和受控工具；输出默认写入
+`.cache/backend-concurrency/`，可用 `--output-dir` 指定隔离结果目录。`--diagnostics on|off` 控制诊断，比较开销时须保持相同二进制和负载。
+禁止指向用户数据库、真实收费模型或生产 MCP 服务。执行实验前先阅读[测量与正确性验收](../performance/backend-concurrency/acceptance.md)。
+
+原始 RPC 回执、成功/错误/无回复计数、逐 Run 恢复与传输完整性必须相互一致；成功请求的分位数不能掩盖拒绝或断连。
+`smoke` 成功不等于 `full` 或 `soak` 达标，基准进程退出成功也不自动证明延迟目标通过。
+2026-10-12 的[第六轮结果](../performance/backend-concurrency/round6-results.md)仍为整体性能验收未通过；后续写队列正确性修复没有重新建立完整性能结论。
+
+[原生 Electron 验收夹具](../../src/main/core/backendAcceptance.electron.test.ts) 只有在 macOS 且显式提供
+`CAPTAIN_CORE_ACCEPTANCE_BINARY` 时运行，否则会跳过。它覆盖生产 Renderer hooks、真实 IPC 和 Core Server 管道，
+不覆盖完整 AppShell 视觉、硬件点击或 compositor paint。详见[Host 与 Renderer 测量](../performance/backend-concurrency/host-renderer-measurement.md)。
+
 ## 8. 当前 `pnpm check` 未覆盖
 
-| 项目                            | 当前状态                                                       |
-| ------------------------------- | -------------------------------------------------------------- |
-| Automation 真实 Core Server E2E | 独立命令与 CI job，不在 `check`                                |
-| Multi-Agent release gate        | 独立命令与 CI job，不在 `check`                                |
-| Managed Playwright release组合  | 独立命令，不在 `check`                                         |
-| `electron-builder` package      | 不在 `check`                                                   |
-| 实际 Developer ID 签名/验签     | 仅真实 `build:mac` 发生；普通 test 只测逻辑                    |
-| macOS DMG 实际签名与验证        | `dmg.sign=true` 只在真实 package 发生；仓库无独立 DMG verifier |
-| macOS packaged privacy scan     | 真实 macOS afterPack 执行；普通 test 使用 fixture              |
-| notarization                    | 未配置                                                         |
-| packaged Agent→browser E2E      | pending                                                        |
-| Windows/Linux 目标平台验收      | 无仓库 CI 自动运行                                             |
+| 项目                                   | 当前状态                                                       |
+| -------------------------------------- | -------------------------------------------------------------- |
+| Automation 真实 Core Server E2E        | 独立命令与 CI job，不在 `check`                                |
+| Human Interaction 真实 Core Server E2E | 独立命令；手动 CI 的 macOS job 执行，不在 `check`              |
+| 后端性能 full/soak 与 SLO 验收         | 显式基准命令；基础设施自测通过不等于性能达标                   |
+| 原生后端验收夹具的实际执行             | 需 macOS 与指定测试二进制；缺少条件时跳过                      |
+| Multi-Agent release gate               | 独立命令与 CI job，不在 `check`                                |
+| Managed Playwright release组合         | 独立命令，不在 `check`                                         |
+| `electron-builder` package             | 不在 `check`                                                   |
+| 实际 Developer ID 签名/验签            | 仅真实 `build:mac` 发生；普通 test 只测逻辑                    |
+| macOS DMG 实际签名与验证               | `dmg.sign=true` 只在真实 package 发生；仓库无独立 DMG verifier |
+| macOS packaged privacy scan            | 真实 macOS afterPack 执行；普通 test 使用 fixture              |
+| notarization                           | 未配置                                                         |
+| packaged Agent→browser E2E             | pending                                                        |
+| Windows/Linux 目标平台验收             | 无仓库 CI 自动运行                                             |
 
 维护者不能因为 `pnpm check` 绿色就声称已完成 release acceptance。
 

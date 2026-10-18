@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-10
+last_verified: 2026-10-18
 ---
 
 # 组织：邮件与分层协作
@@ -212,6 +212,8 @@ last_verified: 2026-10-10
 
 组织首页、实例编辑和看板统一位于右侧栏。看板显示部门、成员活动与邮箱计数：悬停成员查看节点名称、职级、模型、权限与任务，单击不打开详情面板，双击打开实际对话；对话顶部组织菜单导航到其他成员，不区分上下游。邮件正文通过对话中的邮箱工具查看。
 
+直接打开一个实例看板只读取该实例，不先加载模板/创作目录；进入编辑或创建时再加载相应配置。可读快照按账号 session 隔离，切换账号立即清空当前看板；同实例后台重读失败保留已显示画布并给出安全错误/重试，找不到指定实例时不能展示另一个组织。隐藏看板不持续轮询或绘制运行图，返回前台、focus 或恢复信号重新校准；这不暂停 Core Server 邮件调度或真实成员任务。
+
 临时连线只来自已持久化的 sent/recalled 事件；撤回使用反向端点，领取和完成不伪造跨成员传输。首次打开、重开或隐藏期间不回放旧事件；事件按实例序号去重，动画不写入定义。收到、开始、结束和成功须以持久事实核对。
 
 审批和人工交互沿用各成员对话的权限与交互入口。看板只展示稀疏 attention 状态，不自动批准、回答或恢复停止。组织连续运行时长来自真实已准入 Turn，重叠成员及明确委派的子 Agent 合并活动区间，不累加并行耗时；停用不会提前结束已运行 Turn 的计时。
@@ -229,6 +231,8 @@ last_verified: 2026-10-10
 | `structureRevision`   | 最新 `members_changed` 事件序号，触发组织结构重新读取；没有结构事件时为 0                                            |
 
 `summary` 的恢复事实与 `afterSequence` 无关。在同一个 SQLite 读取事务内取得实例事件水位、摘要和暂停状态，避免组合出跨版本快照。`events` 包含游标之后最新 512 条事件，再补充每个当前成员的模型、权限字段各自最新历史失效事件，按序号去重排序。因此历史偏好事件可能早于请求游标；消费者按字段去重并复核当前草稿，不能把它们当作新鲜偏好值，也不能重新播放动画。临时连线只使用新游标之后的真实 sent/recalled 事件。
+
+Renderer 使用 `conversationChanges` 只重新读取已加载且水位推进的对话，单次恢复最多并行 4 个读取，重复失效合并为当前读取后的一次补读；未知/尚未 hydrate 的对话不提前确认水位。当前可见且应用前台的对话才清未读，后台更新保留未读和在途流式内容。`structureRevision` 用于恢复超出事件窗口的成员变化，不要求邮件正文或完整输入列表参与。相同 runtime/list 请求只共享在途读取，后续 focus/poll 仍回到持久快照；账号代次变化拒绝旧响应。
 
 对话变化水位由 `workflow_mail_conversation_changes` 在邮件写事务内维护，升级时从已有输入与事件回填。通知读取不再联表扫描全部历史输入和事件，也不读取邮件正文、输入 JSON 或 Turn Trace。结构与偏好通过索引定位最新事件。摘要大小会随曾接收邮件的对话身份数增长，并非固定长度；不会以静默截断丢失旧对话的恢复信号。此派生表只服务展示与恢复，不作为成员授权、投递资格或邮件处理完成的依据。
 
@@ -252,14 +256,17 @@ worker 由 bootstrap 显式启动并持有，构造服务不启动后台任务�
 
 ## 8. 代码与回归入口
 
-| 领域               | 代码真源                                                                                                                                                                                                                                                              |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 定义与跨语言协议   | [workflows.ts](../../packages/protocol/src/workflows.ts)、[workflow.rs](../../crates/core/src/workflow.rs)、[组织层级 fixture](../../packages/protocol/fixtures/organization-hierarchy-v1.json)                                                                       |
-| 独立实例与成员绑定 | [management.rs](../../crates/core/src/storage/workflow_repository/management.rs)、[实例生命周期测试](../../crates/core/src/storage/workflow_repository/management_tests.rs)                                                                                           |
-| 人员权限与事务     | [organization_personnel.rs](../../crates/core/src/organization_personnel.rs)、[edit.rs](../../crates/core/src/storage/organization_personnel_repository/edit.rs)、[权限/原子性测试](../../crates/core/src/storage/organization_personnel_repository/tests.rs)         |
-| 邮件契约与持久化   | [workflow_execution.rs](../../crates/core/src/workflow_execution.rs)、[邮件 repository](../../crates/core/src/storage/workflow_execution_repository.rs)、[delivery.rs](../../crates/core/src/storage/workflow_execution_repository/delivery.rs)                       |
-| 工具、查询与上下文 | [动态工具](../../crates/core/src/runtime/extensions/workflow.rs)、[查询契约](../../crates/core/src/workflow_awareness.rs)、[World State](../../crates/core/src/world_state/workflow_projection.rs)                                                                    |
-| 准入与调度         | [Host 执行](../../crates/core-server/src/application/agent/workflow_execution.rs)、[调度器](../../crates/core-server/src/application/agent/workflow_scheduler.rs)、[真实根 Turn 邮件测试](../../crates/core-server/src/application/agent/tests/workflow_execution.rs) |
-| 用户界面           | [模板编辑器](../../src/renderer/src/features/workflows/WorkflowSettingsSection.tsx)、[组织首页/编辑](../../src/renderer/src/features/workflows/project/WorkflowsPage.tsx)、[实时看板](../../src/renderer/src/features/workflows/project/WorkflowMonitorPage.tsx)      |
+| 领域                | 代码真源                                                                                                                                                                                                                                                                    |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 定义与跨语言协议    | [workflows.ts](../../packages/protocol/src/workflows.ts)、[workflow.rs](../../crates/core/src/workflow.rs)、[组织层级 fixture](../../packages/protocol/fixtures/organization-hierarchy-v1.json)                                                                             |
+| Markdown 可移植模板 | [workflow_markdown.rs](../../crates/core/src/workflow_markdown.rs)、[language.rs](../../crates/core/src/workflow_markdown/language.rs)、[跨语言/内容保真测试](../../crates/core/src/workflow_markdown/tests.rs)、[Host 文件 IPC](../../src/main/ipc/workflowTemplateIpc.ts) |
+| 独立实例与成员绑定  | [management.rs](../../crates/core/src/storage/workflow_repository/management.rs)、[实例生命周期测试](../../crates/core/src/storage/workflow_repository/management_tests.rs)                                                                                                 |
+| 人员权限与事务      | [organization_personnel.rs](../../crates/core/src/organization_personnel.rs)、[edit.rs](../../crates/core/src/storage/organization_personnel_repository/edit.rs)、[权限/原子性测试](../../crates/core/src/storage/organization_personnel_repository/tests.rs)               |
+| 邮件契约与持久化    | [workflow_execution.rs](../../crates/core/src/workflow_execution.rs)、[邮件 repository](../../crates/core/src/storage/workflow_execution_repository.rs)、[delivery.rs](../../crates/core/src/storage/workflow_execution_repository/delivery.rs)                             |
+| 工具、查询与上下文  | [动态工具](../../crates/core/src/runtime/extensions/workflow.rs)、[查询契约](../../crates/core/src/workflow_awareness.rs)、[World State](../../crates/core/src/world_state/workflow_projection.rs)                                                                          |
+| 准入与调度          | [Host 执行](../../crates/core-server/src/application/agent/workflow_execution.rs)、[调度器](../../crates/core-server/src/application/agent/workflow_scheduler.rs)、[真实根 Turn 邮件测试](../../crates/core-server/src/application/agent/tests/workflow_execution.rs)       |
+| 用户界面            | [模板编辑器](../../src/renderer/src/features/workflows/WorkflowSettingsSection.tsx)、[组织首页/编辑](../../src/renderer/src/features/workflows/project/WorkflowsPage.tsx)、[实时看板](../../src/renderer/src/features/workflows/project/WorkflowMonitorPage.tsx)            |
 
 验证须覆盖模板独立性、启停保持、唯一绑定、部门层级、管理员严格低职级与权限上限、批量原子性、成员移除/重加、幂等恢复；邮件覆盖自由通信、查询不领取、同轮主动接手、领取/撤回竞争、终态结算、停止屏障、FIFO 唤醒与丢通知恢复。前端同时覆盖在线 roster、部门编辑、复制粘贴/撤销、草稿冲突、看板事件去重、历史邮件与对话导航。命令见[测试体系](../development/testing.md#组织配置与邮件协作)；阅读测试不等于实际运行通过。
+
+Markdown 入口同时覆盖 [Host 导入/导出](../../src/main/core/ipc.workflowTemplate.test.ts) 与 [模板 UI](../../src/renderer/src/app/__tests__/WorkflowTemplateMarkdown.browser.test.tsx)；看板直达、缓存/账号隔离和结构水位恢复见 [WorkflowsPage.browser.test.tsx](../../src/renderer/src/app/__tests__/WorkflowsPage.browser.test.tsx)，有界对话恢复见 [WorkflowConversationSync.browser.test.tsx](../../src/renderer/src/app/__tests__/WorkflowConversationSync.browser.test.tsx)。

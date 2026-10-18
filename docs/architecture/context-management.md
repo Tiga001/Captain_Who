@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-06
+last_verified: 2026-10-18
 ---
 
 # 上下文管理
@@ -49,13 +49,12 @@ messages + Trace/model-context journal + active compaction head
 ### 后端历史预热与复用
 
 普通发送、上下文预览和组织邮件启动复用同一份后端历史快照。冷读在一个 SQLite 读事务中取得
-消息、Trace、模型上下文日志和摘要校验材料，释放共享数据库锁后再解析、解压和验证内容。
+消息、Trace、模型上下文日志和摘要校验材料，结束读取快照后再解析、解压和验证内容；磁盘库的 reader/writer 所有权见[存储生命周期](./storage-and-data-lifecycle.md)。
 快照版本包含独立的消息历史 revision、各 Trace journal 版本、摘要及相关附件、消息来源等依赖；
 标题、已读、置顶、`updated_at` 等展示元数据不使历史失效。正式普通发送/组织输入准入仍在写事务内
 核对会话元数据 CAS 与所消费的历史版本；权限、工作区、当前 World State、工具与 Provider 状态
 继续按原规则实时解析。同一连接对其他会话或 MCP 注册表的写入也不会使历史缓存失效。
-消息展示 JSON 使用独立的 `presentation_revision`；Renderer 在终态后补写用量、结束原因等
-展示字段时，Storage 按消息更新序号只刷新有变化的原始 JSON，保留已验证的 Trace/模型日志和计量基线。
+消息展示 JSON 使用独立的 `presentation_revision`；当前 Run 的展示 checkpoint、用量和终态由 Core Server 持久化，Renderer 不再补写完整 Core Server-owned 消息。展示字段变化时，Storage 按消息更新序号只刷新有变化的原始 JSON，保留已验证的 Trace/模型日志和计量基线。
 消息展开等 UI 状态另有独立水位；变化时刷新轻量 UI 记录，同样不影响模型历史版本。
 读取、分叉等消费者仍取得最新原始消息，展示写回也仍推进会话 admission revision。
 同内容的 Trace/header/model-context UPDATE 不再推进日志版本；真实正文、状态、来源、附件或
@@ -105,7 +104,7 @@ Trace 终态记录（`historical_agent_activity_terminal`）以后端状态通�
 
 消息位置和 Trace sequence 决定顺序，不能只按墙钟时间拼接。运行中的 narration 与已闭合 Tool Result 可先持久化；活动 Trace 只允许在尾部暂存一个用于审批/恢复的 open Tool Call，该调用不进入已闭合 model-context 前缀或压缩边界。最终助手消息和 Trace 终态在同一持久边界结算。
 
-pending assistant message 的持久正文为空；“正在思考”等 UI placeholder 不属于逻辑日志。FileChange 的 `apply_patch` durable Tool Call 只保存 body-free operation 与 content/edit digest，不保存完整 content、old/new text 或 Observation ID；精确执行材料属于 Host 私有 action audit/Staged store。成功写后的 successor `fileChangeTarget` 只用于同 Run 的下一次模型 continuation 和私有 checkpoint，不进入普通 Event/Trace/Archive。
+pending assistant message 初始持久正文为空，随后可由 Core Server-owned 展示 checkpoint 保存已公开的流式正文；它不因此成为已结算 assistant 历史，模型仍通过本轮权威帧和 Trace/model-context 获取正确顺序。“正在思考”等 UI placeholder 不属于逻辑日志。FileChange 的 `apply_patch` durable Tool Call 只保存 body-free operation 与 content/edit digest，不保存完整 content、old/new text 或 Observation ID；精确执行材料属于 Host 私有 action audit/Staged store。成功写后的 successor `fileChangeTarget` 只用于同 Run 的下一次模型 continuation 和私有 checkpoint，不进入普通 Event/Trace/Archive。展示检查点与 Runtime 私有恢复检查点不是同一协议，见 [Conversation Trace](./conversation-trace-and-archive.md#core-server-owned-展示检查点)。
 
 用户消息的持久正文保持原样。组装时后端可加入确定性的 `<backend_conversation_timing>` 元数据，记录该用户消息和相邻上一条 assistant 的时间；时间来自 SQLite 毫秒时间戳，并按本机时区渲染为带偏移的 RFC 3339。不要修改 assistant 历史正文来承载内部时间标记。
 
@@ -289,6 +288,8 @@ Conversation World State 在同一会话的多个 Run 之间延续。第一个�
 Host 在发出请求前用事务校验归属、运行状态、停止围栏、预期 head 和安全 Trace 前缀，写入状态与幂等 request receipt。即使没有 diff 也保留该请求的 receipt。状态初始标记为未确认观察，Provider 成功响应后才确认；发送失败不会把准备好的状态误标成已观察。未观察状态保留在上下文中、计为 `run_transient`，不可被压缩覆盖。观察确认失败会保留模型用量并结束当前执行，不重发已经完成的模型请求。
 
 上下文帧和 checkpoint 同时保存 canonical 状态日志及其投影关联；不从模型可见文本反解 Host 状态。SQLite 增量缓存与冷重建使用同一日志。上下文预览在帧副本上计算当前设置对应的临时 full/diff 和指南，使用同一能力快照进行工具计量，不写日志、request receipt 或观察标记。
+
+Conversation World State 同步/恢复先校验权威 ledger，并生成一次当前投影。已有 checkpoint 的正文、scope 和观察状态均匹配时直接复用该结果，不预先构造全部旧格式；仅出现不匹配时惰性计算受支持的历史显示格式用于精确兼容校验。这是投影优化，不跳过来源身份、权限状态或已观察事实校验，也不接受任意文本清洗后冒充可信记录。实现与长 ledger/旧格式回归见 [frame/world_state.rs](../../crates/core/src/context/frame/world_state.rs)。
 
 后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource、Artifact 与 Browser download 必须先通过统一 locator 和各自授权解析，模型字符串本身不是文件系统权限。Host 可以从 `agent_nodes` 推导同一 Agent task tree 的 exact root scope，使父/子/兄弟复用 durable attachment/artifact/download；模型、Prompt 或 Renderer 不能自报 root identity，未知 scheme-like/`@namespace` locator 必须 fail closed。
 

@@ -2,12 +2,14 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-10-18
 ---
 
 # 桌面应用更新
 
 桌面更新使用 `electron-updater` 与 Electron Builder 的 generic HTTPS 源。当前范围为 macOS arm64；Windows、Linux、macOS x64/universal 和 Mac App Store 不启用更新发布。源码实现和配置测试不代表真实发行链路已经验收。
+
+仓库已记录正式发行 `1.0.5` 的签名、公证、stapling 与公开更新清单，见[发行说明](../../public-docs/releases/README.md)及[升级指南](../../public-docs/releases/upgrade-guide.md)。当前源码版本为 `1.0.6`（[package.json](../../package.json)），不据此宣称该版本已发行。以下构建与验收要求面向每次新发行；脚本没有自动公证/上传步骤，不等于正式包从未公证或更新源尚未公开。
 
 ## 应用行为与安全退出
 
@@ -47,7 +49,7 @@ pnpm test:update-config
 
 `verify:update-config` 要求 URL 存在。`build:mac` 在组件准备前调用该检查，因此正式可更新构建缺少地址会提前失败。独立调用配置时可设置 `CAPTAIN_WHO_REQUIRE_UPDATES=1` 取得相同的缺源失败语义；`node scripts/update-config.mjs` 则允许无源开发配置。检查只验证语法与配置，不访问 COS、不证明服务器可读、不执行签名或打包。
 
-后续获得正式地址、证书和发布条件后，构建进程从外部环境取得 `CAPTAIN_WHO_UPDATE_URL` 再执行 `pnpm build:mac`。命令显式使用 `--publish never`，产物生成不会自动上传。generic provider 本身也不实现 COS 上传。
+每次正式构建由发布者从外部环境提供对应更新地址与签名条件，构建进程取得 `CAPTAIN_WHO_UPDATE_URL` 后执行 `pnpm build:mac`。命令显式使用 `--publish never`，产物生成不会自动上传。generic provider 本身也不实现 COS 上传。
 
 有源 macOS arm64 构建的预期产物为：
 
@@ -65,7 +67,7 @@ pnpm test:update-config
 
 `build:mac` 和有源动态配置要求真实 Developer ID 签名。现有 `scripts/sign-macos.mjs` 自定义签名、稳定 Core Server identifier、同 Team ID、hardened runtime 和冻结 receipt 契约保持有效，不能为了更新跳过或放宽。
 
-`notarize: false` 仍明确保留。当前没有完成自动 notarization/stapling 集成，也没有执行本轮真实签名、公证、打包或上传。公证凭据与 Apple 操作属于后续需要发布者参与的步骤。
+`notarize: false` 仍明确保留，因此 `build:mac` 不会自动执行 notarization/stapling；公证凭据、Apple 提交与最终字节验证由独立发行流程负责。已记录正式包的公证事实不能替代下一版本验收，本次文档核验也未执行签名、公证、打包或上传。
 
 正式上传前必须完成公证、必要 stapling 与最终验签，然后冻结真正分发的 ZIP/DMG。若公证或 stapling 改变了 app/归档字节，必须重新生成包含最终 app 的归档、blockmap 和对应 manifest 摘要；不能继续使用字节变化前的 `latest-mac.yml`，也不能手改摘要掩盖未完成的构建验收。
 
@@ -86,7 +88,7 @@ manifest 最后发布可避免客户端看到尚未上传完毕的包；不能�
 
 ## A → B 验收与回退边界
 
-后续真实验收暂定 A=`1.0.0`、B=`1.0.1`。本轮没有为此修改版本、生成包或操作日常使用的应用。两版需要相同 appId、有效且兼容的签名身份、相同数据根语义和可读取同一更新目录的配置。
+每次发行选择真实已安装旧版 A 与候选新版 B，记录精确版本、构建和更新清单，不继续把早期 `1.0.0` → `1.0.1` 计划当作当前验收记录。两版需要相同 appId、有效且兼容的签名身份、相同数据根语义和可读取同一更新目录的配置。已签名/公证的 DMG 与公开 manifest 本身不证明特定 A → B 路径已经成功。
 
 在隔离测试环境安装 A，准备可核对的设置、会话和任务数据，再发布 B。验证检查更新、发现新版本、下载进度、错误提示、下载与原生准备完成后自动安全退出，以及重启后版本为 B；同时验证仅检查不会自动下载/安装、原生准备期间普通退出仍先安全清理、活动任务处理和原有数据保留。首次安装 DMG 与 updater 使用的 ZIP 都要来自本次最终验收产物。
 
@@ -94,13 +96,11 @@ manifest 最后发布可避免客户端看到尚未上传完毕的包；不能�
 
 更新安装不运行开发用 storage reset。应用不提供自动降级和数据库回滚；若需停止坏版本，应停止该版本分发并发布更高版本修复，不能假设把 manifest 指回低版本会自动回退。每次涉及 schema 的更新都需独立评估旧数据兼容与恢复方案。
 
-## 尚未完成
+## 当前限制与逐发行证据
 
-- 正式 COS 更新目录、对象匿名读取/范围读取/缓存配置及其线上证据。
-- 发布上传实现或实际上传，包含 manifest 最后发布与远端最终字节核对。
-- Apple notarization/stapling 集成和真实证书、公证、最终签名验收。
-- 最终 macOS arm64 DMG/ZIP/manifest 的真实构建和 package gate。
-- 真实 A=`1.0.0` → B=`1.0.1` 下载、重启替换、失败恢复与数据保留验收。
-- Windows/Linux/macOS 其他架构的更新发布支持。
+- 构建脚本不自动上传 COS，也不自动执行 Apple notarization/stapling；这些步骤须由发布者完成并记录。
+- 每次新发行须保留更新目录匿名对象读取、范围读取/缓存策略、manifest 最后发布和远端最终字节核对证据，不能从已存在公开清单推断配置永远正确。
+- 候选版本的 DMG/ZIP/manifest、package gate、真实签名/公证及 A → B 下载、重启替换、失败恢复和数据保留需分别验收；本页不把源码测试或旧发行记录视为全部通过。
+- Windows/Linux/macOS 其他架构仍没有更新发布支持。
 
 完整发布条件与现有签名证据边界见[构建与发布](../development/build-and-release.md)。

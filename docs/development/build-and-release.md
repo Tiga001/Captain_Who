@@ -2,18 +2,20 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-10-18
 ---
 
 # 构建与发布
 
 本文记录当前 Electron + Core Server sidecar 的构建、打包、macOS 签名和发布证据边界。当前没有一键发布流水线；维护者必须明确区分“源码构建”“目录包”“发行包”“已签名”和“已公证”。
 
+本次核验的源码版本为 `1.0.6`，已登记的正式发行记录仍为 [`1.0.5`](../../public-docs/releases/release-notes/1-0-5.md)。源码版本递增不代表新安装包已发布；已有正式包的签名、公证及公开更新源证据，也不能替代下一版最终产物的验收。
+
 ## 1. 前置条件
 
 - Node.js `>=22 <23`
 - pnpm `11.10.0`
-- Rust/Cargo workspace toolchain
+- Rust/Cargo `1.99.0`（以 `rust-toolchain.toml` 为准）
 - `pnpm install --frozen-lockfile`
 - 组件准备阶段需要访问各锁定 manifest 指定的下载源；已完整缓存且 receipt 有效时可复用
 - 目标平台 package 必须在目标 OS 原生构建；脚本会拒绝在其他 OS 执行 `build:win/mac/linux`
@@ -26,7 +28,7 @@ last_verified: 2026-09-16
 pnpm check
 ```
 
-`pnpm check` 已包含 `pnpm check:docs`，但不包含专项 release gate、package 或真实签名，不能作为唯一发布证据。
+`pnpm check` 已包含 `pnpm check:docs` 与 `pnpm check:public-docs`，但不包含专项 release gate、长时间性能验收、package 或真实签名，不能作为唯一发布证据。
 
 ## 2. 构建命令
 
@@ -164,15 +166,15 @@ backend 目前仍使用 Node `child_process.fork()`，在迁移或完成专项�
 notarize: false
 ```
 
-因此 macOS 发行包可以是 Developer ID 已签名，但**尚未经过 Apple notary service**。仓库没有自动
-stapling；notary credential 仍由发布者在本机钥匙串管理。基础 YAML 的 `publish: null` 继续禁止默认
+因此只运行 `build:mac` 不能证明产物已经过 Apple notary service。已登记的正式 `1.0.5` 包已另行完成公证及 stapling；仓库脚本没有自动
+stapling，notary credential 仍由发布者在本机钥匙串管理。基础 YAML 的 `publish: null` 继续禁止默认
 provider 推断；动态配置仅为有源 macOS arm64 开启 generic provider、ZIP 与更新 metadata。
 NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不意味着公证或更新发布已经完成。
 任何发行说明必须如实区分签名、公证和发布状态。
 
 公证/stapling 如果改变了 app 或归档字节，最终 ZIP/DMG、blockmap 与 `latest-mac.yml` 必须根据最终
 分发字节重新生成并校验。先上传归档与辅助文件、验证远端摘要，最后发布 manifest；COS 对具体对象
-的公开读不要求桶列目录权限。当前尚未配置正式 COS 更新目录或上传、公证与真实 A → B 验收。
+的公开读不要求桶列目录权限。已有正式版公开更新清单；仓库不内置发布凭据，也没有自动上传、公证、stapling 与真实 A → B 验收流水线，不能把已上线的更新源当作下一版发布成功的证据。
 
 ## 7. 发布前门禁
 
@@ -183,8 +185,10 @@ NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不�
 3. `pnpm check`。
 4. 按改动域运行专项 gate：
    - `pnpm test:automation-core-e2e`
+   - `pnpm test:human-interaction-core-e2e`
    - `pnpm test:multi-agent-release`
    - `pnpm verify:playwright-round3-release`
+   - 涉及调度、存储或运行持久化时，按[后端并发验收](../performance/backend-concurrency/acceptance.md)运行同一最终树的性能矩阵与长测
    - MCP stdio stress/其他明确发布测试
 5. 在目标 OS/arch 执行 `pnpm build:<platform>`；不得跨 OS 伪装 native package。
 6. 检查 afterPack/afterSign 完整成功；macOS 保存 signer/Team ID 验证记录和最终 Electron fuse wire 验证记录。
@@ -196,6 +200,8 @@ NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不�
 12. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
 
 不要把 `build:unpack` 的 unsigned directory、脚本 unit test、旧 bundle startup 或不同 commit 的 gate 拼接成签名发布证据。
+
+最近一次后端第六轮性能验收仍未通过，短任务发送尾延迟和长测输出过载是已记录的失败项。后续写入推进正确性修复没有更新该性能结论；不得把“实现了优化”写成“已达到性能目标”，详见[综合验证结果](../performance/backend-concurrency/round6-results.md)。
 
 ### Scheduled Automation 发布验证
 
@@ -232,7 +238,9 @@ pnpm build:<platform>
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。数据库当前使用 canonical v49，不能假设新库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
+回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。当前源码数据库使用 canonical v71，有限的历史升级范围见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。不能假设新库可被旧应用打开，也不能从 schema 迁移代码推断正式安装包之间已经完成升级验收。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
+
+备份应在应用及 Core Server 完全退出后复制完整数据根。当前 SQLite 使用 WAL，运行中只复制 `storage.sqlite` 可能遗漏已提交内容；不要为了备份删除 `-wal`/`-shm` 文件。凭据存储与数据库分离，恢复边界见[恢复 Runbook](../operations/recovery-runbook.md)。
 
 ## 9. 代码真源
 
@@ -274,14 +282,14 @@ pnpm verify:playwright-packaged-startup
 ## 11. 当前限制
 
 - 已有 Linux/macOS 源码测试 CI，但没有统一 release orchestration、目标平台 package 矩阵、artifact attestation 或自动发布证据归档。
-- 已有 macOS arm64 应用侧更新与 generic 源配置，但正式 COS 更新目录、上传、公证/stapling 和真实 A → B 发布验收尚未完成；没有自动降级或数据库回滚通道。
+- 已有 macOS arm64 应用侧更新、generic 源配置及正式版公开更新清单，但没有自动上传、公证/stapling 和真实 A → B 发布验收流水线；每次发布仍需独立证据，没有自动降级或数据库回滚通道。
 - Windows/Linux 没有仓库内目标平台 release acceptance 记录；目标定义不等于已验证。
 - 非 macOS afterPack 没有等价的全树 privacy scan；全部平台仍缺 packaged Core Server content digest/receipt 绑定。
-- Electron Builder 已请求签名 DMG，但仓库没有独立 DMG signature verifier，也没有 notarization/stapling。
+- Electron Builder 已请求签名 DMG，但仓库没有独立 DMG signature verifier，也没有自动 notarization/stapling 脚本；不能与已发布包的实际公证状态混淆。
 - packaged startup gate 仅支持 macOS unpacked app，且 supplied bundle freshness 不确定。
 - Packaged Agent → Managed Playwright MCP E2E 为 pending。
 - Scheduled Automation 缺真实时钟、Provider/Approval、OS 通知点击、重启/休眠与 packaged Electron 自动化 E2E。
-- `pnpm check` 不包含 package、真实签名、Automation 真实 Core Server E2E、Multi-Agent 或 Playwright 专项 gate。
+- `pnpm check` 不包含 package、真实签名、Automation/Human Interaction 真实 Core Server E2E、Multi-Agent、Playwright 专项 gate 或后端并发完整性能/长测。
 
 ## 12. 变更检查表
 

@@ -2,12 +2,12 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-10-18
 ---
 
 # 工作区文件与预览
 
-Files 模块提供项目多目录树和只读预览，Main 的同一工作区服务还为 Composer `@` 引用提供有界搜索。它是 Electron Main 通过 Host API 管理的工作区浏览能力，不是 Agent `read_file`、统一 `FileChange`、附件解析或 Office 文档渲染能力。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)，引用提交见[会话输入与附件](./conversation-inputs.md)。
+Files 模块提供项目多目录树和只读预览，Main 的同一工作区服务还为 Composer `@` 引用提供有界搜索。聊天读取工具可以通过精确调用身份打开同一预览，但 Files 本身不执行 Agent `read_file`、统一 `FileChange`、附件解析或 Office 文档渲染。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)，引用提交见[会话输入与附件](./conversation-inputs.md)。
 
 ## 职责边界
 
@@ -18,7 +18,7 @@ Files 模块提供项目多目录树和只读预览，Main 的同一工作区服
 | Main `WorkspaceFilesService` | 用 project/folder id 解析权威根；规范化相对路径；阻止逃逸/symlink；有界搜索、读取和分类预览  |
 | Rust Core Storage            | 保存项目多目录配置与每轮冻结工作区；历史读取复验原目录实体                                   |
 
-Renderer 不能提交绝对路径，不能从预览结果推导任意文件系统权限。Files 模块只读；复制和 reveal 由 Main 对已验证路径执行。
+普通工作区请求由 Renderer 提交 project/folder id 与相对路径，不能自行指定根目录。read-tool 请求只能回传该调用已记录的路径并附精确证明身份，不能从预览结果推导任意文件系统权限。Files 模块只读；复制和 reveal 由 Main 对已验证路径执行。
 
 Agent 的 create/update/delete 与 direct `apply_patch` 现在统一投影为 `FileChange`。它们在聊天 Tool activity/审批对话框中显示 path、状态、统计和按需 diff，并由 Rust Core/Core Server 持有 transaction、observation 和写入授权；不会给 Files panel 增加保存按钮，也不会复用 `WorkspaceFilesService` 作为写入后门。写入完成后，Files 通过下一次 refresh/readPreview 观察磁盘现状，不从 FileChange 卡片乐观修改树。完整写入契约见 [FileChange 子系统](./file-change.md)。
 
@@ -55,6 +55,14 @@ Renderer 当前合并延迟搜索并请求 24 项，旧查询结果不能覆盖�
 ## 当前与历史文件身份
 
 预览、copy 和 reveal 均接受可选 `assistantMessageId`。缺少该字段时使用当前项目目录配置；带该字段时由 Rust Core 读取该轮冻结的工作区，再按 folder id（省略时取该轮主根）解析 `@workspace/<alias>/<path>` 并复验目录实体。缺少历史快照、未知源或原根身份变化均失败，不降级读取当前同名路径。历史页面只固定工作区来源，实际预览仍读取该来源当前磁盘文件，并非恢复旧版文件内容。
+
+### 从读取工具打开文件
+
+`read_file`、`read_word`、`read_spreadsheet`、`read_presentation` 的文件名入口使用 tagged `source: read-tool` 请求，携带 conversation、assistant message、call、project 和原始 file path。Main 的 `ReadToolFileSource` 读取单条调用的持久证明，并在必要时合并当前 Run 的有界 live proof；检查调用是可信内置读取工具、项目/消息归属匹配，且路径与该 call 参数或 result 完全匹配。同名 MCP/扩展工具不能取得此入口的本地读取语义。
+
+持久证明由 Rust Core 按选中消息投影 Trace，不读取整段 Conversation，也不要求 Renderer 曾经保存完整运行 JSON。`@attachments/` 通过该轮附件归属解析；工作区路径仍使用该轮冻结来源及目录实体校验。Artifact/download 等需要独立授权 resolver 的 scheme 不在此处通配放行。预览读取当前可用内容，并非工具调用时的文件快照；Office 仍走现有“不支持预览”显示，不因入口来自 `read_word` 而新增渲染能力。
+
+此来源可在没有当前项目目录树的 Files 页打开，resource key 绑定 conversation、assistant message 和 file path，不与同名普通工作区文件串页；实际请求仍携带 read call 身份。copy/reveal 也复用同一 Host 证明检查；不把 Host 解析出的私有路径返回 Renderer。
 
 ## 预览分类与限制
 
@@ -93,14 +101,14 @@ Word、Excel 和 PowerPoint 在 Files preview 中明确显示“不支持预览�
 
 每个 workspace 最多 20 个关联文件页，超限按平台规则淘汰；替换 transient 页不新增页面。
 
-page state 保存相对路径、folder id、可选历史 assistant-message id、`tabState`、Markdown view、PDF page 和 wrap-lines。项目删除或 workspace 不可用时页面关闭，避免旧 project id 继续发请求。
+普通 page state 保存相对路径、folder id、可选历史 assistant-message id；read-tool 来源另保存精确调用引用。两者均保存 `tabState`、Markdown view、PDF page 和 wrap-lines。普通工作区来源在项目删除或 workspace 不可用时关闭，避免旧 project id 继续发请求；read-tool 来源不要求当前目录树可用，但每次实际读取仍须通过 Host 的原始归属检查。
 
 复制路径与 Finder/Explorer reveal 不把绝对路径先交给 Renderer：Renderer 发送 project/folder id、可选历史 assistant-message id 与相对路径，Main 再解析 exact real path，分别调用 Electron clipboard 或 `shell.showItemInFolder()`。Symlink 不允许执行这两项操作。
 
 ## 状态与安全不变量
 
 1. project id 对应的根目录由 Core Server/Rust Core 与 Main 解析，Renderer 不能提供根路径。
-2. 所有请求路径必须是规范化相对路径，并在词法与 realpath 两层保持在根内。
+2. 工作区请求路径必须规范化并保持词法/realpath containment；read-tool 路径必须匹配原调用证明，再通过冻结工作区或附件专用解析器，不能凭字符串绕过授权。
 3. Symlink 可展示但不可递归、预览、copy real path 或 reveal。
 4. `.git` 不进入文件树；Files 不提供写、删除或重命名操作。
 5. 文件读取以实际 bytes 进行上限检查，Renderer 还要执行行数/解码预算。
@@ -113,6 +121,7 @@ page state 保存相对路径、folder id、可选历史 assistant-message id、
 - 协议：`packages/protocol/src/workspaceFiles.ts`
 - Host API：`packages/host-api/src/index.ts` 的 `WorkspaceFilesHostApi`
 - Main 服务：`src/main/workspaceFiles/WorkspaceFilesService.ts`
+- read-tool 证明与来源：[ReadToolFileSource.ts](../../src/main/workspaceFiles/ReadToolFileSource.ts)、[read_tool_file_context.rs](../../crates/core/src/storage/service/read_tool_file_context.rs)
 - Main IPC：`src/main/ipc/workspaceFilesIpc.ts`
 - Renderer panel：`src/renderer/src/features/files/FilesPanel.tsx`
 - Tree session：`src/renderer/src/features/files/workspaceFileTreeSession.ts`
@@ -127,6 +136,7 @@ page state 保存相对路径、folder id、可选历史 assistant-message id、
 关键测试：
 
 - `src/main/workspaceFiles/WorkspaceFilesService.test.ts`
+- [ReadToolFileSource.test.ts](../../src/main/workspaceFiles/ReadToolFileSource.test.ts)、[read_tool_file_context/tests.rs](../../crates/core/src/storage/service/read_tool_file_context/tests.rs)、[readToolContext.electron.test.ts](../../src/main/core/readToolContext.electron.test.ts)：精确 call、原始来源、跨会话拒绝及无 Renderer 保存的持久读取证明。
 - `src/renderer/src/features/files/__tests__/FilesPanel.browser.test.tsx`
 - `src/renderer/src/features/files/__tests__/WorkspacePdfPreview.browser.test.tsx`
 - `src/renderer/src/features/rightSidebar/__tests__/rightSidebarPlatformState.test.ts`

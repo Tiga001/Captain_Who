@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # 故障排查
@@ -48,16 +48,16 @@ pnpm verify:artifact-runtime
 
 ## `development_storage_schema_reset_required`
 
-当前开发策略接受规范 schema 及 exact catalog fingerprint；只对代码明确允许的 v50–v56 原地升级，其中 v50
-要求协作事件日志为空。不要把 reset-required 理解为可以直接重建任何旧库。完全退出 Captain Who 后先执行预检：
+当前规范 schema 为 v71。启动时允许 exact v51–v70 逐版升级；exact v50 还要求协作事件日志为空。
+v49 及更早版本、未知 catalog 或外键完整性不满足要求的数据库会被拒绝。迁移和开发 reset 是两条不同路径，
+不要把 reset-required 理解为可以直接重建任何旧库。完全退出 Captain Who 后先执行预检：
 
 ```bash
 pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。当前工具只支持 exact current v57 的配置保留，历史来源恢复分支
-仍被目标版本 gate 拒绝；详情见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。预检拒绝时保留原库，使用隔离数据根继续开发，不能追加确认参数绕过。人机交互设置、通知设置、Browser 下载设置和链接偏好属于配置保留项，问题、通知
+第一条是非破坏性预检，第二条才会备份并重建。当前工具只支持 exact current v71 的配置保留；历史恢复分支的目标仍固定为 v49，因此不能用于当前 v71。含配置表的 v49–v70 旧库也不属于 reset 配置保留来源，不能因为启动支持迁移就认为 reset 支持恢复；详情见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。预检拒绝时保留原库，使用隔离数据根继续开发，不能追加确认参数绕过。人机交互设置、通知设置、Browser 下载设置和链接偏好属于配置保留项，问题、通知
 事实、浏览/下载记录、Agent 模板与分配、组织模板/实例/草稿、FileChange 事务、本机 Token 统计和会话运行状态不会恢复。应用或 Core Server 仍持锁时
 命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
 [存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
@@ -66,6 +66,14 @@ pnpm storage:reset-dev -- --confirm-reset
 
 App startup gate 会等待项目、模型和 Electron Host 状态。先定位具体 stage 的错误，不要让 Renderer 用默认值伪装
 成成功水合。常见原因包括 Core Server 未就绪、协议 parser 拒绝响应、schema reset required 或模型配置无效。
+
+## 并发任务延迟或存储调用长时间无响应
+
+先记录发生延迟的请求和运行阶段，区分排队、准备、模型请求、工具执行与数据库提交。当前存储使用有界单写通道和两个读连接；独立控制/续租执行器及按资源排序避免部分互相阻塞，但不代表每类请求都有固定响应时限，也不代表已通过 50 并发性能验收。
+
+源码 `5a31c635` 修复了已排队异步写入依赖调用方再次 poll 才能提交、进而被同步后继阻塞的问题。诊断时先核对实际启动的二进制是否包含修复；读取模型就绪状态失败也不应误报成用户切换模型失败。不要反复发送任务或重置数据库来掩盖超时。
+
+需要复现并发问题时，使用[测试体系](testing.md)中的隔离基线命令，不连接真实账号、Provider 或日常数据根。最近一次综合[性能验收](../performance/backend-concurrency/acceptance.md)仍有失败项；后续正确性修复不能代替重跑测量。
 
 ## Scheduled Automation 未运行或显示 blocked
 
@@ -180,8 +188,8 @@ Terminal 输出问题应检查 sequence/ACK/背压和 Renderer/WebContents 所�
 
 ## 打包或 macOS 签名失败
 
-安装包必须在目标系统原生构建。macOS `build:mac` 强制签名、hardened runtime 和严格验签；当前未配置
-notarization。若失败发生在 Core Server build，先检查是否只设置了普通 `RUSTFLAGS`；release 构建要求保留
+安装包必须在目标系统原生构建。macOS `build:mac` 强制签名、hardened runtime 和严格验签，但脚本未自动执行
+notarization/stapling；这不否定已发布安装包另行完成的公证。每次发布都需要核验最终产物。若失败发生在 Core Server build，先检查是否只设置了普通 `RUSTFLAGS`；release 构建要求保留
 `CARGO_ENCODED_RUSTFLAGS` 并追加 path remap。若失败发生在 afterPack/afterSign，不要修改 frozen receipt 或
 扩大签名 allowlist；先定位 privacy gate、目标架构、额外 Mach-O、JIT entitlement、receipt hash 或 signer/Team ID
 中的首个差异。`dmg.sign: true` 不替代对最终 DMG 的系统级验签。不要用

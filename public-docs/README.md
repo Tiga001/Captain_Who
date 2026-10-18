@@ -4,7 +4,7 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # Captain Who 文档
@@ -40,4 +40,4 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ## 阅读说明
 
-文档只描述能够验证的产品行为。[组织指南](user/capabilities/organizations.md)与[组织教程](user/tutorials/create-an-organization.md)明确标注当前开发版本范围：旧工作流已移除，由组织邮件协作取代，但这不代表所有已发布安装包都包含该能力。不同版本的界面和能力可能存在差异；取得安装包时，请同时查看对应的[发行说明](releases/README.md)。涉及第三方模型、搜索或 MCP 服务时，还需要遵守相应服务商的条款、计费方式和数据政策。
+文档只描述能够验证的产品行为。[当前开发进展](releases/development-status.md)汇总本次核验的 `1.0.6` 开发代码变化，包括组织模板、长会话浏览、工具记录与本地存储；它不是正式发行公告。指南中标注“当前开发版本”的内容不能视为已登记的正式 `1.0.5` 安装包功能。不同版本的界面和能力可能存在差异；取得安装包时，请同时查看对应的[发行说明](releases/release-notes/README.md)。涉及第三方模型、搜索或 MCP 服务时，还需要遵守相应服务商的条款、计费方式和数据政策。

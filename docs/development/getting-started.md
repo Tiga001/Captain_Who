@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # 开发环境与启动
@@ -33,8 +33,9 @@ pnpm dev
 该命令先准备 OfficeCLI、Office Renderer、当前平台支持的 Word/PDF Renderer、Artifact Runtime 和开发
 图标，再启动 Electron/Vite。开发模式下 Main 启动 Core Server；首次构建通常比后续启动慢。
 
-首次启动先经过账号恢复/登录与本地数据水合。账号资料验证成功后进入工作区；许可验证独立执行，新用户回合和
-Automation 新回合都需要有效的在线验证结果。保存的登录会话可恢复，但冷启动不会复用磁盘许可。
+首次启动先经过账号恢复/登录与本地数据水合。账号资料验证成功后进入工作区，许可验证独立执行。
+云端账号的新用户回合与 Automation 新回合需要有效的在线验证结果；保存的登录会话可恢复，但冷启动不会复用磁盘许可。
+内置本地账号可以离线恢复并通过本地长期许可准入；这不替代第三方模型服务所需的网络与凭据。
 本地开发测试使用仓库隔离 fixture；真实账号验收由账号持有人完成，见[账号登录](../subsystems/account-login.md)。
 
 进入后，在“设置 → 配置”中创建 Provider/Model 配置，并按需设置 Tavily、图片生成、MCP 和 Skills。
@@ -53,6 +54,7 @@ Automation 新回合都需要有效的在线验证结果。保存的登录会话
 | `pnpm format`            | 格式化 TypeScript、CSS、Markdown 与 Rust             |
 | `pnpm format:check`      | 只检查格式                                           |
 | `pnpm check:docs`        | 检查文档元数据、链接、路径、命令与版本真源           |
+| `pnpm check:public-docs` | 检查公开文档索引、元数据、链接边界与发布版本         |
 | `pnpm check:test-layout` | 检查 Vitest 唯一归属与 Rust ignored-test registry    |
 | `pnpm lint`              | ESLint                                               |
 | `pnpm typecheck`         | Main/Preload/Renderer TypeScript 检查                |
@@ -68,7 +70,7 @@ Automation 新回合都需要有效的在线验证结果。保存的登录会话
 | `pnpm build:core`        | 构建并校验 release Core Server binary                |
 | `pnpm build:unpack`      | 构建当前平台的未封装应用                             |
 
-`pnpm check` 当前不自动包含 Multi-Agent release gate、Playwright release gate 或平台签名验证。发布前还
+`pnpm check` 当前不自动包含 Automation/Human Interaction 真实 Core Server E2E、Multi-Agent release gate、Playwright release gate、后端性能长测或平台签名验证。发布前还
 需执行[测试体系](testing.md)和[构建与发布](build-and-release.md)指定的门禁。
 
 `.github/workflows/tests.yml` 仅在手动触发（`workflow_dispatch`）时分开执行 Linux 静态/脚本/Node/browser/Rust、macOS Electron、Automation 真实 Core Server 与 Multi-Agent release gate；pull request 和 `main` push 不自动触发。可在 GitHub Actions 的 Tests 页面选择 Run workflow；它不是发布打包或签名流水线，本地测试命令保持不变。

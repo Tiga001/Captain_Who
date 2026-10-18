@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-10
+last_verified: 2026-10-18
 ---
 
 # Multi-Agent 当前架构
@@ -190,6 +190,10 @@ Dispatcher 先取得共享 gate reservation，再 claim SQLite Wake；无工作�
 Agent Human Turn、Automation HumanRoot Turn、子 Agent Wake 和重启恢复都计入同一 gate；Automation
 自身另有 2 个 Run 的并发上限。
 
+claim 前还须预留独立有界 preparation 执行容量，并限制同一 root 的未接纳准备；这些物理槽不增加逻辑 Turn 额度。claim 后立即建立独立 lease renewal owner，覆盖排队、准备和运行，而不是等 start 返回才续租。同步准备不能安全强停，取消等待者后仍须拥有其真实结果、lease 与 permit。admission、展示 checkpoint generation 安装、终态和 Wake settlement 在 writer 边界复核 exact claim/有效期，进入 Runtime 前再查 lease，不能拿排队前时间放行过期 owner；后续展示 apply 只按 Run/终态与 generation/sequence/fingerprint CAS 校验。
+
+按 Conversation 的进程 Preparing token 与 durable claim/初始 Trace 分开；运行结束只对精确 Run 做恢复，先退役旧取消 owner，再进入有界 recovery lane。A 完成不能释放仍在准备的 B；停止树、删除与授权变更也不能被晚到准备结果覆盖。代码真源为 [Dispatcher](../../crates/core-server/src/application/agent_dispatcher.rs)、[Preparing registry](../../crates/core-server/src/application/agent/preparing.rs) 和 [Wake fence](../../crates/core-server/src/application/agent/wake_execution_fence.rs)。
+
 关停算法最多可使用两个 5 秒阶段：先等待 manager 自行完成；第一次超时后请求取消非 Approval Run，并在第二个 deadline 前反复扫描 Approval 恢复竞态。因此不能把表中的 5 秒理解为完整 shutdown 的绝对上限。Main 当前 6 秒 Core Server watchdog 更短，超时后的未收口事实必须依赖 SQLite 启动恢复。
 
 恢复规则：
@@ -268,11 +272,7 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v69**。唯一真源：
-
-```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 69;
-```
+当前 canonical storage 是 **v71**，唯一真源为 [`STORAGE_SCHEMA_VERSION`](../../crates/core/src/storage/migrations.rs)。SQLite schema、Runtime checkpoint 和事件 DTO 版本彼此独立。
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
@@ -321,6 +321,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - 树内资源共享当前按整棵不可变 root identity 授权，没有成员级 grant、跨树转授权或对单个已发布 Artifact 的即时树内撤销。
 - 已结算回复内 Timeline 保持冻结；后续活动出现在对应 owner 会话的持久消息边界。
 - Main 的 6 秒 shutdown watchdog 短于 Dispatcher 两阶段理论上限；超时退出依赖 SQLite 恢复，尚未形成完全对齐的优雅关停预算。
+- [后端并发第六轮验收](../performance/backend-concurrency/round6-results.md)未通过全部性能门禁；50 个运行单元包含根 Agent，不是 50 child 加额外 root。专项正确性或 writer 死锁回归通过不能代替固定负载、长测及完整 UI 性能验证。
 
 ## 12. 变更检查表
 
@@ -334,5 +335,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] 各层 Timeline 是否按实际 owner 和任务身份展示，排除未消费任务与纯 Result 轮次，并保持冻结位置及当前树隔离？
-- [ ] 是否更新 schema v65 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] schema 变更是否同步当前 version、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

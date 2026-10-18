@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-08
+last_verified: 2026-10-18
 ---
 
 # SQLite 存储与数据生命周期
@@ -20,7 +20,19 @@ last_verified: 2026-10-08
 
 应用数据根目录由启动配置解析，开发/测试可使用 `MYCOPILOT_APP_DATA_ROOT`；独立存储场景可使用 `MYCOPILOT_STORAGE_DB`。生产代码应通过 bootstrap 返回的权威路径，不在各模块自行拼接默认目录。
 
-打开数据库时启用 foreign keys、busy timeout 和 canonical schema 验证。一个进程通过 database instance lock 独占同一权威数据库；`StorageService` 当前以单个受 Mutex 保护的 `rusqlite::Connection` 串行化访问。不要绕过服务另开写连接，否则会破坏锁、事务和启动 reconciliation 假设。
+打开数据库时启用 foreign keys、busy timeout 和 canonical schema 验证。一个进程通过 database instance lock 独占同一权威数据库；不能另启 Core Server 或绕过服务新增写连接。
+
+### WAL、执行器与连接所有权
+
+[`StorageState`](../../crates/core/src/storage/state.rs) 在完成迁移后为磁盘库验证 `journal_mode=WAL`，显式设置 `synchronous=FULL`、5 秒 busy timeout 与 1000 页自动 checkpoint。当前 bundled SQLite 由 Cargo 锁定；运行时拒绝低于 WAL 竞态修复门槛的 SQLite。内存单元测试仍使用原单连接，不模拟磁盘多连接。
+
+一个命名 writer 线程执行已迁移写操作，独立 FIFO ticket 保证顺序；同步兼容 guard 也共享相同写连接和 gate，不是第二个 writer。总预算为 64 个在途操作/64 MiB 估算输入，普通写最多占 56 项/56 MiB，为控制写保留接纳空间。控制保留不越过已接纳事务，不保证控制延迟。磁盘读取池有两条 READ_ONLY/query_only 连接，最多 32 个在途租借；多查询快照在同一短读事务取得数据和 cursor，再在连接外解码/准备文件。估算输入预算不等于整个进程 RSS 或查询结果上限。常量真源见 [`execution.rs`](../../crates/core/src/storage/execution.rs)。
+
+异步写首次 poll 才接纳，前序 ticket 释放时直接提交已就绪任务，不依赖等待 future 再次被 Tokio poll；这也是 `5a31c635` 对生产周期 WAL 任务与同步后继循环等待的修复。提交路径取得任务前取消会撤票；之后即使等待者消失，实际 SQL、permit 和 drain 仍由 writer 拥有。同步调用等待真实结果，入队不是 durable ACK。持有任意连接后嵌套申请另一连接/写操作会被拒绝。
+
+SQLite update hook 只标记 journal dirty；操作退出并恢复 autocommit 后检查已提交 journal head，只有头推进才通知。回滚或 COMMIT 失败不发布假成功；通知检查失败保留 dirty 与 durable catch-up，不把已提交业务改报失败。数据库实例身份由所有连接共享，Trace/history cache 仍按身份、epoch/revision 校验。真源为 [`commit_notifications.rs`](../../crates/core/src/storage/commit_notifications.rs)。
+
+Core Server 每 30 秒通过有界写入口执行 PASSIVE checkpoint；长读快照可能使 WAL 暂时增长。关停先结束业务生产者及阻塞任务，再停止周期 checkpoint、drain 已接纳写与读，关闭读池、执行 TRUNCATE checkpoint 后关闭 writer；关闭错误不能返回成功。兼容同步路径和大型原子恢复/删除仍可带来尾延迟，见[存储执行边界](../performance/backend-concurrency/round3-storage-execution.md)。
 
 ## Schema 发布策略
 
@@ -52,7 +64,7 @@ last_verified: 2026-10-08
 
 `conversation_message_history_revisions` 由消息增删和模型相关字段的实际变更触发更新，包含文件夹引用与消息来源；标题、已读/未读、更新时间和无关配置写入不使模型历史缓存失效。缓存命中仍读取最新会话元数据与 admission revision；展示水位改变时仅刷新有变化的消息 JSON，复用 Trace、解压结果和模型历史；正式接纳在同一写事务分别校验历史版本和会话 revision。Trace、摘要、附件及回答来源证明变化继续使缓存失效，数据库外部连接的真实消息变更也由相同触发器捕获。
 
-Renderer 消息 checkpoint 先完成 Run 身份校验、权威终态、Usage 和协作信息合并，再比较最终保存值：完全相同时不发出 UPDATE；仅 `agent_run_json` 改变时只更新展示字段，仍推进展示水位；正文或状态真实变化时保持全文检索更新。迟到 checkpoint 不能重新打开终态 Run，也不能覆盖 Rust Core 已提交的完整最终答案。
+Core Server 运行展示 checkpoint 使用精确 Conversation/assistant/Run、segment generation、sequence 与内容 fingerprint；writer 内安装 generation 时复核 segment/适用 Wake lease，后续 apply 检查精确 Run、终态与 generation/sequence/fingerprint CAS。相同请求可幂等重放，旧段、删除或终态不能继续写入。Renderer 的兼容消息保存仍先校验 Run 身份并合并权威终态、Usage 和协作信息，但不能覆盖已安装的 Core Server checkpoint owner。最终值完全相同时不 UPDATE，仅 `agent_run_json` 改变时只更新展示水位；正文或状态真实变化时保持全文检索更新。详细所有权见[运行数据与恢复契约](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
@@ -153,7 +165,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v62 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在当前 canonical schema 中使用通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -199,7 +211,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v62、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验当前 canonical schema、建立 WAL writer/reader、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -235,7 +247,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v62 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -243,8 +255,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v62 的 version 与 fingerprint 必须一致。
-2. 自动结构升级接受 exact v51–v60；exact v50 还要求协作事件日志为空。既有历史不转换、不删除，每一步迁移事务失败时完整回滚；整个逐级链不属于一个总事务，更旧版本或未知 catalog 必须 fail closed。
+1. `canonical_schema.sql`、当前 schema version 与 fingerprint 必须一致。
+2. 自动结构升级接受 exact v51–v70；exact v50 还要求协作事件日志为空。聊天和当前组织邮箱保留，v66 明确删除退役旧图执行表；每一步迁移事务失败时完整回滚，整个逐级链不属于一个总事务。更旧版本或未知 catalog 必须 fail closed。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
 5. FTS、Renderer JSON 和缓存均不是权威数据。
@@ -259,7 +271,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 ## 代码真源
 
 - Schema/version：`crates/core/src/storage/canonical_schema.sql`、`migrations.rs`
-- 服务与连接：`crates/core/src/storage/service.rs`、`storage/mod.rs`
+- 服务与连接：[service.rs](../../crates/core/src/storage/service.rs)、[state.rs](../../crates/core/src/storage/state.rs)、[execution.rs](../../crates/core/src/storage/execution.rs)
+- 运行展示检查点：[runtime_checkpoints.rs](../../crates/core/src/storage/service/runtime_checkpoints.rs)
 - 单实例：`crates/core/src/storage/database_instance_lock.rs`
 - 快照：`crates/core/src/storage/database_snapshot.rs`
 - Repositories：`crates/core/src/storage/*_repository.rs`
@@ -287,7 +300,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v62，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试，同时更新实际受影响的文档快照。
 - [ ] 验证 exact v59 升级按既有顺序回填历史投影并保留全部历史、失败回滚且重复打开不重建；更早版本按上述逐级升级条件检查，拒绝时不修改源库。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。
@@ -303,7 +316,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 ## 当前限制
 
 - 只支持上述精确 catalog 的逐级向前升级，不提供降级或任意旧库转换；更早版本被拒绝时也不能假设 reset 能保留其配置，须按当前恢复手册核对可恢复来源。
-- 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
+- 单 writer 与有界读池服务桌面本地一致性，不提供多进程横向写入。仍有同步兼容入口、长快照和大型原子操作；已完成 WAL 改造不代表整体性能验收通过。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
 - Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。
 - Shared Notification event/batch 也没有统一的用户可配置 retention/GC；native delivery 最多尝试 5 次，失败耗尽后转为 suppressed，尚无独立修复 UI。

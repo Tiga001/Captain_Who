@@ -2,10 +2,14 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-12
+last_verified: 2026-10-18
 ---
 
 # 后端并发优化交付记录
+
+## 2026-10-18：当前源码文档核验
+
+当前源码基线为 `5a31c635`。本次仅将[系统总览](../../architecture/overview.md)、[Core Server](../../architecture/core-server.md)、[存储生命周期](../../architecture/storage-and-data-lifecycle.md)、[Runtime](../../architecture/agent-runtime-and-providers.md)、[Multi-Agent](../../architecture/multi-agent.md)及恢复/发布文档与实现对齐：WAL/FULL 单 writer/双 reader、有界阻塞与资源调度、Core Server checkpoint owner、lease/final CAS、关闭顺序及精确 v71 迁移边界。没有改写各轮测量数据或原始证据，也没有重跑完整性能矩阵。后续修复与第六轮失败门禁继续分别记录；当前实现差异汇总见[架构契约](architecture-contracts.md)。
 
 ## 2026-10-12：运行卡死与切换对话误报修复
 

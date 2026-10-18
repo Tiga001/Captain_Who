@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # Captain Who 开发文档
@@ -23,6 +23,15 @@ fixture 和测试为准。
 5. [测试体系](development/testing.md)
 6. [术语表](development/glossary.md)
 7. 根据负责领域阅读下面的专项文档
+
+## 本次核验基线
+
+2026-10-18 按当前源码核验，package 开发版本为 `1.0.6`、规范数据库 schema 为 v71；正式安装包的版本与验收记录独立维护在[版本与发布](../public-docs/releases/README.md)，不能从开发版本号推断已发行。
+
+- [存储](architecture/storage-and-data-lifecycle.md)已采用 WAL/FULL、单写通道与双读连接；[运行时](architecture/agent-runtime-and-providers.md)包含 Preparing、资源排序及 Core Server-owned 展示检查点。
+- [组织](subsystems/organizations.md)支持可移植 Markdown 模板及按需加载的成员观察/邮件看板；[前端](architecture/frontend.md)和[文件](subsystems/workspace-files.md)文档覆盖长会话分段、工具活动分组与读取文件入口。
+- 后端六轮工作与其后写入推进修复已记录，但[综合性能验收](performance/backend-concurrency/round6-results.md)仍有失败项。实现完成、正确性测试通过、性能达标和正式发布是不同结论。
+- [测试体系](development/testing.md)、[构建与发布](development/build-and-release.md)及[恢复 Runbook](operations/recovery-runbook.md)分别说明验证范围、最终产物证据与旧库处理边界。
 
 ## 架构
 

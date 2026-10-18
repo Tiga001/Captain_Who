@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-10-18
 ---
 
 # Multi-Agent 发布门禁
@@ -38,12 +38,12 @@ pnpm test:multi-agent-release -- --smoke-only
 
 ### Profile
 
-| Step             | 固定边界                                                              | 主要证据                                                  |
-| ---------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
-| 持久化压力       | 树 64 节点成功、65 失败；10,000 facts；4 writers；20 crash recoveries | SQLite 原子性、Mailbox/Event 索引、无 busy 泄漏、重开延迟 |
-| Dispatcher       | 100 Agents；进程共享并发上限 50                                       | FIFO 进展、每 Agent 单 Turn、无 ghost capacity            |
-| Context          | 500 logical turns 后 durable compaction/reload                        | 长历史不会绕过 canonical context/compaction               |
-| Renderer/Preload | 1,000 subscribe/unsubscribe 生命周期                                  | 无重复 card/store、订阅可清理、Host bridge 对称           |
+| Step             | 固定边界                                                                 | 主要证据                                                  |
+| ---------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
+| 持久化压力       | 树 64 节点成功、65 失败；10,000 facts；4 并发调用者；20 crash recoveries | SQLite 原子性、Mailbox/Event 索引、无 busy 泄漏、重开延迟 |
+| Dispatcher       | 100 Agents；进程共享并发上限 50                                          | FIFO 进展、每 Agent 单 Turn、无 ghost capacity            |
+| Context          | 500 logical turns 后 durable compaction/reload                           | 长历史不会绕过 canonical context/compaction               |
+| Renderer/Preload | 1,000 subscribe/unsubscribe 生命周期                                     | 无重复 card/store、订阅可清理、Host bridge 对称           |
 
 ### Smoke
 
@@ -106,9 +106,10 @@ pnpm test:multi-agent-release -- --smoke-only
 - `list_agents`
 - `interrupt_agent`
 
-Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.settings.get`、`agent.collaboration.settings.update`、`agent.collaboration.getTree`、`agent.collaboration.getAgent`、`agent.collaboration.locateConversation`、`agent.collaboration.loadObserverConversation`、`agent.collaboration.listEvents`、`agent.collaboration.templates.list`、`agent.collaboration.templates.create`、`agent.collaboration.templates.update`、`agent.collaboration.templates.setEnabled`、`agent.collaboration.templates.setProjectAssignment`、`agent.collaboration.templates.delete`、`agent.collaboration.approvals.list` 与 `agent.collaboration.approvals.decide`。通知精确为：
+协作 RPC 和通知以 [Rust methods](../../crates/protocol-rs/src/methods.rs)、[TypeScript 协议](../../packages/protocol/src/agentCollaboration.ts)及双端 fixture 为真源，不由人工清单证明完整性。门禁至少覆盖 settings、tree/agent/locate、observer history、event replay、模板/项目分配与 approvals。当前通知路线包括：
 
 - `agent.collaboration.event`
+- `agent.collaboration.childEvent`（Core Server→Main 单份子流，再扇出 ordinary/observer）
 - `agent.collaboration.observerEvent`
 - `agent.collaboration.resync`
 - `agent.collaboration.settingsChanged`
@@ -155,6 +156,10 @@ v60 的专项存储回归还需证明：exact v59 的 message / trace_item 顺�
 5. 适用的 unpacked/packaged startup smoke 通过；
 6. 无未处置的 P0/P1 审计项；
 7. 若发布声明包含内置浏览器，再运行 Managed Playwright 专项 gate，并保留 pending 项说明。
+
+涉及后端并发改造或性能声明时，还须按[后端并发验收](../performance/backend-concurrency/acceptance.md)在同一最终二进制上复测固定负载、长期混合负载和恢复完整性；本页的 13 步正确性门禁不是性能通过证明。当前[第六轮报告](../performance/backend-concurrency/round6-results.md)明确未通过：50 单元短历史发送 p95 为 755.424 ms（目标 500 ms），600 秒混合长测在 239.861 秒输出总字节超载，最大 SLO 内可持续吞吐未建立。
+
+后续 `5a31c635` 已修复异步 writer 需要 runtime repoll 的推进死锁，新增真实磁盘回归及生产 bootstrap 短测；未重新运行完整性能矩阵/长测，不改变上述失败结论。WAL/FULL、提交后通知、queued/started cancellation、Preparing 与 lease fencing、Core Server checkpoint owner/ACK 丢失与旧 Renderer 回写围栏均须保留专项回归。文档核验日期不代表该日重新执行了这些门禁。
 
 仓库目前没有单一 `release:verify` 命令或 CI 把这些步骤绑定到一个 commit。维护者必须记录 commit SHA、平台/架构、工具链版本、每条命令、退出码和产物 hash，避免把不同工作树的通过结果拼接成一次发布。
 
