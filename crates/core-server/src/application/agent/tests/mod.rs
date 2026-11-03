@@ -55,6 +55,7 @@ mod managed_command_loop;
 mod manual_context_compaction;
 mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
+mod message_prediction;
 mod office;
 mod pending_actions;
 mod prepared_history;
