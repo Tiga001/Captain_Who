@@ -151,6 +151,8 @@ Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data�
 
 Main 的完整会话读取采用有界排队/尾随合并，不缓存旧正文快照。需要单条文件读取证明时改用同快照窄查询 `storage.loadReadToolFileContext`，不通过全历史读取授权文件。子 Agent 的 `agent.collaboration.childEvent` 在 Core Server→Main 只传一份，Main 严格校验后分别转到既有 ordinary/observer 路由；cursor、快照切分和终态顺序不改变。真源与恢复边界见[第五轮保存契约](../performance/backend-concurrency/round5-persistence-ownership.md)。
 
+输入框的 `agent.predictNextUserMessage` 走独立的有界 RPC 任务组。Main 在转发前核验账号与许可，Core Server 按自己的执行授权和持久会话状态决定是否采样。回执是可为空的候选，不是发送消息的回执；设置写入与跨窗口广播走独立的 storage 通道。见[下一条用户消息预测](../subsystems/prompt-prediction.md)。
+
 ## Automation 协议边界
 
 Automation 在 UI 中名为 `Scheduled`，协议、代码和本文均使用 Automation；一次执行称 Automation Run。

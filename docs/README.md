@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # Captain Who 开发文档
@@ -26,8 +26,9 @@ fixture 和测试为准。
 
 ## 本次核验基线
 
-2026-10-18 按当前源码核验，package 开发版本为 `1.0.6`、规范数据库 schema 为 v71；正式安装包的版本与验收记录独立维护在[版本与发布](../public-docs/releases/README.md)，不能从开发版本号推断已发行。
+2026-11-03 的功能基线为 `948cd3b5`，数据库 schema 为 v72。源码 `package.json` 与 9 月 23 日的发行标签 `v1.0.6`（`1278cf10`）版本号相同，但不是同一份代码。安装包见[版本与发布](../public-docs/releases/README.md)。
 
+- [预测下一条用户消息](subsystems/prompt-prediction.md)是标签后的新增功能：只对已完成回复做独立采样，不运行工具、不创建用户消息；已发送的请求单独计入用量。
 - [存储](architecture/storage-and-data-lifecycle.md)已采用 WAL/FULL、单写通道与双读连接；[运行时](architecture/agent-runtime-and-providers.md)包含 Preparing、资源排序及 Core Server-owned 展示检查点。
 - [组织](subsystems/organizations.md)支持可移植 Markdown 模板及按需加载的成员观察/邮件看板；[前端](architecture/frontend.md)和[文件](subsystems/workspace-files.md)文档覆盖长会话分段、工具活动分组与读取文件入口。
 - 后端六轮工作与其后写入推进修复已记录，但[综合性能验收](performance/backend-concurrency/round6-results.md)仍有失败项。实现完成、正确性测试通过、性能达标和正式发布是不同结论。
@@ -53,6 +54,7 @@ fixture 和测试为准。
 | 文档                                                                 | 内容                                                     |
 | -------------------------------------------------------------------- | -------------------------------------------------------- |
 | [组织邮件网络](subsystems/organizations.md)                          | 独立实例、部门职级、管理权限、邮件与实时看板             |
+| [预测下一条用户消息](subsystems/prompt-prediction.md)                | 触发、上下文组装、取消与计量                             |
 | [对话输入与附件](subsystems/conversation-inputs.md)                  | 分块导入、文件夹引用、工作区提及、草稿、队列与引导       |
 | [账号登录与云端资料](subsystems/account-login.md)                    | 登录门禁、会话存储、退出登录与运行中任务的边界           |
 | [本机 Token 与账号许可](subsystems/local-token-usage-and-license.md) | 本机统计、许可缓存、Host 准入租约与恢复约束              |

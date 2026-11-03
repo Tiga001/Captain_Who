@@ -1,53 +1,42 @@
 ---
 title: 下载与验证
-description: 从 Captain Who 官网下载 macOS 安装包，并核对发行文件身份与完整性。
+description: 获取 macOS Apple Silicon 的官方 DMG，核对下载文件，再交由 macOS 检查。
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-23
+last_verified: 2026-11-03
 ---
 
 # 下载与验证
 
-当前正式发行仅适用于 **macOS 12 或更高版本的 Apple Silicon（arm64）** 设备。请从 [Captain Who 官网](https://captainwhoagent.com/) 开始下载，不要使用搜索结果中的镜像、网盘转存或他人重新打包的文件。
-
-[GitHub 开发仓库](https://github.com/Tiga001/Captain_Who)提供持续更新的源码，不是当前正式安装包的下载入口。仓库中的版本号或源码压缩包不能代替下表中的 DMG。
+先在「关于本机」确认芯片是 Apple、系统为 macOS 12 或更高版本。可以从 [Captain Who 官网](https://captainwhoagent.com/) 开始下载；要取得下表中的确切版本，请到[项目官方 GitHub Release](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6) 的 **Assets** 下载 DMG。不要选择 Source code，也不要用网盘转发或第三方重打包文件。
 
 ## 当前发行文件
 
-| 项目           | 值                                                                 |
-| -------------- | ------------------------------------------------------------------ |
-| 版本           | `1.0.5`                                                            |
-| 文件名         | `Captain-Who-1.0.5-arm64.dmg`                                      |
-| 文件大小       | 694,547,573 字节                                                   |
-| SHA-256        | `5d41e5799a596790e58a18d433fdae03e0cb57285bf7e562cec2155cfbfa7684` |
-| macOS 信任状态 | Developer ID 签名，Apple 公证已通过，DMG 已装订公证凭据            |
+| 项目    | 值                                                                 |
+| ------- | ------------------------------------------------------------------ |
+| 版本    | `1.0.6`（2026-09-23）                                              |
+| 文件名  | `Captain-Who-1.0.6-arm64.dmg`                                      |
+| 大小    | 694,993,769 字节                                                   |
+| SHA-256 | `53ca3b6d276a728586361f764f3841f04f2ed53add14021bc5cb37c896614256` |
 
-这组校验信息只适用于上表的 1.0.5 DMG。新版本发布后，请以其对应发行说明中的文件名与校验值为准。
+大小和摘要对应 [GitHub 公开发行附件](https://github.com/Tiga001/Captain_Who/releases/expanded_assets/v1.0.6)。从其他官方入口下载时，也请对照实际拿到的文件：若版本不同，请使用对应[发行说明](release-notes/README.md)，不要套用上表的摘要。
 
 ## 下载并核对
 
-1. 在“关于本机”确认芯片为 Apple，并确认 macOS 为 12 或更高版本。
-2. 打开官网，下载 `Captain-Who-1.0.5-arm64.dmg`。
-3. 在终端进入下载目录，运行以下命令：
+在终端进入下载目录，运行：
 
 ```sh
-shasum -a 256 Captain-Who-1.0.5-arm64.dmg
+shasum -a 256 Captain-Who-1.0.6-arm64.dmg
 ```
 
-4. 只有当输出与上表的 SHA-256 **完全一致**时，才继续打开 DMG。
-5. 挂载 DMG 后，将 `Captain Who.app` 拖入“应用程序”文件夹，再从该文件夹启动。
-
-如果文件名、文件大小、校验值或 macOS 显示的发布者状态有任何一项不一致，请删除该下载文件并重新从官网下载。不要通过关闭 Gatekeeper、修改系统安全策略或跳过来源警告来安装。
+1. 逐位比较输出的 64 个十六进制字符与上表；不同就停止安装，重新从官方发行页下载。
+2. 摘要相同后打开 DMG，把 `Captain Who.app` 拖入「应用程序」，再从该文件夹启动。
 
 ## 关于签名与公证
 
-Developer ID 签名用于让 macOS 识别发布者和安装包是否被篡改；Apple 公证表示该发行包已通过 Apple 的自动化安全检查。装订（stapled）是将公证凭据附加到 DMG，使系统在离线或网络受限时也能验证它。
-
-这些机制不能替代你对下载来源的判断：只有从官网取得且与本页校验信息一致的文件，才是此处描述的正式发行包。
+摘要一致只表示与发行附件的内容相符，不能替代 macOS 的签名和公证检查。本页核对了 GitHub 公布的 `1.0.6` 附件信息，未独立验证该 DMG 的公证凭据。若系统报告来源异常、签名无效或文件被修改，请停止安装，不要关闭 Gatekeeper 或绕过提示。
 
 ## 使用应用内更新或手动安装
 
-正式签名的 macOS Apple Silicon 版内置由用户发起的应用内自动更新机制，官方公开更新清单现已可用。完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会发现更新；随后由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装。它不会在你开始下载前自动下载、静默替换或自动降级。更新源暂时不可用时，仍可通过官网 DMG 手动安装，具体步骤见[升级指南](upgrade-guide.md)。
-
-安装步骤见[安装与首次启动](../user/getting-started/installation.md)，平台边界见[平台与构建状态](supported-platforms.md)。如果安装后遇到问题，请先查看[常见问题排查](../support/common-problems.md)和[诊断信息与日志](../support/diagnostics-and-logs.md)。
+旧版 DMG 的校验值和公证记录只适用于相应文件，见 [1.0.5 发行说明](release-notes/1-0-5.md)。已有安装的用户请先看[升级指南](upgrade-guide.md)，首次使用请看[安装与首次启动](../user/getting-started/installation.md)。

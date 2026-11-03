@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # 本机 Token 活动与账号许可
@@ -20,6 +20,8 @@ schema v47 引入本机统计表，当前空库使用 [canonical schema](../../c
 个人资料展示今日/累计/单日最高、所选年份合计及年度热力图，不展示下方日/周/累计趋势和说明段落。年份通过左右按钮切换，最小 2026，最大当前上海年份。刷新仅重新读取本机统计，保留已显示数据、热力图节点及页面滚动位置，不触发资料或许可刷新；切年读取成功后再同时更新年份与数据，失败仍保留原图。本机计数不是计费或防篡改证据；服务商未返回、进程崩溃前未落盘的用量无法从客户端凭空恢复。
 
 设置中的用量/费用 dashboard 是另一份可清理的账本投影，不等同于个人资料的独立本机累计。其 `agent.getUsageDashboard` 在同一快照内批量读取窗口，使用可重建小时 rollup 与边界小时原始账本回退；Renderer 复用短期会话缓存并合并相同请求。清理、缓存失效和显示口径见[设置与配置](../development/settings-and-configuration.md)，实现分别见 [usage_dashboard_repository.rs](../../crates/core/src/storage/usage_dashboard_repository.rs) 与 [usageDashboardCache.ts](../../src/renderer/src/features/agent/usageDashboardCache.ts)。dashboard 清理不能顺带重置本页的累计统计。
+
+输入框预测是单次独立的 Provider 请求，需要通过 Main 账号/许可门禁和 Core Server 执行准入，但不会创建聊天 Turn，也不写模型请求 observation。已经派发的尝试只进入本机预测收据和计费 dashboard：即使没有产出候选，也可能增加请求数；缺少实际 Token 时保持未知。因此 dashboard 与个人资料的 Token 活动不要求数值相等。详见[预测账本](../architecture/storage-and-data-lifecycle.md#预测开关与预测收据)。
 
 ## 许可
 

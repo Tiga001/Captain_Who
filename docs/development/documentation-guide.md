@@ -2,7 +2,7 @@
 status: current
 audience: maintainers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # 文档维护规范
@@ -119,7 +119,9 @@ schema version、DTO `schemaVersion`、领域 `revision` 是不同概念，必�
 不要批量刷新所有页面的 `last_verified`；仅更新实际核验过的页面。存储迁移与恢复工具的支持范围应分别
 检查，不能因为 schema 常量已升级，就推断历史数据恢复路径也已升级。
 
-开发进展可以在公开文档中单独说明，但必须标注核验日期与开发版本范围，并从发布索引链接；不能写入尚未发行版本的正式发行说明，也不能随 `package.json` 更新正式 `release_version`。只有最终安装包、签名/公证、下载身份和升级证据齐备，才更新正式发行基线。
+开发进展可在公开文档中单列，但要标注核验日期与提交范围，不把主分支改动写进较早标签的发行说明。核对实际发布时，分别查官网入口、[项目的 GitHub Releases](https://github.com/Tiga001/Captain_Who/releases) 及应用内更新源：三者不一定同步，`package.json` 也可能在发行后保持不变。
+
+发布新包仍须按[构建与发布](build-and-release.md)完成门禁。补录既有发行时，先核对发布状态、标签指向、附件大小和摘要，再更新 `release_version` 和对应页面；签名、公证及应用内更新须有各自的证据，不从前一版本照抄。
 
 性能结果必须保留测量时的 commit、环境、原始样本和通过/失败结论。后续正确性修复写入进展或当前契约，不回写历史测量值；测试命令退出成功不等于性能目标达标，模拟负载也不等于真实用户任务的服务承诺。
 

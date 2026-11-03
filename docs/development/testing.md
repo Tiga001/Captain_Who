@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # 测试策略与矩阵
@@ -154,6 +154,19 @@ cargo test --locked -p mycopilot-core model_projection
 
 真实账号登录、OTP 送达与操作系统安全存储需单独验收，mock 通过不能证明云端当前配置。详见
 [账号登录](../subsystems/account-login.md)与[本机 Token/许可](../subsystems/local-token-usage-and-license.md)。
+
+### 预测下一条用户消息
+
+这条链路要分别验证两件事：界面没有把候选当作用户发送的消息，后端也没有把预测当作新 Turn。改变开关、会话或选用模型时，过期结果不能写进当前输入框。后端夹具使用本地假 Provider 和临时磁盘库，分别覆盖热前缀、重开后的冷恢复、并发合并、取消和实际发出请求后的独立计量。
+
+```bash
+pnpm exec vitest run --project unit packages/protocol/src/agent.contract.test.ts src/main/core/ipc.agentCollaboration.test.ts
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/ChatComposerCommands.browser.test.tsx src/renderer/src/features/settings/__tests__/settingsBasic.browser.test.tsx -t 'predict'
+cargo test --locked -p mycopilot-core --lib prediction
+cargo test --locked -p mycopilot-core-server --bin core-server message_prediction
+```
+
+这些回归不验证线上模型建议的质量、服务商账单或实际缓存命中率。代码与分层用例见[预测子系统](../subsystems/prompt-prediction.md)。
 
 ### 受管输入与工作区
 

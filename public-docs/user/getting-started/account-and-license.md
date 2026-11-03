@@ -4,7 +4,7 @@ description: 区分本地与云端账户、检查应用内使用许可，并理�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-09
+last_verified: 2026-11-03
 ---
 
 # 账户与软件许可
@@ -47,7 +47,7 @@ Captain Who 的登录身份和模型服务账户是两件事。启动新的 Agen
 - **不可用**：账户当前没有可用许可；使用“管理许可证”进入账户页面处理。
 - **暂时无法验证**：检查网络后重新验证。一次网络或服务错误不表示许可已经失效。
 
-许可检查只决定能否开始新的回合，不会替你配置模型、提供模型额度，也不会改变已经在运行的任务。模型连接仍需按[模型与服务商](../everyday-use/models-and-providers.md)单独设置。
+许可检查决定能否开始新的回合，不会替你配置模型、提供模型额度，也不会改变已经在运行的任务。2026-11-03 的开发版还会在生成可选的[下一条消息建议](../everyday-use/tasks-and-conversations.md#预测下一条用户消息)前检查使用资格；建议本身不启动新回合。模型连接仍需按[模型与服务商](../everyday-use/models-and-providers.md)单独设置。
 
 ## 退出登录
 

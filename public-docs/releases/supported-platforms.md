@@ -4,21 +4,21 @@ description: 查看 Captain Who 当前正式发行的平台、架构和明确的
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-23
+last_verified: 2026-11-03
 ---
 
 # 平台与构建状态
 
-“可以从源码打包”与“已经正式发布并支持”是两件不同的事。本页只列出当前用户可以从官网取得、并有完整发行证据的安装包。
+“可以从源码打包”与“已经正式发布并支持”是两件不同的事。下表按实际发行文件列出支持范围。
 
 | 平台与架构                   | 最低系统版本        | 当前发行状态                   | 安装形式 |
 | ---------------------------- | ------------------- | ------------------------------ | -------- |
-| macOS Apple Silicon（arm64） | macOS 12 或更高版本 | 正式支持，当前版本为 `1.0.5`   | DMG      |
+| macOS Apple Silicon（arm64） | macOS 12 或更高版本 | 正式支持，当前版本为 `1.0.6`   | DMG      |
 | macOS Intel（x64）           | —                   | 未正式发布；不在当前支持范围内 | —        |
 | Windows（x64 / arm64）       | —                   | 未正式发布；不在当前支持范围内 | —        |
 | Linux（x64 / arm64）         | —                   | 未正式发布；不在当前支持范围内 | —        |
 
-当前正式 DMG 为 `Captain-Who-1.0.5-arm64.dmg`。它使用 Developer ID 签名、已通过 Apple 公证，并已装订公证凭据。文件身份和 SHA-256 请以[下载与验证](download-and-verification.md)为准。
+[1.0.6 发行页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6)提供 `Captain-Who-1.0.6-arm64.dmg`。文件大小、SHA-256 与核验步骤见[下载与验证](download-and-verification.md)。
 
 Windows 版本暂未提供。项目由个人开发，目前没有足够时间完成该版本，也没有确定的发布时间。
 

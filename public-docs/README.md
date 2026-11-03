@@ -4,14 +4,14 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # Captain Who 文档
 
 Captain Who 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
 
-当前正式发行版本为 `1.0.5`。请始终从 [Captain Who 官网](https://captainwhoagent.com/) 获取安装包，并在安装前阅读[版本与发布](releases/README.md)中的平台范围、校验与升级说明。
+已发布的 [`1.0.6` 安装包](releases/release-notes/1-0-6.md)适用于 macOS 12 及以上的 Apple Silicon 设备。请从 [Captain Who 官网](https://captainwhoagent.com/) 或项目的 [GitHub Release](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6) 获取 DMG，安装前按[下载与验证](releases/download-and-verification.md)核对文件。
 
 Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com/Tiga001/Captain_Who)会持续更新。仓库中的开发版本可能比官网安装包更新；想直接使用软件，请从官网下载安装包。当前仅发布 macOS Apple Silicon 版本，Windows 暂无安装包。许可证与第三方声明见[法律与第三方声明](legal/README.md)。
 
@@ -40,4 +40,4 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ## 阅读说明
 
-文档只描述能够验证的产品行为。[当前开发进展](releases/development-status.md)汇总本次核验的 `1.0.6` 开发代码变化，包括组织模板、长会话浏览、工具记录与本地存储；它不是正式发行公告。指南中标注“当前开发版本”的内容不能视为已登记的正式 `1.0.5` 安装包功能。不同版本的界面和能力可能存在差异；取得安装包时，请同时查看对应的[发行说明](releases/release-notes/README.md)。涉及第三方模型、搜索或 MCP 服务时，还需要遵守相应服务商的条款、计费方式和数据政策。
+[发行说明](releases/release-notes/README.md)描述已经发布的安装包；[当前开发进展](releases/development-status.md)介绍标签之后的改动。例如，11 月新增的「预测下一条用户消息」不在 9 月 23 日的 `1.0.6` 安装包里，即使当前源码显示的版本号仍是 `1.0.6`。使用第三方模型、搜索或 MCP 服务时，还需遵守相应服务商的条款、计费方式和数据政策。

@@ -2,14 +2,14 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-03
 ---
 
 # 构建与发布
 
 本文记录当前 Electron + Core Server sidecar 的构建、打包、macOS 签名和发布证据边界。当前没有一键发布流水线；维护者必须明确区分“源码构建”“目录包”“发行包”“已签名”和“已公证”。
 
-本次核验的源码版本为 `1.0.6`，已登记的正式发行记录仍为 [`1.0.5`](../../public-docs/releases/release-notes/1-0-5.md)。源码版本递增不代表新安装包已发布；已有正式包的签名、公证及公开更新源证据，也不能替代下一版最终产物的验收。
+当前 `main` 的 `package.json` 与 [GitHub `v1.0.6` 发布标签](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6) 同为 `1.0.6`，但不是同一源码快照：输入框预测及 schema v72 在标签之后提交。发版核验应比对具体 commit、平台、安装包和下载校验值，而不是只比较版本字符串；各下载渠道的已登记证据见[版本与发布](../../public-docs/releases/README.md)。
 
 ## 1. 前置条件
 
@@ -238,7 +238,7 @@ pnpm build:<platform>
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。当前源码数据库使用 canonical v71，有限的历史升级范围见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。不能假设新库可被旧应用打开，也不能从 schema 迁移代码推断正式安装包之间已经完成升级验收。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
+回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。当前源码数据库使用 canonical v72，有限的历史升级范围见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。不能假设新库可被旧应用打开，也不能从 schema 迁移代码推断正式安装包之间已经完成升级验收。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
 
 备份应在应用及 Core Server 完全退出后复制完整数据根。当前 SQLite 使用 WAL，运行中只复制 `storage.sqlite` 可能遗漏已提交内容；不要为了备份删除 `-wal`/`-shm` 文件。凭据存储与数据库分离，恢复边界见[恢复 Runbook](../operations/recovery-runbook.md)。
 

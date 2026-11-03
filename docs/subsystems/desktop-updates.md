@@ -9,7 +9,7 @@ last_verified: 2026-10-18
 
 桌面更新使用 `electron-updater` 与 Electron Builder 的 generic HTTPS 源。当前范围为 macOS arm64；Windows、Linux、macOS x64/universal 和 Mac App Store 不启用更新发布。源码实现和配置测试不代表真实发行链路已经验收。
 
-仓库已记录正式发行 `1.0.5` 的签名、公证、stapling 与公开更新清单，见[发行说明](../../public-docs/releases/README.md)及[升级指南](../../public-docs/releases/upgrade-guide.md)。当前源码版本为 `1.0.6`（[package.json](../../package.json)），不据此宣称该版本已发行。以下构建与验收要求面向每次新发行；脚本没有自动公证/上传步骤，不等于正式包从未公证或更新源尚未公开。
+公开文档已记录 `1.0.5` 的签名、公证、stapling 与更新清单；GitHub 另有 [`v1.0.6` 发布标签](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6)。不要把某一版本或渠道的签名、清单或安装证据移用到其他产物。当前 `main` 仍使用 `1.0.6` 版本号，但输入框预测等实现晚于该标签。各渠道已登记产物见[版本与发布](../../public-docs/releases/README.md)，用户操作见[升级指南](../../public-docs/releases/upgrade-guide.md)。
 
 ## 应用行为与安全退出
 

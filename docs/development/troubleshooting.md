@@ -48,7 +48,7 @@ pnpm verify:artifact-runtime
 
 ## `development_storage_schema_reset_required`
 
-当前规范 schema 为 v71。启动时允许 exact v51–v70 逐版升级；exact v50 还要求协作事件日志为空。
+本次核验的规范 schema 为 v72。启动时允许 exact v51–v71 逐版升级；exact v50 还要求协作事件日志为空。
 v49 及更早版本、未知 catalog 或外键完整性不满足要求的数据库会被拒绝。迁移和开发 reset 是两条不同路径，
 不要把 reset-required 理解为可以直接重建任何旧库。完全退出 Captain Who 后先执行预检：
 
@@ -57,7 +57,7 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。当前工具只支持 exact current v71 的配置保留；历史恢复分支的目标仍固定为 v49，因此不能用于当前 v71。含配置表的 v49–v70 旧库也不属于 reset 配置保留来源，不能因为启动支持迁移就认为 reset 支持恢复；详情见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。预检拒绝时保留原库，使用隔离数据根继续开发，不能追加确认参数绕过。人机交互设置、通知设置、Browser 下载设置和链接偏好属于配置保留项，问题、通知
+第一条是非破坏性预检，第二条才会备份并重建。当前工具只支持 exact current v72 的配置保留；历史恢复分支的目标仍固定为 v49，因此不能用于当前 v72。含配置表的 v49–v71 旧库也不属于 reset 配置保留来源，不能因为启动支持迁移就认为 reset 支持恢复；详情见[恢复 Runbook](../operations/recovery-runbook.md#旧开发库的配置保留边界)。预检拒绝时保留原库，使用隔离数据根继续开发，不能追加确认参数绕过。人机交互设置、通知设置、Browser 下载设置和链接偏好属于配置保留项，问题、通知
 事实、浏览/下载记录、Agent 模板与分配、组织模板/实例/草稿、FileChange 事务、本机 Token 统计和会话运行状态不会恢复。应用或 Core Server 仍持锁时
 命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
 [存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
