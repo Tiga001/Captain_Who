@@ -16,7 +16,12 @@ import { ProfileSettingsPage } from '../pages/ProfileSettingsPage'
 import { PersonalizationSettingsPage } from '../pages/PersonalizationSettingsPage'
 import { UsageBillingSettingsPage } from '../pages/UsageBillingSettingsPage'
 
-const mocks = vi.hoisted(() => ({ mac: true, notifications: true, update: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  mac: true,
+  notifications: true,
+  contextWindow: true,
+  update: vi.fn()
+}))
 
 vi.mock('../../../config/FrontendConfigProvider', async () => {
   const { getTranslation } = await import('../../../config/frontendTranslations')
@@ -56,6 +61,13 @@ vi.mock('../../license/LicenseContext', () => ({
     state: { status: 'signedOut', reason: null, expiresAt: null, error: null },
     refresh: vi.fn()
   })
+}))
+vi.mock('../../../config/featureFlags', () => ({
+  featureFlags: {
+    get contextWindowIndicator() {
+      return mocks.contextWindow
+    }
+  }
 }))
 vi.mock('../../../lib/platform', () => ({ isMacOS: () => mocks.mac }))
 vi.mock('../../notifications/notificationClient', () => ({
@@ -173,6 +185,7 @@ const pages = [
 ] as const
 
 beforeEach(() => {
+  mocks.contextWindow = true
   mocks.mac = true
   mocks.notifications = true
   mocks.update.mockReset()
@@ -211,15 +224,37 @@ describe('basic settings definitions and real page targets', () => {
     expect(screen.container.querySelector('[data-setting-id="notifications"]')).toBeNull()
   })
 
-  it('lets users opt into billed next-message drafts from General', async () => {
+  it('places the prediction switch directly below context usage in Composer with only its label', async () => {
     const change = vi.fn()
     const screen = await render(
       <GeneralSettingsPage uiPreferences={preferences} onUiPreferencesChange={change} />
     )
-    const toggle = screen.getByRole('switch', { name: t('general.predictNextUserMessage') })
+    const composer = screen.container.querySelector('[data-setting-id="general.composer"]')!
+    const context = composer.querySelector('[data-setting-id="general.showContextWindowUsage"]')!
+    const row = composer.querySelector('[data-setting-id="general.predictNextUserMessage"]')!
+    expect(context.nextElementSibling).toBe(row)
+    expect(row.textContent?.trim()).toBe('预测下一条用户消息')
+    const toggle = screen.getByRole('switch', { name: '预测下一条用户消息', exact: true })
     await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
     await toggle.click()
     expect(change).toHaveBeenCalledWith({ predictNextUserMessage: true })
+  })
+
+  it('keeps prediction available and searchable when the context indicator is disabled', async () => {
+    mocks.contextWindow = false
+    const screen = await render(
+      <GeneralSettingsPage uiPreferences={preferences} onUiPreferencesChange={vi.fn()} />
+    )
+    const composer = screen.container.querySelector('[data-setting-id="general.composer"]')!
+    expect(composer.querySelector('[data-setting-id="general.showContextWindowUsage"]')).toBeNull()
+    expect(
+      composer
+        .querySelector('[data-setting-id="general.predictNextUserMessage"]')
+        ?.textContent?.trim()
+    ).toBe('预测下一条用户消息')
+    const ids = buildSettingsSearchIndex(pages, t).map((entry) => entry.id)
+    expect(ids).toContain('general.predictNextUserMessage')
+    expect(ids).not.toContain('general.showContextWindowUsage')
   })
 
   it('finds the actual theme selector through its existing system option label', () => {

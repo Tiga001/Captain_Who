@@ -938,9 +938,7 @@ export const enUSTranslations = {
   'general.languageAria': 'Application language',
   'general.sectionGeneral': 'General',
   'general.sectionComposer': 'Composer',
-  'general.predictNextUserMessage': 'Predict my next message',
-  'general.predictionDescription':
-    'After a reply, use the selected model to suggest an editable draft. Each prediction can incur model charges.',
+  'general.predictNextUserMessage': 'Predict the next user message',
   'general.predictionSaveFailed': 'Could not save this preference.',
   'general.showContextWindowUsage': 'Show context window usage',
   'general.sectionPermissions': 'Permissions',

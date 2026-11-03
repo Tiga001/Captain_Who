@@ -896,9 +896,7 @@ export const zhCNTranslations = {
   'general.languageAria': '软件语言',
   'general.sectionGeneral': '常规',
   'general.sectionComposer': '输入框',
-  'general.predictNextUserMessage': '预测我的下一条消息',
-  'general.predictionDescription':
-    '回复结束后，使用当前模型预测一条可编辑的草稿。每次预测可能产生模型费用。',
+  'general.predictNextUserMessage': '预测下一条用户消息',
   'general.predictionSaveFailed': '未能保存此设置。',
   'general.showContextWindowUsage': '显示上下文窗口使用情况',
   'general.sectionPermissions': '权限',

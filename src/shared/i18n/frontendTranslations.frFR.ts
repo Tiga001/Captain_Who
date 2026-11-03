@@ -968,9 +968,7 @@ export const frFRTranslations = {
   'general.languageAria': 'Langue de candidature',
   'general.sectionGeneral': 'Général',
   'general.sectionComposer': 'Compositeur',
-  'general.predictNextUserMessage': 'Prédire mon prochain message',
-  'general.predictionDescription':
-    'Après chaque réponse, le modèle sélectionné peut proposer un brouillon modifiable. Chaque prédiction peut être facturée.',
+  'general.predictNextUserMessage': 'Prédire le prochain message utilisateur',
   'general.predictionSaveFailed': 'Impossible d’enregistrer ce réglage.',
   'general.showContextWindowUsage': "Afficher l'utilisation de la fenêtre contextuelle",
   'general.sectionPermissions': 'Autorisations',

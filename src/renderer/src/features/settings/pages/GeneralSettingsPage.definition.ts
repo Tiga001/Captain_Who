@@ -40,11 +40,6 @@ export const generalSettingsNodes = defineSettingsNodes([
     title: 'general.sectionGeneral',
     children: [
       {
-        id: 'general.predictNextUserMessage',
-        title: 'general.predictNextUserMessage',
-        description: 'general.predictionDescription'
-      },
-      {
         id: 'general.language',
         title: 'general.language',
         terms: appLanguageOptions.map((option) => ({ text: option.label }))
@@ -107,8 +102,14 @@ export const generalSettingsNodes = defineSettingsNodes([
   {
     id: 'general.composer',
     title: 'general.sectionComposer',
-    supported: () => featureFlags.contextWindowIndicator,
-    children: [{ id: 'general.showContextWindowUsage', title: 'general.showContextWindowUsage' }]
+    children: [
+      {
+        id: 'general.showContextWindowUsage',
+        title: 'general.showContextWindowUsage',
+        supported: () => featureFlags.contextWindowIndicator
+      },
+      { id: 'general.predictNextUserMessage', title: 'general.predictNextUserMessage' }
+    ]
   },
   {
     id: 'notifications',

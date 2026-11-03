@@ -952,9 +952,7 @@ export const jaJPTranslations = {
   'general.languageAria': 'アプリケーション言語',
   'general.sectionGeneral': '一般',
   'general.sectionComposer': '作曲家',
-  'general.predictNextUserMessage': '次のメッセージを予測',
-  'general.predictionDescription':
-    '返信後、選択中のモデルで編集可能な下書きを提案します。予測ごとにモデルの利用料金が発生する場合があります。',
+  'general.predictNextUserMessage': '次のユーザーメッセージを予測',
   'general.predictionSaveFailed': '設定を保存できませんでした。',
   'general.showContextWindowUsage': 'コンテキストウィンドウの使用法を表示する',
   'general.sectionPermissions': '権限',

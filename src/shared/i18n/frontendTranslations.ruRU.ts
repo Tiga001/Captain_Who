@@ -952,9 +952,7 @@ export const ruRUTranslations = {
   'general.languageAria': 'Язык приложения',
   'general.sectionGeneral': 'Общий',
   'general.sectionComposer': 'Композитор',
-  'general.predictNextUserMessage': 'Предсказывать моё следующее сообщение',
-  'general.predictionDescription':
-    'После ответа выбранная модель предлагает черновик, который можно изменить. За каждый прогноз может взиматься плата.',
+  'general.predictNextUserMessage': 'Предсказывать следующее сообщение пользователя',
   'general.predictionSaveFailed': 'Не удалось сохранить настройку.',
   'general.showContextWindowUsage': 'Показать использование контекстного окна',
   'general.sectionPermissions': 'Разрешения',

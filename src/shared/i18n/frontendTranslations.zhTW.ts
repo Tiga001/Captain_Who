@@ -888,9 +888,7 @@ export const zhTWTranslations = {
   'general.languageAria': '軟體語言',
   'general.sectionGeneral': '常規',
   'general.sectionComposer': '輸入框',
-  'general.predictNextUserMessage': '預測我的下一則訊息',
-  'general.predictionDescription':
-    '回覆結束後，使用目前模型預測一則可編輯的草稿。每次預測可能產生模型費用。',
+  'general.predictNextUserMessage': '預測下一則使用者訊息',
   'general.predictionSaveFailed': '無法儲存此設定。',
   'general.showContextWindowUsage': '顯示上下文視窗使用情況',
   'general.sectionPermissions': '權限',

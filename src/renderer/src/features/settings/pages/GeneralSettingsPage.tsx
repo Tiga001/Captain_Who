@@ -367,28 +367,6 @@ export function GeneralSettingsPage({
                 <div className="settings-list general-settings-list">
                   {renderSettingsNodes(section.children, (node) => {
                     switch (node.id) {
-                      case 'general.predictNextUserMessage':
-                        return (
-                          <div className="settings-list-row" data-setting-id={node.id}>
-                            <span className="settings-list-row__text">
-                              <span className="settings-list-row__title">
-                                {settingLabel(node, t)}
-                              </span>
-                              <p className="settings-list-row__description">
-                                {settingDescription(node, t)}
-                              </p>
-                              {predictionSaveFailed && (
-                                <span role="alert">{t('general.predictionSaveFailed')}</span>
-                              )}
-                            </span>
-                            <SettingsToggle
-                              checked={uiPreferences.predictNextUserMessage}
-                              disabled={predictionSaving}
-                              label={settingLabel(node, t)}
-                              onChange={(checked) => void updatePredictionPreference(checked)}
-                            />
-                          </div>
-                        )
                       case 'general.language':
                         return (
                           <div className="settings-list-row general-settings-language-row">
@@ -692,6 +670,25 @@ export function GeneralSettingsPage({
                               onChange={(showContextWindowUsage) =>
                                 onUiPreferencesChange({ showContextWindowUsage })
                               }
+                            />
+                          </div>
+                        )
+                      case 'general.predictNextUserMessage':
+                        return (
+                          <div className="settings-list-row">
+                            <span className="settings-list-row__text">
+                              <span className="settings-list-row__title">
+                                {settingLabel(node, t)}
+                              </span>
+                              {predictionSaveFailed && (
+                                <span role="alert">{t('general.predictionSaveFailed')}</span>
+                              )}
+                            </span>
+                            <SettingsToggle
+                              checked={uiPreferences.predictNextUserMessage}
+                              disabled={predictionSaving}
+                              label={settingLabel(node, t)}
+                              onChange={(checked) => void updatePredictionPreference(checked)}
                             />
                           </div>
                         )

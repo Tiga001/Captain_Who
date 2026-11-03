@@ -926,9 +926,7 @@ export const koKRTranslations = {
   'general.languageAria': '응용 언어',
   'general.sectionGeneral': '일반',
   'general.sectionComposer': '작곡가',
-  'general.predictNextUserMessage': '다음 메시지 예측',
-  'general.predictionDescription':
-    '답변 후 선택한 모델이 수정 가능한 초안을 제안합니다. 예측할 때마다 모델 비용이 발생할 수 있습니다.',
+  'general.predictNextUserMessage': '다음 사용자 메시지 예측',
   'general.predictionSaveFailed': '설정을 저장하지 못했습니다.',
   'general.showContextWindowUsage': '컨텍스트 창 사용법 표시',
   'general.sectionPermissions': '권한',
