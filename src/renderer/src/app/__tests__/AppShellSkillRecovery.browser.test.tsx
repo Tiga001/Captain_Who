@@ -69,6 +69,7 @@ const testState = vi.hoisted(() => ({
   loadConversationMetas: vi.fn(),
   loadInputAttachments: vi.fn(),
   loadUiPreferences: vi.fn(),
+  onPredictionPreferenceChanged: vi.fn(),
   onAgentEvent: vi.fn(),
   onProviderTransition: vi.fn(),
   persistedConversations: new Map<string, ChatConversation>(),
@@ -178,6 +179,7 @@ vi.mock('../useShellLayout', () => ({
 
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
+    storage: { onPredictionPreferenceChanged: testState.onPredictionPreferenceChanged },
     agent: {
       onPromptPreferencesChanged: vi.fn(() => () => undefined),
       onCollaborationSettingsChanged: vi.fn(() => () => undefined),
@@ -2313,6 +2315,25 @@ describe('provider transition guard', () => {
 })
 
 describe('conversation startup loading', () => {
+  it('preserves a newer window preference when the startup snapshot returns late', async () => {
+    const saved = { ...defaultUiPreferences(), predictNextUserMessage: true }
+    const pending = deferred<typeof saved>()
+    testState.loadUiPreferences.mockReturnValueOnce(pending.promise)
+    const screen = await renderSelectedConversation()
+    const active = screen.getByTestId('active-conversation-id')
+    const changed = testState.onPredictionPreferenceChanged.mock.lastCall?.[0]
+    changed(false)
+    pending.resolve(saved)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect.element(active).toHaveAttribute('data-prediction-enabled', 'false')
+    changed(true)
+    await expect.element(active).toHaveAttribute('data-prediction-enabled', 'true')
+    testState.rightOpen = true
+    testState.rightMaximized = true
+    await screen.rerender(<AppShell />)
+    await expect.element(active).toHaveAttribute('data-prediction-enabled', 'false')
+  })
+
   it('waits for restored drafts before enabling catch-up when opening an idle saved chat', async () => {
     const pending = deferred<Record<string, ChatComposerDraft>>()
     testState.loadComposerDrafts.mockReturnValueOnce(pending.promise)

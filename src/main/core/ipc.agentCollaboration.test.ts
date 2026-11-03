@@ -11,6 +11,27 @@ import { currentRpcDiagnosticContext } from './rpcDiagnosticContext'
 describe('Main Agent IPC collaboration routing', () => {
   beforeEach(() => getAllWindows.mockReset())
 
+  it.each(['ACCOUNT_LOGIN_REQUIRED', 'ACCOUNT_LICENSE_REQUIRED', 'ACCOUNT_LICENSE_UNAVAILABLE'])(
+    'rejects a composer prediction before Core dispatch when turn access fails with %s',
+    async (reason) => {
+      const core = {
+        onAgentEvent: vi.fn(),
+        onProviderTransition: vi.fn(),
+        predictNextUserMessage: vi.fn()
+      }
+      const ipc = { handle: vi.fn(), on: vi.fn() }
+      const authorize = vi.fn().mockRejectedValue(new Error(reason))
+      registerAgentIpc(ipc as never, core as never, authorize)
+      const handler = ipc.handle.mock.calls.find(
+        ([channel]) => channel === HOST_CHANNELS.agent.predictNextUserMessage
+      )?.[1]
+      const input = { conversationId: 'chat', assistantMessageId: 'answer', modelId: 'model' }
+      await expect(handler({}, input)).rejects.toThrow(reason)
+      expect(authorize).toHaveBeenCalledOnce()
+      expect(core.predictNextUserMessage).not.toHaveBeenCalled()
+    }
+  )
+
   it('broadcasts profile invalidation to live windows only', () => {
     let listener: ((event: unknown) => void) | undefined
     const send = vi.fn()

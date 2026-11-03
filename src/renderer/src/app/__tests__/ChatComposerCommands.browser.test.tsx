@@ -27,7 +27,7 @@ const modelState = vi.hoisted(() => ({
 }))
 const { predictNextUserMessage } = vi.hoisted(() => ({ predictNextUserMessage: vi.fn() }))
 vi.mock('../../host/hostClient', () => ({ hostClient: { agent: { predictNextUserMessage } } }))
-const attachmentMocks = vi.hoisted(() => ({ build: vi.fn() }))
+const attachmentMocks = vi.hoisted(() => ({ build: vi.fn(), select: vi.fn() }))
 vi.mock('../../features/agentRun/useProviderTransition', () => ({
   useProviderTransition: () => ({
     cancelConfirmation: vi.fn(),
@@ -80,7 +80,7 @@ vi.mock('../../features/chat/chatAttachments', () => ({
   getComposerDroppedFilePath: () => undefined,
   loadComposerFoldersFromPaths: async () => [],
   selectComposerFolders: async () => [],
-  selectComposerAttachments: async () => [],
+  selectComposerAttachments: attachmentMocks.select,
   stripAttachmentSummary: (content: string) => content
 }))
 import { ChatComposer } from '../../features/chat/components/ChatComposer'
@@ -298,6 +298,7 @@ let previousViewport: { width: number; height: number }
 beforeEach(async () => {
   vi.clearAllMocks()
   predictNextUserMessage.mockReset()
+  attachmentMocks.select.mockReset().mockResolvedValue([])
   attachmentMocks.build.mockReset().mockImplementation((attachments: unknown[]) => attachments)
   translate.mockImplementation((key: string) => key)
   modelState.enabledModels = [modelFixture()]
@@ -1434,4 +1435,50 @@ it('retries a transient forecast failure while the same turn remains eligible', 
   await expect.poll(() => input.placeholder, { timeout: 4000 }).toBe('next after commit')
   expect(predictNextUserMessage).toHaveBeenCalledTimes(2)
   expect(changed).not.toHaveBeenCalled()
+})
+
+it('hides the forecast throughout a file import and restores it after removing the attachment', async () => {
+  const pending = Promise.withResolvers<unknown[]>()
+  attachmentMocks.select.mockReturnValue(pending.promise)
+  predictNextUserMessage.mockResolvedValue({ suggestion: 'next' })
+  const view = await render(
+    <TestComposer conversationId="a" predictionSourceId="answer" predictionsEnabled />
+  )
+  const input = view.container.querySelector('textarea')!
+  await expect.poll(() => input.placeholder).toBe('next')
+  await view.getByRole('button', { name: 'chat.addContext' }).click()
+  await view.getByText('chat.addFile', { exact: true }).click()
+  await expect.poll(() => input.placeholder).toBe('chat.inputPlaceholder')
+  const attachment = {
+    id: 'report',
+    kind: 'file',
+    name: 'report.txt',
+    sizeBytes: 4,
+    mimeType: 'text/plain',
+    encoding: 'managed',
+    data: 'report.txt'
+  }
+  pending.resolve([{ ...attachment, agentAttachment: attachment }])
+  const remove = view.getByRole('button', { name: /removeAttachment.*report.txt/i })
+  await expect.element(remove).toBeVisible()
+  expect(input.placeholder).toBe('chat.inputPlaceholder')
+  await remove.click()
+  await expect.poll(() => input.placeholder).toBe('next')
+})
+
+it('does not display late forecasts after disabling the preference or during model transitions', async () => {
+  const old = Promise.withResolvers<{ suggestion: string }>()
+  predictNextUserMessage
+    .mockReturnValueOnce(old.promise)
+    .mockResolvedValue({ suggestion: 'new generation' })
+  const props = { conversationId: 'a', predictionSourceId: 'answer' }
+  const view = await render(<TestComposer {...props} predictionsEnabled />)
+  const input = view.container.querySelector('textarea')!
+  await view.rerender(<TestComposer {...props} />)
+  old.resolve({ suggestion: 'disabled generation' })
+  await view.rerender(<TestComposer {...props} predictionsEnabled transition />)
+  expect(input.placeholder).toBe('chat.inputPlaceholder')
+  expect(predictNextUserMessage).toHaveBeenCalledTimes(1)
+  await view.rerender(<TestComposer {...props} predictionsEnabled />)
+  await expect.poll(() => input.placeholder).toBe('new generation')
 })

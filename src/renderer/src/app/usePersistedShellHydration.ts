@@ -6,6 +6,7 @@ import {
   loadUiPreferences,
   type UiPreferencesSnapshot
 } from '../features/storage/storageClient'
+import { hostClient } from '../host/hostClient'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import { createComposerDraft } from './chatMessageFactory'
 
@@ -54,11 +55,20 @@ export function usePersistedShellHydration({
 
   useEffect(() => {
     let cancelled = false
+    let latestPredictionPreference: boolean | undefined
+    // Another window may change this preference while the startup snapshot is in flight.
+    const unsubscribe = hostClient.storage?.onPredictionPreferenceChanged?.((enabled) => {
+      latestPredictionPreference = enabled
+      setUiPreferences((current) => ({ ...current, predictNextUserMessage: enabled }))
+    })
     markUiPreferencesPending()
     void loadUiPreferences()
       .then((preferences) => {
         if (!cancelled) {
-          setUiPreferences(preferences)
+          setUiPreferences({
+            ...preferences,
+            predictNextUserMessage: latestPredictionPreference ?? preferences.predictNextUserMessage
+          })
           markUiPreferencesReady()
         }
       })
@@ -70,6 +80,7 @@ export function usePersistedShellHydration({
       })
     return () => {
       cancelled = true
+      unsubscribe?.()
     }
   }, [
     setUiPreferences,

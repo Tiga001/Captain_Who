@@ -416,20 +416,10 @@ export function useAppShellRuntime({
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
 
-  useEffect(
-    () =>
-      hostClient.storage?.onPredictionPreferenceChanged?.((enabled) => {
-        setUiPreferences((current) => ({ ...current, predictNextUserMessage: enabled }))
-      }),
-    [setUiPreferences]
-  )
-
   const updateUiPreferences = useCallback(async (patch: Partial<UiPreferencesSnapshot>) => {
     if (patch.predictNextUserMessage !== undefined) {
-      const enabled = patch.predictNextUserMessage
-      return hostClient.storage.setPredictionPreference(enabled).then(() => {
-        setUiPreferences((current) => ({ ...current, predictNextUserMessage: enabled }))
-      })
+      // Main broadcasts the committed preference to every window, including this one.
+      return hostClient.storage.setPredictionPreference(patch.predictNextUserMessage)
     }
 
     setUiPreferences((currentPreferences) => {

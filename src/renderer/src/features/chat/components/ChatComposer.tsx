@@ -440,6 +440,7 @@ export function ChatComposer({
       !isGenerating &&
       !isResumeStarting &&
       !isModelSelectionDisabled &&
+      !isFileDragActive &&
       !attachmentImports.hasPending &&
       !restoringAttachmentIds.size &&
       !draft.queuedMessages.length &&
@@ -1022,6 +1023,8 @@ export function ChatComposer({
   }
 
   const addFolders = async () => {
+    prediction.dismiss()
+    const scopeVersion = restoreVersionRef.current
     setAttachmentError(null)
     if (message === '@') updateDraft({ message: '' })
     setMentionQuery('')
@@ -1029,6 +1032,7 @@ export function ChatComposer({
     setIsAttachmentMenuOpen(false)
     try {
       const selected = await selectComposerFolders()
+      if (scopeVersion !== restoreVersionRef.current) return
       const existing = new Set(
         (draftRef.current.folderReferences ?? []).map((folder) => folder.rootPath ?? folder.id)
       )
@@ -1039,6 +1043,7 @@ export function ChatComposer({
         })
       }
     } catch (error) {
+      if (scopeVersion !== restoreVersionRef.current) return
       setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
     }
   }
@@ -1389,6 +1394,7 @@ export function ChatComposer({
           if (isModelTransitionRunning) return
           if (event.dataTransfer.files.length === 0 && event.dataTransfer.items.length === 0) return
           event.preventDefault()
+          prediction.dismiss()
           setIsFileDragActive(false)
           void addDroppedItems(event.dataTransfer)
         }}
