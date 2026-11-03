@@ -31,6 +31,8 @@ import type {
   AgentConversationTurnContinueInput,
   AgentConversationTurnOutput,
   AgentConversationTurnRewriteInput,
+  AgentPromptPredictionInput,
+  AgentPromptPredictionOutput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentDetail,
@@ -121,6 +123,7 @@ import {
   AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
   AGENT_COMMAND_SESSIONS_GET_METHOD,
   AGENT_COMMAND_SESSIONS_LIST_METHOD,
+  AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
   AGENT_GET_FILE_CHANGE_DIFF_METHOD,
   AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
@@ -452,6 +455,13 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
   ): Promise<AgentConversationTurnOutput> {
     return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnRewriteInput>(
       AGENT_REWRITE_CONVERSATION_TURN_METHOD,
+      input
+    )
+  }
+
+  predictNextUserMessage(input: AgentPromptPredictionInput): Promise<AgentPromptPredictionOutput> {
+    return this.rpc.request<AgentPromptPredictionOutput, AgentPromptPredictionInput>(
+      AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD,
       input
     )
   }

@@ -10,6 +10,7 @@
     "startProviderTransition": "agent.startProviderTransition",
     "getProviderTransitionStatus": "agent.getProviderTransitionStatus",
     "providerTransitionNotification": "agent.providerTransition",
+    "predictNextUserMessage": "agent.predictNextUserMessage",
     "getContextWindowSnapshot": "agent.getContextWindowSnapshot",
     "listCommandSessions": "agent.commandSessions.list",
     "getCommandSession": "agent.commandSessions.get",

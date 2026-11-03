@@ -195,6 +195,10 @@ export function registerAgentIpc(
       return coreServer.rewriteConversationTurn(input)
     })
   )
+  ipcMain.handle(HOST_CHANNELS.agent.predictNextUserMessage, async (_event, input) => {
+    await assertCanStartTurn()
+    return coreServer.predictNextUserMessage(input)
+  })
   ipcMain.handle(HOST_CHANNELS.agent.getContextWindowSnapshot, (_event, input) =>
     captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))
   )

@@ -27,6 +27,18 @@ export const AGENT_CONTINUE_CONVERSATION_TURN_METHOD = 'agent.continueConversati
 
 export const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 
+export const AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD = 'agent.predictNextUserMessage'
+
+export interface AgentPromptPredictionInput {
+  conversationId: string
+  assistantMessageId: string
+  modelId: string
+}
+
+export interface AgentPromptPredictionOutput {
+  suggestion: string | null
+}
+
 export const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
 
 export const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'

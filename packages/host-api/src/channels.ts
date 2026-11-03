@@ -75,6 +75,7 @@ export const HOST_CHANNELS = {
     clearUsageRecords: 'host:agent.clearUsageRecords',
     event: 'host:agent.event',
     getCommandSession: 'host:agent.getCommandSession',
+    predictNextUserMessage: 'host:agent.predictNextUserMessage',
     getContextWindowSnapshot: 'host:agent.getContextWindowSnapshot',
     getFileChangeDiff: 'host:agent.getFileChangeDiff',
     getFileChangeHistoryDiff: 'host:agent.getFileChangeHistoryDiff',

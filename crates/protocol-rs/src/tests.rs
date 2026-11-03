@@ -839,6 +839,10 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
             AGENT_REWRITE_CONVERSATION_TURN_METHOD,
         ),
         (
+            "predictNextUserMessage",
+            AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD,
+        ),
+        (
             "getContextWindowSnapshot",
             AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
         ),

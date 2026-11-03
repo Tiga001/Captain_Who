@@ -62,6 +62,7 @@ pub const AGENT_STEER_RUN_METHOD: &str = "agent.steerRun";
 pub const AGENT_CONTINUE_CONVERSATION_TURN_METHOD: &str = "agent.continueConversationTurn";
 pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
 pub const AGENT_REWRITE_CONVERSATION_TURN_METHOD: &str = "agent.rewriteConversationTurn";
+pub const AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD: &str = "agent.predictNextUserMessage";
 pub const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD: &str = "agent.getContextWindowSnapshot";
 pub const AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD: &str = "agent.preflightProviderTransition";
 pub const AGENT_START_PROVIDER_TRANSITION_METHOD: &str = "agent.startProviderTransition";
