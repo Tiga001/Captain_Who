@@ -196,6 +196,9 @@ pub(super) fn emit_terminal_events_after_persistence_for_turn(
     collaboration_identity: Option<&AgentCollaborationIdentity>,
     assistant_message_id: &str,
 ) {
+    if output.status == AgentRunStatus::Completed {
+        service.publish_prediction_seed(&output.run_id, assistant_message_id);
+    }
     for event in gate.take_after_persistence(output) {
         emit_agent_event_notifications(
             service,

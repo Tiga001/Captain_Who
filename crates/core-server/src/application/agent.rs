@@ -140,6 +140,8 @@ mod conversation_world_state;
 mod history_warmup;
 mod human_root_notifications;
 mod manual_context_compaction;
+mod message_prediction;
+pub(crate) use message_prediction::PromptPredictionInput;
 mod observer_stream;
 mod pending_action_store;
 mod persisted_resume_input;
@@ -697,6 +699,7 @@ pub struct AgentService {
     prepared_histories: Arc<Mutex<prepared_history::PreparedHistoryCache>>,
     prepared_history_inflight:
         Arc<Mutex<HashMap<String, std::sync::Weak<prepared_history::PreparedHistoryInflight>>>>,
+    predictions: Arc<message_prediction::Predictions>,
     history_warmup: Arc<Mutex<history_warmup::HistoryWarmupQueue>>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     conversation_admission: Arc<keyed_admission::KeyedAdmission>,
@@ -925,6 +928,7 @@ impl AgentService {
                 prepared_history::PreparedHistoryCache::default(),
             )),
             prepared_history_inflight: Arc::new(Mutex::new(HashMap::new())),
+            predictions: Arc::new(message_prediction::Predictions::default()),
             history_warmup: Arc::new(Mutex::new(history_warmup::HistoryWarmupQueue::default())),
             context_compaction_summary_generator: None,
             conversation_admission: Arc::new(keyed_admission::KeyedAdmission::default()),

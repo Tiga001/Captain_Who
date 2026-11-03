@@ -385,6 +385,7 @@ impl AgentService {
         // Agent cancellation deliberately does not reach handed-off Sessions; conversation
         // deletion does, and waits below for their terminal file-effect settlement.
         for affected in &deleted_conversation_ids {
+            self.predictions.invalidate_chat(affected);
             self.command_sessions.terminate_conversation(affected);
         }
 

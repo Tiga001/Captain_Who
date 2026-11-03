@@ -159,6 +159,7 @@ where
         &rpc,
     )
     .await;
+    agent_service.stop_message_predictions();
     if let Some(bridge) = network_routes.as_ref() {
         bridge.0.close();
     }
@@ -201,6 +202,7 @@ where
     let mcp_management_tasks = services.mcp_management_tasks;
     let outbound = outbounds.normal;
     let image_artifact_outbound = outbounds.image_artifact;
+    let mut predictions = JoinSet::new();
     let mut lines = input.lines();
     loop {
         let next = tokio::select! {
@@ -246,11 +248,19 @@ where
             continue;
         }
 
+        if request.jsonrpc == "2.0"
+            && request.method == mycopilot_protocol_rs::AGENT_PREDICT_NEXT_USER_MESSAGE_METHOD
+        {
+            dispatch_prediction(agent_service, outbound, request, &mut predictions)?;
+            continue;
+        }
         if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
             // Wake routing waiters before draining the worker lanes that own their requests.
             if let Some(bridge) = network_routes.as_ref() {
                 bridge.close();
             }
+            agent_service.stop_message_predictions();
+            while predictions.join_next().await.is_some() {}
             forks.begin_shutdown();
             rpc.begin_shutdown();
             let stopping_service = agent_service.clone();
@@ -831,7 +841,54 @@ where
             enqueue_outbound(outbound, response)?;
         }
     }
+    agent_service.stop_message_predictions();
+    while predictions.join_next().await.is_some() {}
     Ok(None)
+}
+
+/// These billable requests have an independent task and transport budget; no RPC worker is
+/// occupied while a provider is generating. Closing the requester view does not abort a sample.
+fn dispatch_prediction(
+    agent_service: &AgentService,
+    outbound: &crate::transport::OutboundSender,
+    request: JsonRpcRequest,
+    predictions: &mut JoinSet<()>,
+) -> io::Result<()> {
+    while predictions.try_join_next().is_some() {}
+    if predictions.len() >= 16 {
+        enqueue_outbound(
+            outbound,
+            response_error(Some(request.id), -32000, "Prediction capacity is busy."),
+        )?;
+        return Ok(());
+    }
+    let input = match parse_params::<agent::PromptPredictionInput>(request.params) {
+        Ok(input) => input,
+        Err(error) => {
+            enqueue_outbound(outbound, response_error(Some(request.id), -32602, error))?;
+            return Ok(());
+        }
+    };
+    let access = match agent_service.capture_execution_access() {
+        Ok(access) => access,
+        Err(denial) => {
+            enqueue_outbound(
+                outbound,
+                agent_service_error_response(request.id, denial.agent_error()),
+            )?;
+            return Ok(());
+        }
+    };
+    let service = agent_service.clone();
+    let outbound = outbound.clone();
+    predictions.spawn(async move {
+        let response = match service.predict_next_user_message(input, access).await {
+            Ok(suggestion) => response_success(request.id, json!({"suggestion": suggestion})),
+            Err(error) => agent_service_error_response(request.id, error),
+        };
+        let _ = outbound.send(response);
+    });
+    Ok(())
 }
 
 fn managed_playwright_completion_response(

@@ -86,6 +86,8 @@ mycopilot-core       adapters
 
 磁盘存储使用 WAL/FULL、单 FIFO writer 与两条只读连接，旧同步 guard 共享写 gate。`5a31c635` 后，前序 ticket 退役直接提交就绪异步写，等待 future 无需再次 poll；queued cancellation 与 writer 取得任务按唯一归属竞争，已取得的操作在等待者取消后仍 drain。不能把异步返回句柄或入队视作持久成功。详见[存储生命周期](storage-and-data-lifecycle.md#wal执行器与连接所有权)。
 
+启用输入框预测后，`agent.predictNextUserMessage` 为指定会话最后一条已完成回复做一次隔离采样。请求复用登录与许可检查，独立限制并发和超时。普通回合提交后可使用不含凭证的内存前缀；重新打开聊天时可从持久化模型历史和当前工具配置恢复上下文。预测不会启动 Turn、发布聊天事件或执行工具。Host 按会话、回合、历史版本、模型配置和开关代次合并请求并缓存结果；切换当前聊天不取消在途采样。实际发出的请求单独记入用量，候选正文只留在内存。
+
 ## 3. JSON-RPC 契约
 
 ### Framing 与消息方向

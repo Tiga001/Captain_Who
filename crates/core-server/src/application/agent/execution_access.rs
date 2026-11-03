@@ -189,22 +189,34 @@ impl AgentService {
         input: SetExecutionAccessInput,
     ) -> Result<SetExecutionAccessOutput, String> {
         input.validate().map_err(str::to_string)?;
-        let (output, changed) = self.storage.publish_execution_access_boundary(|| {
-            let mut access = self
-                .execution_access
-                .lock()
-                .map_err(|_| "Execution access state unavailable".to_string())?;
-            let previous_revision = access.revision;
-            let output = access.apply(input, now_ms(), Instant::now());
-            let changed = access.revision != previous_revision;
-            let denial = access
-                .check()
-                .err()
-                .map(|denial| (denial.code, denial.message));
-            // No storage operation is allowed while this short registry lock is held. Grant
-            // publication and all unbound-attempt settlement share the surrounding writer job.
-            Ok(((output, changed), denial))
-        })?;
+        let (output, changed, invalidate_predictions) =
+            self.storage.publish_execution_access_boundary(|| {
+                let mut access = self
+                    .execution_access
+                    .lock()
+                    .map_err(|_| "Execution access state unavailable".to_string())?;
+                let previous_revision = access.revision;
+                let previous_generation = access.denial_generation;
+                let output = access.apply(input, now_ms(), Instant::now());
+                let changed = access.revision != previous_revision;
+                let denial = access
+                    .check()
+                    .err()
+                    .map(|denial| (denial.code, denial.message));
+                // No storage operation is allowed while this short registry lock is held. Grant
+                // publication and all unbound-attempt settlement share the surrounding writer job.
+                Ok((
+                    (
+                        output,
+                        changed,
+                        access.denial_generation != previous_generation,
+                    ),
+                    denial,
+                ))
+            })?;
+        if invalidate_predictions {
+            self.clear_message_predictions();
+        }
         if changed {
             self.workflow_readiness_changed(None);
         }

@@ -456,15 +456,26 @@ impl StorageService {
         &self,
         version: &ConversationHistoryVersion,
     ) -> Result<bool, String> {
+        Ok(self
+            .current_conversation_history_version(&version.conversation_id)?
+            .as_ref()
+            == Some(version))
+    }
+
+    /// Read just the authoritative version when binding an ephemeral result to committed history.
+    pub fn current_conversation_history_version(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationHistoryVersion>, String> {
         let mut connection = self.state.read_connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let current = history_version_in_connection(
             &transaction,
-            &version.conversation_id,
+            conversation_id,
             &self.state.instance_identity,
         )?;
         transaction.commit().map_err(storage_error)?;
-        Ok(current.is_some_and(|(current, _)| current == *version))
+        Ok(current.map(|(version, _)| version))
     }
 
     /// Returns one transactionally captured raw history. Active turns are readable but never

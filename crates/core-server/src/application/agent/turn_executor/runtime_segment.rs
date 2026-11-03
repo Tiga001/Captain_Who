@@ -549,6 +549,14 @@ impl AgentService {
                                 preferences.automation_execution_context.is_none()
                             })
                         {
+                            if let Some(observer) = service.prediction_seed_observer(
+                                &conversation_id,
+                                &assistant_message_id,
+                                &run_id,
+                                &agent_input,
+                            ) {
+                                host_services = host_services.with_prompt_prediction_seed_observer(observer);
+                            }
                             host_services = host_services.with_human_interaction_runtime(Arc::new(
                                 StoredBlockingHumanInput {
                                     service: service.clone(),

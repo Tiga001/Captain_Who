@@ -65,6 +65,8 @@ impl AgentService {
                 assistant_message_id: assistant_message_id.to_string(),
             },
         );
+        drop(active_turns);
+        self.predictions.invalidate_chat(conversation_id);
         Ok(())
     }
 

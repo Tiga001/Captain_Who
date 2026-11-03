@@ -82,6 +82,17 @@ fn collaboration_checkpoint_directory(
     Ok(snapshot.selector_directory.clone())
 }
 
+pub(super) enum PreparedContextView {
+    Running(AgentContextWindowSnapshotOutput),
+    Ready(Box<IdleContextView>),
+}
+
+pub(super) struct IdleContextView {
+    pub input: AgentChatInput,
+    pub projection: AgentContextWindowToolProjection,
+    conversation_started: bool,
+}
+
 impl AgentService {
     pub(crate) fn collaboration_directory_for_run(
         &self,
@@ -185,6 +196,46 @@ impl AgentService {
         &self,
         input: AgentContextWindowSnapshotInput,
     ) -> Result<AgentContextWindowSnapshotOutput, AgentServiceError> {
+        let conversation_id = normalized_optional(input.conversation_id.as_deref());
+        let model_config_id = input.model_id.trim().to_string();
+        let view = match self.prepare_context_view(input)? {
+            PreparedContextView::Running(snapshot) => return Ok(snapshot),
+            PreparedContextView::Ready(view) => view,
+        };
+        let IdleContextView {
+            input: agent_input,
+            projection: tool_projection,
+            conversation_started,
+        } = *view;
+        let mut snapshot = match conversation_id.as_deref() {
+            Some(conversation_id) => self.context_window_snapshot_with_projection_cache(
+                &agent_input,
+                conversation_id,
+                &tool_projection,
+            )?,
+            None => inspect_context_window_with_tool_projection(agent_input, &tool_projection)
+                .map_err(|error| error.to_string())?,
+        };
+        if !conversation_started {
+            if let Some(snapshot) = snapshot.as_mut() {
+                snapshot.input_tokens = 0;
+                snapshot.cost_breakdown = Default::default();
+                snapshot.remaining_input_tokens = snapshot
+                    .input_capacity_tokens
+                    .map(|capacity| i64::try_from(capacity).unwrap_or(i64::MAX));
+            }
+        }
+        Ok(AgentContextWindowSnapshotOutput {
+            model_config_id,
+            snapshot,
+        })
+    }
+
+    /// Read-only context shared by the input-window indicator and isolated composer sampling.
+    pub(super) fn prepare_context_view(
+        &self,
+        input: AgentContextWindowSnapshotInput,
+    ) -> Result<PreparedContextView, AgentServiceError> {
         let model_id = input.model_id.trim();
         if model_id.is_empty() {
             return Err("modelId 不能为空。".to_string().into());
@@ -304,10 +355,12 @@ impl AgentService {
                 if let Some(snapshot) =
                     self.cached_running_context_window_snapshot(run_id, &agent_input)
                 {
-                    return Ok(AgentContextWindowSnapshotOutput {
-                        model_config_id: model.id,
-                        snapshot: Some(snapshot),
-                    });
+                    return Ok(PreparedContextView::Running(
+                        AgentContextWindowSnapshotOutput {
+                            model_config_id: model.id,
+                            snapshot: Some(snapshot),
+                        },
+                    ));
                 }
             }
         }
@@ -399,28 +452,11 @@ impl AgentService {
             prepared_skills.resources.as_ref().map(Arc::clone),
         )?;
 
-        let mut snapshot = match conversation_id.as_deref() {
-            Some(conversation_id) => self.context_window_snapshot_with_projection_cache(
-                &agent_input,
-                conversation_id,
-                &tool_projection,
-            )?,
-            None => inspect_context_window_with_tool_projection(agent_input, &tool_projection)
-                .map_err(|error| error.to_string())?,
-        };
-        if !conversation_started {
-            if let Some(snapshot) = snapshot.as_mut() {
-                snapshot.input_tokens = 0;
-                snapshot.cost_breakdown = Default::default();
-                snapshot.remaining_input_tokens = snapshot
-                    .input_capacity_tokens
-                    .map(|capacity| i64::try_from(capacity).unwrap_or(i64::MAX));
-            }
-        }
-        Ok(AgentContextWindowSnapshotOutput {
-            model_config_id: model.id,
-            snapshot,
-        })
+        Ok(PreparedContextView::Ready(Box::new(IdleContextView {
+            input: agent_input,
+            projection: tool_projection,
+            conversation_started,
+        })))
     }
 
     pub(super) fn context_window_tool_projection(
@@ -1324,6 +1360,7 @@ impl AgentService {
     }
 
     pub fn invalidate_all_conversation_context_states(&self) {
+        self.clear_message_predictions();
         self.conversation_context_states
             .lock()
             .unwrap_or_else(|error| error.into_inner())
