@@ -164,7 +164,7 @@ export function AppShell() {
     attempt: composerDraftsStartupAttempt,
     markFailed: markComposerDraftsStartupFailed,
     markPending: markComposerDraftsStartupPending,
-    markReady: markComposerDraftsStartupReady
+    markReady: reportComposerDraftsReady
   } = useAppStartupStage('composerDrafts')
   const {
     attempt: conversationMetasStartupAttempt,
@@ -172,6 +172,11 @@ export function AppShell() {
     markPending: markConversationMetasStartupPending,
     markReady: markConversationMetasStartupReady
   } = useAppStartupStage('conversationMetas')
+  const [restoredDraftsAttempt, setRestoredDraftsAttempt] = useState<number | null>(null)
+  const markComposerDraftsStartupReady = useCallback(() => {
+    setRestoredDraftsAttempt(composerDraftsStartupAttempt)
+    reportComposerDraftsReady()
+  }, [composerDraftsStartupAttempt, reportComposerDraftsReady])
   const { enabledModels, models } = useModelSettings()
   const {
     projects,
@@ -1743,6 +1748,14 @@ export function AppShell() {
               </div>
             ) : (
               <ChatConversationPage
+                messagePredictionsEnabled={
+                  uiPreferences.predictNextUserMessage &&
+                  restoredDraftsAttempt === composerDraftsStartupAttempt &&
+                  visibleConversationId === activeConversation.id &&
+                  !forkRunBusy &&
+                  !forkCommandBusy &&
+                  !activeProviderTransitionConfirmation
+                }
                 commands={conversationCommands}
                 isManualCompactionRunning={manualCompaction.isRunning || !manualCompaction.ready}
                 manualCompactionOperations={manualCompaction.operations}

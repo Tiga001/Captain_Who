@@ -23,6 +23,7 @@ import {
   X
 } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { useNextUserMessagePrediction } from '../useNextUserMessagePrediction'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
 import { useLicense } from '../../license/LicenseContext'
 import { useTurnAccessIdentity } from '../../license/useTurnAccessIdentity'
@@ -118,6 +119,8 @@ interface ChatComposerProps {
   isGenerating?: boolean
   isModelTransitionRunning?: boolean
   inputPlaceholder?: string
+  predictionSourceId?: string
+  messagePredictionsEnabled?: boolean
   messageSyncKey?: string
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
@@ -157,6 +160,8 @@ export function ChatComposer({
   isGenerating = false,
   isModelTransitionRunning = false,
   inputPlaceholder,
+  predictionSourceId,
+  messagePredictionsEnabled = false,
   messageSyncKey,
   onDraftChange,
   onDraftMessageChange,
@@ -180,12 +185,13 @@ export function ChatComposer({
   const license = useLicense()
   const accessIdentity = useTurnAccessIdentity()
   const submitInFlightRef = useRef(false)
-  const { enabledModels } = useModelSettings()
+  const { configurationRevision, enabledModels } = useModelSettings()
   const { projects, openCreateProjectDialog } = useProjectSettings()
   const openImagePreview = useImagePreview()
   const commandListId = useId()
   const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false)
   const [isCapabilityCenterOpen, setIsCapabilityCenterOpen] = useState(false)
+  const [isModelPickerOpen, setIsModelPickerOpen] = useState(false)
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isCapabilityDialogOpen, setIsCapabilityDialogOpen] = useState(false)
   const [isCommandSession, setIsCommandSession] = useState(false)
@@ -419,6 +425,35 @@ export function ChatComposer({
     attachments.length > 0 ||
     folderReferences.length > 0 ||
     workspaceMentions.length > 0
+  const prediction = useNextUserMessagePrediction({
+    conversationId: resetKey,
+    assistantMessageId: predictionSourceId,
+    modelId: selectedModel?.id,
+    configurationRevision,
+    accountId: accountAuth?.state.profile?.userId,
+    eligible:
+      messagePredictionsEnabled &&
+      message === '' &&
+      draft.message === '' &&
+      !hasSendableContent &&
+      !isSuspended &&
+      !isGenerating &&
+      !isResumeStarting &&
+      !isModelSelectionDisabled &&
+      !attachmentImports.hasPending &&
+      !restoringAttachmentIds.size &&
+      !draft.queuedMessages.length &&
+      !draft.skills.length &&
+      !isCommandMenuOpen &&
+      !isModelPickerOpen &&
+      !isMentionMenuOpen &&
+      !isAttachmentMenuOpen &&
+      !isPermissionMenuOpen &&
+      !isProjectMenuOpen &&
+      !isFullPermissionConfirmationOpen &&
+      (!accountAuth || accountAuth.canStartTurn()) &&
+      (!license || license.canStartTurn())
+  })
   const hasInvalidSkillSelection = hasStaleSkillSelection || hasUnavailableSkillSelection
   const canSend =
     hasSendableContent &&
@@ -746,7 +781,7 @@ export function ChatComposer({
     const nextHeight = Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT)
     textarea.style.height = `${nextHeight}px`
     textarea.style.overflowY = textarea.scrollHeight > TEXTAREA_MAX_HEIGHT ? 'auto' : 'hidden'
-  }, [message])
+  }, [message, prediction.suggestion])
 
   const executeCommand = async (command: ComposerCommand) => {
     if (command.disabledReason || commandExecutingRef.current) return
@@ -1358,6 +1393,7 @@ export function ChatComposer({
           void addDroppedItems(event.dataTransfer)
         }}
         onPaste={(event) => {
+          prediction.dismiss()
           commandTriggerRef.current = false
           setIsCommandSession(false)
           setIsCommandMenuOpen(false)
@@ -1493,8 +1529,9 @@ export function ChatComposer({
         <textarea
           ref={textareaRef}
           value={message}
-          placeholder={inputPlaceholder ?? t('chat.inputPlaceholder')}
+          placeholder={prediction.suggestion ?? inputPlaceholder ?? t('chat.inputPlaceholder')}
           aria-label={t('chat.inputAria')}
+          aria-keyshortcuts={prediction.suggestion ? 'Tab' : undefined}
           disabled={isModelTransitionRunning}
           rows={1}
           aria-controls={isCommandMenuOpen && !isCommandSubmenuOpen ? commandListId : undefined}
@@ -1507,6 +1544,7 @@ export function ChatComposer({
           onChange={(event) => {
             setIsCapabilityCenterOpen(false)
             setIsModelMenuOpen(false)
+            prediction.dismiss()
             const nextMessage = event.target.value
             const native = event.nativeEvent as InputEvent
             const onlyMentionsBeforeInput =
@@ -1564,6 +1602,7 @@ export function ChatComposer({
             }
           }}
           onCompositionStart={() => {
+            prediction.dismiss()
             isComposingRef.current = true
           }}
           onCompositionEnd={() => {
@@ -1572,6 +1611,22 @@ export function ChatComposer({
           }}
           onKeyDown={(event) => {
             if (isConfirmingImeInput(event)) return
+            if (
+              prediction.suggestion &&
+              !event.defaultPrevented &&
+              event.currentTarget.ownerDocument.activeElement === event.currentTarget &&
+              event.key === 'Tab' &&
+              !event.shiftKey &&
+              !event.altKey &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              event.currentTarget.value === ''
+            ) {
+              event.preventDefault()
+              updateDraftMessage(prediction.suggestion)
+              prediction.dismiss()
+              return
+            }
             if (isMentionMenuOpen) {
               if (event.key === 'Escape') {
                 event.preventDefault()
@@ -1825,6 +1880,7 @@ export function ChatComposer({
             disabled={isModelSelectionDisabled}
             emptyLabel={t('chat.noEnabledModels')}
             portalMenu={portalMenus}
+            onOpenChange={setIsModelPickerOpen}
             onChange={selectModelConfig}
             options={modelOptions}
             value={selectedModel?.id ?? null}

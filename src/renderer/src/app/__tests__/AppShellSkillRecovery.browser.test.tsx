@@ -441,6 +441,7 @@ vi.mock('../../features/chat/NewConversationPage', () => ({
 }))
 vi.mock('../../features/chat/ChatConversationPage', () => ({
   ChatConversationPage: ({
+    messagePredictionsEnabled,
     commands,
     composerDraft,
     conversation,
@@ -467,6 +468,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     scrollTargetMessageId,
     skillCatalogRefreshToken
   }: {
+    messagePredictionsEnabled?: boolean
     commands?: readonly ComposerCommand[]
     composerDraft: ChatComposerDraft
     conversation: ChatConversation
@@ -549,7 +551,12 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <output data-testid="approval-count">
         {conversation.messages.at(-1)?.agentRun?.approvals.length ?? 0}
       </output>
-      <output data-testid="active-conversation-id">{conversation.id}</output>
+      <output
+        data-testid="active-conversation-id"
+        data-prediction-enabled={Boolean(messagePredictionsEnabled)}
+      >
+        {conversation.id}
+      </output>
       <output data-testid="scroll-target-message-id">{scrollTargetMessageId ?? 'none'}</output>
       <output data-testid="conversation-updated-at">{conversation.updatedAt}</output>
       <output data-testid="draft-model-id">{composerDraft.modelId}</output>
@@ -2306,6 +2313,20 @@ describe('provider transition guard', () => {
 })
 
 describe('conversation startup loading', () => {
+  it('waits for restored drafts before enabling catch-up when opening an idle saved chat', async () => {
+    const pending = deferred<Record<string, ChatComposerDraft>>()
+    testState.loadComposerDrafts.mockReturnValueOnce(pending.promise)
+    testState.loadUiPreferences.mockResolvedValueOnce({
+      ...defaultUiPreferences(),
+      predictNextUserMessage: true
+    })
+    const screen = await renderSelectedConversation()
+    const active = screen.getByTestId('active-conversation-id')
+    await expect.element(active).toHaveAttribute('data-prediction-enabled', 'false')
+    pending.resolve({})
+    await expect.element(active).toHaveAttribute('data-prediction-enabled', 'true')
+  })
+
   it('keeps the prompt stable when the global new-conversation action is repeated on the root page', async () => {
     const screen = await render(<AppShell />)
     const promptIndex = screen.getByTestId('new-conversation-prompt-index')

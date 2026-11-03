@@ -21,8 +21,12 @@ const { execute, fork, submit, stop, changed, translate, workspaceActions } = vi
     agents: vi.fn()
   }
 }))
-const modelState = vi.hoisted(() => ({ enabledModels: [] as ModelConfig[] }))
-vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
+const modelState = vi.hoisted(() => ({
+  enabledModels: [] as ModelConfig[],
+  configurationRevision: 'revision-1'
+}))
+const { predictNextUserMessage } = vi.hoisted(() => ({ predictNextUserMessage: vi.fn() }))
+vi.mock('../../host/hostClient', () => ({ hostClient: { agent: { predictNextUserMessage } } }))
 const attachmentMocks = vi.hoisted(() => ({ build: vi.fn() }))
 vi.mock('../../features/agentRun/useProviderTransition', () => ({
   useProviderTransition: () => ({
@@ -199,6 +203,9 @@ function CapabilityMenuFixture({
 
 function TestComposer({
   message = '',
+  predictionSourceId,
+  conversationId,
+  predictionsEnabled = false,
   disabled = false,
   running = false,
   maintenance = false,
@@ -213,6 +220,9 @@ function TestComposer({
   onSubmitMessage = submit
 }: {
   message?: string
+  predictionSourceId?: string
+  conversationId?: string
+  predictionsEnabled?: boolean
   disabled?: boolean
   running?: boolean
   maintenance?: boolean
@@ -236,6 +246,9 @@ function TestComposer({
   return (
     <div style={{ marginTop: 300, width: 650 }}>
       <ChatComposer
+        predictionSourceId={predictionSourceId}
+        resetKey={conversationId}
+        messagePredictionsEnabled={predictionsEnabled}
         commands={[
           { id: 'model', label: '模型', description: '查看并切换模型' },
           {
@@ -284,9 +297,11 @@ let previousRootStyle: string | null
 let previousViewport: { width: number; height: number }
 beforeEach(async () => {
   vi.clearAllMocks()
+  predictNextUserMessage.mockReset()
   attachmentMocks.build.mockReset().mockImplementation((attachments: unknown[]) => attachments)
   translate.mockImplementation((key: string) => key)
   modelState.enabledModels = [modelFixture()]
+  modelState.configurationRevision = 'revision-1'
   previousRootStyle = document.documentElement.getAttribute('style')
   const theme = getFrontendTheme('classic-light')
   for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, theme.tokens))) {
@@ -1304,4 +1319,119 @@ it('keeps folder payloads on the normal send action after a stop', async () => {
   )
   await expect.element(view.getByRole('button', { name: 'chat.send', exact: true })).toBeEnabled()
   expect(view.container.querySelector('[data-state="resume"]')).toBeNull()
+})
+
+it('shows the forecast outside the draft and accepts only plain Tab without submitting', async () => {
+  predictNextUserMessage.mockResolvedValue({ suggestion: '请继续测试。' })
+  const props = {
+    conversationId: 'chat-a',
+    predictionSourceId: 'reply-a',
+    predictionsEnabled: true
+  }
+  const view = await render(<TestComposer {...props} />)
+  const input = view.container.querySelector('textarea')!
+  await expect.poll(() => input.placeholder).toBe('请继续测试。')
+  expect(input.value).toBe('')
+  expect(changed).not.toHaveBeenCalled()
+  expect(predictNextUserMessage).toHaveBeenCalledWith({
+    conversationId: 'chat-a',
+    assistantMessageId: 'reply-a',
+    modelId: 'model-1'
+  })
+
+  input.focus()
+  await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
+  expect(input.value).toBe('')
+  input.focus()
+  await userEvent.keyboard('{Tab}')
+  expect(input.value).toBe('请继续测试。')
+  expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({ message: '请继续测试。' }))
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('keeps a late forecast scoped to its chat and reattaches on return to the same turn', async () => {
+  const resultA = Promise.withResolvers<{ suggestion: string }>()
+  const resultB = Promise.withResolvers<{ suggestion: string }>()
+  predictNextUserMessage.mockImplementation(({ conversationId }) =>
+    conversationId === 'A' ? resultA.promise : resultB.promise
+  )
+  const chat = (conversationId: string) => (
+    <TestComposer conversationId={conversationId} predictionSourceId="same-id" predictionsEnabled />
+  )
+  const view = await render(chat('A'))
+  const input = view.container.querySelector('textarea')!
+  await view.rerender(chat('B'))
+  await expect.poll(() => predictNextUserMessage.mock.calls.length).toBe(2)
+  resultA.resolve({ suggestion: 'next for A' })
+  await Promise.resolve()
+  expect(input.placeholder).toBe('chat.inputPlaceholder')
+  await view.rerender(chat('A'))
+  await expect.poll(() => input.placeholder).toBe('next for A')
+  resultB.resolve({ suggestion: 'next for B' })
+  await Promise.resolve()
+  expect(input.placeholder).toBe('next for A')
+})
+
+it('dismisses a pending forecast for the turn on typing, even after erasing or IME confirmation', async () => {
+  const pending = Promise.withResolvers<{ suggestion: string }>()
+  predictNextUserMessage.mockReturnValue(pending.promise)
+  const view = await render(
+    <TestComposer conversationId="chat" predictionSourceId="first" predictionsEnabled />
+  )
+  const input = view.container.querySelector('textarea')!
+  input.focus()
+  await userEvent.keyboard('x{Backspace}')
+  pending.resolve({ suggestion: 'first reply' })
+  await Promise.resolve()
+  expect(input.value).toBe('')
+  expect(input.placeholder).toBe('chat.inputPlaceholder')
+  expect(predictNextUserMessage).toHaveBeenCalledTimes(1)
+
+  predictNextUserMessage.mockResolvedValue({ suggestion: 'new reply' })
+  await view.rerender(
+    <TestComposer conversationId="chat" predictionSourceId="next" predictionsEnabled />
+  )
+  await expect.poll(() => input.placeholder).toBe('new reply')
+  input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  await expect.poll(() => input.placeholder).toBe('chat.inputPlaceholder')
+  input.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, isComposing: true })
+  )
+  input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+  expect(input.value).toBe('')
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('skips predictions for disabled, running, and restored nonempty composer states', async () => {
+  const props = { conversationId: 'chat', predictionSourceId: 'answer' }
+  const view = await render(<TestComposer {...props} />)
+  await view.rerender(<TestComposer {...props} predictionsEnabled running />)
+  await view.rerender(<TestComposer key="restored" {...props} predictionsEnabled message=" " />)
+  expect(predictNextUserMessage).not.toHaveBeenCalled()
+})
+
+it('invalidates the visible forecast when the same model configuration is revised', async () => {
+  predictNextUserMessage
+    .mockResolvedValueOnce({ suggestion: 'old config' })
+    .mockResolvedValueOnce({ suggestion: 'new config' })
+  const props = { conversationId: 'chat', predictionSourceId: 'answer', predictionsEnabled: true }
+  const view = await render(<TestComposer {...props} />)
+  const input = view.container.querySelector('textarea')!
+  await expect.poll(() => input.placeholder).toBe('old config')
+  modelState.configurationRevision = 'revision-2'
+  await view.rerender(<TestComposer {...props} />)
+  await expect.poll(() => input.placeholder).toBe('new config')
+})
+
+it('retries a transient forecast failure while the same turn remains eligible', async () => {
+  predictNextUserMessage
+    .mockRejectedValueOnce(new Error('final message is not committed yet'))
+    .mockResolvedValueOnce({ suggestion: 'next after commit' })
+  const view = await render(
+    <TestComposer conversationId="chat" predictionSourceId="answer" predictionsEnabled />
+  )
+  const input = view.container.querySelector('textarea')!
+  await expect.poll(() => input.placeholder, { timeout: 4000 }).toBe('next after commit')
+  expect(predictNextUserMessage).toHaveBeenCalledTimes(2)
+  expect(changed).not.toHaveBeenCalled()
 })

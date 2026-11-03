@@ -34,6 +34,7 @@ interface ModelSaveOptions {
 }
 
 interface ModelSettingsContextValue {
+  configurationRevision: string | null
   apiUrl: string
   apiTokenStatus: CredentialStatus
   enabledModels: ModelConfig[]
@@ -421,6 +422,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     const enabledModels = settings.models.filter((model) => model.execution.status === 'available')
 
     return {
+      configurationRevision: settings.configurationRevision,
       apiUrl,
       apiTokenStatus,
       enabledModels,

@@ -98,6 +98,7 @@ interface ConversationSurfaceCommonProps {
 
 export interface InteractiveConversationSurfaceProps extends ConversationSurfaceCommonProps {
   mode: 'interactive'
+  messagePredictionsEnabled?: boolean
   forkDisabledReason?: string
   commands?: readonly ComposerCommand[]
   isManualCompactionRunning?: boolean
@@ -799,6 +800,12 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   }, [conversation.messages, humanInteraction.requests])
   const { activeAssistantRun, isGenerating, lastAssistantMessageId, lastCommittedUserMessageId } =
     messageSummary
+  const latestMessage = conversation.messages.at(-1)
+  const predictionSourceComplete =
+    latestMessage?.role === 'assistant' &&
+    (latestMessage.status === 'sent' || latestMessage.status == null) &&
+    (!latestMessage.agentRun || latestMessage.agentRun.status === 'completed') &&
+    Boolean(latestMessage.content.trim())
   const canGuideQueuedMessages = Boolean(
     activeAssistantRun?.runId && activeAssistantRun.status === 'running'
   )
@@ -1080,6 +1087,16 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             inert={isComposerSuspended}
           >
             <ChatComposer
+              predictionSourceId={
+                latestMessage?.role === 'assistant' ? latestMessage.id : undefined
+              }
+              messagePredictionsEnabled={
+                interactive.messagePredictionsEnabled &&
+                predictionSourceComplete &&
+                conversation.messagesLoaded !== false &&
+                !conversation.archivedAt &&
+                conversation.pendingArchivedAt == null
+              }
               isSuspended={isComposerSuspended}
               commands={interactive.commands}
               isManualCompactionRunning={interactive.isManualCompactionRunning}

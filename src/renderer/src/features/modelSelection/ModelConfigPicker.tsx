@@ -19,6 +19,7 @@ interface ModelConfigPickerProps {
   disabled?: boolean
   emptyLabel: string
   onChange: (modelConfigId: string) => void
+  onOpenChange?: (isOpen: boolean) => void
   options: readonly ModelConfigPickerOption[]
   portalMenu?: boolean
   popoverClassName?: string
@@ -38,6 +39,7 @@ export function ModelConfigPicker({
   disabled = false,
   emptyLabel,
   onChange,
+  onOpenChange,
   options,
   portalMenu = false,
   popoverClassName,
@@ -47,6 +49,7 @@ export function ModelConfigPicker({
   variant
 }: ModelConfigPickerProps) {
   const [isOpen, setOpen] = useState(false)
+  useEffect(() => onOpenChange?.(isOpen), [isOpen, onOpenChange])
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
