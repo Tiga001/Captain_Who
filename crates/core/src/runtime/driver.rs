@@ -1316,6 +1316,9 @@ impl AgentRuntime {
                         }
                         break 'agent_loop response_content;
                     }
+                    // An intermediate sampling frame may hold large images and private provider
+                    // state. Release it before tool execution, which can outlive the request.
+                    drop(request);
                     response_fence_corrections = 0;
 
                     if model_request_index >= self.max_tool_iterations {
