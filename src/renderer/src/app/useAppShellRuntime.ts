@@ -416,7 +416,22 @@ export function useAppShellRuntime({
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
 
-  const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
+  useEffect(
+    () =>
+      hostClient.storage?.onPredictionPreferenceChanged?.((enabled) => {
+        setUiPreferences((current) => ({ ...current, predictNextUserMessage: enabled }))
+      }),
+    [setUiPreferences]
+  )
+
+  const updateUiPreferences = useCallback(async (patch: Partial<UiPreferencesSnapshot>) => {
+    if (patch.predictNextUserMessage !== undefined) {
+      const enabled = patch.predictNextUserMessage
+      return hostClient.storage.setPredictionPreference(enabled).then(() => {
+        setUiPreferences((current) => ({ ...current, predictNextUserMessage: enabled }))
+      })
+    }
+
     setUiPreferences((currentPreferences) => {
       const nextPreferences = {
         ...currentPreferences,

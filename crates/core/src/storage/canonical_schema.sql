@@ -7876,3 +7876,23 @@ BEGIN
         SELECT created_at FROM (SELECT created_at FROM manual_context_compaction_usage_records WHERE (created_at - ((created_at % 3600000 + 3600000) % 3600000)) = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1)
     )) WHERE usage_hour = (OLD.created_at - ((OLD.created_at % 3600000 + 3600000) % 3600000)) AND model_id = OLD.model_id AND model_name = OLD.model_name AND last_observed_at = OLD.created_at AND OLD.cleared_at IS NULL;
 END;
+
+-- Next-message prediction preference and consent generation, schema v72.
+ALTER TABLE ui_preferences ADD COLUMN predict_next_user_message INTEGER NOT NULL DEFAULT 0 CHECK (predict_next_user_message IN (0,1));
+ALTER TABLE ui_preferences ADD COLUMN prediction_generation INTEGER NOT NULL DEFAULT 0 CHECK (prediction_generation >= 0);
+
+-- One receipt per dispatched prediction, including attempts with no reported token usage.
+CREATE TABLE message_prediction_usage (
+    request_id TEXT PRIMARY KEY NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    model_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    billable_request_count INTEGER NOT NULL CHECK (billable_request_count >= 0),
+    input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER,
+    output_thinking_tokens INTEGER, total_tokens INTEGER, cache_creation_input_tokens INTEGER,
+    input_price TEXT NOT NULL, cached_input_price TEXT NOT NULL, output_price TEXT NOT NULL,
+    estimated_cost REAL, cleared_at INTEGER
+);
+CREATE INDEX idx_message_prediction_usage_time ON message_prediction_usage(created_at) WHERE cleared_at IS NULL;
+CREATE INDEX idx_message_prediction_usage_conversation ON message_prediction_usage(conversation_id);

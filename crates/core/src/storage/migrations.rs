@@ -1,7 +1,7 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 71;
+pub const STORAGE_SCHEMA_VERSION: i32 = 72;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
@@ -37,8 +37,10 @@ const V69_SCHEMA_FINGERPRINT: &str =
     "sha256:8532d89f095b602369e576f3541172a7b872b7e22619228865cc9cf85eb403d8";
 const V70_SCHEMA_FINGERPRINT: &str =
     "sha256:843221527806ceaf0563ede4973442c4040432cc9827639d0d411951ef66714b";
-const CANONICAL_SCHEMA_FINGERPRINT: &str =
+const V71_SCHEMA_FINGERPRINT: &str =
     "sha256:ce54b37ebd2b7243acfdcc875db55cc3a673ed4bb0c4d3f587b72c4496f50054";
+const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:f23d05f9c1ca9b5130e0cb5ae0e5235f01e62ff8af103de080b4fd6fe586fce7";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -61,6 +63,7 @@ const CANONICAL_SCHEMA_FINGERPRINT: &str =
 /// v69 skips full-text index rewrites for unchanged message values, preserving existing history.
 /// v70 keeps organization recovery cursors as transaction-owned metadata, without reading bodies.
 /// v71 incrementally projects billing ledgers into exact hourly aggregates, with raw fallback.
+/// v72 adds opt-in composer prediction state and independent prediction billing receipts.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -154,6 +157,15 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if read_schema_version(connection)? == 70 {
         install_billing_hourly_aggregates_v70(connection)?;
+    }
+
+    if read_schema_version(connection)? == 71 {
+        let transaction = connection.unchecked_transaction()?;
+        validate_schema_fingerprint(&transaction, V71_SCHEMA_FINGERPRINT)?;
+        transaction.execute_batch(prediction_schema())?;
+        transaction.pragma_update(None, "user_version", 72)?;
+        validate_canonical_schema(&transaction)?;
+        transaction.commit()?;
     }
 
     let schema_version = read_schema_version(connection)?;
@@ -501,13 +513,23 @@ fn workflow_recovery_metadata_schema() -> &'static str {
         .unwrap();
     &CANONICAL_SCHEMA[start..end]
 }
+fn prediction_schema() -> &'static str {
+    &CANONICAL_SCHEMA[CANONICAL_SCHEMA
+        .find("-- Next-message prediction preference and consent generation, schema v72.")
+        .unwrap()..]
+}
 fn billing_hourly_aggregates_schema() -> &'static str {
     &CANONICAL_SCHEMA[CANONICAL_SCHEMA
         .find("-- Incremental billing hour aggregates, schema v71.")
-        .unwrap()..]
+        .unwrap()
+        ..CANONICAL_SCHEMA
+            .find("-- Next-message prediction preference and consent generation, schema v72.")
+            .unwrap()]
 }
 fn canonical_schema_v70() -> String {
-    CANONICAL_SCHEMA.replace(billing_hourly_aggregates_schema(), "")
+    CANONICAL_SCHEMA
+        .replace(prediction_schema(), "")
+        .replace(billing_hourly_aggregates_schema(), "")
 }
 fn canonical_schema_v69() -> String {
     canonical_schema_v70().replace(workflow_recovery_metadata_schema(), "")
@@ -550,7 +572,7 @@ fn install_billing_hourly_aggregates_v70(connection: &Connection) -> rusqlite::R
     validate_schema_fingerprint(&transaction, V70_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(billing_hourly_aggregates_schema())?;
     transaction.pragma_update(None, "user_version", 71)?;
-    validate_canonical_schema(&transaction)?;
+    validate_schema_fingerprint(&transaction, V71_SCHEMA_FINGERPRINT)?;
     transaction.commit()
 }
 fn retired_workflow_cleanup_schema() -> &'static str {

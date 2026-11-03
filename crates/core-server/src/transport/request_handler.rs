@@ -946,6 +946,22 @@ pub(crate) fn handle_request(
         STORAGE_LOAD_UI_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_ui_preferences())
         }
+        mycopilot_protocol_rs::STORAGE_SET_PREDICTION_PREFERENCE_METHOD => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Input {
+                enabled: bool,
+            }
+            let input = match parse_params::<Input>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let result = storage.set_prediction_preference(input.enabled);
+            if result.is_ok() {
+                agent_service.clear_message_predictions();
+            }
+            storage_response(request.id, result)
+        }
         STORAGE_SAVE_UI_PREFERENCES_METHOD => {
             let preferences = match parse_params::<UiPreferencesRecord>(request.params) {
                 Ok(preferences) => preferences,

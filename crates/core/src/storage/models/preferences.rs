@@ -14,6 +14,8 @@ pub struct UiPreferencesRecord {
     pub native_font_smoothing: bool,
     pub show_token_usage_details: bool,
     pub show_context_window_usage: bool,
+    #[serde(default)]
+    pub predict_next_user_message: bool,
     pub translucent_sidebar: bool,
     pub translucent_sidebar_transparency: i64,
     pub full_permission_enabled: bool,

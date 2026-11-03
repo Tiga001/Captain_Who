@@ -272,7 +272,7 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v71**，唯一真源为 [`STORAGE_SCHEMA_VERSION`](../../crates/core/src/storage/migrations.rs)。SQLite schema、Runtime checkpoint 和事件 DTO 版本彼此独立。
+当前 canonical storage 是 **v72**，唯一真源为 [`STORAGE_SCHEMA_VERSION`](../../crates/core/src/storage/migrations.rs)。SQLite schema、Runtime checkpoint 和事件 DTO 版本彼此独立。
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 

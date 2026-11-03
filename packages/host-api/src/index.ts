@@ -489,6 +489,8 @@ export interface StorageHostApi {
   saveComposerDraft(draft: StorageComposerDraftRecord): Promise<StorageComposerDraftRecord>
   saveComposerDraftMessage(input: StorageComposerDraftMessageUpdate): Promise<boolean>
   loadUiPreferences(): Promise<StorageUiPreferencesRecord>
+  setPredictionPreference(enabled: boolean): Promise<void>
+  onPredictionPreferenceChanged(handler: (enabled: boolean) => void): () => void
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
   loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null>

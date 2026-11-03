@@ -108,6 +108,16 @@ export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): Storage
     saveComposerDraftMessage: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveComposerDraftMessage, input),
     loadUiPreferences: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadUiPreferences),
+    setPredictionPreference: (enabled) =>
+      ipcRenderer.invoke(HOST_CHANNELS.storage.setPredictionPreference, enabled),
+    onPredictionPreferenceChanged: (handler) => {
+      const listener = (_event: unknown, enabled: unknown): void => {
+        if (typeof enabled === 'boolean') handler(enabled)
+      }
+      ipcRenderer.on(HOST_CHANNELS.storage.predictionPreferenceChanged, listener)
+      return () =>
+        ipcRenderer.removeListener(HOST_CHANNELS.storage.predictionPreferenceChanged, listener)
+    },
     saveUiPreferences: (preferences) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveUiPreferences, preferences),
     selectProfileAvatar: () => ipcRenderer.invoke(HOST_CHANNELS.storage.selectProfileAvatar),

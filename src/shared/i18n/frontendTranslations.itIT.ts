@@ -962,6 +962,10 @@ export const itITTranslations = {
   'general.languageAria': "Lingua dell'applicazione",
   'general.sectionGeneral': 'Generale',
   'general.sectionComposer': 'Compositore',
+  'general.predictNextUserMessage': 'Prevedi il mio prossimo messaggio',
+  'general.predictionDescription':
+    'Dopo una risposta, il modello selezionato suggerisce una bozza modificabile. Ogni previsione può comportare costi.',
+  'general.predictionSaveFailed': 'Impossibile salvare questa preferenza.',
   'general.showContextWindowUsage': "Mostra l'utilizzo della finestra di contesto",
   'general.sectionPermissions': 'Autorizzazioni',
   'general.customPermissions': 'Autorizzazioni personalizzate',

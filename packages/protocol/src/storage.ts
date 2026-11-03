@@ -553,6 +553,7 @@ export interface StorageUiPreferencesRecord {
   nativeFontSmoothing: boolean
   showTokenUsageDetails: boolean
   showContextWindowUsage: boolean
+  predictNextUserMessage?: boolean
   translucentSidebar: boolean
   translucentSidebarTransparency: number
   fullPermissionEnabled: boolean

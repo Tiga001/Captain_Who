@@ -40,6 +40,11 @@ export const generalSettingsNodes = defineSettingsNodes([
     title: 'general.sectionGeneral',
     children: [
       {
+        id: 'general.predictNextUserMessage',
+        title: 'general.predictNextUserMessage',
+        description: 'general.predictionDescription'
+      },
+      {
         id: 'general.language',
         title: 'general.language',
         terms: appLanguageOptions.map((option) => ({ text: option.label }))

@@ -40,7 +40,8 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                 custom_builtin_execution_permission,
                 full_permission_enabled,
                 custom_permission_enabled,
-                updated_at
+                updated_at,
+                predict_next_user_message
             FROM ui_preferences
             WHERE id = 'default'
             ",
@@ -74,6 +75,7 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                     full_permission_enabled: row.get::<_, i64>(17)? != 0,
                     custom_permission_enabled: row.get::<_, i64>(18)? != 0,
                     updated_at: row.get(19)?,
+                    predict_next_user_message: row.get(20)?,
                 })
             },
         )
@@ -181,10 +183,29 @@ pub fn save_ui_preferences(
         ],
     )?;
 
-    Ok(UiPreferencesRecord {
-        updated_at: timestamp,
-        ..preferences
-    })
+    // An unrelated whole-record save must not change or echo stale prediction consent.
+    load_ui_preferences(connection)
+}
+
+pub fn load_prediction_preference(connection: &Connection) -> rusqlite::Result<(bool, i64)> {
+    Ok(connection.query_row(
+        "SELECT predict_next_user_message, prediction_generation FROM ui_preferences WHERE id='default'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?.unwrap_or((false, 0)))
+}
+
+pub fn set_prediction_preference(connection: &Connection, enabled: bool) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO ui_preferences (id, sidebar_conversation_sort, sidebar_project_sort,
+            sidebar_section_order, updated_at, predict_next_user_message, prediction_generation)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(id) DO UPDATE SET predict_next_user_message=excluded.predict_next_user_message,
+            prediction_generation=ui_preferences.prediction_generation+1, updated_at=excluded.updated_at
+         WHERE ui_preferences.predict_next_user_message <> excluded.predict_next_user_message",
+        params![DEFAULT_CONVERSATION_SORT, DEFAULT_PROJECT_SORT, DEFAULT_SECTION_ORDER, now_ms(), enabled],
+    )?;
+    Ok(())
 }
 
 fn default_ui_preferences() -> UiPreferencesRecord {
@@ -199,6 +220,7 @@ fn default_ui_preferences() -> UiPreferencesRecord {
         native_font_smoothing: false,
         show_token_usage_details: true,
         show_context_window_usage: true,
+        predict_next_user_message: false,
         translucent_sidebar: false,
         translucent_sidebar_transparency: DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
         full_permission_enabled: true,
@@ -242,6 +264,7 @@ fn normalize_preferences(preferences: UiPreferencesRecord) -> UiPreferencesRecor
         native_font_smoothing: preferences.native_font_smoothing,
         show_token_usage_details: preferences.show_token_usage_details,
         show_context_window_usage: preferences.show_context_window_usage,
+        predict_next_user_message: preferences.predict_next_user_message,
         translucent_sidebar: preferences.translucent_sidebar,
         translucent_sidebar_transparency: preferences.translucent_sidebar_transparency.clamp(
             MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
@@ -387,6 +410,24 @@ fn normalize_value(value: &str, allowed_values: &[&str], fallback: &str) -> Stri
 mod tests {
     use super::*;
     use crate::storage::migrations;
+
+    #[test]
+    fn stale_ui_save_preserves_prediction_consent_and_generation() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::storage::migrations::run_migrations(&db).unwrap();
+        let stale = load_ui_preferences(&db).unwrap();
+        assert_eq!(load_prediction_preference(&db).unwrap(), (false, 0));
+        set_prediction_preference(&db, true).unwrap();
+        assert!(
+            save_ui_preferences(&db, stale)
+                .unwrap()
+                .predict_next_user_message
+        );
+        set_prediction_preference(&db, true).unwrap();
+        assert_eq!(load_prediction_preference(&db).unwrap(), (true, 1));
+        set_prediction_preference(&db, false).unwrap();
+        assert_eq!(load_prediction_preference(&db).unwrap(), (false, 2));
+    }
 
     #[test]
     fn custom_permissions_use_expected_defaults_and_round_trip() {

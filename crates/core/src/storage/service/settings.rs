@@ -1613,6 +1613,19 @@ impl StorageService {
         preferences_repository::load_ui_preferences(&connection).map_err(storage_error)
     }
 
+    pub fn load_prediction_preference(&self) -> Result<(bool, i64), String> {
+        let connection = self.state.read_connection()?;
+        preferences_repository::load_prediction_preference(&connection).map_err(storage_error)
+    }
+
+    pub fn set_prediction_preference(&self, enabled: bool) -> Result<(), String> {
+        self.state
+            .write_sync(1, StorageWriteClass::Control, |connection| {
+                preferences_repository::set_prediction_preference(connection, enabled)
+                    .map_err(storage_error)
+            })?
+    }
+
     pub fn save_ui_preferences(
         &self,
         preferences: UiPreferencesRecord,

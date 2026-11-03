@@ -1371,6 +1371,11 @@ fn build_fresh_database(
         storage
             .save_ui_preferences(configuration.ui_preferences.clone())
             .map_err(|_| io::Error::other("failed to restore UI preferences"))?;
+        if configuration.ui_preferences.predict_next_user_message {
+            storage
+                .set_prediction_preference(true)
+                .map_err(|_| io::Error::other("failed to restore prediction preference"))?;
+        }
         storage
             .save_agent_prompt_preferences(configuration.agent_prompt_preferences.clone())
             .map_err(|_| io::Error::other("failed to restore agent prompt preferences"))?;

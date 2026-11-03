@@ -398,6 +398,7 @@ describe('Skills settings navigation and management inventory', () => {
           profileDisplayName: '',
           profileHandle: 'USER',
           showContextWindowUsage: true,
+          predictNextUserMessage: false,
           showTokenUsageDetails: true,
           sidebarConversationSort: 'updated',
           sidebarProjectOrder: [],

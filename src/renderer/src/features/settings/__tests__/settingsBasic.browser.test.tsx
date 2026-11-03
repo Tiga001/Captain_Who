@@ -119,6 +119,7 @@ const preferences: UiPreferencesSnapshot = {
   nativeFontSmoothing: false,
   showTokenUsageDetails: true,
   showContextWindowUsage: true,
+  predictNextUserMessage: false,
   translucentSidebar: true,
   translucentSidebarTransparency: 54,
   fullPermissionEnabled: true,
@@ -208,6 +209,17 @@ describe('basic settings definitions and real page targets', () => {
       screen.container.querySelector('[data-setting-id="appearance.nativeFontSmoothing"]')
     ).toBeNull()
     expect(screen.container.querySelector('[data-setting-id="notifications"]')).toBeNull()
+  })
+
+  it('lets users opt into billed next-message drafts from General', async () => {
+    const change = vi.fn()
+    const screen = await render(
+      <GeneralSettingsPage uiPreferences={preferences} onUiPreferencesChange={change} />
+    )
+    const toggle = screen.getByRole('switch', { name: t('general.predictNextUserMessage') })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await toggle.click()
+    expect(change).toHaveBeenCalledWith({ predictNextUserMessage: true })
   })
 
   it('finds the actual theme selector through its existing system option label', () => {

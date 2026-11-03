@@ -1,3 +1,4 @@
+import { BrowserWindow } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import {
   captureHostInvocation,
@@ -171,6 +172,18 @@ export function registerStorageIpc(
     coreServer.saveComposerDraftMessage(input)
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadUiPreferences, () => coreServer.loadUiPreferences())
+  ipcMain.handle(
+    HOST_CHANNELS.storage.setPredictionPreference,
+    async (_event, enabled: unknown) => {
+      if (typeof enabled !== 'boolean') throw new Error('Invalid prediction preference')
+      await coreServer.setPredictionPreference(enabled)
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+          window.webContents.send(HOST_CHANNELS.storage.predictionPreferenceChanged, enabled)
+        }
+      }
+    }
+  )
   ipcMain.handle(HOST_CHANNELS.storage.saveUiPreferences, (_event, preferences) =>
     coreServer.saveUiPreferences(preferences)
   )

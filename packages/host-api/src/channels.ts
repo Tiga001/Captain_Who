@@ -275,6 +275,8 @@ export const HOST_CHANNELS = {
     saveConversationMeta: 'host:storage.saveConversationMeta',
     saveModelSettings: 'host:storage.saveModelSettings',
     saveProject: 'host:storage.saveProject',
+    setPredictionPreference: 'host:storage.setPredictionPreference',
+    predictionPreferenceChanged: 'host:storage.predictionPreferenceChanged',
     saveUiPreferences: 'host:storage.saveUiPreferences',
     selectProfileAvatar: 'host:storage.selectProfileAvatar',
     showProjectInFolder: 'host:storage.showProjectInFolder',

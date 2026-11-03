@@ -30,6 +30,7 @@ export interface UiPreferencesSnapshot {
   nativeFontSmoothing: boolean
   showTokenUsageDetails: boolean
   showContextWindowUsage: boolean
+  predictNextUserMessage: boolean
   translucentSidebar: boolean
   translucentSidebarTransparency: number
   fullPermissionEnabled: boolean
@@ -61,6 +62,7 @@ export function defaultUiPreferences(): UiPreferencesSnapshot {
     nativeFontSmoothing: false,
     showTokenUsageDetails: true,
     showContextWindowUsage: true,
+    predictNextUserMessage: false,
     translucentSidebar: false,
     translucentSidebarTransparency: DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
     fullPermissionEnabled: true,
@@ -118,6 +120,7 @@ export function normalizeUiPreferences(
         ? 'conversations_first'
         : 'projects_first',
     showContextWindowUsage: preferences?.showContextWindowUsage !== false,
+    predictNextUserMessage: preferences?.predictNextUserMessage === true,
     translucentSidebarTransparency: normalizeTranslucentSidebarTransparency(
       preferences?.translucentSidebarTransparency
     ),

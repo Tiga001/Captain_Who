@@ -322,6 +322,20 @@ export function GeneralSettingsPage({
 }: GeneralSettingsPageProps) {
   const { language, setLanguage, t } = useFrontendConfig()
   const [isLanguageMenuOpen, setLanguageMenuOpen] = useState(false)
+  const [predictionSaving, setPredictionSaving] = useState(false)
+  const [predictionSaveFailed, setPredictionSaveFailed] = useState(false)
+  const updatePredictionPreference = async (enabled: boolean) => {
+    setPredictionSaveFailed(false)
+    setPredictionSaving(true)
+    try {
+      await onUiPreferencesChange({ predictNextUserMessage: enabled })
+    } catch {
+      setPredictionSaveFailed(true)
+    } finally {
+      setPredictionSaving(false)
+    }
+  }
+
   const selectedLanguage =
     appLanguageOptions.find((option) => option.value === language) ?? appLanguageOptions[0]
   const canAutoApproveFileEdits = uiPreferences.customPermissions.write !== 'denied'
@@ -353,6 +367,28 @@ export function GeneralSettingsPage({
                 <div className="settings-list general-settings-list">
                   {renderSettingsNodes(section.children, (node) => {
                     switch (node.id) {
+                      case 'general.predictNextUserMessage':
+                        return (
+                          <div className="settings-list-row" data-setting-id={node.id}>
+                            <span className="settings-list-row__text">
+                              <span className="settings-list-row__title">
+                                {settingLabel(node, t)}
+                              </span>
+                              <p className="settings-list-row__description">
+                                {settingDescription(node, t)}
+                              </p>
+                              {predictionSaveFailed && (
+                                <span role="alert">{t('general.predictionSaveFailed')}</span>
+                              )}
+                            </span>
+                            <SettingsToggle
+                              checked={uiPreferences.predictNextUserMessage}
+                              disabled={predictionSaving}
+                              label={settingLabel(node, t)}
+                              onChange={(checked) => void updatePredictionPreference(checked)}
+                            />
+                          </div>
+                        )
                       case 'general.language':
                         return (
                           <div className="settings-list-row general-settings-language-row">

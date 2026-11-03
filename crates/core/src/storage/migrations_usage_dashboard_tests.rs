@@ -198,3 +198,18 @@ fn usage_dashboard_v71_fresh_schema_and_repeated_open_are_idempotent() {
     assert_eq!(empty.summary.estimated_cost, None);
     assert_eq!(empty.buckets.len(), 1);
 }
+
+#[test]
+fn v71_upgrades_with_predictions_disabled_and_preserves_existing_preferences() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(CANONICAL_SCHEMA.strip_suffix(prediction_schema()).unwrap())
+        .unwrap();
+    c.pragma_update(None, "user_version", 71).unwrap();
+    c.execute("INSERT INTO ui_preferences(id,sidebar_conversation_sort,sidebar_project_sort,sidebar_section_order,updated_at,profile_display_name) VALUES('default','created','manual','projects_first',17,'Existing profile')", []).unwrap();
+    validate_schema_fingerprint(&c, V71_SCHEMA_FINGERPRINT).unwrap();
+    run_migrations(&c).unwrap();
+    let pref = super::super::preferences_repository::load_ui_preferences(&c).unwrap();
+    assert_eq!(pref.profile_display_name, "Existing profile");
+    assert!(!pref.predict_next_user_message);
+    run_migrations(&c).unwrap();
+}

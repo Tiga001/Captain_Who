@@ -27,6 +27,7 @@ const preferences: UiPreferencesSnapshot = {
   nativeFontSmoothing: false,
   showTokenUsageDetails: true,
   showContextWindowUsage: true,
+  predictNextUserMessage: false,
   translucentSidebar: false,
   translucentSidebarTransparency: 54,
   fullPermissionEnabled: true,

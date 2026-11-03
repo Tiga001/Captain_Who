@@ -272,6 +272,7 @@ mod tests {
             native_font_smoothing: false,
             show_token_usage_details: true,
             show_context_window_usage: true,
+            predict_next_user_message: false,
             translucent_sidebar: false,
             translucent_sidebar_transparency: 54,
             full_permission_enabled: true,

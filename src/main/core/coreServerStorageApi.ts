@@ -694,6 +694,10 @@ export class CoreServerStorageApi {
     return this.rpc.request<StorageUiPreferencesRecord>(STORAGE_LOAD_UI_PREFERENCES_METHOD)
   }
 
+  setPredictionPreference(enabled: boolean): Promise<void> {
+    return this.rpc.request('storage.setPredictionPreference', { enabled })
+  }
+
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord> {
     return this.rpc.request<StorageUiPreferencesRecord, StorageUiPreferencesRecord>(
       STORAGE_SAVE_UI_PREFERENCES_METHOD,
