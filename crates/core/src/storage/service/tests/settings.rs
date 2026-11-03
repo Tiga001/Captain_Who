@@ -202,6 +202,83 @@ fn official_profile_test_model(
     }
 }
 
+#[test]
+fn prediction_receipts_count_without_chat_messages_and_clear_idempotently() {
+    let fixture = StorageFixture::new();
+    let storage = fixture.service();
+    let model = official_profile_test_model("selected-model", None, None);
+    let usage = crate::AgentUsage {
+        input_tokens: Some(1000),
+        cached_input_tokens: Some(200),
+        output_tokens: Some(100),
+        output_thinking_tokens: None,
+        total_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: None,
+    };
+    let before = crate::storage::now_ms();
+    for _ in 0..2 {
+        storage
+            .record_prediction_usage(
+                "known",
+                "deleted-conversation",
+                &model,
+                Some(&usage),
+                Some(100),
+            )
+            .unwrap();
+    }
+    storage
+        .record_prediction_usage("unknown", "deleted-conversation", &model, None, None)
+        .unwrap();
+    let after = crate::storage::now_ms();
+    let dashboard = crate::AgentUsageDashboardInput {
+        windows: vec![crate::AgentUsageWindow {
+            from: before,
+            to: after,
+        }],
+    };
+    let summary = storage.get_usage_dashboard(&dashboard).unwrap().summary;
+    assert_eq!(summary.request_count, 2);
+    assert_eq!(summary.message_count, 0);
+    assert_eq!(summary.input_tokens, Some(1000));
+    assert!((summary.estimated_cost.unwrap() - 1.3).abs() < 0.000001);
+    let summary = storage
+        .get_usage_summary(
+            &crate::AgentUsageSummaryInput {
+                range: crate::AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            },
+            after,
+        )
+        .unwrap();
+    assert_eq!((summary.request_count, summary.message_count), (2, 0));
+    storage
+        .clear_usage_records(&crate::AgentUsageClearInput {
+            from: None,
+            to: None,
+        })
+        .unwrap();
+    storage
+        .record_prediction_usage(
+            "known",
+            "deleted-conversation",
+            &model,
+            Some(&usage),
+            Some(100),
+        )
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_usage_dashboard(&dashboard)
+            .unwrap()
+            .summary
+            .request_count,
+        0
+    );
+}
+
 fn delete_stored_credential(fixture: &StorageFixture, column: &str, model_id: Option<&str>) {
     let connection = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
     let query = match model_id {

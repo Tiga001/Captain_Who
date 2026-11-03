@@ -147,6 +147,31 @@ pub(crate) fn read_snapshot(
             .map_err(super::storage_error)?;
         owned
     };
+    // Aggregate the independent prediction ledger per requested bucket. One retained
+    // contribution per (bucket, model, name) bounds the projection passed out of SQLite.
+    {
+        let sums = TOKEN_COLUMNS
+            .map(|column| format!("SUM({column})"))
+            .join(", ");
+        let mut query = reader
+            .prepare(&format!(
+                "SELECT MAX(created_at), model_id, model_name, SUM(billable_request_count), 0, 0,
+                    {sums}, SUM(estimated_cost)
+             FROM message_prediction_usage
+             WHERE cleared_at IS NULL AND created_at BETWEEN ?1 AND ?2
+             GROUP BY model_id, model_name"
+            ))
+            .map_err(super::storage_error)?;
+        for window in &input.windows {
+            rows.extend(
+                query
+                    .query_map(params![window.from, window.to], decode)
+                    .map_err(super::storage_error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(super::storage_error)?,
+            );
+        }
+    }
     if raw_hours != "[]" {
         let tokens = TOKEN_COLUMNS.join(", ");
         let mut query = reader.prepare(&format!(

@@ -404,6 +404,12 @@ fn clear_usage_records_inner(
            AND (?2 IS NULL OR created_at <= ?2)",
         params![input.from, input.to],
     )?;
+    let changed_predictions = connection.execute(
+        "UPDATE message_prediction_usage SET cleared_at = created_at
+         WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
+           AND (?2 IS NULL OR created_at <= ?2)",
+        params![input.from, input.to],
+    )?;
     let (rollup_from, rollup_to) = rollup_window(input.from, input.to);
     let changed_rollups = connection.execute(
         "
@@ -415,7 +421,8 @@ fn clear_usage_records_inner(
     )?;
 
     Ok(AgentUsageClearOutput {
-        deleted_records: (changed_records + changed_rollups + changed_manual) as u64,
+        deleted_records: (changed_records + changed_rollups + changed_manual + changed_predictions)
+            as u64,
     })
 }
 
@@ -512,6 +519,13 @@ fn query_usage_totals(
             WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
               AND (?2 IS NULL OR created_at <= ?2)
             UNION ALL
+            SELECT billable_request_count, 0, 0, input_tokens, output_tokens,
+                   output_thinking_tokens, total_tokens, cached_input_tokens,
+                   cache_creation_input_tokens, estimated_cost
+            FROM message_prediction_usage
+            WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
             SELECT
                 request_count,
                 message_count,
@@ -580,6 +594,13 @@ fn query_usage_models(
                    0, 0, input_tokens, output_tokens, output_thinking_tokens, total_tokens,
                    cached_input_tokens, cache_creation_input_tokens, estimated_cost
             FROM manual_context_compaction_usage_records
+            WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
+            SELECT model_id, model_name, created_at, billable_request_count,
+                   0, 0, input_tokens, output_tokens, output_thinking_tokens, total_tokens,
+                   cached_input_tokens, cache_creation_input_tokens, estimated_cost
+            FROM message_prediction_usage
             WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
               AND (?2 IS NULL OR created_at <= ?2)
             UNION ALL

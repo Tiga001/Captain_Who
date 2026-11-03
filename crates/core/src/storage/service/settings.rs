@@ -1640,6 +1640,50 @@ impl StorageService {
         )?
     }
 
+    /// A provider attempt is billed once, even when its suggestion is cancelled or abstains.
+    /// A missing usage report means unknown tokens and cost, while the request still counts.
+    pub fn record_prediction_usage(
+        &self,
+        request_id: &str,
+        conversation_id: &str,
+        model: &ModelConfigRecord,
+        usage: Option<&crate::AgentUsage>,
+        billable_output_tokens: Option<u64>,
+    ) -> Result<(), String> {
+        let input = usage.and_then(|usage| usage.input_tokens);
+        let cached = usage.and_then(|usage| usage.cached_input_tokens);
+        let cost = self.estimate_usage_cost(
+            input,
+            cached,
+            billable_output_tokens,
+            &model.input_price,
+            model.effective_cached_input_price(),
+            &model.output_price,
+        );
+        self.state.write_sync(
+            settings_text_bytes(&[request_id, conversation_id, &model.id, &model.display_name]),
+            StorageWriteClass::Normal,
+            |connection| {
+                connection.execute(
+                    "INSERT INTO message_prediction_usage
+                     (request_id, conversation_id, created_at, model_id, model_name, billable_request_count,
+                      input_tokens, cached_input_tokens, output_tokens, output_thinking_tokens, total_tokens,
+                      cache_creation_input_tokens, input_price, cached_input_price, output_price, estimated_cost)
+                     VALUES (?1, (SELECT id FROM conversations WHERE id=?2), ?3, ?4, ?5, ?6,
+                             ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     ON CONFLICT(request_id) DO NOTHING",
+                    rusqlite::params![
+                        request_id, conversation_id, crate::storage::now_ms(), model.id, model.display_label(),
+                        usage.and_then(|u| u.billable_request_count).unwrap_or(1),
+                        input, cached, usage.and_then(|u| u.output_tokens), usage.and_then(|u| u.output_thinking_tokens),
+                        usage.and_then(|u| u.total_tokens), usage.and_then(|u| u.cache_creation_input_tokens),
+                        model.input_price, model.effective_cached_input_price(), model.output_price, cost,
+                    ],
+                ).map(|_| ()).map_err(storage_error)
+            },
+        )?
+    }
+
     pub fn upsert_agent_usage(&self, record: AgentUsageRecordInsert) -> Result<(), String> {
         self.state.write_sync(
             settings_text_bytes(&[
