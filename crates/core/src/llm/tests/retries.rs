@@ -930,6 +930,7 @@ async fn streaming_metadata_frames_do_not_refresh_the_idle_timeout() {
             AgentCancellationToken::new(),
             LlmResponseValidation::RequireModelAction,
             Duration::from_millis(35),
+            None,
             |_| {},
         ),
     )
@@ -973,6 +974,7 @@ async fn streaming_idle_window_spans_response_headers_and_body() {
             AgentCancellationToken::new(),
             LlmResponseValidation::RequireModelAction,
             Duration::from_millis(80),
+            None,
             |_| {},
         ),
     )

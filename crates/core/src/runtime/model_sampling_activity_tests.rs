@@ -278,7 +278,7 @@ async fn sampling_transport_cancellation_retry_and_nonstream_keep_activity_trans
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             sample_model(
-                request,
+                &request,
                 cancellation,
                 ModelSamplingContext {
                     run_id: "run",

@@ -35,6 +35,7 @@ impl AgentRuntime {
             storage,
             trace_observer,
             model_request_observer,
+            prompt_prediction_seed_observer,
             context_window_observer,
             context_compaction_services,
             provider_continuation_vault,
@@ -1063,7 +1064,7 @@ impl AgentRuntime {
                         received_model_output,
                         mut committed_message_stream_id,
                     } = model_sampling::sample_model(
-                        request,
+                        &request,
                         cancellation_token.clone(),
                         model_sampling::ModelSamplingContext {
                             run_id: &run_id,
@@ -1292,7 +1293,7 @@ impl AgentRuntime {
                         // terminal ConversationMessage. That terminal transaction promotes the
                         // exact owner, so a failed message write can never expose orphaned raw
                         // Provider state to a later run.
-                        let (_staged_final_turn, _terminal_message_handoff) =
+                        let (staged_final_turn, _terminal_message_handoff) =
                             stage_ordinary_provider_assistant_turn(
                             assistant_turn,
                             provider_runtime_capabilities,
@@ -1305,6 +1306,14 @@ impl AgentRuntime {
                             provider_continuation_vault.as_ref(),
                             crate::ProviderContinuationProjection::ConversationMessage,
                         )?;
+                        if let Some(observer) = &prompt_prediction_seed_observer {
+                            // The Host publishes only after the same terminal message commits.
+                            observer(AgentPromptPredictionSeed::from_final_request(
+                                request,
+                                staged_final_turn,
+                                llm_request.context_window_tokens,
+                            ));
+                        }
                         break 'agent_loop response_content;
                     }
                     response_fence_corrections = 0;

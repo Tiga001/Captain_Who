@@ -18,9 +18,13 @@ pub(crate) use tool_call_id::{
     validate_provider_tool_call_id,
 };
 pub(crate) use transport::{
-    complete_chat, complete_chat_allow_empty, complete_chat_streaming,
-    complete_chat_streaming_allow_empty, is_repairable_empty_model_action,
+    complete_chat_allow_empty, complete_chat_streaming_allow_empty, complete_prepared_chat,
+    complete_prepared_chat_streaming, complete_prompt_prediction_once,
+    is_repairable_empty_model_action, LlmResponseValidation, LLM_STREAM_INACTIVITY_TIMEOUT,
 };
+
+#[cfg(test)]
+pub(crate) use transport::{complete_chat, complete_chat_streaming};
 
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{

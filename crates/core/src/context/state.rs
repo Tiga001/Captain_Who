@@ -800,6 +800,24 @@ impl AgentConversationContextState {
         activation: Option<&AgentSkillActivation>,
         projection: &AgentContextWindowToolProjection,
     ) -> AgentResult<AgentContextWindowSnapshot> {
+        let mut preview = self.projected_request_frame(discovery, activation, projection)?;
+        Ok(self
+            .detector
+            .inspect_with_dynamic_tools(
+                &mut preview,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+                projection.dynamic_definitions(),
+            )
+            .snapshot(&self.model))
+    }
+
+    pub(crate) fn projected_request_frame(
+        &mut self,
+        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
+        activation: Option<&AgentSkillActivation>,
+        projection: &AgentContextWindowToolProjection,
+    ) -> AgentResult<ContextFrame> {
         let baseline = self.shared_baseline()?;
         let mut preview = baseline.into_frame();
         preview
@@ -828,14 +846,6 @@ impl AgentConversationContextState {
         for item in &projection.capability_context {
             preview.push(item.clone());
         }
-        Ok(self
-            .detector
-            .inspect_with_dynamic_tools(
-                &mut preview,
-                self.context_window_tokens,
-                self.reserved_output_tokens,
-                projection.dynamic_definitions(),
-            )
-            .snapshot(&self.model))
+        Ok(preview)
     }
 }

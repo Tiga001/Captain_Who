@@ -11,6 +11,10 @@ mod events;
 mod extensions;
 mod file_transactions;
 mod model_sampling;
+mod prompt_prediction;
+pub use prompt_prediction::{
+    prepare_prompt_prediction_seed, AgentPromptPredictionOutput, AgentPromptPredictionSeed,
+};
 mod output_budget;
 mod preparation;
 mod provider_tool_batch;
@@ -53,8 +57,8 @@ use crate::file_change_support::{
     file_change_approval_route, file_change_snapshot, FileChangeApprovalRoute,
 };
 use crate::llm::{
-    complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
-    LlmChatRequest, LlmMessage, LlmMessageRole, LlmStreamEvent,
+    detect_api_style, is_repairable_empty_model_action, LlmChatRequest, LlmMessage, LlmMessageRole,
+    LlmStreamEvent,
 };
 use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,

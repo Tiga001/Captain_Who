@@ -27,7 +27,7 @@ struct ModelStreamProgress {
 }
 
 pub(super) async fn sample_model(
-    request: LlmChatRequest,
+    request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     mut context: ModelSamplingContext<'_>,
 ) -> ModelSamplingResult {
@@ -39,21 +39,32 @@ pub(super) async fn sample_model(
     );
     let response = if request.stream {
         let delta_cancellation_token = cancellation_token.clone();
-        complete_chat_streaming(request, cancellation_token.clone(), |stream_event| {
-            progress.on_event(
-                &mut context,
-                &stream_id,
-                &delta_cancellation_token,
-                stream_event,
-            );
-        })
+        crate::llm::complete_prepared_chat_streaming(
+            request,
+            cancellation_token.clone(),
+            crate::llm::LlmResponseValidation::RequireModelAction,
+            crate::llm::LLM_STREAM_INACTIVITY_TIMEOUT,
+            |stream_event| {
+                progress.on_event(
+                    &mut context,
+                    &stream_id,
+                    &delta_cancellation_token,
+                    stream_event,
+                );
+            },
+        )
         .await
     } else {
         if !cancellation_token.is_cancelled() {
             progress.tool_input_stream.start_attempt(1);
             progress.set_activity(&mut context, &stream_id, AgentModelActivity::Waiting);
         }
-        complete_chat(request, cancellation_token.clone()).await
+        crate::llm::complete_prepared_chat(
+            request,
+            cancellation_token.clone(),
+            crate::llm::LlmResponseValidation::RequireModelAction,
+        )
+        .await
     };
     // Cancellation bypasses the normal callback reset, and all callbacks are suppressed
     // once the token is cancelled. Always release the transient phase when sampling exits.

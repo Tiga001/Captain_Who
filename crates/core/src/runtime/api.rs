@@ -432,6 +432,8 @@ pub struct AgentRuntimeHostServices {
     pub(super) storage: Option<Arc<StorageService>>,
     pub(super) trace_observer: Option<AgentConversationTraceObserver>,
     pub(super) model_request_observer: Option<AgentModelRequestObserver>,
+    pub(super) prompt_prediction_seed_observer:
+        Option<Arc<dyn Fn(AgentPromptPredictionSeed) + Send + Sync>>,
     pub(super) context_window_observer: Option<AgentContextWindowObserver>,
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
     pub(super) provider_continuation_vault: Option<Arc<crate::ProviderContinuationVault>>,
@@ -648,6 +650,16 @@ impl AgentRuntimeHostServices {
 
     pub fn with_model_request_observer(mut self, observer: AgentModelRequestObserver) -> Self {
         self.model_request_observer = Some(observer);
+        self
+    }
+
+    /// Receives a private, credential-free seed at the ordinary final-answer boundary.
+    /// The Host must discard it if the terminal message fails to commit.
+    pub fn with_prompt_prediction_seed_observer(
+        mut self,
+        observer: Arc<dyn Fn(AgentPromptPredictionSeed) + Send + Sync>,
+    ) -> Self {
+        self.prompt_prediction_seed_observer = Some(observer);
         self
     }
 
@@ -1065,6 +1077,13 @@ pub fn create_conversation_context_state(
     input: AgentChatInput,
 ) -> AgentResult<AgentConversationContextState> {
     let prepared = prepare_conversation_context(&input)?;
+    assemble_prepared_conversation_state(input, prepared).map(|(state, _)| state)
+}
+
+fn assemble_prepared_conversation_state(
+    input: AgentChatInput,
+    prepared: PreparedConversationContext,
+) -> AgentResult<(AgentConversationContextState, Vec<AgentToolDefinition>)> {
     let output_budget = resolve_output_budget(&input, prepared.api_style)?;
     let assembled = assemble_context_preview(
         DurableConversationTimeline {
@@ -1093,7 +1112,7 @@ pub fn create_conversation_context_state(
         assembled.timing,
     );
     state.hydrate_context_images(&input.context_image_attachments)?;
-    Ok(state)
+    Ok((state, prepared.tool_definitions))
 }
 
 /// Rebuilds a durable conversation context and privately restores provider-native Assistant
@@ -1107,6 +1126,21 @@ pub fn create_conversation_context_state_with_host_services(
     conversation_id: &str,
     host_services: &AgentRuntimeHostServices,
 ) -> AgentResult<AgentConversationContextState> {
+    Ok(hydrate_conversation_context(input, conversation_id, host_services)?.state)
+}
+
+pub(super) struct HydratedConversationContext {
+    pub state: AgentConversationContextState,
+    pub stable_tools: Vec<AgentToolDefinition>,
+    pub profile: ProviderProfileConfig,
+    pub protocol: ProviderProtocolKey,
+}
+
+pub(super) fn hydrate_conversation_context(
+    input: AgentChatInput,
+    conversation_id: &str,
+    host_services: &AgentRuntimeHostServices,
+) -> AgentResult<HydratedConversationContext> {
     let conversation_id = conversation_id.trim();
     if conversation_id.is_empty() {
         return Err(AgentError::new(
@@ -1165,7 +1199,8 @@ pub fn create_conversation_context_state_with_host_services(
         .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?,
     };
 
-    let mut state = create_conversation_context_state(input)?;
+    let prepared = prepare_conversation_context(&input)?;
+    let (mut state, stable_tools) = assemble_prepared_conversation_state(input, prepared)?;
     super::hydrate_provider_continuation_history(
         state.provider_hydration_frame_mut(),
         &provider_profile_config,
@@ -1178,7 +1213,12 @@ pub fn create_conversation_context_state_with_host_services(
             current_assistant_turn_id: None,
         },
     )?;
-    Ok(state)
+    Ok(HydratedConversationContext {
+        state,
+        stable_tools,
+        profile: provider_profile_config,
+        protocol: provider_protocol_key,
+    })
 }
 
 pub(super) struct PreparedConversationContext {

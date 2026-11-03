@@ -6,7 +6,7 @@ use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_PROVIDER_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
-pub(super) const LLM_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const LLM_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Every recoverable model failure shares one attempt budget and one exhaustion path.
 pub(super) const LLM_MAX_ATTEMPTS: usize = 3;
@@ -21,11 +21,12 @@ pub(super) const LLM_LOGICAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180
 pub(crate) const EMPTY_MODEL_ACTION_ERROR_CODE: &str = "agent.empty_model_action";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LlmResponseValidation {
+pub(crate) enum LlmResponseValidation {
     RequireModelAction,
     AllowEmpty,
 }
 
+#[cfg(test)]
 pub(crate) async fn complete_chat(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
@@ -57,7 +58,17 @@ pub(super) async fn complete_chat_with_validation(
 ) -> AgentResult<LlmChatResponse> {
     let mut request = request;
     request.stream = false;
-    let usage_semantics = ProviderAdapterRegistry::resolve(&request)?
+    complete_prepared_chat(&request, cancellation_token, validation).await
+}
+
+// A borrowing boundary lets the runtime move the successful final request into a follow-up
+// seed without cloning the model context on every tool iteration.
+pub(crate) async fn complete_prepared_chat(
+    request: &LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
+) -> AgentResult<LlmChatResponse> {
+    let usage_semantics = ProviderAdapterRegistry::resolve(request)?
         .capabilities()
         .usage();
 
@@ -68,7 +79,7 @@ pub(super) async fn complete_chat_with_validation(
     for attempt in 1..=LLM_MAX_ATTEMPTS {
         let result = tokio::select! {
             _ = tokio::time::sleep_until(deadline) => Err(logical_request_timeout_error()),
-            result = complete_chat_once(&request, cancellation_token.clone(), validation) => result,
+            result = complete_chat_once(request, cancellation_token.clone(), validation, None) => result,
         };
         match result {
             Ok(mut response) => {
@@ -93,7 +104,7 @@ pub(super) async fn complete_chat_with_validation(
                 ) else {
                     return Err(retry_exhausted_error(error, attempt));
                 };
-                register_retry_cooldown(&request, &plan);
+                register_retry_cooldown(request, &plan);
                 last_error = Some(error);
                 total_retry_sleep += plan.delay;
                 wait_before_retry(plan.delay, cancellation_token.clone())
@@ -109,23 +120,75 @@ pub(super) async fn complete_chat_with_validation(
     ))
 }
 
+/// Single-attempt transport for disposable predictions. No streaming event escapes this call.
+pub(crate) async fn complete_prompt_prediction_once(
+    request: &LlmChatRequest,
+    cancellation: AgentCancellationToken,
+    deadline: Duration,
+    on_dispatch: impl FnOnce() + Send,
+) -> AgentResult<LlmChatResponse> {
+    let mut dispatched = false;
+    let notify_dispatch = || {
+        dispatched = true;
+        on_dispatch();
+    };
+    let attempt = async {
+        if request.stream {
+            complete_chat_streaming_once(
+                request,
+                cancellation,
+                LlmResponseValidation::AllowEmpty,
+                deadline,
+                Some(Box::new(notify_dispatch)),
+                |_| {},
+            )
+            .await
+        } else {
+            complete_chat_once(
+                request,
+                cancellation,
+                LlmResponseValidation::AllowEmpty,
+                Some(Box::new(notify_dispatch)),
+            )
+            .await
+        }
+    };
+    let result = tokio::time::timeout(deadline, attempt)
+        .await
+        .unwrap_or_else(|_| Err(AgentError::new("Prompt prediction timed out.")));
+    result.map_err(|error| {
+        if dispatched {
+            with_request_usage(error)
+        } else {
+            error.with_usage(None)
+        }
+    })
+}
+
 pub(super) async fn complete_chat_once(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
+    on_dispatch: Option<Box<dyn FnOnce() + Send + '_>>,
 ) -> AgentResult<LlmChatResponse> {
     let provider_protocol = request.provider_protocol.clone();
     let provider_profile = request.provider_profile.clone();
     validate_request(request)?;
-    let response = send_llm_request(request, cancellation_token.clone())
-        .await
-        .map_err(with_request_usage)?;
+    let (response, _) = send_llm_request_with_stream_timeout(
+        request,
+        cancellation_token.clone(),
+        LLM_STREAM_INACTIVITY_TIMEOUT,
+        on_dispatch,
+    )
+    .await
+    .map_err(with_request_usage)?;
     let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
         .await
         .map_err(with_request_usage)?;
     parse_non_stream_response_with_profile(&body, &provider_profile, &provider_protocol, validation)
 }
 
+#[cfg(test)]
 pub(crate) async fn complete_chat_streaming<F>(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
@@ -184,14 +247,34 @@ pub(super) async fn complete_chat_streaming_with_validation_and_timeout<F>(
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
     inactivity_timeout: Duration,
-    mut on_event: F,
+    on_event: F,
 ) -> AgentResult<LlmChatResponse>
 where
     F: FnMut(LlmStreamEvent) + Send,
 {
     let mut request = request;
     request.stream = true;
-    let usage_semantics = ProviderAdapterRegistry::resolve(&request)?
+    complete_prepared_chat_streaming(
+        &request,
+        cancellation_token,
+        validation,
+        inactivity_timeout,
+        on_event,
+    )
+    .await
+}
+
+pub(crate) async fn complete_prepared_chat_streaming<F>(
+    request: &LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
+    inactivity_timeout: Duration,
+    mut on_event: F,
+) -> AgentResult<LlmChatResponse>
+where
+    F: FnMut(LlmStreamEvent) + Send,
+{
+    let usage_semantics = ProviderAdapterRegistry::resolve(request)?
         .capabilities()
         .usage();
 
@@ -205,10 +288,11 @@ where
         });
         let mut partial_response = String::new();
         let result = complete_chat_streaming_once(
-            &request,
+            request,
             cancellation_token.clone(),
             validation,
             inactivity_timeout,
+            None,
             |event| {
                 if let LlmStreamEvent::Delta(text) = &event {
                     partial_response.push_str(text);
@@ -247,7 +331,7 @@ where
                 else {
                     return Err(retry_exhausted_error(error, attempt));
                 };
-                register_retry_cooldown(&request, &plan);
+                register_retry_cooldown(request, &plan);
                 last_error = Some(error);
                 on_event(LlmStreamEvent::Retrying {
                     attempt: attempt + 1,
@@ -276,6 +360,7 @@ pub(super) async fn complete_chat_streaming_once<F>(
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
     inactivity_timeout: Duration,
+    on_dispatch: Option<Box<dyn FnOnce() + Send + '_>>,
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -288,6 +373,7 @@ where
         request,
         cancellation_token.clone(),
         inactivity_timeout,
+        on_dispatch,
     )
     .await
     .map_err(with_request_usage)?;
@@ -484,6 +570,7 @@ pub(super) fn merge_error_usage(
     error.with_usage(total.clone())
 }
 
+#[cfg(test)]
 pub(super) async fn send_llm_request(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
@@ -492,6 +579,7 @@ pub(super) async fn send_llm_request(
         request,
         cancellation_token,
         LLM_STREAM_INACTIVITY_TIMEOUT,
+        None,
     )
     .await?;
     Ok(response)
@@ -501,6 +589,7 @@ async fn send_llm_request_with_stream_timeout(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     inactivity_timeout: Duration,
+    on_dispatch: Option<Box<dyn FnOnce() + Send + '_>>,
 ) -> AgentResult<(reqwest::Response, tokio::time::Instant)> {
     cancellation_token.check()?;
     validate_request(request)?;
@@ -528,17 +617,27 @@ async fn send_llm_request_with_stream_timeout(
     )
     .await?;
     super::request_fingerprint::log_request_fingerprint_if_enabled(&payload);
-    let send = client
+    let http_request = client
         .post(request.api_url.trim())
         .headers(headers)
         .json(&payload)
-        .send();
+        .build()
+        .map_err(|error| LlmProviderFailure::from_network_error(error).to_agent_error())?;
+    // Record only a send whose future was actually polled. Cancellation while waiting
+    // for validation, connection setup or the provider cooldown never counts as dispatch.
+    let send = async {
+        if let Some(observer) = on_dispatch {
+            observer();
+        }
+        client.execute(http_request).await
+    };
     // Client construction may read the native trust store and system proxy configuration. That is
     // setup work, not Provider inactivity. Start the single header/body window only when the HTTP
     // request is ready to be polled.
     let inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
     let response = if request.stream {
         tokio::select! {
+            biased;
             _ = cancellation_token.cancelled() => {
                 complete_provider_cooldown(cooldown_permit);
                 return Err(AgentError::cancelled());
@@ -554,6 +653,7 @@ async fn send_llm_request_with_stream_timeout(
         }
     } else {
         tokio::select! {
+            biased;
             _ = cancellation_token.cancelled() => {
                 complete_provider_cooldown(cooldown_permit);
                 return Err(AgentError::cancelled());
