@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 mod deepseek;
 mod generic;
 mod moonshot;
+mod zhipu;
 
 pub(crate) use deepseek::{
     DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION, DEEPSEEK_V4_PRO_0813_CHAT_REGISTRATION,
@@ -26,6 +27,7 @@ pub(crate) use moonshot::{
     MOONSHOT_K2_6_CHAT_REGISTRATION, MOONSHOT_K2_7_CODE_CHAT_REGISTRATION,
     MOONSHOT_K3_CHAT_REGISTRATION,
 };
+pub(crate) use zhipu::{ZHIPU_GLM5_3_CHAT_REGISTRATION, ZHIPU_GLM5_3_FLASH_CHAT_REGISTRATION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderToolExchangeSemantics {
@@ -171,6 +173,7 @@ pub enum ProviderVendorSettingsKind {
     None,
     Deepseek,
     Moonshot,
+    Zhipu,
 }
 
 /// Safe model-editor policy. This is deliberately separate from runtime capabilities.
@@ -224,6 +227,16 @@ pub enum ProviderFamilySettingsDescriptor {
     #[serde(rename = "moonshot_k2_6_chat")]
     MoonshotK26Chat {
         thinking_modes: Vec<MoonshotK26ThinkingMode>,
+        default_settings: ProviderFamilySettings,
+    },
+    #[serde(rename = "zhipu_glm5_3_chat")]
+    ZhipuGlm53Chat {
+        reasoning_efforts: Vec<ProviderReasoningEffort>,
+        default_settings: ProviderFamilySettings,
+    },
+    #[serde(rename = "zhipu_glm5_3_flash_chat")]
+    ZhipuGlm53FlashChat {
+        reasoning_efforts: Vec<ProviderReasoningEffort>,
         default_settings: ProviderFamilySettings,
     },
 }
@@ -526,6 +539,8 @@ pub(crate) enum ProviderAdapterKind {
     MoonshotK3Chat,
     MoonshotK27CodeChat,
     MoonshotK26Chat,
+    ZhipuGlm53Chat,
+    ZhipuGlm53FlashChat,
 }
 
 impl ProviderRegistration {
@@ -673,7 +688,7 @@ impl ProviderRegistration {
     }
 }
 
-static PROVIDER_REGISTRATIONS: [&ProviderRegistration; 7] = [
+static PROVIDER_REGISTRATIONS: [&ProviderRegistration; 9] = [
     &GENERIC_OPENAI_CHAT_REGISTRATION,
     &GENERIC_ANTHROPIC_MESSAGES_REGISTRATION,
     &DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION,
@@ -681,9 +696,11 @@ static PROVIDER_REGISTRATIONS: [&ProviderRegistration; 7] = [
     &MOONSHOT_K3_CHAT_REGISTRATION,
     &MOONSHOT_K2_7_CODE_CHAT_REGISTRATION,
     &MOONSHOT_K2_6_CHAT_REGISTRATION,
+    &ZHIPU_GLM5_3_CHAT_REGISTRATION,
+    &ZHIPU_GLM5_3_FLASH_CHAT_REGISTRATION,
 ];
 
-static PROVIDER_VENDOR_REGISTRATIONS: [&ProviderRegistration; 7] = [
+static PROVIDER_VENDOR_REGISTRATIONS: [&ProviderRegistration; 9] = [
     &GENERIC_OPENAI_CHAT_REGISTRATION,
     &GENERIC_ANTHROPIC_MESSAGES_REGISTRATION,
     &DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION,
@@ -691,6 +708,8 @@ static PROVIDER_VENDOR_REGISTRATIONS: [&ProviderRegistration; 7] = [
     &MOONSHOT_K3_CHAT_REGISTRATION,
     &MOONSHOT_K2_7_CODE_CHAT_REGISTRATION,
     &MOONSHOT_K2_6_CHAT_REGISTRATION,
+    &ZHIPU_GLM5_3_CHAT_REGISTRATION,
+    &ZHIPU_GLM5_3_FLASH_CHAT_REGISTRATION,
 ];
 
 pub(crate) fn is_registered_provider_profile(profile: ProviderProfileRef) -> bool {
@@ -711,6 +730,7 @@ pub fn provider_vendor_descriptors() -> Vec<ProviderVendorDescriptor> {
         generic::vendor_descriptor(),
         deepseek::vendor_descriptor(),
         moonshot::vendor_descriptor(),
+        zhipu::vendor_descriptor(),
     ]
 }
 
@@ -864,7 +884,7 @@ mod tests {
     #[test]
     fn vendor_projection_hides_profiles_and_resolves_exact_model_families() {
         let vendors = serde_json::to_value(provider_vendor_descriptors()).unwrap();
-        assert_eq!(vendors.as_array().unwrap().len(), 3);
+        assert_eq!(vendors.as_array().unwrap().len(), 4);
         assert_eq!(vendors[0]["modelIdPolicy"], json!({ "kind": "free_text" }));
         assert!(vendors[0]["fixedApiUrl"].is_null());
         assert_eq!(

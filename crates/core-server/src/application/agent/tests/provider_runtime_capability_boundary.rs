@@ -8,11 +8,13 @@ const ALLOWED_PROVIDER_BOUNDARIES: &[&str] = &[
     "crates/core/src/provider_registration/generic.rs",
     "crates/core/src/provider_registration/deepseek.rs",
     "crates/core/src/provider_registration/moonshot.rs",
+    "crates/core/src/provider_registration/zhipu.rs",
     "crates/core/src/llm/adapter.rs",
     "crates/core/src/llm/payload.rs",
     "crates/core/src/llm/providers/mod.rs",
     "crates/core/src/llm/providers/deepseek.rs",
     "crates/core/src/llm/providers/moonshot.rs",
+    "crates/core/src/llm/providers/zhipu.rs",
     "crates/core/src/llm/stream.rs",
     // This file's vendor references are confined to cfg(test) response-parser fixtures. Runtime
     // request construction still resolves through the exact Adapter registration.
@@ -28,6 +30,10 @@ const FORBIDDEN_GENERIC_PROVIDER_MARKERS: &[&str] = &[
     "moonshot",
     "Kimi",
     "kimi",
+    "Zhipu",
+    "zhipu",
+    "Glm53",
+    "glm-5.3",
     "is_special_provider",
     "is_deepseek",
 ];

@@ -391,3 +391,5 @@ mod moonshot_wire;
 mod output_budget;
 mod retries;
 mod streaming_and_usage;
+
+mod zhipu_wire;

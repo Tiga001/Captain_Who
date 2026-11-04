@@ -146,7 +146,7 @@ impl LlmProviderFailure {
         body: &str,
         api_token: &str,
     ) -> Self {
-        let provider_code = extract_provider_code(body);
+        let provider_code = extract_provider_code_for_protocol(protocol, body);
         let retry_after_ms = retry_after_ms(headers);
         let category = classify_provider_failure_for_protocol(
             protocol,
@@ -190,7 +190,7 @@ impl LlmProviderFailure {
         api_style: AgentApiStyle,
         body: &str,
     ) -> Self {
-        let provider_code = extract_provider_code(body);
+        let provider_code = extract_provider_code_for_protocol(protocol, body);
         let category = classify_provider_failure_for_protocol(
             protocol,
             api_style,
@@ -548,6 +548,16 @@ fn retryable_category(
         | LlmProviderFailureCategory::InvalidRequest
         | LlmProviderFailureCategory::ContextTooLarge => false,
     }
+}
+
+fn extract_provider_code_for_protocol(
+    protocol: Option<&ProviderProtocolKey>,
+    body: &str,
+) -> Option<String> {
+    protocol
+        .and_then(|key| super::adapter::ProviderAdapterRegistry::resolve_key(key).ok())
+        .and_then(|adapter| adapter.provider_error_code(body))
+        .or_else(|| extract_provider_code(body))
 }
 
 fn extract_provider_code(body: &str) -> Option<String> {

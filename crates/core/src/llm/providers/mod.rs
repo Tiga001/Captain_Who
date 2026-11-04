@@ -6,3 +6,5 @@
 
 pub(super) mod deepseek;
 pub(super) mod moonshot;
+
+pub(super) mod zhipu;

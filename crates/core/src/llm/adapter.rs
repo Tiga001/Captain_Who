@@ -13,6 +13,7 @@ use super::providers::deepseek::{
 use super::providers::moonshot::{
     MOONSHOT_K2_6_CHAT_ADAPTER, MOONSHOT_K2_7_CODE_CHAT_ADAPTER, MOONSHOT_K3_CHAT_ADAPTER,
 };
+use super::providers::zhipu::{ZHIPU_GLM5_3_CHAT_ADAPTER, ZHIPU_GLM5_3_FLASH_CHAT_ADAPTER};
 use super::response::{
     extract_anthropic_tool_calls, extract_openai_tool_calls, extract_response_text,
 };
@@ -63,6 +64,12 @@ pub(super) trait ProviderAdapter: Sync {
         _body: &str,
     ) -> ProviderErrorClassification {
         ProviderErrorClassification::DialectDefault
+    }
+
+    /// Allows a vendor to choose its authoritative discriminator before generic compatibility
+    /// extraction prefers portable string `type` values over numeric `code` values.
+    fn provider_error_code(&self, _body: &str) -> Option<String> {
+        None
     }
 
     fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()>;
@@ -151,6 +158,8 @@ impl ProviderAdapterRegistry {
             ProviderAdapterKind::MoonshotK3Chat => &MOONSHOT_K3_CHAT_ADAPTER,
             ProviderAdapterKind::MoonshotK27CodeChat => &MOONSHOT_K2_7_CODE_CHAT_ADAPTER,
             ProviderAdapterKind::MoonshotK26Chat => &MOONSHOT_K2_6_CHAT_ADAPTER,
+            ProviderAdapterKind::ZhipuGlm53Chat => &ZHIPU_GLM5_3_CHAT_ADAPTER,
+            ProviderAdapterKind::ZhipuGlm53FlashChat => &ZHIPU_GLM5_3_FLASH_CHAT_ADAPTER,
         };
         debug_assert!(std::ptr::eq(adapter.registration(), registration));
         Ok(adapter)

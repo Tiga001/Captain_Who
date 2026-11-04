@@ -13,6 +13,8 @@ pub const DEEPSEEK_V4_PRO_0813_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K3_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K2_6_CHAT_PROFILE_VERSION: u32 = 1;
+pub const ZHIPU_GLM5_3_CHAT_PROFILE_VERSION: u32 = 1;
+pub const ZHIPU_GLM5_3_FLASH_CHAT_PROFILE_VERSION: u32 = 1;
 
 /// The provider wire dialect selected for one immutable model run.
 ///
@@ -168,6 +170,7 @@ bounded_provider_identity!(
         Generic => "generic",
         DeepSeek => "deepseek",
         Moonshot => "moonshot",
+        Zhipu => "zhipu",
     }
 );
 
@@ -184,6 +187,8 @@ bounded_provider_identity!(
         MoonshotK3Chat => "moonshot_k3_chat",
         MoonshotK27CodeChat => "moonshot_k2_7_code_chat",
         MoonshotK26Chat => "moonshot_k2_6_chat",
+        ZhipuGlm53Chat => "zhipu_glm5_3_chat",
+        ZhipuGlm53FlashChat => "zhipu_glm5_3_flash_chat",
     }
 );
 
@@ -216,6 +221,10 @@ impl ProviderProfileId {
     pub const MoonshotK27CodeChat: Self = Self::from_static("moonshot_k2_7_code_chat");
     #[allow(non_upper_case_globals)]
     pub const MoonshotK26Chat: Self = Self::from_static("moonshot_k2_6_chat");
+    #[allow(non_upper_case_globals)]
+    pub const ZhipuGlm53Chat: Self = Self::from_static("zhipu_glm5_3_chat");
+    #[allow(non_upper_case_globals)]
+    pub const ZhipuGlm53FlashChat: Self = Self::from_static("zhipu_glm5_3_flash_chat");
 
     const fn from_static(value: &str) -> Self {
         let source = value.as_bytes();
@@ -345,6 +354,20 @@ impl ProviderProfileRef {
         }
     }
 
+    pub const fn zhipu_glm5_3_chat() -> Self {
+        Self {
+            id: ProviderProfileId::ZhipuGlm53Chat,
+            version: ZHIPU_GLM5_3_CHAT_PROFILE_VERSION,
+        }
+    }
+
+    pub const fn zhipu_glm5_3_flash_chat() -> Self {
+        Self {
+            id: ProviderProfileId::ZhipuGlm53FlashChat,
+            version: ZHIPU_GLM5_3_FLASH_CHAT_PROFILE_VERSION,
+        }
+    }
+
     pub fn validate(self) -> Result<(), ProviderProfileValidationError> {
         if !crate::provider_registration::is_registered_provider_profile(self) {
             return Err(ProviderProfileValidationError::UnsupportedProfileVersion {
@@ -456,6 +479,14 @@ pub enum ProviderFamilySettings {
     MoonshotK26Chat {
         thinking_mode: MoonshotK26ThinkingMode,
     },
+    #[serde(rename = "zhipu_glm5_3_chat")]
+    ZhipuGlm53Chat {
+        reasoning_effort: ProviderReasoningEffort,
+    },
+    #[serde(rename = "zhipu_glm5_3_flash_chat")]
+    ZhipuGlm53FlashChat {
+        reasoning_effort: ProviderReasoningEffort,
+    },
 }
 
 /// Renderer-editable vendor settings. Runtime identities and capabilities remain Host-owned.
@@ -468,7 +499,10 @@ impl ProviderFamilySettings {
             Self::DeepseekFlashChat { reasoning } | Self::DeepseekProChat { reasoning } => {
                 reasoning.mode
             }
-            Self::MoonshotK3Chat { .. } | Self::MoonshotK27CodeChat => ReasoningMode::Enabled,
+            Self::MoonshotK3Chat { .. }
+            | Self::MoonshotK27CodeChat
+            | Self::ZhipuGlm53Chat { .. }
+            | Self::ZhipuGlm53FlashChat { .. } => ReasoningMode::Enabled,
             Self::MoonshotK26Chat { thinking_mode } => match thinking_mode {
                 MoonshotK26ThinkingMode::ProviderDefault => ReasoningMode::ProviderDefault,
                 MoonshotK26ThinkingMode::Enabled | MoonshotK26ThinkingMode::EnabledKeepAll => {
@@ -484,7 +518,9 @@ impl ProviderFamilySettings {
             Self::DeepseekFlashChat { reasoning } | Self::DeepseekProChat { reasoning } => {
                 reasoning.effort
             }
-            Self::MoonshotK3Chat { reasoning_effort } => reasoning_effort,
+            Self::MoonshotK3Chat { reasoning_effort }
+            | Self::ZhipuGlm53Chat { reasoning_effort }
+            | Self::ZhipuGlm53FlashChat { reasoning_effort } => reasoning_effort,
             Self::Generic | Self::MoonshotK27CodeChat | Self::MoonshotK26Chat { .. } => {
                 ProviderReasoningEffort::ProviderDefault
             }
@@ -504,7 +540,9 @@ impl ProviderFamilySettings {
             | Self::DeepseekProChat { .. }
             | Self::MoonshotK3Chat { .. }
             | Self::MoonshotK27CodeChat
-            | Self::MoonshotK26Chat { .. } => Ok(()),
+            | Self::MoonshotK26Chat { .. }
+            | Self::ZhipuGlm53Chat { .. }
+            | Self::ZhipuGlm53FlashChat { .. } => Ok(()),
         }
     }
 }

@@ -315,6 +315,7 @@ pub(super) enum ProviderStreamState {
     Anthropic(AnthropicStreamAccumulator),
     DeepSeek(Box<super::providers::deepseek::DeepSeekStreamAccumulator>),
     Moonshot(Box<super::providers::moonshot::MoonshotStreamAccumulator>),
+    Zhipu(Box<super::providers::zhipu::ZhipuStreamAccumulator>),
 }
 
 pub(super) struct LlmStreamAccumulator {
@@ -446,6 +447,7 @@ impl LlmStreamAccumulator {
             ProviderStreamState::Anthropic(accumulator) => accumulator.usage.as_ref(),
             ProviderStreamState::DeepSeek(accumulator) => accumulator.projected_usage.as_ref(),
             ProviderStreamState::Moonshot(accumulator) => accumulator.projected_usage.as_ref(),
+            ProviderStreamState::Zhipu(accumulator) => accumulator.projected_usage.as_ref(),
         }
     }
 }
@@ -1003,7 +1005,7 @@ impl AnthropicStreamAccumulator {
     }
 }
 
-fn append_stream_fragment(target: &mut String, fragment: &str) {
+pub(super) fn append_stream_fragment(target: &mut String, fragment: &str) {
     if fragment.is_empty() {
         return;
     }

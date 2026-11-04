@@ -244,7 +244,7 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
         notifications.clone(),
         request(STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD, None),
     );
-    assert_eq!(vendors["result"].as_array().unwrap().len(), 3);
+    assert_eq!(vendors["result"].as_array().unwrap().len(), 4);
     let moonshot = vendors["result"]
         .as_array()
         .unwrap()
@@ -264,6 +264,62 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
     }
     assert!(moonshot.get("profileId").is_none());
     assert!(moonshot.get("runtimeCapabilities").is_none());
+
+    let zhipu = vendors["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|descriptor| descriptor["vendorId"] == "zhipu")
+        .unwrap();
+    assert_eq!(zhipu["displayName"], "智谱");
+    assert_eq!(zhipu["selectable"], true);
+    assert_eq!(
+        zhipu["fixedApiUrl"],
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    );
+    assert_eq!(
+        zhipu["modelIdPolicy"],
+        serde_json::json!({
+            "kind": "fixed",
+            "modelIds": ["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.3-flashx-legal"]
+        })
+    );
+    assert!(zhipu.get("profileId").is_none());
+    assert!(zhipu.get("runtimeCapabilities").is_none());
+
+    for (model, family, image) in [
+        ("glm-5.3", "zhipu_glm5_3_chat", "unsupported"),
+        ("glm-5.3-flash", "zhipu_glm5_3_flash_chat", "supported"),
+        ("glm-5.3-flashx", "zhipu_glm5_3_flash_chat", "supported"),
+        (
+            "glm-5.3-flashx-legal",
+            "zhipu_glm5_3_flash_chat",
+            "supported",
+        ),
+    ] {
+        let policy = handle_request(
+            storage.as_ref(),
+            &agent_service,
+            notifications.clone(),
+            request(
+                STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+                Some(serde_json::json!({
+                    "vendorId": "zhipu", "modelId": model, "dialect": "openai_chat_completions"
+                })),
+            ),
+        );
+        assert_eq!(policy["result"]["status"], "supported");
+        assert_eq!(policy["result"]["settingsKind"], "zhipu");
+        assert_eq!(policy["result"]["modelFamily"], family);
+        assert_eq!(policy["result"]["imageInput"], image);
+        assert_eq!(
+            policy["result"]["settings"]["defaultSettings"],
+            serde_json::json!({
+                "kind": family, "reasoningEffort": "max"
+            })
+        );
+        assert!(policy["result"].get("profileId").is_none());
+    }
 
     let policy = handle_request(
         storage.as_ref(),
