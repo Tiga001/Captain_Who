@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-04
 ---
 
 # IPC 与协议
@@ -117,6 +117,16 @@ TypeScript 类型不构成运行时校验。每个不可信边界需要按风险
 - 持久 JSON → Renderer：Storage client 使用精确 key、长度、枚举和 schema version 校验。
 
 高价值契约应使用“仅允许已知键”的严格 parser。新增字段必须提升相应 schema version 或按协议规定提供兼容解析；不能让调用方静默接受拼写错误和额外权限字段。
+
+### 模型厂商目录与策略
+
+`StorageHostApi.loadProviderVendorDescriptors` 返回厂商级编辑描述，型号选择由 `modelIdPolicy` 区分 `{ kind: free_text }` 与 `{ kind: fixed, modelIds }`；`fixedApiUrl` 是必需的可空字段，通用兼容为 `null`，专用厂商返回固定 HTTPS 地址。名单由 Rust [Provider 注册表](../../crates/core/src/provider_registration.rs)投影；它是编辑选项，不是 Renderer 自行判断执行能力的依据。
+
+[共享 parser](../../packages/protocol/src/storageParsers/provider.ts)拒绝额外/缺失字段、空或重复固定型号、重复厂商、越界数据，以及包含凭据、query、fragment 或空白的固定地址。Main 和 [Storage Preload bridge](../../src/preload/StorageIpcBridge.ts)均解析返回值，不能把旧版缺字段响应当作自由输入降级。桌面包需要匹配的 Main、Preload 和 Core Server。
+
+`resolveProviderVendorModelPolicy` 以 `vendorId`、精确 `modelId` 和 `dialect` 解析支持状态、模型族、图片能力及公开设置，Renderer 不通过型号前缀猜测。新增 K3.1 型号仍归 K3 Profile；智谱的两个模型族使用现有 Provider 配置 schema v2，只有 `reasoningEffort` 设置，不因此提升 SQLite 或 Runtime checkpoint 版本。Provider 配置、描述符和策略的定义见 [storage.ts](../../packages/protocol/src/storage.ts)；运行时私有续接策略不进入这些 UI DTO。
+
+该链路的跨层回归入口见[模型 Provider 与配置协议](../development/testing.md#模型-provider-与配置协议)。
 
 ## 错误契约
 

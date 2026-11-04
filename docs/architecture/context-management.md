@@ -342,13 +342,15 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 
 ### 请求输出上限与上下文预留
 
-普通对话不再由 Renderer 或 Runtime 统一注入 `maxTokens: 30000`。`runtime/output_budget.rs` 一次解析两个独立结果：可选的 HTTP 输出上限和非零的内部输出预留。发送前检查、运行中自动压缩、空闲预览和配置指纹使用同一解析入口；未知服务的预留估计不得反向写成请求限制。
+普通对话不再由 Renderer 或 Runtime 统一注入 `maxTokens: 30000`。[`runtime/output_budget.rs`](../../crates/core/src/runtime/output_budget.rs) 一次解析两个独立结果：可选的 HTTP 输出上限和非零的内部输出预留。发送前检查、运行中自动压缩、空闲预览和配置指纹使用同一解析入口；未知服务的预留估计不得反向写成请求限制。
+
+模型配置的 `contextWindowTokens` 是输入与输出共用的总窗口；内部输出预留是在这个窗口内为回答留出的空间；HTTP 输出上限才是请求对服务端生成长度的约束。扩大总窗口不会同步提高输出上限，省略 HTTP 上限也不会清除内部预留。三者不能互相替代，实际可用输入还须扣除安全余量。
 
 | Profile                   | 默认请求字段                   | 内部输出预留                                      |
 | ------------------------- | ------------------------------ | ------------------------------------------------- |
 | 通用 OpenAI-compatible    | 不发送 `max_tokens`            | 30,000，未知默认值的估计                          |
 | DeepSeek Flash / Pro      | 不发送 `max_tokens`            | 非思考 8,192；思考默认 65,536；max effort 131,072 |
-| Moonshot K3               | 不发送 `max_completion_tokens` | 131,072                                           |
+| Moonshot K3 / K3.1        | 不发送 `max_completion_tokens` | 131,072                                           |
 | Moonshot K2.6 / K2.7 Code | 不发送 `max_completion_tokens` | 30,000，未确认默认值的估计                        |
 | 智谱 GLM-5.3 / Flash 系列 | 不发送 `max_tokens`            | 65,536                                            |
 | 通用 Anthropic Messages   | 必填 `max_tokens: 30000`       | 30,000，保留现有兼容值                            |
@@ -510,7 +512,9 @@ ordinary request / summary request pressure
 
 请求布局、跨 Run 材料、压缩恢复与 Provider continuation 应联合验证，不把某个历史轮次的测试数量当作当前完成门禁。重点补充入口：
 
-- [输出预算回归](../../crates/core/src/runtime/tests/output_budget.rs)：省略 wire 上限、内部预留与恢复指纹。
+- [输出预算回归](../../crates/core/src/runtime/tests/output_budget.rs)：各已注册 Profile（含 K3 与智谱）的预览/执行预留一致性、省略 wire 上限与恢复指纹；K3.1 与 K3 共用 Profile 的归属另由 [Moonshot 注册测试](../../crates/core/src/provider_registration/moonshot.rs)验证。
+- [智谱 wire 回归](../../crates/core/src/llm/tests/zhipu_wire.rs)：显式输出上限校验、原始工具参数额外字节计量，以及推理/缓存用量子集不重复累加。
+- [推理续接恢复回归](../../crates/core/src/runtime/tests/preserved_thinking_recovery.rs)：Moonshot 与智谱的普通回复、空正文轮和进程重开后私有状态恢复，忽略未完成提交的 staging 状态。
 - [统一历史回归](../../crates/core/src/runtime/tests/unified_history.rs)：真实 Runtime、SQLite 重启、原图引用、冷/热容量与跨 Run 前缀。
 - [请求前缀回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs)：Host admission、迟到 Renderer upsert、终态及持久化回执。
 - [工作区指令回归](../../crates/core-server/src/application/agent/tests/workspace_instructions.rs)：同一次发现用于预览与请求，replace/remove 及目录身份复验。

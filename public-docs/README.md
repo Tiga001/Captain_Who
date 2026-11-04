@@ -4,7 +4,7 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # Captain Who 文档
@@ -40,4 +40,4 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ## 阅读说明
 
-[发行说明](releases/release-notes/README.md)描述已经发布的安装包；[当前开发进展](releases/development-status.md)介绍标签之后的改动。例如，11 月新增的「预测下一条用户消息」不在 9 月 23 日的 `1.0.6` 安装包里，即使当前源码显示的版本号仍是 `1.0.6`。使用第三方模型、搜索或 MCP 服务时，还需遵守相应服务商的条款、计费方式和数据政策。
+[发行说明](releases/release-notes/README.md)描述已经发布的安装包；[当前开发进展](releases/development-status.md)介绍标签之后的改动。11 月新增的「预测下一条用户消息」、Kimi K3.1 和智谱 GLM-5.3 专用接入不在 9 月 23 日的 `1.0.6` 安装包里，即使当前源码显示的版本号仍是 `1.0.6`。模型接入步骤见[连接模型 Provider](integrations/model-provider-integration.md)。使用第三方模型、搜索或 MCP 服务时，还需遵守相应服务商的条款、计费方式和数据政策。

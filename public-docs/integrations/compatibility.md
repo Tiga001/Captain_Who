@@ -4,7 +4,7 @@ description: 查看 Captain Who 当前对 Provider、Skill、MCP 和文件能力
 status: current
 audience: user
 owner: product
-last_verified: 2026-09-14
+last_verified: 2026-11-04
 ---
 
 # 集成兼容性
@@ -13,14 +13,19 @@ last_verified: 2026-09-14
 
 ## 模型 Provider
 
-| 能力                                      | 当前状态                   |
-| ----------------------------------------- | -------------------------- |
-| OpenAI-compatible Chat 与 Tool Calls      | 支持对应通用适配器         |
-| Anthropic-compatible Messages 与 Tool Use | 支持对应通用适配器         |
-| DeepSeek V4 Chat 推理续接                 | 支持专用配置               |
-| Moonshot 模型族专用配置                   | 支持按模型资料显示的设置   |
-| 任意 OpenAI/Anthropic 网关                | 不保证；需逐端点验证       |
-| 自动发现模型与价格                        | 不支持，模型资料由用户配置 |
+以下按 2026-11-04 主分支核验；新增的 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面不属于 2026-09-23 的 v1.0.6 安装包。参见[当前开发进展](../releases/development-status.md)。
+
+| 能力                                      | 当前状态                                                  |
+| ----------------------------------------- | --------------------------------------------------------- |
+| OpenAI-compatible Chat 与 Tool Calls      | 支持对应通用适配器                                        |
+| Anthropic-compatible Messages 与 Tool Use | 支持对应通用适配器                                        |
+| DeepSeek V4 Chat 推理续接                 | 支持专用配置                                              |
+| Moonshot 模型族专用配置                   | 支持 K3/K3.1、K2.7 Code、K2.6 各自的设置                  |
+| 智谱 GLM-5.3 与 Flash 系列                | 支持国内标准 API 专用配置，不接入 Coding Plan 或海外 Z.AI |
+| 任意 OpenAI/Anthropic 网关                | 不保证；需逐端点验证                                      |
+| 自动发现模型与价格                        | 不支持，模型资料由用户配置                                |
+
+专用厂商使用已适配型号列表、固定官方地址及对应图片能力；通用兼容配置允许手动填写。具体型号、参数差异与配置步骤见[连接模型 Provider](model-provider-integration.md)。
 
 ## Skill
 

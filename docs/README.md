@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # Captain Who 开发文档
@@ -26,8 +26,9 @@ fixture 和测试为准。
 
 ## 本次核验基线
 
-2026-11-03 的功能基线为 `948cd3b5`，数据库 schema 为 v72。源码 `package.json` 与 9 月 23 日的发行标签 `v1.0.6`（`1278cf10`）版本号相同，但不是同一份代码。安装包见[版本与发布](../public-docs/releases/README.md)。
+2026-11-04 的主分支功能基线为 `654734dd`，数据库 schema 仍为 v72。源码 `package.json` 与 9 月 23 日的发行标签 `v1.0.6`（`1278cf10`）版本号相同，但不是同一份代码。安装包见[版本与发布](../public-docs/releases/README.md)。
 
+- [模型 Provider](architecture/agent-runtime-and-providers.md)新增 Kimi K3.1 两个型号、智谱 GLM-5.3 文本和 Flash 模型族；[配置契约](development/settings-and-configuration.md)说明固定厂商地址与精确型号选择，[上下文预算](architecture/context-management.md#请求输出上限与上下文预留)区分窗口容量和输出预留。厂商线上可用性仍需独立验证。
 - [预测下一条用户消息](subsystems/prompt-prediction.md)是标签后的新增功能：只对已完成回复做独立采样，不运行工具、不创建用户消息；已发送的请求单独计入用量。
 - [存储](architecture/storage-and-data-lifecycle.md)已采用 WAL/FULL、单写通道与双读连接；[运行时](architecture/agent-runtime-and-providers.md)包含 Preparing、资源排序及 Core Server-owned 展示检查点。
 - [组织](subsystems/organizations.md)支持可移植 Markdown 模板及按需加载的成员观察/邮件看板；[前端](architecture/frontend.md)和[文件](subsystems/workspace-files.md)文档覆盖长会话分段、工具活动分组与读取文件入口。

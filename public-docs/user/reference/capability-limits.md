@@ -4,7 +4,7 @@ description: 汇总当前版本面向用户的重要支持范围、上限和不�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-04
 ---
 
 # 能力限制
@@ -13,7 +13,8 @@ last_verified: 2026-10-04
 
 ## 模型与网络
 
-- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible、DeepSeek V4 Chat 和 Moonshot 配置；兼容端点仍需满足对应协议行为。
+- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱国内标准 API 配置；兼容端点仍需满足对应协议行为。此处按 2026-11-04 主分支核验，新增的 Kimi K3.1 与智谱 GLM-5.3 不属于 2026-09-23 的 v1.0.6 安装包；型号和参数范围见[连接模型 Provider](../../integrations/model-provider-integration.md)。
+- 专用厂商的型号、官方地址与图片能力受已适配目录约束；不会自动发现服务商新型号，也不会自动填写上下文或价格。智谱专用配置不接入 Coding Plan 套餐或海外 Z.AI。
 - 联网搜索依赖用户配置的 Tavily API Key；没有 Key 时不能使用搜索 Tool。
 - 模型与搜索不是离线能力，数据会发往相应配置服务。
 - Token 和费用是本地统计或估算，不代表服务商最终账单。

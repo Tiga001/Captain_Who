@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # 设置与配置
@@ -61,6 +61,18 @@ Turn-start 目录可按 `configurationRevision` 复用缓存，执行和 spawn �
 - General 的 Custom 权限除 read/write/command/FileChange 外，还包含 `builtinExecution` 审批开关；它控制符合条件的应用内置 capability/Tool 与 BrowserRisk 是否需要本次人工点击，但不会自行激活 capability，也不跳过 target、risk、来源、policy、audit 或执行前复核。
 - Agent 模板名称与 machine key 在工作区级模板库内唯一；启用状态和内容使用 revision/CAS，项目 assignment 独立且每个项目最多 32 个模板。未分配、已停用或模型不可用的模板不能用于 spawn。
 - Browser 的链接打开目标使用 `system | builtin`；下载目录与“每次询问”只影响用户手动下载，Agent 下载不会停在原生保存对话框中。Renderer 只接收安全 display path，不取得 Host 保存的真实 custom directory authority。
+
+### 厂商与模型配置
+
+模型编辑页目前提供通用兼容、DeepSeek、Moonshot/Kimi 和智谱。专用厂商的型号下拉与只读官方 API 地址来自 Host 的 `modelIdPolicy` / `fixedApiUrl`，不在 Renderer 硬编码型号名单；通用兼容保留型号和地址自由输入。切换厂商保留草稿，不自动选中列表第一项；原有但不在当前名单中的型号保留为不可选择的展示项，不静默替换。
+
+每次型号或连接协议变化后，表单重新请求 Host 的模型策略；旧响应不得覆盖后来选择的型号。Host 决定模型族、图片输入能力和高级设置范围，等待策略或解析失败时不能用旧结果保存新配置。智谱仅提供推理强度设置，默认 `max`，不提供关闭思考开关；准确型号与各厂商运行语义见[Agent Runtime 与 Provider](../architecture/agent-runtime-and-providers.md#当前-provider)。
+
+专用厂商保存时采用固定地址。只有模型原本没有覆盖 URL/凭据、凭据意图仍为 `keep`，且全局地址去除首尾空白后与固定地址一致时，才保留全局整对连接继承。新建覆盖连接或显式清除模型凭据后，不得从全局连接借用另一半凭据；不完整连接可以作为待补齐配置保存，但不能执行。固定地址是模型编辑规则，不是自动迁移：不会把已有 Generic 配置改成专用 Profile，也不会重写正在运行的冻结连接。
+
+上下文窗口仍由用户填写并由 Host 校验，不随型号选择自动扩大。窗口是总容量，不是单次输出长度；K3.1 使用 K3 Profile 的 131,072 输出预留，旧的 128,000 默认窗口无法容纳它。保存时的容量拒绝保留草稿并定位窗口输入框，完整规则见[请求输出上限与上下文预留](../architecture/context-management.md#请求输出上限与上下文预留)。
+
+实现与回归以 [ModelForm](../../src/renderer/src/features/settings/pages/configuration/ModelForm.tsx)、[Provider 表单状态](../../src/renderer/src/features/settings/pages/configuration/providerProfileForm.ts) 和[模型配置浏览器测试](../../src/renderer/src/app/__tests__/ModelProviderProfileForm.browser.test.tsx)为准。
 
 ### 模型快捷选择
 

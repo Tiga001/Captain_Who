@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # 测试策略与矩阵
@@ -154,6 +154,25 @@ cargo test --locked -p mycopilot-core model_projection
 
 真实账号登录、OTP 送达与操作系统安全存储需单独验收，mock 通过不能证明云端当前配置。详见
 [账号登录](../subsystems/account-login.md)与[本机 Token/许可](../subsystems/local-token-usage-and-license.md)。
+
+### 模型 Provider 与配置协议
+
+Provider 回归覆盖注册、wire 编码、私有续接、容量与 UI 配置，不能只验证下拉菜单出现新型号。当前 Kimi K3.1 沿用 K3 Profile；智谱 GLM-5.3/Flash 使用独立 Adapter。以下测试均使用本地 fixture/模拟响应，不需要线上 API Key：
+
+```bash
+cargo test --locked -p mycopilot-core --test provider_profile_contract
+cargo test --locked -p mycopilot-core --lib moonshot
+cargo test --locked -p mycopilot-core --lib zhipu
+cargo test --locked -p mycopilot-core --lib output_budget
+cargo test --locked -p mycopilot-core --lib preserved_thinking_recovery
+cargo test --locked -p mycopilot-core-server --bin core-server provider
+pnpm exec vitest run --project unit packages/protocol/src/providerVendor.test.ts packages/protocol/src/zhipuProvider.test.ts packages/protocol/src/storageParsers.test.ts src/main/core/coreServer.modelSettings.test.ts src/main/core/ipc.storage.test.ts src/preload/StorageIpcBridge.test.ts src/renderer/src/app/__tests__/providerProfileForm.test.ts
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/ModelProviderProfileForm.browser.test.tsx
+```
+
+[智谱 wire 测试](../../crates/core/src/llm/tests/zhipu_wire.rs)验证四个精确型号、图片边界、强制思考、可选输出上限、128 个工具限制、流式参数完整性、业务错误分类及用量子集。[恢复测试](../../crates/core/src/runtime/tests/preserved_thinking_recovery.rs)使用临时磁盘库验证 Moonshot/智谱推理续接在终态提交、重启及中断 staging 后的行为；[预算测试](../../crates/core/src/runtime/tests/output_budget.rs)验证预览与真实请求共用预留，不能用配置窗口代替输出预算。
+
+跨层测试另覆盖固定型号/地址描述符的严格解析、厂商与模型族匹配、全局整对连接继承、显式清除凭据、草稿保留和过期策略响应。它们已归属默认 `unit`、`browser` 和 Cargo workspace 测试，不是新增的独立 release gate；运行筛选命令时仍应检查实际执行数量，不能将 0 项视为通过。离线回归不验证线上型号权限、供应商可用性、实际缓存命中率或账单。
 
 ### 预测下一条用户消息
 

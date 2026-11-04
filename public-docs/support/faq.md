@@ -4,7 +4,7 @@ description: 关于 Captain Who 数据、模型、权限、扩展和自动化的
 status: current
 audience: user
 owner: support
-last_verified: 2026-10-04
+last_verified: 2026-11-04
 ---
 
 # 常见问答
@@ -15,7 +15,11 @@ last_verified: 2026-10-04
 
 ## 必须使用某一家模型服务吗？
 
-不必。当前支持 OpenAI-compatible、Anthropic-compatible、DeepSeek V4 Chat 和 Moonshot 对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证。
+不必。当前主分支支持 OpenAI-compatible、Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证；型号与参数见[连接模型 Provider](../integrations/model-provider-integration.md)。2026-11-04 新增的 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面不属于 2026-09-23 的 v1.0.6 安装包，参见[当前开发进展](../releases/development-status.md)。
+
+## 智谱 Coding Plan 能直接用于智谱配置吗？
+
+当前专用配置面向国内标准 API，固定使用 `open.bigmodel.cn` 的标准接口，请填写标准 API Key，按量计费；它不接入 Coding Plan 套餐或海外 Z.AI。该配置不会检查或转换你的套餐额度。详见[智谱 GLM-5.3 配置](../integrations/model-provider-integration.md#智谱-glm-53-配置)。
 
 ## Captain Who 会自动收费吗？
 

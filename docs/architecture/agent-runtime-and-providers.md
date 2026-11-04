@@ -67,7 +67,9 @@ Steering 关闭守卫和文件事务 Run guard 保持在 Driver 的原有作用�
 
 此表用于读者定位，不应成为新的注册真源。新增或删除 Provider 必须以 `provider_registration.rs` 和 provider contract test 为准，并同步本文。
 
-模型编辑页通过厂商描述中的 `modelIdPolicy` 区分自由输入与固定型号下拉。固定选项直接从同一注册表的精确型号集合投影，不在 Renderer 维护另一份名单；选中型号后仍由 Host 解析模型族和设置。厂商描述的 `fixedApiUrl` 为专用厂商提供只读官方地址，通用兼容为 `null` 并保留自由输入。表单保存时采用固定地址；原本继承全局整对连接、全局地址与固定地址完全一致且凭据未改时，继续保留继承关系。其他半对连接仍允许保存草稿，执行时不得借用全局另一半凭据。Moonshot 的 `kimi-k3.1-pro`、`kimi-k3.1-pro-highspeed` 与 `kimi-k3` 共用现有 K3 Profile，不批量迁移用户配置或提升 Profile 版本。Chat Completions 的 `prompt_tokens_details.cache_write_tokens` 映射到已有缓存写入用量字段；写入量已包含在总输入中，不再次累加输入或费用。
+模型编辑页通过厂商描述中的 `modelIdPolicy` 区分自由输入与固定型号下拉。固定选项直接从同一注册表的精确型号集合投影，不在 Renderer 维护另一份名单；选中型号后仍由 Host 解析模型族和设置。厂商描述的 `fixedApiUrl` 为专用厂商提供只读官方地址，通用兼容为 `null` 并保留自由输入。表单保存、全局连接继承与不完整连接的边界见[厂商与模型配置](../development/settings-and-configuration.md#厂商与模型配置)，描述符的跨进程校验见[模型厂商目录与策略](./ipc-and-protocol.md#模型厂商目录与策略)。
+
+Moonshot 的 `kimi-k3.1-pro`、`kimi-k3.1-pro-highspeed` 与 `kimi-k3` 共用现有 K3 Profile，不批量迁移用户配置或提升 Profile 版本。Chat Completions 的 `prompt_tokens_details.cache_write_tokens` 映射到已有缓存写入用量字段；写入量已包含在总输入中，不再次累加输入或费用。
 
 Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 replay、上下文投影、Usage 口径、partial Trace、Tool Call 来源、终态批次、Checkpoint 私有参数以及 continuation 要求。Runtime 应查询 `ProviderTurnRuntimePolicy`，不得按 profile 名称散落条件分支。
 
@@ -84,6 +86,8 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
 请求输出上限使用 `max_tokens`；未显式指定时省略该字段，但容量规划按官方默认 65,536 预留，
 模型最大输出为 131,072，不能用 1M 上下文代替输出预算。
 流式工具调用使用 `tool_stream=true`，工具参数收齐并通过协议验证后才可交给 Runtime。
+每个请求最多携带 128 个函数工具；[智谱 Adapter](../../crates/core/src/llm/providers/zhipu.rs)
+在发出请求前拒绝超限，不静默截断工具集。此限制作用于最终请求的全部工具，包括已启用的扩展工具。
 
 推理、原始 assistant 内容及成组工具调用通过智谱私有 continuation 保存和回传，绑定冻结的
 ProviderProtocolKey，复用加密 vault 与 checkpoint 引用。普通回复和工具轮均保留原始顺序；
@@ -275,7 +279,11 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 
 ## 测试
 
-- `crates/core/tests/provider_profile_contract.rs`
+- [Provider 注册与配置契约](../../crates/core/tests/provider_profile_contract.rs)
+- [Moonshot wire 契约](../../crates/core/src/llm/tests/moonshot_wire.rs)
+- [智谱 wire 契约](../../crates/core/src/llm/tests/zhipu_wire.rs)
+- [推理续接跨重启恢复](../../crates/core/src/runtime/tests/preserved_thinking_recovery.rs)
+- [Core Server 厂商目录与策略](../../crates/core-server/src/transport/tests/provider_profiles.rs)
 - `crates/core/src/llm/tests/deepseek_runtime.rs`
 - `crates/core/src/runtime/tests/`
 - `crates/core/src/runtime/tests/request_layout.rs`
@@ -291,13 +299,16 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 建议最小验证：
 
 ```bash
-cargo test -p mycopilot-core --test provider_profile_contract
-cargo test -p mycopilot-core deepseek
-cargo test -p mycopilot-core runtime
-cargo test -p mycopilot-core-server provider
+cargo test --locked -p mycopilot-core --test provider_profile_contract
+cargo test --locked -p mycopilot-core --lib deepseek
+cargo test --locked -p mycopilot-core --lib moonshot
+cargo test --locked -p mycopilot-core --lib zhipu
+cargo test --locked -p mycopilot-core --lib runtime
+cargo test --locked -p mycopilot-core-server --bin core-server provider
 ```
 
 具体 package 名与筛选项以 workspace `Cargo.toml` 和 `cargo test --workspace --no-run` 为准；不要把上述便捷命令当成 CI 真源。
+这些本地 fixture 回归验证注册、请求编码和恢复契约，不证明线上厂商当前可用、账号具有权限、实际缓存命中率或计费结果；跨层配置回归见[模型 Provider 与配置协议](../development/testing.md#模型-provider-与配置协议)。
 
 ## 变更检查表
 
