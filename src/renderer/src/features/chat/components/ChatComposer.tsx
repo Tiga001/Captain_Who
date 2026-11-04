@@ -11,17 +11,7 @@ import {
   type KeyboardEvent
 } from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
-import {
-  ArrowUp,
-  Check,
-  ChevronDown,
-  Folder,
-  LoaderCircle,
-  Play,
-  Plus,
-  Search,
-  X
-} from 'lucide-react'
+import { ArrowUp, ChevronDown, Folder, LoaderCircle, Play, Plus, X } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useNextUserMessagePrediction } from '../useNextUserMessagePrediction'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
@@ -87,6 +77,9 @@ import {
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
 import { createComposerModelMenuOption } from '../../modelSelection/composerModelPresentation'
 import { ComposerModelMenu } from './ComposerModelMenu'
+import { ComposerWorkspaceMentionMenu } from './ComposerWorkspaceMentionMenu'
+import { ComposerPermissionMenu } from './ComposerPermissionMenu'
+import { ComposerProjectMenu } from './ComposerProjectMenu'
 import {
   CHAT_PERMISSION_PRESENTATIONS,
   getChatPermissionPresentation
@@ -1322,38 +1315,13 @@ export function ChatComposer({
                   toggleSkill(descriptor)
                 }}
               />
-            ) : mentionEntries.length === 0 ? (
-              <div className="composer-commands" role="listbox" aria-label="Workspace files">
-                <div className="composer-commands__list">
-                  <p className="composer-commands__empty">未找到匹配项</p>
-                </div>
-              </div>
             ) : (
-              <div className="composer-commands" role="listbox" aria-label="Workspace files">
-                <div className="composer-commands__list">
-                  {mentionEntries.map((entry, index) => (
-                    <button
-                      key={`${entry.folderId}:${entry.path}`}
-                      type="button"
-                      role="option"
-                      aria-selected={index === mentionIndex}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onPointerMove={() => setMentionIndex(index)}
-                      onClick={() => selectWorkspaceMention(entry)}
-                    >
-                      {entry.kind === 'directory' ? (
-                        <Folder aria-hidden="true" />
-                      ) : (
-                        <WorkspaceFileTypeIcon path={entry.path} />
-                      )}
-                      <span className="composer-commands__label">{entry.displayName}</span>
-                      <span className="composer-commands__description" title={entry.displayPath}>
-                        {entry.displayPath}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <ComposerWorkspaceMentionMenu
+                mentionEntries={mentionEntries}
+                mentionIndex={mentionIndex}
+                setMentionIndex={setMentionIndex}
+                selectWorkspaceMention={selectWorkspaceMention}
+              />
             )}
           </AnchoredPopover>
         )}
@@ -1841,36 +1809,13 @@ export function ChatComposer({
                 onClose={() => setIsPermissionMenuOpen(false)}
                 popoverRef={permissionPopoverRef}
               >
-                <div
-                  className="composer-permission-menu"
-                  role="listbox"
-                  aria-label={t('chat.selectPermission')}
-                >
-                  {permissionOptions.map((option) => {
-                    const OptionIcon = option.icon
-                    const isSelected = option.id === permissionMode
-
-                    return (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={isSelected}
-                        className="composer-permission-option"
-                        disabled={isModelSelectionDisabled}
-                        data-permission={option.id}
-                        data-selected={isSelected || undefined}
-                        key={option.id}
-                        onClick={() => selectPermissionMode(option.id)}
-                      >
-                        <OptionIcon aria-hidden="true" />
-                        <span>{t(option.labelKey)}</span>
-                        {isSelected && (
-                          <Check className="composer-permission-option__check" aria-hidden="true" />
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
+                <ComposerPermissionMenu
+                  permissionOptions={permissionOptions}
+                  permissionMode={permissionMode}
+                  isModelSelectionDisabled={isModelSelectionDisabled}
+                  selectPermissionMode={selectPermissionMode}
+                  t={t}
+                />
               </AnchoredPopover>
             )}
           </div>
@@ -1971,74 +1916,26 @@ export function ChatComposer({
                   onClose={() => setIsProjectMenuOpen(false)}
                   popoverRef={projectPopoverRef}
                 >
-                  <div
-                    className="composer-project-menu"
-                    role="listbox"
-                    aria-label={t('project.chooseProject')}
-                  >
-                    <label className="composer-project-menu__search">
-                      <Search aria-hidden="true" />
-                      <input
-                        value={projectSearch}
-                        placeholder={t('project.searchProject')}
-                        onChange={(event) => setProjectSearch(event.target.value)}
-                      />
-                    </label>
-
-                    <div className="composer-project-menu__items">
-                      {filteredProjects.map((project) => {
-                        const isSelected = project.id === selectedProjectId
-
-                        return (
-                          <button
-                            className="composer-project-option"
-                            data-selected={isSelected || undefined}
-                            type="button"
-                            role="option"
-                            aria-selected={isSelected}
-                            key={project.id}
-                            onClick={() => {
-                              updateDraft({
-                                projectId: project.id,
-                                skills:
-                                  draftRef.current.projectId === project.id
-                                    ? draftRef.current.skills
-                                    : retainGlobalSkillSelections(draftRef.current.skills)
-                              })
-                              setProjectSearch('')
-                              setIsProjectMenuOpen(false)
-                            }}
-                          >
-                            <Folder aria-hidden="true" />
-                            <span>{project.name}</span>
-                            {isSelected && <Check aria-hidden="true" />}
-                          </button>
-                        )
-                      })}
-                    </div>
-
-                    <div className="composer-project-menu__divider" />
-
-                    <button
-                      className="composer-project-command"
-                      type="button"
-                      onClick={() => {
-                        void handleSelectProjectDirectory()
-                      }}
-                    >
-                      <Plus aria-hidden="true" />
-                      <span>{t('project.newProject')}</span>
-                    </button>
-
-                    <button
-                      className="composer-project-command"
-                      type="button"
-                      onClick={clearSelectedProject}
-                    >
-                      <X aria-hidden="true" />
-                      <span>{t('project.noProject')}</span>
-                    </button>
-                  </div>
+                  <ComposerProjectMenu
+                    projectSearch={projectSearch}
+                    setProjectSearch={setProjectSearch}
+                    filteredProjects={filteredProjects}
+                    selectedProjectId={selectedProjectId}
+                    onSelectProject={(project) => {
+                      updateDraft({
+                        projectId: project.id,
+                        skills:
+                          draftRef.current.projectId === project.id
+                            ? draftRef.current.skills
+                            : retainGlobalSkillSelections(draftRef.current.skills)
+                      })
+                      setProjectSearch('')
+                      setIsProjectMenuOpen(false)
+                    }}
+                    handleSelectProjectDirectory={handleSelectProjectDirectory}
+                    clearSelectedProject={clearSelectedProject}
+                    t={t}
+                  />
                 </AnchoredPopover>
               )}
             </div>
