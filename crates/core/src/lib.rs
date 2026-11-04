@@ -177,9 +177,9 @@ pub use provider_registration::{
     ProviderProfileUiDescriptor, ProviderRegistration, ProviderRuntimeCapabilities,
     ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics,
     ProviderTurnRuntimePolicy, ProviderUsageSemantics, ProviderVendorDescriptor,
-    ProviderVendorModelPolicyDescriptor, ProviderVendorModelPolicyInput,
-    ProviderVendorModelUnsupportedReason, ProviderVendorResolutionError,
-    ProviderVendorSettingsKind,
+    ProviderVendorModelIdPolicy, ProviderVendorModelPolicyDescriptor,
+    ProviderVendorModelPolicyInput, ProviderVendorModelUnsupportedReason,
+    ProviderVendorResolutionError, ProviderVendorSettingsKind,
 };
 pub use storage::agent_graph_repository::{
     ActiveAgentTreeWake, AgentTreeRunStopCancellation, AgentTreeRunStopRecord,

@@ -2254,6 +2254,13 @@ export const koKRTranslations = {
   'configuration.cancel': '취소',
   'configuration.done': '완료',
   'configuration.providerModelId': '제공자 모델 ID',
+  'configuration.fixedProviderApiUrl':
+    'API 제공업체의 고정 URL입니다. 사용자 지정 URL은 일반 호환을 사용하세요.',
+  'configuration.fixedProviderTokenRequired':
+    '이 URL을 사용하려면 이 모델의 API 토큰을 설정하세요.',
+  'configuration.selectProviderModel': '모델 선택',
+  'configuration.selectSupportedProviderModel':
+    '선택한 제공업체가 지원하지 않는 모델입니다. 목록에서 모델을 선택하세요.',
   'configuration.providerModelIdPlaceholder': '예: deepseek-flash',
   'configuration.displayName': '표시 이름',
   'configuration.displayNamePlaceholder': '예: Kimi K3 High',

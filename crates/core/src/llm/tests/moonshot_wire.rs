@@ -127,24 +127,26 @@ fn expected_read_file_tool() -> Value {
 
 #[test]
 fn k3_payload_matches_complete_golden() {
-    let k3 = request(
-        k3_profile(ProviderReasoningEffort::Max),
-        "kimi-k3",
-        vec![message(LlmMessageRole::User, "hello")],
-        vec![tool_definition()],
-    );
-    assert_eq!(
-        build_payload(&k3),
-        json!({
-            "model": "kimi-k3",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "stream": false,
-            "max_completion_tokens": 128 * 1024,
-            "reasoning_effort": "max",
-            "tools": [expected_read_file_tool()],
-            "tool_choice": "auto"
-        })
-    );
+    for model in ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+        let k3 = request(
+            k3_profile(ProviderReasoningEffort::Max),
+            model,
+            vec![message(LlmMessageRole::User, "hello")],
+            vec![tool_definition()],
+        );
+        assert_eq!(
+            build_payload(&k3),
+            json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": false,
+                "max_completion_tokens": 128 * 1024,
+                "reasoning_effort": "max",
+                "tools": [expected_read_file_tool()],
+                "tool_choice": "auto"
+            })
+        );
+    }
 }
 
 #[test]
@@ -198,33 +200,35 @@ fn k3_payload_uses_completion_limit_efforts_and_no_k2_sampling_fields() {
         (ProviderReasoningEffort::High, Some("high")),
         (ProviderReasoningEffort::Max, Some("max")),
     ];
-    for (effort, expected) in cases {
-        let request = request(
-            k3_profile(effort),
-            "kimi-k3",
-            vec![message(LlmMessageRole::User, "hello")],
-            vec![tool_definition()],
-        );
-        let payload = build_payload(&request);
-        assert_eq!(payload["max_completion_tokens"], 128 * 1024);
-        assert_eq!(
-            payload.get("reasoning_effort").and_then(Value::as_str),
-            expected
-        );
-        assert_eq!(payload["tool_choice"], "auto");
-        for forbidden in [
-            "thinking",
-            "max_tokens",
-            "temperature",
-            "top_p",
-            "n",
-            "presence_penalty",
-            "frequency_penalty",
-        ] {
-            assert!(
-                payload.get(forbidden).is_none(),
-                "K3 unexpectedly sent {forbidden}"
+    for model in ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+        for (effort, expected) in cases {
+            let request = request(
+                k3_profile(effort),
+                model,
+                vec![message(LlmMessageRole::User, "hello")],
+                vec![tool_definition()],
             );
+            let payload = build_payload(&request);
+            assert_eq!(payload["max_completion_tokens"], 128 * 1024);
+            assert_eq!(
+                payload.get("reasoning_effort").and_then(Value::as_str),
+                expected
+            );
+            assert_eq!(payload["tool_choice"], "auto");
+            for forbidden in [
+                "thinking",
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "n",
+                "presence_penalty",
+                "frequency_penalty",
+            ] {
+                assert!(
+                    payload.get(forbidden).is_none(),
+                    "{model} unexpectedly sent {forbidden}"
+                );
+            }
         }
     }
 }
@@ -334,6 +338,60 @@ fn moonshot_thinking_families_preserve_completion_without_inventing_reasoning_us
             .unwrap()
             .usage();
         assert_eq!(usage_semantics.billable_output_tokens(&usage), Some(13));
+    }
+}
+
+#[test]
+fn k3_cache_usage_matches_nonstream_and_stream_without_double_counting_writes() {
+    let usage = json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "prompt_tokens_details": {
+            "cached_tokens": 30,
+            "cache_write_tokens": 40
+        }
+    });
+    for model in ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+        let profile = k3_profile(ProviderReasoningEffort::Max);
+        let provider_protocol = protocol(&profile, model);
+        let response = parse_non_stream_response_with_profile(
+            &json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "Visible." },
+                    "finish_reason": "stop"
+                }],
+                "usage": usage
+            })
+            .to_string(),
+            &profile,
+            &provider_protocol,
+            LlmResponseValidation::RequireModelAction,
+        )
+        .unwrap();
+        let mut accumulator =
+            LlmStreamAccumulator::for_profile(&profile, &provider_protocol).unwrap();
+        for value in [
+            json!({
+                "choices": [{
+                    "delta": { "content": "Visible." },
+                    "finish_reason": "stop"
+                }]
+            }),
+            json!({ "choices": [], "usage": usage }),
+        ] {
+            process_sse_frame(&format!("data: {value}\n\n"), &mut accumulator, &mut |_| {})
+                .unwrap();
+        }
+        for usage in [response.usage, accumulator.finish().unwrap().usage] {
+            let usage = usage.unwrap();
+            assert_eq!(usage.input_tokens, Some(100));
+            assert_eq!(usage.output_tokens, Some(20));
+            assert_eq!(usage.total_tokens, Some(120));
+            assert_eq!(usage.cached_input_tokens, Some(30));
+            assert_eq!(usage.cache_creation_input_tokens, Some(40));
+            assert_eq!(usage.billable_request_count, Some(1));
+        }
     }
 }
 

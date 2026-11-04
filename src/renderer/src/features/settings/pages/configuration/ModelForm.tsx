@@ -175,7 +175,21 @@ export function ModelForm({
   const isInputPriceValid = isValidPriceInput(values.inputPrice)
   const isCachedInputPriceValid = isValidPriceInput(values.cachedInputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
-  const hasOverrideUrl = values.apiUrlOverride.trim().length > 0
+  const selectedVendor = providerVendorDescriptors.find(
+    (descriptor) => descriptor.vendorId === providerProfile.selection
+  )
+  const fixedApiUrl = selectedVendor?.fixedApiUrl ?? null
+  const displayedApiUrl = fixedApiUrl ?? values.apiUrlOverride
+  // Preserve an existing matching global connection as a whole pair. A fixed URL must never
+  // borrow a global credential belonging to another endpoint, or undo an explicit token clear.
+  const inheritsFixedConnection =
+    fixedApiUrl !== null &&
+    !values.apiUrlOverride.trim() &&
+    values.apiTokenOverrideStatus === 'missing' &&
+    values.apiTokenOverrideMutation.type === 'keep' &&
+    globalApiUrl.trim() === fixedApiUrl
+  const savedApiUrlOverride = inheritsFixedConnection ? '' : displayedApiUrl.trim()
+  const hasOverrideUrl = savedApiUrlOverride.length > 0
   const effectiveOverrideTokenStatus =
     values.apiTokenOverrideMutation.type === 'replace'
       ? values.apiTokenOverrideMutation.value.length > 0
@@ -186,8 +200,8 @@ export function ModelForm({
         : values.apiTokenOverrideStatus
   const hasOverrideToken = effectiveOverrideTokenStatus === 'configured'
   const isConnectionPairComplete = hasOverrideUrl === hasOverrideToken
-  const isOverrideUrlValid = isValidApiUrl(values.apiUrlOverride)
-  const effectiveApiUrl = values.apiUrlOverride.trim() || globalApiUrl
+  const isOverrideUrlValid = isValidApiUrl(displayedApiUrl)
+  const effectiveApiUrl = fixedApiUrl ?? (values.apiUrlOverride.trim() || globalApiUrl)
   const originalEffectiveApiUrl = model?.apiUrlOverride?.trim() || globalApiUrl
   const wireIdentityUnchanged =
     Boolean(model) &&
@@ -198,6 +212,25 @@ export function ModelForm({
     resolvedPolicy?.status === 'supported' && resolvedPolicy.vendorId === providerProfile.selection
       ? resolvedPolicy
       : null
+  const modelIdPolicy = selectedVendor?.modelIdPolicy
+  const fixedModelIds = modelIdPolicy?.kind === 'fixed' ? modelIdPolicy.modelIds : null
+  const selectedModelId = values.providerModelId.trim()
+  const isUnlistedModel =
+    fixedModelIds !== null && selectedModelId.length > 0 && !fixedModelIds.includes(selectedModelId)
+  const modelIdOptions: SettingsSelectOption[] = fixedModelIds
+    ? [
+        ...(!selectedModelId || isUnlistedModel
+          ? [
+              {
+                value: selectedModelId,
+                label: selectedModelId || t('configuration.selectProviderModel'),
+                disabled: true
+              }
+            ]
+          : []),
+        ...fixedModelIds.map((modelId) => ({ value: modelId, label: modelId }))
+      ]
+    : []
   const canPreserveUnchangedProfile =
     providerProfile.update.kind === 'unchanged' &&
     !providerProfile.explicitSelection &&
@@ -220,6 +253,16 @@ export function ModelForm({
     isOutputPriceValid &&
     isOverrideUrlValid &&
     isProviderStateValid
+
+  const changeProviderModelId = (modelId: string) => {
+    if (modelId === values.providerModelId) return
+    // Invalidate the previous preview immediately, including promises that settle before the
+    // effect for this selection runs. Saving must wait for the new model's authoritative policy.
+    policyRequestRef.current += 1
+    setPolicyResolution({ status: modelId.trim() ? 'loading' : 'idle' })
+    setProviderSettingsOpen(false)
+    setValues((current) => ({ ...current, providerModelId: modelId }))
+  }
 
   useEffect(() => {
     const selection = providerProfile.selection
@@ -365,7 +408,7 @@ export function ModelForm({
         ...values,
         providerModelId: values.providerModelId.trim(),
         displayName: values.displayName.trim(),
-        apiUrlOverride: values.apiUrlOverride.trim(),
+        apiUrlOverride: savedApiUrlOverride,
         contextWindowTokens:
           values.contextWindowTokens.trim().replaceAll(',', '') ||
           DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
@@ -400,24 +443,35 @@ export function ModelForm({
           switch (node.id) {
             case 'configuration.model.providerModelId':
               return (
-                <label className="configuration-field settings-list-row">
+                <div className="configuration-field settings-list-row">
                   <span className="settings-list-row__text">
                     <span className="settings-list-row__title">{settingLabel(node, t)}</span>
                   </span>
-                  <span className="settings-list-row__control">
-                    <input
-                      className="settings-list-control"
-                      value={values.providerModelId}
-                      placeholder={t('configuration.providerModelIdPlaceholder')}
-                      onChange={(event) =>
-                        setValues((current) => ({
-                          ...current,
-                          providerModelId: event.target.value
-                        }))
-                      }
-                    />
+                  <span className="settings-list-row__control model-form-price-control">
+                    {fixedModelIds ? (
+                      <SettingsSelect
+                        ariaLabel={settingLabel(node, t)}
+                        className="model-provider-profile-select"
+                        options={modelIdOptions}
+                        value={selectedModelId}
+                        onChange={changeProviderModelId}
+                      />
+                    ) : (
+                      <input
+                        aria-label={settingLabel(node, t)}
+                        className="settings-list-control"
+                        value={values.providerModelId}
+                        placeholder={t('configuration.providerModelIdPlaceholder')}
+                        onChange={(event) => changeProviderModelId(event.target.value)}
+                      />
+                    )}
+                    {isUnlistedModel && (
+                      <small className="model-form-field-error" role="status">
+                        {t('configuration.selectSupportedProviderModel')}
+                      </small>
+                    )}
                   </span>
-                </label>
+                </div>
               )
             case 'configuration.model.contextWindowTokens':
               return (
@@ -625,16 +679,23 @@ export function ModelForm({
                                     className="settings-list-control"
                                     type="url"
                                     aria-invalid={!isOverrideUrlValid}
-                                    value={values.apiUrlOverride}
+                                    readOnly={fixedApiUrl !== null}
+                                    value={displayedApiUrl}
                                     placeholder={t('configuration.modelApiUrlPlaceholder')}
                                     tabIndex={isAdvancedOpen ? 0 : -1}
-                                    onChange={(event) =>
+                                    onChange={(event) => {
+                                      if (fixedApiUrl !== null) return
                                       setValues((current) => ({
                                         ...current,
                                         apiUrlOverride: event.target.value
                                       }))
-                                    }
+                                    }}
                                   />
+                                  {fixedApiUrl !== null && (
+                                    <small className="model-provider-policy-message">
+                                      {t('configuration.fixedProviderApiUrl')}
+                                    </small>
+                                  )}
                                   {!isOverrideUrlValid && (
                                     <small className="model-form-field-error">
                                       {t('configuration.invalidApiUrl')}
@@ -667,7 +728,11 @@ export function ModelForm({
                                   />
                                   {!isConnectionPairComplete && (
                                     <small className="model-form-field-error">
-                                      {t('configuration.modelConnectionPairRequired')}
+                                      {t(
+                                        fixedApiUrl !== null
+                                          ? 'configuration.fixedProviderTokenRequired'
+                                          : 'configuration.modelConnectionPairRequired'
+                                      )}
                                     </small>
                                   )}
                                 </span>
@@ -691,6 +756,12 @@ export function ModelForm({
                                     onChange={(selection) => {
                                       if (selection === 'unsupported') return
                                       setProviderSettingsOpen(false)
+                                      if (selection !== providerProfile.selection) {
+                                        policyRequestRef.current += 1
+                                        setPolicyResolution({
+                                          status: selectedModelId ? 'loading' : 'idle'
+                                        })
+                                      }
                                       setProviderProfile((current) => {
                                         const selected = selectProviderVendor(current, selection)
                                         return supportedPolicy?.vendorId === selection

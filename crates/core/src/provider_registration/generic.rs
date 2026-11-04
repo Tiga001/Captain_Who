@@ -40,12 +40,8 @@ fn accepts_settings(settings: ProviderFamilySettings) -> bool {
     matches!(settings, ProviderFamilySettings::Generic)
 }
 
-pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
-    ProviderVendorDescriptor {
-        vendor_id: ProviderVendorId::Generic,
-        display_name: "通用兼容",
-        selectable: true,
-    }
+pub(super) fn vendor_descriptor() -> ProviderVendorDescriptor {
+    ProviderVendorDescriptor::new(ProviderVendorId::Generic, "通用兼容", true, None)
 }
 
 pub(crate) static GENERIC_OPENAI_CHAT_REGISTRATION: ProviderRegistration =

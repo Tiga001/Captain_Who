@@ -2268,6 +2268,13 @@ export const enUSTranslations = {
   'configuration.cancel': 'Cancel',
   'configuration.done': 'Done',
   'configuration.providerModelId': 'Provider model ID',
+  'configuration.fixedProviderApiUrl':
+    'The API provider sets this URL. Use Generic compatibility for a custom URL.',
+  'configuration.fixedProviderTokenRequired':
+    'Configure this model’s API token to use this provider URL.',
+  'configuration.selectProviderModel': 'Select a model',
+  'configuration.selectSupportedProviderModel':
+    'This model is not supported by the selected provider. Choose a model from the list.',
   'configuration.providerModelIdPlaceholder': 'Example: deepseek-flash',
   'configuration.displayName': 'Display name',
   'configuration.displayNamePlaceholder': 'Example: Kimi K3 High',

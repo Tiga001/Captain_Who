@@ -64,6 +64,8 @@ Steering 关闭守卫和文件事务 Run guard 保持在 Driver 的原有作用�
 
 此表用于读者定位，不应成为新的注册真源。新增或删除 Provider 必须以 `provider_registration.rs` 和 provider contract test 为准，并同步本文。
 
+模型编辑页通过厂商描述中的 `modelIdPolicy` 区分自由输入与固定型号下拉。固定选项直接从同一注册表的精确型号集合投影，不在 Renderer 维护另一份名单；选中型号后仍由 Host 解析模型族和设置。厂商描述的 `fixedApiUrl` 为专用厂商提供只读官方地址，通用兼容为 `null` 并保留自由输入。表单保存时采用固定地址；原本继承全局整对连接、全局地址与固定地址完全一致且凭据未改时，继续保留继承关系。其他半对连接仍允许保存草稿，执行时不得借用全局另一半凭据。Moonshot 的 `kimi-k3.1-pro`、`kimi-k3.1-pro-highspeed` 与 `kimi-k3` 共用现有 K3 Profile，不批量迁移用户配置或提升 Profile 版本。Chat Completions 的 `prompt_tokens_details.cache_write_tokens` 映射到已有缓存写入用量字段；写入量已包含在总输入中，不再次累加输入或费用。
+
 Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 replay、上下文投影、Usage 口径、partial Trace、Tool Call 来源、终态批次、Checkpoint 私有参数以及 continuation 要求。Runtime 应查询 `ProviderTurnRuntimePolicy`，不得按 profile 名称散落条件分支。
 
 ### 模型可用性与输出预算

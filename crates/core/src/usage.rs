@@ -200,6 +200,11 @@ fn usage_from_usage_value(usage: &Value) -> Option<AgentUsage> {
     let cache_creation_input_tokens = usage
         .get("cache_creation_input_tokens")
         .or_else(|| usage.get("cache_creation_tokens"))
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens"))
+        })
         .or_else(|| usage.get("prompt_cache_miss_tokens"))
         .and_then(Value::as_u64);
 
@@ -284,6 +289,61 @@ mod tests {
         assert_eq!(anthropic_usage.cached_input_tokens, Some(2));
         assert_eq!(anthropic_usage.cache_creation_input_tokens, Some(1));
         assert_eq!(anthropic_usage.billable_request_count, Some(1));
+    }
+
+    #[test]
+    fn moonshot_cache_writes_remain_a_subset_of_prompt_and_total_tokens() {
+        for cache_write_tokens in [0, 40] {
+            for total_tokens in [None, Some(120)] {
+                let mut value = json!({
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 20,
+                        "prompt_tokens_details": {
+                            "cached_tokens": 30,
+                            "cache_write_tokens": cache_write_tokens
+                        }
+                    }
+                });
+                if let Some(total_tokens) = total_tokens {
+                    value["usage"]["total_tokens"] = json!(total_tokens);
+                }
+                let usage = extract_usage(&value).unwrap();
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(20));
+                assert_eq!(usage.total_tokens, Some(120));
+                assert_eq!(usage.cached_input_tokens, Some(30));
+                assert_eq!(usage.cache_creation_input_tokens, Some(cache_write_tokens));
+                assert_eq!(usage.billable_request_count, Some(1));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_cache_write_tokens_stay_unknown_and_existing_aliases_are_preserved() {
+        let mut value = json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 30 }
+            }
+        });
+        assert_eq!(
+            extract_usage(&value).unwrap().cache_creation_input_tokens,
+            None
+        );
+        for field in [
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+            "prompt_cache_miss_tokens",
+        ] {
+            value["usage"][field] = json!(40);
+            let usage = extract_usage(&value).unwrap();
+            assert_eq!(usage.cache_creation_input_tokens, Some(40));
+            assert_eq!(usage.input_tokens, Some(100));
+            assert_eq!(usage.total_tokens, Some(120));
+            value["usage"].as_object_mut().unwrap().remove(field);
+        }
     }
 
     #[test]

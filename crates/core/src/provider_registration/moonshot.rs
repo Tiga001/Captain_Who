@@ -17,7 +17,7 @@ use crate::provider_profile::{
     MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION, MOONSHOT_K3_CHAT_PROFILE_VERSION,
 };
 
-const K3_MODEL_IDS: &[&str] = &["kimi-k3"];
+const K3_MODEL_IDS: &[&str] = &["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"];
 const K2_7_CODE_MODEL_IDS: &[&str] = &["kimi-k2.7-code", "kimi-k2.7-code-highspeed"];
 const K2_6_MODEL_IDS: &[&str] = &["kimi-k2.6"];
 const fn runtime_capabilities(
@@ -85,12 +85,13 @@ fn accepts_k2_6_settings(settings: ProviderFamilySettings) -> bool {
     matches!(settings, ProviderFamilySettings::MoonshotK26Chat { .. })
 }
 
-pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
-    ProviderVendorDescriptor {
-        vendor_id: ProviderVendorId::Moonshot,
-        display_name: "月之暗面",
-        selectable: true,
-    }
+pub(super) fn vendor_descriptor() -> ProviderVendorDescriptor {
+    ProviderVendorDescriptor::new(
+        ProviderVendorId::Moonshot,
+        "月之暗面",
+        true,
+        Some("https://api.moonshot.cn/v1/chat/completions"),
+    )
 }
 
 pub(crate) static MOONSHOT_K3_CHAT_REGISTRATION: ProviderRegistration = ProviderRegistration::new(
@@ -157,3 +158,39 @@ pub(crate) static MOONSHOT_K2_6_CHAT_REGISTRATION: ProviderRegistration = Provid
     false,
     false,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_registration::resolve_provider_vendor_registration;
+
+    #[test]
+    fn k3_and_k31_models_resolve_to_the_same_registered_profile() {
+        for model in ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+            let registration = resolve_provider_vendor_registration(
+                ProviderVendorId::Moonshot,
+                model,
+                ProviderProtocolDialect::OpenAiChatCompletions,
+            )
+            .unwrap();
+            assert!(std::ptr::eq(registration, &MOONSHOT_K3_CHAT_REGISTRATION));
+            let config = registration
+                .config_from_vendor_settings(ProviderFamilySettings::MoonshotK3Chat {
+                    reasoning_effort: ProviderReasoningEffort::Max,
+                })
+                .unwrap();
+            config
+                .validate_for_model(model, ProviderProtocolDialect::OpenAiChatCompletions)
+                .unwrap();
+        }
+
+        for model in ["kimi-k3.1", "kimi-k3.1-pro-future"] {
+            assert!(resolve_provider_vendor_registration(
+                ProviderVendorId::Moonshot,
+                model,
+                ProviderProtocolDialect::OpenAiChatCompletions,
+            )
+            .is_err());
+        }
+    }
+}

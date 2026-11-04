@@ -59,7 +59,15 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
         selectable: true
       }
     ],
-    providerVendorDescriptors: [{ vendorId: 'generic', displayName: 'Generic', selectable: true }],
+    providerVendorDescriptors: [
+      {
+        vendorId: 'generic',
+        displayName: 'Generic',
+        selectable: true,
+        modelIdPolicy: { kind: 'free_text' },
+        fixedApiUrl: null
+      }
+    ],
     searchMode: 'auto',
     tavilyApiKeyStatus: 'configured'
   })
@@ -129,7 +137,13 @@ describe('configuration setting search navigation', () => {
             }
           ]}
           providerVendorDescriptors={[
-            { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true }
+            {
+              vendorId: 'deepseek',
+              displayName: 'DeepSeek',
+              selectable: true,
+              modelIdPolicy: { kind: 'fixed', modelIds: ['deepseek-flash', 'deepseek-pro'] },
+              fixedApiUrl: 'https://api.deepseek.com/chat/completions'
+            }
           ]}
           resolveProviderVendorModelPolicy={resolveProviderVendorModelPolicy}
           onCancel={vi.fn()}

@@ -111,6 +111,57 @@ pub struct ProviderVendorDescriptor {
     pub vendor_id: ProviderVendorId,
     pub display_name: &'static str,
     pub selectable: bool,
+    pub model_id_policy: ProviderVendorModelIdPolicy,
+    pub fixed_api_url: Option<&'static str>,
+}
+
+/// Editor choices derived from the same registrations that validate requests at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderVendorModelIdPolicy {
+    FreeText,
+    Fixed {
+        #[serde(rename = "modelIds")]
+        model_ids: Vec<&'static str>,
+    },
+}
+
+impl ProviderVendorDescriptor {
+    fn new(
+        vendor_id: ProviderVendorId,
+        display_name: &'static str,
+        selectable: bool,
+        fixed_api_url: Option<&'static str>,
+    ) -> Self {
+        let mut model_ids = Vec::new();
+        let mut free_text = false;
+        for registration in PROVIDER_VENDOR_REGISTRATIONS {
+            if registration.vendor_id != vendor_id {
+                continue;
+            }
+            match registration.model_id_policy {
+                ProviderModelIdPolicy::AnyNonEmpty => free_text = true,
+                ProviderModelIdPolicy::Exact(ids) => {
+                    for &id in ids {
+                        if !model_ids.contains(&id) {
+                            model_ids.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            vendor_id,
+            display_name,
+            selectable,
+            fixed_api_url,
+            model_id_policy: if free_text {
+                ProviderVendorModelIdPolicy::FreeText
+            } else {
+                ProviderVendorModelIdPolicy::Fixed { model_ids }
+            },
+        }
+    }
 }
 
 /// Public editor family. This contains no runtime, replay, checkpoint or usage capability.
@@ -813,14 +864,50 @@ mod tests {
     #[test]
     fn vendor_projection_hides_profiles_and_resolves_exact_model_families() {
         let vendors = serde_json::to_value(provider_vendor_descriptors()).unwrap();
+        assert_eq!(vendors.as_array().unwrap().len(), 3);
+        assert_eq!(vendors[0]["modelIdPolicy"], json!({ "kind": "free_text" }));
+        assert!(vendors[0]["fixedApiUrl"].is_null());
         assert_eq!(
-            vendors,
-            json!([
-                {"vendorId": "generic", "displayName": "通用兼容", "selectable": true},
-                {"vendorId": "deepseek", "displayName": "DeepSeek", "selectable": true},
-                {"vendorId": "moonshot", "displayName": "月之暗面", "selectable": true}
-            ])
+            vendors[1]["fixedApiUrl"],
+            "https://api.deepseek.com/chat/completions"
         );
+        assert_eq!(
+            vendors[2]["fixedApiUrl"],
+            "https://api.moonshot.cn/v1/chat/completions"
+        );
+        assert_eq!(
+            vendors[1]["modelIdPolicy"],
+            json!({
+                "kind": "fixed", "modelIds": ["deepseek-flash", "deepseek-v4-pro"]
+            })
+        );
+        assert_eq!(vendors[2]["vendorId"], "moonshot");
+        assert_eq!(vendors[2]["displayName"], "月之暗面");
+        assert_eq!(vendors[2]["selectable"], true);
+        assert_eq!(vendors[2]["modelIdPolicy"]["kind"], "fixed");
+        let moonshot_ids = vendors[2]["modelIdPolicy"]["modelIds"].as_array().unwrap();
+        assert!(moonshot_ids.contains(&json!("kimi-k3.1-pro")));
+        assert!(moonshot_ids.contains(&json!("kimi-k3.1-pro-highspeed")));
+        // Every advertised exact ID must be executable through a registered dialect, and every
+        // registered exact ID must be exposed. The editor cannot drift from runtime validation.
+        for vendor in provider_vendor_descriptors() {
+            if let ProviderVendorModelIdPolicy::Fixed { model_ids } = vendor.model_id_policy {
+                assert!(!model_ids.is_empty());
+                for id in &model_ids {
+                    assert!(PROVIDER_VENDOR_REGISTRATIONS.iter().any(|registration| {
+                        registration.vendor_id == vendor.vendor_id
+                            && registration.model_id_policy.accepts(id)
+                    }));
+                }
+                for registration in PROVIDER_VENDOR_REGISTRATIONS {
+                    if registration.vendor_id == vendor.vendor_id {
+                        if let ProviderModelIdPolicy::Exact(ids) = registration.model_id_policy {
+                            assert!(ids.iter().all(|id| model_ids.contains(id)));
+                        }
+                    }
+                }
+            }
+        }
         let encoded = vendors.to_string();
         assert!(!encoded.contains("profileId"));
         assert!(!encoded.contains("runtimeCapabilities"));

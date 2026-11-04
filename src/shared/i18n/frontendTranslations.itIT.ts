@@ -2377,6 +2377,13 @@ export const itITTranslations = {
   'configuration.cancel': 'Annulla',
   'configuration.done': 'Fatto',
   'configuration.providerModelId': 'ID modello del fornitore',
+  'configuration.fixedProviderApiUrl':
+    'Questo URL è impostato dal fornitore API. Usa la compatibilità generica per un URL personalizzato.',
+  'configuration.fixedProviderTokenRequired':
+    'Configura il token API di questo modello per usare questo URL.',
+  'configuration.selectProviderModel': 'Seleziona un modello',
+  'configuration.selectSupportedProviderModel':
+    'Questo modello non è supportato dal fornitore selezionato. Scegli un modello dall’elenco.',
   'configuration.providerModelIdPlaceholder': 'Esempio: deepseek-flash',
   'configuration.displayName': 'Nome visualizzato',
   'configuration.displayNamePlaceholder': 'Esempio: Kimi K3 High',

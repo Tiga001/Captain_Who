@@ -346,9 +346,27 @@ describe('model settings IPC', () => {
       on: vi.fn()
     }
     const descriptors = [
-      { vendorId: 'generic', displayName: 'Generic', selectable: true },
-      { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
-      { vendorId: 'moonshot', displayName: 'Moonshot AI', selectable: true }
+      {
+        vendorId: 'generic',
+        displayName: 'Generic',
+        selectable: true,
+        modelIdPolicy: { kind: 'free_text' },
+        fixedApiUrl: null
+      },
+      {
+        vendorId: 'deepseek',
+        displayName: 'DeepSeek',
+        selectable: true,
+        modelIdPolicy: { kind: 'fixed', modelIds: ['deepseek-flash', 'deepseek-pro'] },
+        fixedApiUrl: 'https://api.deepseek.com/chat/completions'
+      },
+      {
+        vendorId: 'moonshot',
+        displayName: 'Moonshot AI',
+        selectable: true,
+        modelIdPolicy: { kind: 'fixed', modelIds: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'] },
+        fixedApiUrl: 'https://api.moonshot.cn/v1/chat/completions'
+      }
     ]
     const input = {
       vendorId: 'moonshot',

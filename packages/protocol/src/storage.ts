@@ -111,10 +111,16 @@ export interface ProviderProfileConfigV2 {
  */
 export type ProviderProfileConfig = ProviderProfileConfigV1 | ProviderProfileConfigV2
 
+/** Host-owned model ID choices; the Renderer does not maintain a vendor model catalog. */
+export type ProviderVendorModelIdPolicy =
+  { kind: 'free_text' } | { kind: 'fixed'; modelIds: string[] }
+
 export interface ProviderVendorDescriptor {
   vendorId: ProviderVendorId
   displayName: string
   selectable: boolean
+  modelIdPolicy: ProviderVendorModelIdPolicy
+  fixedApiUrl: string | null
 }
 
 export type ProviderModelFamilyId =

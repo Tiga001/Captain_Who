@@ -253,6 +253,15 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
         .unwrap();
     assert_eq!(moonshot["displayName"], "月之暗面");
     assert_eq!(moonshot["selectable"], true);
+    assert_eq!(moonshot["modelIdPolicy"]["kind"], "fixed");
+    assert_eq!(
+        moonshot["fixedApiUrl"],
+        "https://api.moonshot.cn/v1/chat/completions"
+    );
+    let moonshot_models = moonshot["modelIdPolicy"]["modelIds"].as_array().unwrap();
+    for model_id in ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+        assert!(moonshot_models.contains(&serde_json::json!(model_id)));
+    }
     assert!(moonshot.get("profileId").is_none());
     assert!(moonshot.get("runtimeCapabilities").is_none());
 

@@ -86,12 +86,13 @@ fn accepts_pro_settings(settings: ProviderFamilySettings) -> bool {
     matches!(settings, ProviderFamilySettings::DeepseekProChat { .. })
 }
 
-pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
-    ProviderVendorDescriptor {
-        vendor_id: ProviderVendorId::DeepSeek,
-        display_name: "DeepSeek",
-        selectable: true,
-    }
+pub(super) fn vendor_descriptor() -> ProviderVendorDescriptor {
+    ProviderVendorDescriptor::new(
+        ProviderVendorId::DeepSeek,
+        "DeepSeek",
+        true,
+        Some("https://api.deepseek.com/chat/completions"),
+    )
 }
 
 pub(crate) static DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION: ProviderRegistration =

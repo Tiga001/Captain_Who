@@ -44,9 +44,27 @@ describe('Provider Profile UI descriptor parser', () => {
 
 describe('Provider vendor descriptor parsers', () => {
   const vendors = [
-    { vendorId: 'generic', displayName: 'Generic', selectable: true },
-    { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
-    { vendorId: 'moonshot', displayName: 'Moonshot', selectable: true }
+    {
+      vendorId: 'generic',
+      displayName: 'Generic',
+      selectable: true,
+      modelIdPolicy: { kind: 'free_text' },
+      fixedApiUrl: null
+    },
+    {
+      vendorId: 'deepseek',
+      displayName: 'DeepSeek',
+      selectable: true,
+      modelIdPolicy: { kind: 'fixed', modelIds: ['deepseek-flash', 'deepseek-pro'] },
+      fixedApiUrl: 'https://api.deepseek.com/chat/completions'
+    },
+    {
+      vendorId: 'moonshot',
+      displayName: 'Moonshot',
+      selectable: true,
+      modelIdPolicy: { kind: 'fixed', modelIds: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'] },
+      fixedApiUrl: 'https://api.moonshot.cn/v1/chat/completions'
+    }
   ] as const
 
   it('accepts the bounded public vendor directory and exact K3 policy union', () => {
@@ -104,7 +122,13 @@ describe('Provider vendor descriptor parsers', () => {
   })
 
   it('keeps future bounded vendors opaque instead of rejecting the whole directory', () => {
-    const future = { vendorId: 'future_vendor.v1', displayName: 'Future', selectable: true }
+    const future = {
+      vendorId: 'future_vendor.v1',
+      displayName: 'Future',
+      selectable: true,
+      modelIdPolicy: { kind: 'fixed', modelIds: ['future/model-v1'] },
+      fixedApiUrl: 'https://future.example/v1/chat/completions'
+    }
     expect(parseProviderVendorDescriptors([...vendors, future])).toEqual([...vendors, future])
     expect(
       parseProviderVendorModelPolicyDescriptor({
@@ -119,11 +143,114 @@ describe('Provider vendor descriptor parsers', () => {
     })
   })
 
+  it('preserves Host-owned choices and accepts model ID and list size boundaries', () => {
+    const modelIds = [
+      'x'.repeat(2048),
+      ...Array.from({ length: 255 }, (_, index) => `model-${index}`)
+    ]
+    const descriptor = {
+      ...vendors[1],
+      modelIdPolicy: { kind: 'fixed', modelIds }
+    }
+    const parsed = parseProviderVendorDescriptors([descriptor])
+
+    expect(parsed).toEqual([descriptor])
+    expect(parsed[0].modelIdPolicy).not.toBe(descriptor.modelIdPolicy)
+    if (parsed[0].modelIdPolicy.kind === 'fixed') {
+      expect(parsed[0].modelIdPolicy.modelIds).not.toBe(modelIds)
+    }
+  })
+
   it.each([
-    [...vendors, { vendorId: 'moonshot', displayName: 'Duplicate', selectable: true }],
-    [{ vendorId: 'Future Vendor', displayName: 'Future', selectable: true }],
-    [{ vendorId: 'a'.repeat(33), displayName: 'Future', selectable: true }],
-    [{ vendorId: 'moonshot', displayName: 'Moonshot', selectable: true, profileId: 'private' }]
+    null,
+    'https://provider.example/v1/chat/completions',
+    'https://provider.example:8443/v1/messages',
+    `https://provider.example/${'x'.repeat(4096 - 'https://provider.example/'.length)}`
+  ])('accepts an absent fixed endpoint or a bounded public HTTPS endpoint %#', (fixedApiUrl) => {
+    const descriptor = { ...vendors[0], fixedApiUrl }
+    expect(parseProviderVendorDescriptors([descriptor])).toEqual([descriptor])
+  })
+
+  it.each([
+    undefined,
+    '',
+    ' ',
+    12,
+    {},
+    [],
+    'not-a-url',
+    '/v1/chat/completions',
+    'https://',
+    'https://invalid host/v1',
+    'http://provider.example/v1',
+    'javascript:alert(1)',
+    'https:provider.example/v1',
+    'https://user@provider.example/v1',
+    'https://user:secret@provider.example/v1',
+    'https://@provider.example/v1',
+    'https://provider.example/v1?key=secret',
+    'https://provider.example/v1?',
+    'https://provider.example/v1#fragment',
+    'https://provider.example/v1#',
+    ' https://provider.example/v1',
+    'https://provider.example/v1 ',
+    'https://provider.example/v1\n',
+    'https://provider.example/v1\t/chat',
+    'https://provider.example/v1\u0000/chat',
+    `https://provider.example/${'x'.repeat(4097 - 'https://provider.example/'.length)}`
+  ])(
+    'rejects missing, malformed, secret-bearing, or oversized fixed API URLs %#',
+    (fixedApiUrl) => {
+      const descriptor = { ...vendors[2], fixedApiUrl }
+      if (fixedApiUrl === undefined) delete (descriptor as Record<string, unknown>).fixedApiUrl
+
+      expect(() => parseProviderVendorDescriptors([descriptor])).toThrow(
+        'Invalid Provider vendor descriptors[0].fixedApiUrl'
+      )
+    }
+  )
+
+  it.each([
+    undefined,
+    null,
+    'free_text',
+    [],
+    {},
+    { kind: 'unknown' },
+    { kind: 'free_text', modelIds: [] },
+    { kind: 'free_text', credentialRef: 'private' },
+    { kind: 'fixed' },
+    { kind: 'fixed', modelIds: null },
+    { kind: 'fixed', modelIds: 'kimi-k3' },
+    { kind: 'fixed', modelIds: [] },
+    { kind: 'fixed', modelIds: [''] },
+    { kind: 'fixed', modelIds: [' \t\n'] },
+    { kind: 'fixed', modelIds: [' kimi-k3'] },
+    { kind: 'fixed', modelIds: ['kimi-k3\n'] },
+    { kind: 'fixed', modelIds: ['\u00a0kimi-k3'] },
+    { kind: 'fixed', modelIds: [null] },
+    { kind: 'fixed', modelIds: [3] },
+    { kind: 'fixed', modelIds: [{ apiToken: 'private' }] },
+    { kind: 'fixed', modelIds: ['kimi-k3', 'kimi-k3'] },
+    { kind: 'fixed', modelIds: ['x'.repeat(2049)] },
+    { kind: 'fixed', modelIds: Array.from({ length: 257 }, (_, index) => `model-${index}`) },
+    { kind: 'fixed', modelIds: ['kimi-k3'], adapter: 'private' }
+  ])('rejects missing, malformed, unbounded, or expanded model ID policies %#', (modelIdPolicy) => {
+    const descriptor = { ...vendors[2], modelIdPolicy }
+    if (modelIdPolicy === undefined) delete (descriptor as Record<string, unknown>).modelIdPolicy
+
+    expect(() => parseProviderVendorDescriptors([descriptor])).toThrow(
+      'Invalid Provider vendor descriptors[0].modelIdPolicy'
+    )
+  })
+
+  it.each([
+    [...vendors, { ...vendors[2], displayName: 'Duplicate' }],
+    [{ ...vendors[0], vendorId: 'Future Vendor' }],
+    [{ ...vendors[0], vendorId: 'a'.repeat(33) }],
+    [{ ...vendors[2], profileId: 'private' }],
+    [{ ...vendors[2], apiToken: 'private' }],
+    Array.from({ length: 17 }, (_, index) => ({ ...vendors[0], vendorId: `vendor-${index}` }))
   ])('rejects malformed or expanded vendor descriptors %#', (value) => {
     expect(() => parseProviderVendorDescriptors(value)).toThrow(
       'Invalid Provider vendor descriptors'

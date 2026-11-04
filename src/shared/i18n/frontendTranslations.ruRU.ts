@@ -2315,6 +2315,13 @@ export const ruRUTranslations = {
   'configuration.cancel': 'Отмена',
   'configuration.done': 'Готово',
   'configuration.providerModelId': 'ID модели провайдера',
+  'configuration.fixedProviderApiUrl':
+    'URL задан провайдером API. Для своего URL выберите общую совместимость.',
+  'configuration.fixedProviderTokenRequired':
+    'Настройте API-токен этой модели для использования данного URL.',
+  'configuration.selectProviderModel': 'Выберите модель',
+  'configuration.selectSupportedProviderModel':
+    'Выбранный провайдер не поддерживает эту модель. Выберите модель из списка.',
   'configuration.providerModelIdPlaceholder': 'Пример: deepseek-flash',
   'configuration.displayName': 'Отображаемое имя',
   'configuration.displayNamePlaceholder': 'Пример: Kimi K3 High',

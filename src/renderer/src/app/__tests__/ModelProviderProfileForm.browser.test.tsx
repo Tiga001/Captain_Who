@@ -80,10 +80,44 @@ const profileDescriptors: ProviderProfileUiDescriptor[] = [
 ]
 
 const vendorDescriptors: ProviderVendorDescriptor[] = [
-  { vendorId: 'generic', displayName: 'Generic internal label', selectable: true },
-  { vendorId: 'deepseek', displayName: 'DeepSeek internal label', selectable: true },
-  { vendorId: 'moonshot', displayName: 'Moonshot internal label', selectable: true },
-  { vendorId: 'future_vendor.v1', displayName: 'Future internal label', selectable: true }
+  {
+    vendorId: 'generic',
+    displayName: 'Generic internal label',
+    selectable: true,
+    fixedApiUrl: null,
+    modelIdPolicy: { kind: 'free_text' }
+  },
+  {
+    vendorId: 'deepseek',
+    displayName: 'DeepSeek internal label',
+    selectable: true,
+    fixedApiUrl: 'https://api.deepseek.com/chat/completions',
+    modelIdPolicy: { kind: 'fixed', modelIds: ['deepseek-flash', 'deepseek-v4-pro'] }
+  },
+  {
+    vendorId: 'moonshot',
+    displayName: 'Moonshot internal label',
+    selectable: true,
+    fixedApiUrl: 'https://api.moonshot.cn/v1/chat/completions',
+    modelIdPolicy: {
+      kind: 'fixed',
+      modelIds: [
+        'kimi-k3',
+        'kimi-k3.1-pro',
+        'kimi-k3.1-pro-highspeed',
+        'kimi-k2.7-code',
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.6'
+      ]
+    }
+  },
+  {
+    vendorId: 'future_vendor.v1',
+    displayName: 'Future internal label',
+    selectable: true,
+    fixedApiUrl: null,
+    modelIdPolicy: { kind: 'free_text' }
+  }
 ]
 
 function genericPolicy(input: ProviderVendorModelPolicyInput): ProviderVendorModelPolicyDescriptor {
@@ -145,7 +179,10 @@ function resolvePolicy(
       }
     })
   }
-  if (input.vendorId === 'moonshot' && input.modelId === 'kimi-k3') {
+  if (
+    input.vendorId === 'moonshot' &&
+    ['kimi-k3', 'kimi-k3.1-pro', 'kimi-k3.1-pro-highspeed'].includes(input.modelId)
+  ) {
     return Promise.resolve({
       status: 'supported',
       vendorId: 'moonshot',
@@ -236,6 +273,284 @@ const commonProps = {
 }
 
 describe('ModelForm vendor controls', () => {
+  it('switches between provider model choices and free text without replacing the draft', async () => {
+    const onSave = vi.fn()
+    const screen = await render(<ModelForm {...commonProps} onSave={onSave} />)
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('custom-model')
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('My model')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    const url = screen.getByPlaceholder('configuration.modelApiUrlPlaceholder')
+    await url.fill('https://custom.example/v1/chat/completions')
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.deepSeek' }).click()
+    await expect.element(url).toHaveValue('https://api.deepseek.com/chat/completions')
+    await expect.element(url).toHaveAttribute('readonly')
+
+    const modelPicker = screen.getByRole('button', {
+      name: 'configuration.providerModelId: custom-model'
+    })
+    await expect.element(modelPicker).toBeVisible()
+    await expect
+      .element(screen.getByText('configuration.selectSupportedProviderModel'))
+      .toBeVisible()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeDisabled()
+    await modelPicker.click()
+    await expect.element(screen.getByRole('option', { name: 'custom-model' })).toBeDisabled()
+    await expect.element(screen.getByRole('option', { name: 'deepseek-flash' })).toBeVisible()
+    await expect.element(screen.getByRole('option', { name: 'deepseek-v4-pro' })).toBeVisible()
+    expect(screen.getByRole('option').all()).toHaveLength(3)
+    await screen.getByRole('option', { name: 'deepseek-flash', exact: true }).click()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeEnabled()
+
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.moonshot' }).click()
+    await expect.element(url).toHaveValue('https://api.moonshot.cn/v1/chat/completions')
+    await expect.element(url).toHaveAttribute('readonly')
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.providerModelId: deepseek-flash'
+        })
+      )
+      .toBeVisible()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeDisabled()
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.generic' }).click()
+    await expect.element(url).not.toHaveAttribute('readonly')
+    await expect.element(url).toHaveValue('https://custom.example/v1/chat/completions')
+    await expect
+      .element(screen.getByPlaceholder('configuration.providerModelIdPlaceholder'))
+      .toHaveValue('deepseek-flash')
+    await screen
+      .getByPlaceholder('configuration.providerModelIdPlaceholder')
+      .fill('another-custom-model')
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeEnabled()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['deepSeek', 'deepseek-flash', 'https://api.deepseek.com/chat/completions'],
+    ['moonshot', 'kimi-k3.1-pro', 'https://api.moonshot.cn/v1/chat/completions']
+  ])('saves the fixed %s URL and a model-specific credential', async (vendor, modelId, apiUrl) => {
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{
+          ...model,
+          providerModelId: modelId,
+          contextWindowTokens: 1_048_576
+        }}
+        onSave={onSave}
+      />
+    )
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: `configuration.providerProfile.${vendor}` }).click()
+    await expect
+      .element(screen.getByPlaceholder('configuration.modelApiUrlPlaceholder'))
+      .toHaveValue(apiUrl)
+    await expect.element(screen.getByText('configuration.fixedProviderTokenRequired')).toBeVisible()
+    await screen.getByLabelText('configuration.modelApiToken').fill('test-only-provider-key')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      providerModelId: modelId,
+      apiUrlOverride: apiUrl,
+      apiTokenOverrideMutation: { type: 'replace', value: 'test-only-provider-key' }
+    })
+  })
+
+  it('preserves a matching global connection until a dedicated token is entered', async () => {
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        globalApiUrl="https://api.moonshot.cn/v1/chat/completions"
+        model={{
+          ...model,
+          providerModelId: 'kimi-k3',
+          contextWindowTokens: 1_048_576,
+          providerProfileConfig: {
+            schemaVersion: 2,
+            vendorId: 'moonshot',
+            profile: { id: 'moonshot_k3_chat', version: 1 },
+            settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+          }
+        }}
+        onSave={onSave}
+      />
+    )
+    await expect
+      .element(screen.getByPlaceholder('configuration.modelApiUrlPlaceholder'))
+      .toHaveValue('https://api.moonshot.cn/v1/chat/completions')
+    await expect
+      .element(screen.getByPlaceholder('configuration.modelApiUrlPlaceholder'))
+      .toHaveAttribute('readonly')
+    await expect
+      .element(screen.getByText('configuration.fixedProviderTokenRequired'))
+      .not.toBeInTheDocument()
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Renamed Kimi')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      displayName: 'Renamed Kimi',
+      apiUrlOverride: '',
+      apiTokenOverrideMutation: { type: 'keep' },
+      providerProfileUpdate: { kind: 'unchanged' }
+    })
+    await screen.getByLabelText('configuration.modelApiToken').fill('test-only-kimi-key')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(2)
+    expect(onSave.mock.calls[1]![0]).toMatchObject({
+      apiUrlOverride: 'https://api.moonshot.cn/v1/chat/completions',
+      apiTokenOverrideMutation: { type: 'replace', value: 'test-only-kimi-key' }
+    })
+  })
+
+  it('keeps the fixed URL after clearing a model token instead of inheriting a global token', async () => {
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        globalApiUrl="https://api.moonshot.cn/v1/chat/completions"
+        model={{
+          ...model,
+          providerModelId: 'kimi-k3',
+          apiTokenOverrideStatus: 'configured',
+          apiUrlOverride: 'https://api.moonshot.cn/v1/chat/completions',
+          providerProfileConfig: {
+            schemaVersion: 2,
+            vendorId: 'moonshot',
+            profile: { id: 'moonshot_k3_chat', version: 1 },
+            settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+          }
+        }}
+        onSave={onSave}
+      />
+    )
+    await screen.getByRole('button', { name: 'configuration.credential.clear' }).click()
+    await screen.getByRole('button', { name: 'configuration.credential.clearConfirm' }).click()
+    await expect.element(screen.getByText('configuration.fixedProviderTokenRequired')).toBeVisible()
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      apiUrlOverride: 'https://api.moonshot.cn/v1/chat/completions',
+      apiTokenOverrideMutation: { type: 'clear' }
+    })
+  })
+
+  it('requires an explicit model choice when an empty draft switches to a fixed provider', async () => {
+    const screen = await render(<ModelForm {...commonProps} onSave={vi.fn()} />)
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.moonshot' }).click()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.providerModelId: configuration.selectProviderModel'
+      })
+      .click()
+    await expect
+      .element(screen.getByRole('option', { name: 'configuration.selectProviderModel' }))
+      .toBeDisabled()
+    await expect
+      .element(screen.getByRole('option', { name: 'kimi-k3.1-pro', exact: true }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('option', { name: 'kimi-k3.1-pro-highspeed', exact: true }))
+      .toBeVisible()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeDisabled()
+  })
+
+  it.each(['kimi-k3.1-pro', 'kimi-k3.1-pro-highspeed'])(
+    'saves %s through the K3 family while preserving the existing user configuration',
+    async (providerModelId) => {
+      const onSave = vi.fn()
+      const screen = await render(
+        <ModelForm
+          {...commonProps}
+          model={{
+            ...model,
+            providerModelId: 'kimi-k3',
+            contextWindowTokens: 800_000,
+            apiUrlOverride: 'https://api.moonshot.cn/v1/chat/completions',
+            apiTokenOverrideStatus: 'configured',
+            supportsImage: true,
+            inputPrice: '0.02',
+            cachedInputPrice: '0.002',
+            outputPrice: '0.06',
+            providerProfileConfig: {
+              schemaVersion: 2,
+              vendorId: 'moonshot',
+              profile: { id: 'moonshot_k3_chat', version: 1 },
+              settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+            }
+          }}
+          onSave={onSave}
+        />
+      )
+      await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeEnabled()
+      await screen.getByRole('button', { name: 'configuration.providerModelId: kimi-k3' }).click()
+      await screen.getByRole('option', { name: providerModelId, exact: true }).click()
+      await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
+      await expect
+        .element(
+          screen.getByRole('button', {
+            name: 'configuration.moonshotSettings.reasoningEffort: configuration.moonshotSettings.effortLow'
+          })
+        )
+        .toBeVisible()
+      await screen.getByText('configuration.providerSettings.cancel', { exact: true }).click()
+      await screen.getByRole('button', { name: 'configuration.save' }).click()
+      await expect.poll(() => onSave.mock.calls.length).toBe(1)
+      expect(onSave.mock.calls[0]![0]).toMatchObject({
+        providerModelId,
+        displayName: model.displayName,
+        contextWindowTokens: '800000',
+        apiUrlOverride: 'https://api.moonshot.cn/v1/chat/completions',
+        apiTokenOverrideStatus: 'configured',
+        apiTokenOverrideMutation: { type: 'keep' },
+        inputPrice: '0.02',
+        cachedInputPrice: '0.002',
+        outputPrice: '0.06',
+        providerProfileUpdate: { kind: 'unchanged' }
+      })
+    }
+  )
+
+  it('keeps an unsupported stored model visible until the user chooses a supported replacement', async () => {
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{
+          ...model,
+          providerModelId: 'retired-kimi',
+          providerProfileConfig: {
+            schemaVersion: 2,
+            vendorId: 'moonshot',
+            profile: { id: 'moonshot_k3_chat', version: 1 },
+            settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+          }
+        }}
+        onSave={onSave}
+      />
+    )
+    await expect
+      .element(screen.getByText('configuration.selectSupportedProviderModel'))
+      .toBeVisible()
+    await screen
+      .getByRole('button', { name: 'configuration.providerModelId: retired-kimi' })
+      .click()
+    await expect.element(screen.getByRole('option', { name: 'retired-kimi' })).toBeDisabled()
+    expect(onSave).not.toHaveBeenCalled()
+    await screen.getByRole('option', { name: 'kimi-k3.1-pro', exact: true }).click()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeEnabled()
+    await expect
+      .element(screen.getByText('configuration.selectSupportedProviderModel'))
+      .not.toBeInTheDocument()
+  })
+
   it('locates advanced settings without discarding a draft, changing vendors or saving', async () => {
     const onSave = vi.fn()
     const resolver = vi.fn(resolvePolicy)
@@ -817,7 +1132,8 @@ describe('ModelForm vendor controls', () => {
       }
     }
     const screen = await render(<ModelForm {...commonProps} model={k3Model} onSave={onSave} />)
-    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('kimi-k2.6')
+    await screen.getByRole('button', { name: 'configuration.providerModelId: kimi-k3' }).click()
+    await screen.getByRole('option', { name: 'kimi-k2.6', exact: true }).click()
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await expect
       .element(screen.getByText('configuration.providerProfile.familyChanged'))
@@ -831,7 +1147,7 @@ describe('ModelForm vendor controls', () => {
     })
   })
 
-  it('does not auto-migrate a Kimi alias stored as DeepSeek on a custom endpoint', async () => {
+  it('requires resolving a stored model mismatch before saving its fixed provider URL', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     const screen = await render(
       <ModelForm
@@ -853,7 +1169,6 @@ describe('ModelForm vendor controls', () => {
         onSave={onSave}
       />
     )
-    await screen.getByRole('button', { name: 'configuration.more' }).click()
     await expect
       .element(screen.getByText('configuration.providerProfile.unsupportedModel'))
       .toBeVisible()
@@ -862,9 +1177,20 @@ describe('ModelForm vendor controls', () => {
         name: 'configuration.providerProfile.vendor: configuration.providerProfile.deepSeek'
       })
     ).toBeTruthy()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeDisabled()
+    await expect
+      .element(screen.getByPlaceholder('configuration.modelApiUrlPlaceholder'))
+      .toHaveValue('https://api.deepseek.com/chat/completions')
+    expect(onSave).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: /^configuration.providerProfile.vendor:/ }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.generic' }).click()
     await screen.getByRole('button', { name: 'configuration.save' }).click()
     await expect.poll(() => onSave.mock.calls.length).toBe(1)
-    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({ kind: 'unchanged' })
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      providerModelId: 'kimi-k3',
+      apiUrlOverride: '',
+      providerProfileUpdate: { kind: 'select_generic' }
+    })
   })
 
   it('blocks an unknown Moonshot model and keeps the Host save rejection sanitized', async () => {

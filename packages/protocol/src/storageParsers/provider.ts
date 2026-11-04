@@ -6,7 +6,8 @@ import {
   expectEnum,
   invalidProtocolValue,
   expectArray,
-  expectBoolean
+  expectBoolean,
+  hasAsciiControlCharacter
 } from '../skills/validation'
 import type {
   ProviderProfileConfig,
@@ -18,6 +19,7 @@ import type {
   ProviderReasoningMode,
   ProviderReasoningEffort,
   ProviderVendorDescriptor,
+  ProviderVendorModelIdPolicy,
   ProviderProfileUiDescriptor,
   ProviderVendorModelPolicyDescriptor,
   ProviderModelFamilyId
@@ -29,6 +31,12 @@ const MAX_PROVIDER_DESCRIPTORS = 16
 const MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES = 256
 
 const MAX_PROVIDER_VENDOR_ID_BYTES = 32
+
+const MAX_PROVIDER_VENDOR_MODEL_IDS = 256
+
+const MAX_PROVIDER_MODEL_ID_LENGTH = 2048
+
+const MAX_PROVIDER_API_URL_BYTES = 4096
 
 const PROVIDER_PROFILE_IDS = [
   'generic_openai_chat',
@@ -339,6 +347,72 @@ function parseProviderFamilySettingsDescriptor(
   return { kind: 'moonshot_k2_6_chat', thinkingModes, defaultSettings }
 }
 
+function parseProviderVendorModelIdPolicy(
+  value: unknown,
+  context: string
+): ProviderVendorModelIdPolicy {
+  const record = expectRecord(value, context)
+  const kind = expectEnum(record.kind, ['free_text', 'fixed'] as const, `${context}.kind`)
+  if (kind === 'free_text') {
+    expectOnlyKeys(record, ['kind'] as const, context)
+    return { kind }
+  }
+
+  expectOnlyKeys(record, ['kind', 'modelIds'] as const, context)
+  const modelIdsContext = `${context}.modelIds`
+  const values = expectArray(record.modelIds, modelIdsContext)
+  if (values.length === 0 || values.length > MAX_PROVIDER_VENDOR_MODEL_IDS) {
+    throw invalidProtocolValue(
+      modelIdsContext,
+      `must contain between 1 and ${MAX_PROVIDER_VENDOR_MODEL_IDS} entries`
+    )
+  }
+  const modelIds = values.map((value, index) => {
+    const itemContext = `${modelIdsContext}[${index}]`
+    const modelId = expectNonEmptyString(value, itemContext)
+    if (modelId !== modelId.trim() || modelId.length > MAX_PROVIDER_MODEL_ID_LENGTH) {
+      throw invalidProtocolValue(
+        itemContext,
+        `must be trimmed and not exceed ${MAX_PROVIDER_MODEL_ID_LENGTH} characters`
+      )
+    }
+    return modelId
+  })
+  if (new Set(modelIds).size !== modelIds.length) {
+    throw invalidProtocolValue(modelIdsContext, 'must not contain duplicates')
+  }
+  return { kind, modelIds }
+}
+
+function parseProviderFixedApiUrl(value: unknown, context: string): string | null {
+  if (value === null) return null
+  const apiUrl = expectNonEmptyString(value, context)
+  if (
+    new TextEncoder().encode(apiUrl).byteLength > MAX_PROVIDER_API_URL_BYTES ||
+    hasAsciiControlCharacter(apiUrl) ||
+    /\s/.test(apiUrl) ||
+    !/^https:\/\//i.test(apiUrl) ||
+    /^https:\/\/[^/?#]*@/i.test(apiUrl) ||
+    apiUrl.includes('?') ||
+    apiUrl.includes('#')
+  ) {
+    throw invalidProtocolValue(
+      context,
+      'expected a bounded HTTPS URL without user info, query, or fragment'
+    )
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(apiUrl)
+  } catch {
+    throw invalidProtocolValue(context, 'expected a valid HTTPS URL')
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw invalidProtocolValue(context, 'expected an HTTPS URL without user info')
+  }
+  return apiUrl
+}
+
 export function parseProviderVendorDescriptors(value: unknown): ProviderVendorDescriptor[] {
   const context = 'Provider vendor descriptors'
   const records = expectArray(value, context)
@@ -348,11 +422,20 @@ export function parseProviderVendorDescriptors(value: unknown): ProviderVendorDe
   const result = records.map((value, index) => {
     const itemContext = `${context}[${index}]`
     const record = expectRecord(value, itemContext)
-    expectOnlyKeys(record, ['vendorId', 'displayName', 'selectable'] as const, itemContext)
+    expectOnlyKeys(
+      record,
+      ['vendorId', 'displayName', 'selectable', 'modelIdPolicy', 'fixedApiUrl'] as const,
+      itemContext
+    )
     return {
       vendorId: parseProviderVendorId(record.vendorId, `${itemContext}.vendorId`),
       displayName: expectNonEmptyString(record.displayName, `${itemContext}.displayName`),
-      selectable: expectBoolean(record.selectable, `${itemContext}.selectable`)
+      selectable: expectBoolean(record.selectable, `${itemContext}.selectable`),
+      modelIdPolicy: parseProviderVendorModelIdPolicy(
+        record.modelIdPolicy,
+        `${itemContext}.modelIdPolicy`
+      ),
+      fixedApiUrl: parseProviderFixedApiUrl(record.fixedApiUrl, `${itemContext}.fixedApiUrl`)
     }
   })
   if (new Set(result.map(({ vendorId }) => vendorId)).size !== result.length) {

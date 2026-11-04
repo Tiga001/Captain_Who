@@ -2315,6 +2315,13 @@ export const jaJPTranslations = {
   'configuration.cancel': 'キャンセル',
   'configuration.done': '完了',
   'configuration.providerModelId': 'プロバイダーモデル ID',
+  'configuration.fixedProviderApiUrl':
+    'URLはAPIプロバイダーによって固定されています。独自のURLには汎用互換を使用してください。',
+  'configuration.fixedProviderTokenRequired':
+    'このURLを使用するには、このモデルのAPIトークンを設定してください。',
+  'configuration.selectProviderModel': 'モデルを選択',
+  'configuration.selectSupportedProviderModel':
+    'このプロバイダーは現在のモデルに対応していません。一覧から選択してください。',
   'configuration.providerModelIdPlaceholder': '例: deepseek-flash',
   'configuration.displayName': '表示名',
   'configuration.displayNamePlaceholder': '例: Kimi K3 High',

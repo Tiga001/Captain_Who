@@ -35,6 +35,10 @@ Captain Who 不附带可直接使用的模型账户，新安装的模型目录�
 
 填写模型标识、显示名称和上下文窗口。模型标识会原样发送给 Provider；显示名称只用于界面展示。
 
+在“更多”中选择 DeepSeek 或 Moonshot 后，顶部“厂商模型 ID”会显示软件已适配型号的下拉列表；通用兼容配置仍可手动输入。切换厂商不会自动选择第一个型号，原型号不适用时会提示重新选择。已有配置中的未知型号会保留显示，不会被静默替换。Moonshot 列表包含 Kimi K3.1 Pro 及其高速版，两者沿用 K3 的推理强度设置。
+
+专用厂商的 URL 同时显示为只读官方地址：DeepSeek 为 `https://api.deepseek.com/chat/completions`，Moonshot 为国内端点 `https://api.moonshot.cn/v1/chat/completions`。自定义网关或其他区域端点请使用通用兼容。修改在保存后生效；原本继承相同官方全局地址的配置可继续继承整对连接，否则需要为模型配置对应的 API Token。
+
 高级选项包括：
 
 - 模型级 API URL 与 Token；
