@@ -366,6 +366,16 @@ describe('model settings IPC', () => {
         selectable: true,
         modelIdPolicy: { kind: 'fixed', modelIds: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6'] },
         fixedApiUrl: 'https://api.moonshot.cn/v1/chat/completions'
+      },
+      {
+        vendorId: 'zhipu',
+        displayName: '智谱',
+        selectable: true,
+        modelIdPolicy: {
+          kind: 'fixed',
+          modelIds: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx', 'glm-5.3-flashx-legal']
+        },
+        fixedApiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
       }
     ]
     const input = {

@@ -17,6 +17,20 @@ vi.mock('../../notifications/notificationClient', () => ({
 const t = (key: Parameters<typeof getTranslation>[1]) => getTranslation('zh-CN', key)
 
 describe('settings definitions as the shared rendering and search source', () => {
+  it('finds Zhipu reasoning settings and targets the Zhipu editor', () => {
+    const index = buildSettingsSearchIndex(
+      SETTINGS_GROUPS.flatMap((group) => group.items),
+      t
+    )
+    const results = searchSettings(index, '智谱 推理强度')
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        id: 'configuration.model.zhipu.reasoningEffort',
+        view: 'model-zhipu',
+        prerequisiteId: 'configuration.models'
+      })
+    )
+  })
   it('adds, renames, moves and removes UI fields and search results from one definition', () => {
     const original = defineSettingsNodes([{ id: 'sample', title: { text: '旧名称' } }])
     const changed = defineSettingsNodes([{ id: 'new-field', title: { text: '新名称' } }])

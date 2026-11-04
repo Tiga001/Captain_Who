@@ -45,7 +45,9 @@ const PROVIDER_PROFILE_IDS = [
   'deepseek_v4_pro_0813_chat',
   'moonshot_k3_chat',
   'moonshot_k2_7_code_chat',
-  'moonshot_k2_6_chat'
+  'moonshot_k2_6_chat',
+  'zhipu_glm5_3_chat',
+  'zhipu_glm5_3_flash_chat'
 ] as const
 
 const PROVIDER_DIALECTS = ['openai_chat_completions', 'anthropic_messages'] as const
@@ -133,7 +135,9 @@ const PROVIDER_MODEL_FAMILIES = [
   'deepseek_pro_chat',
   'moonshot_k3_chat',
   'moonshot_k2_7_code_chat',
-  'moonshot_k2_6_chat'
+  'moonshot_k2_6_chat',
+  'zhipu_glm5_3_chat',
+  'zhipu_glm5_3_flash_chat'
 ] as const
 
 const REASONING_MODES = ['provider_default', 'enabled', 'disabled'] as const
@@ -203,7 +207,11 @@ function parseProviderFamilySettings(value: unknown, context: string): ProviderF
       reasoning: parseProviderFamilyReasoningPolicy(record.reasoning, `${context}.reasoning`)
     }
   }
-  if (kind === 'moonshot_k3_chat') {
+  if (
+    kind === 'moonshot_k3_chat' ||
+    kind === 'zhipu_glm5_3_chat' ||
+    kind === 'zhipu_glm5_3_flash_chat'
+  ) {
     expectOnlyKeys(record, ['kind', 'reasoningEffort'] as const, context)
     return {
       kind,
@@ -298,7 +306,11 @@ function parseProviderFamilySettingsDescriptor(
     }
     throw invalidProtocolValue(context, 'default DeepSeek settings use the wrong family')
   }
-  if (kind === 'moonshot_k3_chat') {
+  if (
+    kind === 'moonshot_k3_chat' ||
+    kind === 'zhipu_glm5_3_chat' ||
+    kind === 'zhipu_glm5_3_flash_chat'
+  ) {
     expectOnlyKeys(record, ['kind', 'reasoningEfforts', 'defaultSettings'] as const, context)
     const reasoningEfforts = expectUniqueEnumArray(
       record.reasoningEfforts,
@@ -313,9 +325,18 @@ function parseProviderFamilySettingsDescriptor(
       defaultSettings.kind !== kind ||
       !reasoningEfforts.includes(defaultSettings.reasoningEffort)
     ) {
-      throw invalidProtocolValue(context, 'default Moonshot settings are outside legal options')
+      throw invalidProtocolValue(context, 'default reasoning settings are outside legal options')
     }
-    return { kind, reasoningEfforts, defaultSettings }
+    if (kind === 'moonshot_k3_chat' && defaultSettings.kind === 'moonshot_k3_chat') {
+      return { kind, reasoningEfforts, defaultSettings }
+    }
+    if (kind === 'zhipu_glm5_3_chat' && defaultSettings.kind === 'zhipu_glm5_3_chat') {
+      return { kind, reasoningEfforts, defaultSettings }
+    }
+    if (kind === 'zhipu_glm5_3_flash_chat' && defaultSettings.kind === 'zhipu_glm5_3_flash_chat') {
+      return { kind, reasoningEfforts, defaultSettings }
+    }
+    throw invalidProtocolValue(context, 'default reasoning settings use the wrong family')
   }
   if (kind === 'moonshot_k2_7_code_chat') {
     expectOnlyKeys(record, ['kind', 'defaultSettings'] as const, context)
@@ -327,6 +348,9 @@ function parseProviderFamilySettingsDescriptor(
       throw invalidProtocolValue(context, 'default Moonshot settings use the wrong family')
     }
     return { kind, defaultSettings }
+  }
+  if (kind !== 'moonshot_k2_6_chat') {
+    throw invalidProtocolValue(`${context}.kind`, `unexpected value ${String(record.kind)}`)
   }
   expectOnlyKeys(record, ['kind', 'thinkingModes', 'defaultSettings'] as const, context)
   const thinkingModes = expectUniqueEnumArray(
@@ -534,7 +558,7 @@ export function parseProviderVendorModelPolicyDescriptor(
   ) as ProviderModelFamilyId
   const settingsKind = expectEnum(
     record.settingsKind,
-    ['none', 'deepseek', 'moonshot'] as const,
+    ['none', 'deepseek', 'moonshot', 'zhipu'] as const,
     `${context}.settingsKind`
   )
   const imageInput = expectEnum(
@@ -546,11 +570,21 @@ export function parseProviderVendorModelPolicyDescriptor(
   const isGeneric =
     modelFamily === 'generic_openai_chat' || modelFamily === 'generic_anthropic_messages'
   const isDeepSeek = modelFamily === 'deepseek_flash_chat' || modelFamily === 'deepseek_pro_chat'
+  const isMoonshot =
+    modelFamily === 'moonshot_k3_chat' ||
+    modelFamily === 'moonshot_k2_7_code_chat' ||
+    modelFamily === 'moonshot_k2_6_chat'
+  const isZhipu = modelFamily === 'zhipu_glm5_3_chat' || modelFamily === 'zhipu_glm5_3_flash_chat'
   const valid = isGeneric
     ? vendorId === 'generic' && settingsKind === 'none' && settings.kind === 'generic'
     : isDeepSeek
       ? vendorId === 'deepseek' && settingsKind === 'deepseek' && settings.kind === modelFamily
-      : vendorId === 'moonshot' && settingsKind === 'moonshot' && settings.kind === modelFamily
+      : isMoonshot
+        ? vendorId === 'moonshot' && settingsKind === 'moonshot' && settings.kind === modelFamily
+        : isZhipu &&
+          vendorId === 'zhipu' &&
+          settingsKind === 'zhipu' &&
+          settings.kind === modelFamily
   if (!valid)
     throw invalidProtocolValue(context, 'vendor, family, settings, and image policy disagree')
 

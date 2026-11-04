@@ -24,6 +24,7 @@ function providerLabel(config: ProviderProfileConfig | undefined, t: Translate):
   if (config?.schemaVersion === 2) {
     if (config.vendorId === 'deepseek') return t('chat.models.providerDeepseek')
     if (config.vendorId === 'moonshot') return t('chat.models.providerMoonshot')
+    if (config.vendorId === 'zhipu') return t('chat.models.providerZhipu')
   }
   return t('chat.models.providerGeneric')
 }

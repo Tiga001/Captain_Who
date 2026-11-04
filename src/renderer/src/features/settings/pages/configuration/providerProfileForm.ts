@@ -8,7 +8,7 @@ import type {
   StorageProviderProfileUpdate
 } from '@mycopilot/protocol'
 
-export type ProviderProfileSelection = 'generic' | 'deepseek' | 'moonshot' | 'unsupported'
+export type ProviderProfileSelection = 'generic' | 'deepseek' | 'moonshot' | 'zhipu' | 'unsupported'
 export type SelectableProviderVendor = Exclude<ProviderProfileSelection, 'unsupported'>
 export type DeepSeekFamilySettings = Extract<
   ProviderFamilySettings,
@@ -19,6 +19,10 @@ export type MoonshotFamilySettings = Extract<
   {
     kind: 'moonshot_k3_chat' | 'moonshot_k2_7_code_chat' | 'moonshot_k2_6_chat'
   }
+>
+export type ZhipuFamilySettings = Extract<
+  ProviderFamilySettings,
+  { kind: 'zhipu_glm5_3_chat' | 'zhipu_glm5_3_flash_chat' }
 >
 
 interface ProviderProfileFormStateBase {
@@ -40,6 +44,10 @@ export type ProviderProfileFormState =
   | (ProviderProfileFormStateBase & {
       selection: 'moonshot'
       settings: MoonshotFamilySettings | null
+    })
+  | (ProviderProfileFormStateBase & {
+      selection: 'zhipu'
+      settings: ZhipuFamilySettings | null
     })
   | (ProviderProfileFormStateBase & {
       selection: 'unsupported'
@@ -99,6 +107,17 @@ function initialV2State(
     return {
       ...unchangedBase(config.settings.kind),
       selection: 'moonshot',
+      settings: cloneSettings(config.settings)
+    }
+  }
+  if (
+    config.vendorId === 'zhipu' &&
+    (config.settings.kind === 'zhipu_glm5_3_chat' ||
+      config.settings.kind === 'zhipu_glm5_3_flash_chat')
+  ) {
+    return {
+      ...unchangedBase(config.settings.kind),
+      selection: 'zhipu',
       settings: cloneSettings(config.settings)
     }
   }
@@ -162,14 +181,27 @@ export function selectProviderVendor(
       familyChanged: false
     }
   }
-  return {
-    selection,
-    settings: current.selection === 'moonshot' ? current.settings : null,
-    modelFamily: current.modelFamily,
-    update: current.selection === 'moonshot' ? current.update : { kind: 'unchanged' },
-    explicitSelection: true,
-    familyChanged: false
+  if (selection === 'moonshot') {
+    return {
+      selection,
+      settings: current.selection === 'moonshot' ? current.settings : null,
+      modelFamily: current.modelFamily,
+      update: current.selection === 'moonshot' ? current.update : { kind: 'unchanged' },
+      explicitSelection: true,
+      familyChanged: false
+    }
   }
+  if (selection === 'zhipu') {
+    return {
+      selection,
+      settings: current.selection === 'zhipu' ? current.settings : null,
+      modelFamily: current.modelFamily,
+      update: current.selection === 'zhipu' ? current.update : { kind: 'unchanged' },
+      explicitSelection: true,
+      familyChanged: false
+    }
+  }
+  return current
 }
 
 function normalizeDeepSeekSettings(
@@ -284,7 +316,43 @@ export function applyResolvedProviderPolicy(
       familyChanged
     }
   }
+  if (
+    current.selection === 'zhipu' &&
+    (policy.settings.kind === 'zhipu_glm5_3_chat' ||
+      policy.settings.kind === 'zhipu_glm5_3_flash_chat')
+  ) {
+    const settings =
+      current.settings && current.modelFamily === policy.modelFamily
+        ? normalizeZhipuSettings(current.settings, policy.settings)
+        : cloneSettings(policy.settings.defaultSettings)
+    return {
+      selection: 'zhipu',
+      settings,
+      modelFamily: policy.modelFamily,
+      update: mustWrite
+        ? { kind: 'select_vendor', vendorId: 'zhipu', settings }
+        : { kind: 'unchanged' },
+      explicitSelection: current.explicitSelection,
+      familyChanged
+    }
+  }
   return current
+}
+
+export function normalizeZhipuSettings(
+  settings: ZhipuFamilySettings,
+  descriptor: Extract<
+    ProviderFamilySettingsDescriptor,
+    { kind: 'zhipu_glm5_3_chat' | 'zhipu_glm5_3_flash_chat' }
+  >
+): ZhipuFamilySettings {
+  if (settings.kind !== descriptor.kind) return cloneSettings(descriptor.defaultSettings)
+  return {
+    kind: descriptor.kind,
+    reasoningEffort: descriptor.reasoningEfforts.includes(settings.reasoningEffort)
+      ? settings.reasoningEffort
+      : descriptor.defaultSettings.reasoningEffort
+  }
 }
 
 export function updateDeepSeekProviderSettings(
@@ -310,6 +378,19 @@ export function updateMoonshotProviderSettings(
     ...current,
     settings: nextSettings,
     update: { kind: 'select_vendor', vendorId: 'moonshot', settings: nextSettings }
+  }
+}
+
+export function updateZhipuProviderSettings(
+  current: ProviderProfileFormState,
+  settings: ZhipuFamilySettings
+): ProviderProfileFormState {
+  if (current.selection !== 'zhipu') return current
+  const nextSettings = cloneSettings(settings)
+  return {
+    ...current,
+    settings: nextSettings,
+    update: { kind: 'select_vendor', vendorId: 'zhipu', settings: nextSettings }
   }
 }
 

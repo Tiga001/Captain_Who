@@ -5,7 +5,9 @@ import {
   deepSeekThinkingModeLabels,
   deepSeekEffortLabels,
   moonshotThinkingModeLabels,
-  moonshotEffortLabels
+  moonshotEffortLabels,
+  zhipuProviderSettings,
+  zhipuEffortLabels
 } from './configuration.definition'
 import { useState } from 'react'
 import type {
@@ -15,7 +17,12 @@ import type {
 } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { SettingsSelect, type SettingsSelectOption } from '../../components/SettingsSelect'
-import type { DeepSeekFamilySettings, MoonshotFamilySettings } from './providerProfileForm'
+import {
+  normalizeZhipuSettings,
+  type DeepSeekFamilySettings,
+  type MoonshotFamilySettings,
+  type ZhipuFamilySettings
+} from './providerProfileForm'
 import { ProviderSettingsDialogShell } from './ProviderSettingsDialogShell'
 
 type DeepSeekDescriptor = Extract<
@@ -26,6 +33,56 @@ type MoonshotDescriptor = Extract<
   ProviderFamilySettingsDescriptor,
   { kind: 'moonshot_k3_chat' | 'moonshot_k2_7_code_chat' | 'moonshot_k2_6_chat' }
 >
+type ZhipuDescriptor = Extract<
+  ProviderFamilySettingsDescriptor,
+  { kind: 'zhipu_glm5_3_chat' | 'zhipu_glm5_3_flash_chat' }
+>
+
+interface ZhipuProviderSettingsEditorProps {
+  definition?: typeof zhipuProviderSettings
+  descriptor: ZhipuDescriptor
+  initialSettings: ZhipuFamilySettings
+  onCancel: () => void
+  onConfirm: (settings: ZhipuFamilySettings) => void
+}
+
+export function ZhipuProviderSettingsEditor({
+  definition = zhipuProviderSettings,
+  descriptor,
+  initialSettings,
+  onCancel,
+  onConfirm
+}: ZhipuProviderSettingsEditorProps) {
+  const { t } = useFrontendConfig()
+  const [settings, setSettings] = useState(() =>
+    normalizeZhipuSettings(initialSettings, descriptor)
+  )
+  return (
+    <ProviderSettingsDialogShell
+      title={settingLabel(definition, t)}
+      settingId={definition.id}
+      description={settingDescription(definition, t) ?? ''}
+      onCancel={onCancel}
+      onConfirm={() => onConfirm(normalizeZhipuSettings(settings, descriptor))}
+    >
+      {renderSettingsNodes(definition.children, (node) => (
+        <div className="provider-settings-dialog__field" data-setting-id={node.id}>
+          <span>{settingLabel(node, t)}</span>
+          <SettingsSelect
+            ariaLabel={settingLabel(node, t)}
+            className="provider-settings-dialog__select"
+            options={descriptor.reasoningEfforts.map((value) => ({
+              value,
+              label: t(zhipuEffortLabels[value])
+            }))}
+            value={settings.reasoningEffort}
+            onChange={(reasoningEffort) => setSettings({ kind: descriptor.kind, reasoningEffort })}
+          />
+        </div>
+      ))}
+    </ProviderSettingsDialogShell>
+  )
+}
 
 interface DeepSeekProviderSettingsEditorProps {
   definition?: typeof deepSeekProviderSettings

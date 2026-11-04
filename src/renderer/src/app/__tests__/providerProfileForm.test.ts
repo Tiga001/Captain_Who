@@ -12,10 +12,21 @@ import {
   initialProviderProfileFormState,
   selectProviderVendor,
   updateDeepSeekProviderSettings,
-  updateMoonshotProviderSettings
+  updateMoonshotProviderSettings,
+  updateZhipuProviderSettings
 } from '../../features/settings/pages/configuration/providerProfileForm'
 
 const descriptors: ProviderProfileUiDescriptor[] = [
+  ...(['zhipu_glm5_3_chat', 'zhipu_glm5_3_flash_chat'] as const).map(
+    (profileId): ProviderProfileUiDescriptor => ({
+      profileId,
+      profileVersion: 1,
+      displayName: 'Zhipu',
+      compatibleDialects: ['openai_chat_completions'],
+      settingsKind: 'none',
+      selectable: false
+    })
+  ),
   {
     profileId: 'generic_openai_chat',
     profileVersion: 1,
@@ -146,6 +157,94 @@ function legacyProfile(
 }
 
 describe('vendor-aware Provider form state', () => {
+  it.each(['zhipu_glm5_3_chat', 'zhipu_glm5_3_flash_chat'] as const)(
+    'loads %s unchanged and preserves its effort within the family',
+    (kind) => {
+      const state = initialProviderProfileFormState(
+        {
+          schemaVersion: 2,
+          vendorId: 'zhipu',
+          profile: { id: kind, version: 1 },
+          settings: { kind, reasoningEffort: 'low' }
+        },
+        descriptors
+      )
+      const resolved = applyResolvedProviderPolicy(state, {
+        status: 'supported',
+        vendorId: 'zhipu',
+        modelFamily: kind,
+        settingsKind: 'zhipu',
+        imageInput: kind === 'zhipu_glm5_3_chat' ? 'unsupported' : 'supported',
+        settings: {
+          kind,
+          reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+          defaultSettings: { kind, reasoningEffort: 'max' }
+        } as Extract<ProviderVendorModelPolicyDescriptor, { status: 'supported' }>['settings']
+      })
+      expect(resolved).toMatchObject({
+        selection: 'zhipu',
+        settings: { kind, reasoningEffort: 'low' },
+        update: { kind: 'unchanged' }
+      })
+      expect(
+        updateZhipuProviderSettings(resolved, { kind, reasoningEffort: 'provider_default' }).update
+      ).toEqual({
+        kind: 'select_vendor',
+        vendorId: 'zhipu',
+        settings: { kind, reasoningEffort: 'provider_default' }
+      })
+    }
+  )
+
+  it('resets Zhipu settings only when Host resolves a different family', () => {
+    const state = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        vendorId: 'zhipu',
+        profile: { id: 'zhipu_glm5_3_chat', version: 1 },
+        settings: { kind: 'zhipu_glm5_3_chat', reasoningEffort: 'low' }
+      },
+      descriptors
+    )
+    const flashPolicy: ProviderVendorModelPolicyDescriptor = {
+      status: 'supported',
+      vendorId: 'zhipu',
+      modelFamily: 'zhipu_glm5_3_flash_chat',
+      settingsKind: 'zhipu',
+      imageInput: 'supported',
+      settings: {
+        kind: 'zhipu_glm5_3_flash_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'zhipu_glm5_3_flash_chat', reasoningEffort: 'max' }
+      }
+    }
+    expect(applyResolvedProviderPolicy(state, flashPolicy)).toMatchObject({
+      selection: 'zhipu',
+      familyChanged: true,
+      settings: { kind: 'zhipu_glm5_3_flash_chat', reasoningEffort: 'max' },
+      update: { kind: 'select_vendor', vendorId: 'zhipu' }
+    })
+    const generic = initialNewProviderProfileFormState()
+    expect(applyResolvedProviderPolicy(generic, flashPolicy)).toBe(generic)
+    expect(
+      applyResolvedProviderPolicy(selectProviderVendor(generic, 'zhipu'), flashPolicy)
+    ).toMatchObject({ selection: 'zhipu', update: { kind: 'select_vendor', vendorId: 'zhipu' } })
+  })
+
+  it('preserves future Zhipu profiles as opaque unchanged configurations', () => {
+    expect(
+      initialProviderProfileFormState(
+        {
+          schemaVersion: 2,
+          vendorId: 'zhipu',
+          profile: { id: 'zhipu_glm5_3_chat', version: 99 },
+          settings: { kind: 'zhipu_glm5_3_chat', reasoningEffort: 'high' }
+        },
+        descriptors
+      )
+    ).toMatchObject({ selection: 'unsupported', settings: null, update: { kind: 'unchanged' } })
+  })
+
   it('starts new models with explicit Generic selection', () => {
     expect(initialNewProviderProfileFormState()).toMatchObject({
       selection: 'generic',

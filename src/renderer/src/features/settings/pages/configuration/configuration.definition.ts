@@ -23,10 +23,17 @@ export const moonshotEffortLabels = {
   high: 'configuration.moonshotSettings.effortHigh',
   max: 'configuration.moonshotSettings.effortMax'
 } as const
+export const zhipuEffortLabels = {
+  provider_default: 'configuration.zhipuSettings.effortProviderDefault',
+  low: 'configuration.zhipuSettings.effortLow',
+  high: 'configuration.zhipuSettings.effortHigh',
+  max: 'configuration.zhipuSettings.effortMax'
+} as const
 export const providerVendorLabels = {
   generic: 'configuration.providerProfile.generic',
   deepseek: 'configuration.providerProfile.deepSeek',
-  moonshot: 'configuration.providerProfile.moonshot'
+  moonshot: 'configuration.providerProfile.moonshot',
+  zhipu: 'configuration.providerProfile.zhipu'
 } as const
 
 export const modelDefaultSettings = defineSettingsNodes([
@@ -84,9 +91,24 @@ export const moonshotProviderSettings = {
   children: moonshotSettings
 } as const
 
+export const zhipuProviderSettings = {
+  id: 'configuration.model.zhipu',
+  title: 'configuration.zhipuSettings.title',
+  description: 'configuration.zhipuSettings.description',
+  view: 'model-zhipu',
+  children: defineSettingsNodes([
+    {
+      id: 'configuration.model.zhipu.reasoningEffort',
+      title: 'configuration.zhipuSettings.reasoningEffort',
+      terms: Object.values(zhipuEffortLabels)
+    }
+  ])
+} as const
+
 export const providerSettings = defineSettingsNodes([
   deepSeekProviderSettings,
-  moonshotProviderSettings
+  moonshotProviderSettings,
+  zhipuProviderSettings
 ])
 
 export const modelBasicSettings = defineSettingsNodes([

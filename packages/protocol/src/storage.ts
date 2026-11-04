@@ -14,13 +14,15 @@ export type KnownProviderProfileId =
   | 'moonshot_k3_chat'
   | 'moonshot_k2_7_code_chat'
   | 'moonshot_k2_6_chat'
+  | 'zhipu_glm5_3_chat'
+  | 'zhipu_glm5_3_flash_chat'
 
 /** Persisted ids are tolerant so unsupported future profiles can be displayed without reset. */
 export type ProviderProfileId = KnownProviderProfileId | (string & {})
 
 export type ProviderProtocolDialect = 'openai_chat_completions' | 'anthropic_messages'
 
-export type KnownProviderVendorId = 'generic' | 'deepseek' | 'moonshot'
+export type KnownProviderVendorId = 'generic' | 'deepseek' | 'moonshot' | 'zhipu'
 
 /** Persisted ids are tolerant; Host registration remains authoritative for support. */
 export type ProviderVendorId = KnownProviderVendorId | (string & {})
@@ -84,6 +86,16 @@ export interface MoonshotK26ChatProviderSettingsV1 {
   thinkingMode: MoonshotK26ThinkingMode
 }
 
+export interface ZhipuGlm53ChatProviderSettingsV1 {
+  kind: 'zhipu_glm5_3_chat'
+  reasoningEffort: ProviderReasoningEffort
+}
+
+export interface ZhipuGlm53FlashChatProviderSettingsV1 {
+  kind: 'zhipu_glm5_3_flash_chat'
+  reasoningEffort: ProviderReasoningEffort
+}
+
 /** Versioned, model-family-owned settings used by Provider Profile config schema v2. */
 export type ProviderFamilySettings =
   | GenericProviderSettingsV1
@@ -92,6 +104,8 @@ export type ProviderFamilySettings =
   | MoonshotK3ChatProviderSettingsV1
   | MoonshotK27CodeChatProviderSettingsV1
   | MoonshotK26ChatProviderSettingsV1
+  | ZhipuGlm53ChatProviderSettingsV1
+  | ZhipuGlm53FlashChatProviderSettingsV1
 
 export type ProviderVendorPublicSettings = ProviderFamilySettings
 
@@ -131,8 +145,10 @@ export type ProviderModelFamilyId =
   | 'moonshot_k3_chat'
   | 'moonshot_k2_7_code_chat'
   | 'moonshot_k2_6_chat'
+  | 'zhipu_glm5_3_chat'
+  | 'zhipu_glm5_3_flash_chat'
 
-export type ProviderVendorSettingsKind = 'none' | 'deepseek' | 'moonshot'
+export type ProviderVendorSettingsKind = 'none' | 'deepseek' | 'moonshot' | 'zhipu'
 
 /** Public model-editor policy; runtime Provider capabilities remain Host-private. */
 export type ProviderImageInputPolicy = 'user_configurable' | 'supported' | 'unsupported'
@@ -167,6 +183,16 @@ export type ProviderFamilySettingsDescriptor =
       kind: 'moonshot_k2_6_chat'
       thinkingModes: MoonshotK26ThinkingMode[]
       defaultSettings: MoonshotK26ChatProviderSettingsV1
+    }
+  | {
+      kind: 'zhipu_glm5_3_chat'
+      reasoningEfforts: ProviderReasoningEffort[]
+      defaultSettings: ZhipuGlm53ChatProviderSettingsV1
+    }
+  | {
+      kind: 'zhipu_glm5_3_flash_chat'
+      reasoningEfforts: ProviderReasoningEffort[]
+      defaultSettings: ZhipuGlm53FlashChatProviderSettingsV1
     }
 
 export interface ProviderVendorModelPolicyInput {

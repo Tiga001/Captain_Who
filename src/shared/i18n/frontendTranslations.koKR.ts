@@ -2288,6 +2288,15 @@ export const koKRTranslations = {
   'configuration.providerProfile.generic': '일반 호환',
   'configuration.providerProfile.deepSeek': 'DeepSeek',
   'configuration.providerProfile.moonshot': 'Moonshot',
+  'configuration.providerProfile.zhipu': 'Zhipu',
+  'configuration.zhipuSettings.title': 'Zhipu 설정',
+  'configuration.zhipuSettings.description':
+    'GLM-5.3 계열은 항상 추론을 사용합니다. 표준 API 키를 사용하세요. 표준 API는 사용량에 따라 과금됩니다.',
+  'configuration.zhipuSettings.reasoningEffort': '추론 강도',
+  'configuration.zhipuSettings.effortProviderDefault': 'API 기본값 사용',
+  'configuration.zhipuSettings.effortLow': '낮음',
+  'configuration.zhipuSettings.effortHigh': '높음',
+  'configuration.zhipuSettings.effortMax': '최대',
   'configuration.providerProfile.unsupported': '지원되지 않는 호환성 구성',
   'configuration.providerProfile.resolving': '모델 및 제공자 정책 확인 중…',
   'configuration.providerProfile.resolveFailed':

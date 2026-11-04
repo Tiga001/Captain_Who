@@ -28,11 +28,13 @@ import {
   selectProviderVendor,
   updateDeepSeekProviderSettings,
   updateMoonshotProviderSettings,
+  updateZhipuProviderSettings,
   type ProviderProfileSelection
 } from './providerProfileForm'
 import {
   DeepSeekProviderSettingsEditor,
-  MoonshotProviderSettingsEditor
+  MoonshotProviderSettingsEditor,
+  ZhipuProviderSettingsEditor
 } from './providerSettingsEditors'
 import { CredentialInput } from './CredentialInput'
 import { classifyModelSettingsSaveError, type ModelSettingsSaveError } from './modelSettingsErrors'
@@ -325,18 +327,18 @@ export function ModelForm({
         label: t(providerVendorLabels.moonshot),
         value: 'moonshot'
       })
+    } else if (descriptor.vendorId === 'zhipu') {
+      selectableVendorOptions.push({
+        label: t(providerVendorLabels.zhipu),
+        value: 'zhipu'
+      })
     }
   }
   if (
     providerProfile.selection !== 'unsupported' &&
     !selectableVendorOptions.some((option) => option.value === providerProfile.selection)
   ) {
-    const label =
-      providerProfile.selection === 'generic'
-        ? t(providerVendorLabels.generic)
-        : providerProfile.selection === 'deepseek'
-          ? t(providerVendorLabels.deepseek)
-          : t(providerVendorLabels.moonshot)
+    const label = t(providerVendorLabels[providerProfile.selection])
     selectableVendorOptions.unshift({ disabled: true, label, value: providerProfile.selection })
   }
   const providerProfileOptions: SettingsSelectOption<ProviderProfileSelection>[] = [
@@ -364,6 +366,12 @@ export function ModelForm({
       supportedPolicy.settings.kind === 'moonshot_k2_6_chat')
       ? supportedPolicy.settings
       : null
+  const zhipuSettingsDescriptor =
+    supportedPolicy &&
+    (supportedPolicy.settings.kind === 'zhipu_glm5_3_chat' ||
+      supportedPolicy.settings.kind === 'zhipu_glm5_3_flash_chat')
+      ? supportedPolicy.settings
+      : null
 
   useSettingsPageNavigation(
     'configuration',
@@ -376,7 +384,9 @@ export function ModelForm({
           ? 'deepseek'
           : target.view === 'model-moonshot'
             ? 'moonshot'
-            : null
+            : target.view === 'model-zhipu'
+              ? 'zhipu'
+              : null
       )
     },
     () => setRequestedProviderSettings(null)
@@ -386,7 +396,8 @@ export function ModelForm({
     if (
       requestedProviderSettings === providerProfile.selection &&
       ((requestedProviderSettings === 'deepseek' && deepSeekSettingsDescriptor) ||
-        (requestedProviderSettings === 'moonshot' && moonshotSettingsDescriptor))
+        (requestedProviderSettings === 'moonshot' && moonshotSettingsDescriptor) ||
+        (requestedProviderSettings === 'zhipu' && zhipuSettingsDescriptor))
     ) {
       setProviderSettingsOpen(true)
       setRequestedProviderSettings(null)
@@ -394,6 +405,7 @@ export function ModelForm({
   }, [
     deepSeekSettingsDescriptor,
     moonshotSettingsDescriptor,
+    zhipuSettingsDescriptor,
     providerProfile.selection,
     requestedProviderSettings
   ])
@@ -776,7 +788,8 @@ export function ModelForm({
                           case 'configuration.model.providerSettings':
                             if (
                               providerProfile.selection !== 'deepseek' &&
-                              providerProfile.selection !== 'moonshot'
+                              providerProfile.selection !== 'moonshot' &&
+                              providerProfile.selection !== 'zhipu'
                             )
                               return null
                             return (
@@ -790,7 +803,9 @@ export function ModelForm({
                                   className="secondary-settings-button model-provider-settings-button"
                                   type="button"
                                   disabled={
-                                    !deepSeekSettingsDescriptor && !moonshotSettingsDescriptor
+                                    !deepSeekSettingsDescriptor &&
+                                    !moonshotSettingsDescriptor &&
+                                    !zhipuSettingsDescriptor
                                   }
                                   tabIndex={isAdvancedOpen ? 0 : -1}
                                   onClick={() => setProviderSettingsOpen(true)}
@@ -934,6 +949,27 @@ export function ModelForm({
                     onConfirm={(settings) => {
                       setProviderProfile((current) =>
                         updateMoonshotProviderSettings(current, settings)
+                      )
+                      setProviderSettingsOpen(false)
+                    }}
+                  />
+                )) ||
+              null
+            )
+          case 'configuration.model.zhipu':
+            return (
+              (isProviderSettingsOpen &&
+                providerProfile.selection === 'zhipu' &&
+                providerProfile.settings &&
+                zhipuSettingsDescriptor && (
+                  <ZhipuProviderSettingsEditor
+                    definition={node}
+                    descriptor={zhipuSettingsDescriptor}
+                    initialSettings={providerProfile.settings}
+                    onCancel={() => setProviderSettingsOpen(false)}
+                    onConfirm={(settings) => {
+                      setProviderProfile((current) =>
+                        updateZhipuProviderSettings(current, settings)
                       )
                       setProviderSettingsOpen(false)
                     }}

@@ -2349,6 +2349,15 @@ export const ruRUTranslations = {
   'configuration.providerProfile.generic': 'Общая совместимость',
   'configuration.providerProfile.deepSeek': 'DeepSeek',
   'configuration.providerProfile.moonshot': 'Moonshot',
+  'configuration.providerProfile.zhipu': 'Zhipu',
+  'configuration.zhipuSettings.title': 'Настройки Zhipu',
+  'configuration.zhipuSettings.description':
+    'Для семейства GLM-5.3 рассуждение всегда включено. Используйте стандартный ключ API; стандартный API оплачивается по объёму использования.',
+  'configuration.zhipuSettings.reasoningEffort': 'Интенсивность рассуждения',
+  'configuration.zhipuSettings.effortProviderDefault': 'По умолчанию API',
+  'configuration.zhipuSettings.effortLow': 'Низкая',
+  'configuration.zhipuSettings.effortHigh': 'Высокая',
+  'configuration.zhipuSettings.effortMax': 'Максимальная',
   'configuration.providerProfile.unsupported': 'Неподдерживаемая конфигурация совместимости',
   'configuration.providerProfile.resolving': 'Проверка модели и политики провайдера…',
   'configuration.providerProfile.resolveFailed':

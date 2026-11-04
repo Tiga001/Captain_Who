@@ -81,6 +81,15 @@ describe('composer model metadata', () => {
     {
       profile: {
         schemaVersion: 2,
+        vendorId: 'zhipu',
+        profile: { id: 'zhipu_glm5_3_chat', version: 1 },
+        settings: { kind: 'zhipu_glm5_3_chat', reasoningEffort: 'max' }
+      },
+      label: '智谱'
+    },
+    {
+      profile: {
+        schemaVersion: 2,
         vendorId: 'another-registered-vendor',
         profile: { id: 'generic_anthropic_messages', version: 1 },
         settings: { kind: 'generic' }

@@ -29,6 +29,16 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 const { ModelForm } = await import('../../features/settings/pages/configuration/ModelForm')
 
 const profileDescriptors: ProviderProfileUiDescriptor[] = [
+  ...(['zhipu_glm5_3_chat', 'zhipu_glm5_3_flash_chat'] as const).map(
+    (profileId): ProviderProfileUiDescriptor => ({
+      profileId,
+      profileVersion: 1,
+      displayName: 'Zhipu internal profile',
+      compatibleDialects: ['openai_chat_completions'],
+      settingsKind: 'none',
+      selectable: false
+    })
+  ),
   {
     profileId: 'generic_openai_chat',
     profileVersion: 1,
@@ -109,6 +119,16 @@ const vendorDescriptors: ProviderVendorDescriptor[] = [
         'kimi-k2.7-code-highspeed',
         'kimi-k2.6'
       ]
+    }
+  },
+  {
+    vendorId: 'zhipu',
+    displayName: 'Zhipu internal label',
+    selectable: true,
+    fixedApiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    modelIdPolicy: {
+      kind: 'fixed',
+      modelIds: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx', 'glm-5.3-flashx-legal']
     }
   },
   {
@@ -226,6 +246,37 @@ function resolvePolicy(
       }
     })
   }
+  if (input.vendorId === 'zhipu' && input.modelId === 'glm-5.3') {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'zhipu',
+      modelFamily: 'zhipu_glm5_3_chat',
+      settingsKind: 'zhipu',
+      imageInput: 'unsupported',
+      settings: {
+        kind: 'zhipu_glm5_3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'zhipu_glm5_3_chat', reasoningEffort: 'max' }
+      }
+    })
+  }
+  if (
+    input.vendorId === 'zhipu' &&
+    ['glm-5.3-flash', 'glm-5.3-flashx', 'glm-5.3-flashx-legal'].includes(input.modelId)
+  ) {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'zhipu',
+      modelFamily: 'zhipu_glm5_3_flash_chat',
+      settingsKind: 'zhipu',
+      imageInput: 'supported',
+      settings: {
+        kind: 'zhipu_glm5_3_flash_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'zhipu_glm5_3_flash_chat', reasoningEffort: 'max' }
+      }
+    })
+  }
   return Promise.resolve({
     status: 'unsupported',
     vendorId: input.vendorId,
@@ -330,7 +381,8 @@ describe('ModelForm vendor controls', () => {
 
   it.each([
     ['deepSeek', 'deepseek-flash', 'https://api.deepseek.com/chat/completions'],
-    ['moonshot', 'kimi-k3.1-pro', 'https://api.moonshot.cn/v1/chat/completions']
+    ['moonshot', 'kimi-k3.1-pro', 'https://api.moonshot.cn/v1/chat/completions'],
+    ['zhipu', 'glm-5.3', 'https://open.bigmodel.cn/api/paas/v4/chat/completions']
   ])('saves the fixed %s URL and a model-specific credential', async (vendor, modelId, apiUrl) => {
     const onSave = vi.fn()
     const screen = await render(
@@ -822,7 +874,8 @@ describe('ModelForm vendor controls', () => {
     expect(labels).toEqual([
       'configuration.providerProfile.generic',
       'configuration.providerProfile.deepSeek',
-      'configuration.providerProfile.moonshot'
+      'configuration.providerProfile.moonshot',
+      'configuration.providerProfile.zhipu'
     ])
     expect(document.body.textContent).not.toMatch(/V4 Chat|Kimi K3|deepseek_v4|moonshot_k3|@1/)
   })
@@ -1371,5 +1424,208 @@ describe('ModelForm vendor controls', () => {
       displayName: 'Available display',
       providerModelId: 'deepseek-flash'
     })
+  })
+})
+
+const zhipuApiUrl = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+const zhipuModelIds = ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx', 'glm-5.3-flashx-legal']
+
+function zhipuModel(modelId: string): ModelConfig {
+  const kind = modelId === 'glm-5.3' ? 'zhipu_glm5_3_chat' : 'zhipu_glm5_3_flash_chat'
+  return {
+    ...model,
+    providerModelId: modelId,
+    displayName: 'My GLM configuration',
+    apiUrlOverride: zhipuApiUrl,
+    apiTokenOverrideStatus: 'configured',
+    contextWindowTokens: 196_608,
+    inputPrice: '1.2',
+    cachedInputPrice: '0.2',
+    outputPrice: '2.4',
+    providerProfileConfig: {
+      schemaVersion: 2,
+      vendorId: 'zhipu',
+      profile: { id: kind, version: 1 },
+      settings: { kind, reasoningEffort: 'low' }
+    }
+  }
+}
+
+describe('Zhipu model controls', () => {
+  it.each(zhipuModelIds)(
+    'uses Host choices for %s, preserves the draft on cancel, and saves only Zhipu effort',
+    async (modelId) => {
+      const onSave = vi.fn()
+      const screen = await render(
+        <ModelForm {...commonProps} model={zhipuModel(modelId)} onSave={onSave} />
+      )
+      const picker = screen.getByRole('button', {
+        name: `configuration.providerModelId: ${modelId}`
+      })
+      await picker.click()
+      expect(screen.getByRole('option').all()).toHaveLength(4)
+      for (const id of zhipuModelIds) {
+        await expect.element(screen.getByRole('option', { name: id, exact: true })).toBeVisible()
+      }
+      await screen.getByRole('option', { name: modelId, exact: true }).click()
+      const apiUrl = screen.getByPlaceholder('configuration.modelApiUrlPlaceholder')
+      await expect.element(apiUrl).toHaveValue(zhipuApiUrl)
+      await expect.element(apiUrl).toHaveAttribute('readonly')
+      const image = screen.getByRole('switch', { name: 'configuration.supportsImage' })
+      await expect.element(image).toHaveAttribute('aria-checked', String(modelId !== 'glm-5.3'))
+      await expect.element(image).toBeDisabled()
+      const open = screen.getByRole('button', { name: 'configuration.providerSettings.open' })
+      await expect.element(open).toBeEnabled()
+      await open.click()
+      await expect
+        .element(screen.getByText('configuration.zhipuSettings.description'))
+        .toBeVisible()
+      const effort = screen.getByRole('button', {
+        name: /^configuration.zhipuSettings.reasoningEffort:/
+      })
+      await effort.click()
+      await screen.getByRole('option', { name: 'configuration.zhipuSettings.effortHigh' }).click()
+      await screen.getByText('configuration.providerSettings.cancel').click()
+      await open.click()
+      await expect.element(effort).toHaveTextContent('configuration.zhipuSettings.effortLow')
+      await effort.click()
+      await screen
+        .getByRole('option', { name: 'configuration.zhipuSettings.effortProviderDefault' })
+        .click()
+      await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
+      expect(onSave).not.toHaveBeenCalled()
+      await screen.getByRole('button', { name: 'configuration.save' }).click()
+      await expect.poll(() => onSave.mock.calls.length).toBe(1)
+      expect(onSave.mock.calls[0]![0]).toMatchObject({
+        providerModelId: modelId,
+        displayName: 'My GLM configuration',
+        apiUrlOverride: zhipuApiUrl,
+        apiTokenOverrideMutation: { type: 'keep' },
+        contextWindowTokens: '196608',
+        inputPrice: '1.2',
+        cachedInputPrice: '0.2',
+        outputPrice: '2.4',
+        supportsImage: modelId !== 'glm-5.3',
+        providerProfileUpdate: {
+          kind: 'select_vendor',
+          vendorId: 'zhipu',
+          settings: {
+            kind: modelId === 'glm-5.3' ? 'zhipu_glm5_3_chat' : 'zhipu_glm5_3_flash_chat',
+            reasoningEffort: 'provider_default'
+          }
+        }
+      })
+    }
+  )
+
+  it('preserves an inherited matching Zhipu connection and unchanged settings', async () => {
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        globalApiUrl={zhipuApiUrl}
+        model={{ ...zhipuModel('glm-5.3'), apiUrlOverride: '', apiTokenOverrideStatus: 'missing' }}
+        onSave={onSave}
+      />
+    )
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeEnabled()
+    await expect
+      .element(screen.getByText('configuration.fixedProviderTokenRequired'))
+      .not.toBeInTheDocument()
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Renamed GLM')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      displayName: 'Renamed GLM',
+      apiUrlOverride: '',
+      apiTokenOverrideMutation: { type: 'keep' },
+      providerProfileUpdate: { kind: 'unchanged' }
+    })
+  })
+
+  it('ignores a stale flagship policy after a Flash model has resolved', async () => {
+    const older = deferred<ProviderVendorModelPolicyDescriptor>()
+    let delivered = false
+    const resolver = vi.fn((input: ProviderVendorModelPolicyInput) =>
+      input.modelId === 'glm-5.3'
+        ? older.promise.then((policy) => {
+            delivered = true
+            return policy
+          })
+        : resolvePolicy(input)
+    )
+    const onSave = vi.fn()
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={zhipuModel('glm-5.3')}
+        resolveProviderVendorModelPolicy={resolver}
+        onSave={onSave}
+      />
+    )
+    const save = screen.getByRole('button', { name: 'configuration.save' })
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    await expect.element(save).toBeDisabled()
+    await screen.getByRole('button', { name: 'configuration.providerModelId: glm-5.3' }).click()
+    await screen.getByRole('option', { name: 'glm-5.3-flashx-legal', exact: true }).click()
+    await expect.element(save).toBeEnabled()
+    older.resolve(
+      await resolvePolicy({
+        vendorId: 'zhipu',
+        modelId: 'glm-5.3',
+        dialect: 'openai_chat_completions'
+      })
+    )
+    await expect.poll(() => delivered).toBe(true)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect
+      .element(screen.getByRole('switch', { name: 'configuration.supportsImage' }))
+      .toHaveAttribute('aria-checked', 'true')
+    await save.click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'zhipu',
+      settings: { kind: 'zhipu_glm5_3_flash_chat', reasoningEffort: 'max' }
+    })
+  })
+
+  it('opens the Zhipu field from settings search only after Host policy resolves', async () => {
+    const pending = deferred<ProviderVendorModelPolicyDescriptor>()
+    const onSave = vi.fn()
+    const resolver = vi.fn(() => pending.promise)
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'configuration',
+          id: 'configuration.model.zhipu.reasoningEffort',
+          view: 'model-zhipu',
+          revision: 1
+        }}
+      >
+        <ModelForm
+          {...commonProps}
+          model={zhipuModel('glm-5.3')}
+          resolveProviderVendorModelPolicy={resolver}
+          onSave={onSave}
+        />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    await expect.element(screen.getByRole('dialog')).not.toBeInTheDocument()
+    pending.resolve(
+      await resolvePolicy({
+        vendorId: 'zhipu',
+        modelId: 'glm-5.3',
+        dialect: 'openai_chat_completions'
+      })
+    )
+    await expect
+      .element(screen.getByRole('dialog', { name: 'configuration.zhipuSettings.title' }))
+      .toBeVisible()
+    expect(
+      document.querySelector('[data-setting-id="configuration.model.zhipu.reasoningEffort"]')
+    ).not.toBeNull()
+    expect(onSave).not.toHaveBeenCalled()
   })
 })

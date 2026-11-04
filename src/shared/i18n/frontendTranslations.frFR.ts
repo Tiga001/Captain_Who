@@ -2399,6 +2399,15 @@ export const frFRTranslations = {
   'configuration.providerProfile.generic': 'Compatibilité générique',
   'configuration.providerProfile.deepSeek': 'DeepSeek',
   'configuration.providerProfile.moonshot': 'Moonshot',
+  'configuration.providerProfile.zhipu': 'Zhipu',
+  'configuration.zhipuSettings.title': 'Paramètres Zhipu',
+  'configuration.zhipuSettings.description':
+    'La réflexion est toujours activée pour la famille GLM-5.3. Utilisez une clé API standard ; l’API standard est facturée à l’usage.',
+  'configuration.zhipuSettings.reasoningEffort': 'Effort de raisonnement',
+  'configuration.zhipuSettings.effortProviderDefault': 'Valeur par défaut de l’API',
+  'configuration.zhipuSettings.effortLow': 'Faible',
+  'configuration.zhipuSettings.effortHigh': 'Élevé',
+  'configuration.zhipuSettings.effortMax': 'Maximal',
   'configuration.providerProfile.unsupported': 'Configuration de compatibilité non prise en charge',
   'configuration.providerProfile.resolving': 'Vérification du modèle et du fournisseur…',
   'configuration.providerProfile.resolveFailed':

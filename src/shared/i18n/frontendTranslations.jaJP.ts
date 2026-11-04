@@ -2350,6 +2350,15 @@ export const jaJPTranslations = {
   'configuration.providerProfile.generic': '汎用互換',
   'configuration.providerProfile.deepSeek': 'DeepSeek',
   'configuration.providerProfile.moonshot': 'Moonshot',
+  'configuration.providerProfile.zhipu': 'Zhipu',
+  'configuration.zhipuSettings.title': 'Zhipu の設定',
+  'configuration.zhipuSettings.description':
+    'GLM-5.3 シリーズでは思考が常に有効です。標準 API キーを使用してください。標準 API は従量課金です。',
+  'configuration.zhipuSettings.reasoningEffort': '推論の強度',
+  'configuration.zhipuSettings.effortProviderDefault': 'API の既定値に従う',
+  'configuration.zhipuSettings.effortLow': '低',
+  'configuration.zhipuSettings.effortHigh': '高',
+  'configuration.zhipuSettings.effortMax': '最大',
   'configuration.providerProfile.unsupported': 'サポートされていない互換性構成',
   'configuration.providerProfile.resolving': 'モデルとプロバイダーのポリシーを確認中…',
   'configuration.providerProfile.resolveFailed':
