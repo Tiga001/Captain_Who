@@ -269,4 +269,4 @@ worker 由 bootstrap 显式启动并持有，构造服务不启动后台任务�
 
 验证须覆盖模板独立性、启停保持、唯一绑定、部门层级、管理员严格低职级与权限上限、批量原子性、成员移除/重加、幂等恢复；邮件覆盖自由通信、查询不领取、同轮主动接手、领取/撤回竞争、终态结算、停止屏障、FIFO 唤醒与丢通知恢复。前端同时覆盖在线 roster、部门编辑、复制粘贴/撤销、草稿冲突、看板事件去重、历史邮件与对话导航。命令见[测试体系](../development/testing.md#组织配置与邮件协作)；阅读测试不等于实际运行通过。
 
-Markdown 入口同时覆盖 [Host 导入/导出](../../src/main/core/ipc.workflowTemplate.test.ts) 与 [模板 UI](../../src/renderer/src/app/__tests__/WorkflowTemplateMarkdown.browser.test.tsx)；看板直达、缓存/账号隔离和结构水位恢复见 [WorkflowsPage.browser.test.tsx](../../src/renderer/src/app/__tests__/WorkflowsPage.browser.test.tsx)，有界对话恢复见 [WorkflowConversationSync.browser.test.tsx](../../src/renderer/src/app/__tests__/WorkflowConversationSync.browser.test.tsx)。
+Markdown 入口同时覆盖 [Host 导入/导出](../../src/main/core/ipc.workflowTemplate.test.ts) 与 [模板 UI](../../src/renderer/src/app/__tests__/WorkflowTemplateMarkdown.browser.test.tsx)；看板直达、缓存/账号隔离和结构水位恢复见 [WorkflowsPage 场景测试](../../src/renderer/src/app/__tests__/workflowsPage/)，有界对话恢复见 [WorkflowConversationSync.browser.test.tsx](../../src/renderer/src/app/__tests__/WorkflowConversationSync.browser.test.tsx)。

@@ -86,7 +86,7 @@
       "runner": "node scripts/run-backend-concurrency-baseline.mjs --mode smoke"
     },
     {
-      "file": "crates/core-server/src/application/agent/tests/command_sessions.rs",
+      "file": "crates/core-server/src/application/agent/tests/command_sessions/managed_pdf.rs",
       "name": "aspen_pdf_runs_a_five_step_managed_session_workflow",
       "owner": "core-server-runtime",
       "reason": "Manual Aspen PDF smoke requires external prepared artifacts.",

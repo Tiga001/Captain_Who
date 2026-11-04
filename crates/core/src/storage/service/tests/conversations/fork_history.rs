@@ -1,0 +1,811 @@
+use super::*;
+
+#[test]
+fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-archive-source".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "archive source".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    human_interaction_response: None,
+                    id: "user-archive-source".to_string(),
+                    role: "user".to_string(),
+                    content: "read it".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    folder_references_json: None,
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    human_interaction_response: None,
+                    id: "assistant-archive-source".to_string(),
+                    role: "assistant".to_string(),
+                    content: "done".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    folder_references_json: None,
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let archive_provider_call_id = "provider-call-archive-source";
+    let archive_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        0,
+        archive_provider_call_id,
+    );
+    let history_provider_call_id = "provider-call-history-source";
+    let history_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        1,
+        history_provider_call_id,
+    );
+    let managed_provider_call_id = "provider-call-managed-source";
+    let managed_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        2,
+        managed_provider_call_id,
+    );
+    let exact = "{\"content\":\"fork exact history\"}".repeat(20_000);
+    let archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 1,
+                call_id: archive_call_id.clone(),
+                tool: "read_file".to_string(),
+                content_type: "application/json".to_string(),
+                content: exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: false,
+                archive_projection_truncated: false,
+                created_at: 3,
+            },
+        )
+        .unwrap();
+    let managed_session_id = "cmd_000000000000000000000000000000a1";
+    let managed_running_exact =
+        format!(r#"{{"status":"running","sessionId":"{managed_session_id}"}}"#);
+    let managed_running_archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 5,
+                call_id: managed_call_id.clone(),
+                tool: "run_command".to_string(),
+                content_type: "application/json".to_string(),
+                content: managed_running_exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: false,
+                archive_projection_truncated: false,
+                created_at: 4,
+            },
+        )
+        .unwrap();
+    let managed_terminal_exact =
+        r#"{"status":"exited","exitCode":0,"stdout":"managed exact output"}"#.to_string();
+    let managed_terminal_archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 6,
+                call_id: format!("command-session:{managed_session_id}"),
+                tool: "run_command".to_string(),
+                content_type: "application/json".to_string(),
+                content: managed_terminal_exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 5,
+            },
+        )
+        .unwrap();
+    let source_archive_open =
+        crate::storage::conversation_history_open::encode_archive_history_open(
+            archive.archive_ref.clone(),
+            37,
+        )
+        .unwrap();
+    let source_tool_exchange_open =
+        crate::storage::conversation_history_open::encode_history_open(
+            &crate::storage::conversation_history_open::HistoryOpenRoute::ToolExchange {
+                reference: crate::storage::conversation_history_repository::ConversationHistoryRecordRef::TraceItem {
+                    assistant_message_id: "assistant-archive-source".to_string(),
+                    sequence: 1,
+                },
+            },
+        )
+        .unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-archive-source".to_string(),
+        conversation_id: "conversation-archive-source".to_string(),
+        assistant_message_id: "assistant-archive-source".to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: true,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: archive_call_id.clone(),
+                tool: "read_file".to_string(),
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
+                operation: serde_json::json!({ "path": "large.txt" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: archive_call_id.clone(),
+                tool: "read_file".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "path": "large.txt", "summary": "bounded" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: true,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(archive.archive_ref.clone()),
+                    content_hash: Some(archive.content_hash.clone()),
+                    archived_bytes: Some(archive.total_bytes),
+                    archived_completely: Some(true),
+                    history_projection_truncated: true,
+                    ..Default::default()
+                },
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 2,
+                call_id: history_call_id.clone(),
+                tool: "conversation_history".to_string(),
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "conversation_history".to_string(),
+                },
+                operation: serde_json::json!({ "open": source_archive_open }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 3,
+                call_id: history_call_id.clone(),
+                tool: "conversation_history".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({
+                    "view": "exact_tool_result",
+                    "navigation": {
+                        "next": source_archive_open,
+                        "toolExchange": source_tool_exchange_open
+                    }
+                }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 4,
+                call_id: managed_call_id.clone(),
+                tool: "run_command".to_string(),
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
+                operation: serde_json::json!({ "command": "python3 app.py" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 5,
+                call_id: managed_call_id.clone(),
+                tool: "run_command".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({
+                    "status": "running",
+                    "sessionId": managed_session_id
+                }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(managed_running_archive.archive_ref.clone()),
+                    content_hash: Some(managed_running_archive.content_hash.clone()),
+                    archived_bytes: Some(managed_running_archive.total_bytes),
+                    archived_completely: Some(true),
+                    ..Default::default()
+                },
+            },
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 6,
+                phase: crate::ConversationCommandSessionLifecyclePhase::Terminal,
+                session_id: managed_session_id.to_string(),
+                call_id: managed_call_id.clone(),
+                status: crate::AgentCommandSessionStatus::Exited,
+                exit_code: Some(0),
+                latest_sequence: 1,
+                output_truncated: false,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(managed_terminal_archive.archive_ref.clone()),
+                    content_hash: Some(managed_terminal_archive.content_hash.clone()),
+                    archived_bytes: Some(managed_terminal_archive.total_bytes),
+                    archived_completely: Some(true),
+                    model_projection_truncated: true,
+                    ..Default::default()
+                },
+                created_at: 5,
+            },
+        ],
+    };
+    let exact_model_items = vec![
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: archive_call_id.clone(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({ "path": "large.txt" }),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: archive_provider_call_id.to_string(),
+                    runtime_call_id: archive_call_id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"ok":true,"result":{"content":"EXACT_FORK_MODEL_MARKER"}}"#.to_string(),
+            tool_call_id: Some(archive_call_id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: history_call_id.clone(),
+                name: "conversation_history".to_string(),
+                args: serde_json::json!({ "open": source_archive_open }),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: history_provider_call_id.to_string(),
+                    runtime_call_id: history_call_id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 3,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: serde_json::json!({
+                "view": "exact_tool_result",
+                "navigation": {
+                    "next": source_archive_open,
+                    "toolExchange": source_tool_exchange_open
+                }
+            })
+            .to_string(),
+            tool_call_id: Some(history_call_id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 4,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: managed_call_id.clone(),
+                name: "run_command".to_string(),
+                args: serde_json::json!({ "command": "python3 app.py" }),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: managed_provider_call_id.to_string(),
+                    runtime_call_id: managed_call_id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 5,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: managed_running_exact.clone(),
+            tool_call_id: Some(managed_call_id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
+    let mut in_progress_trace = trace.clone();
+    in_progress_trace.terminal_status = crate::ConversationTurnTraceTerminalStatus::InProgress;
+    service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &in_progress_trace,
+            &exact_model_items,
+            2,
+            3,
+        )
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(&trace, 2, 4)
+        .unwrap();
+
+    let forked = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-archive-request",
+            "conversation-archive-source",
+            "assistant-archive-source",
+        ))
+        .unwrap()
+        .conversation;
+    let forked_assistant = forked.messages.last().unwrap();
+    let forked_trace = service
+        .get_conversation_turn_trace(&forked_assistant.id)
+        .unwrap()
+        .unwrap();
+    let forked_model_context = service
+        .get_conversation_model_context_log(&forked_assistant.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(forked_model_context.items.len(), exact_model_items.len());
+    assert!(forked_model_context.items[1]
+        .content
+        .contains("EXACT_FORK_MODEL_MARKER"));
+    let ConversationTurnTraceItem::ToolResult {
+        archive: forked_archive,
+        ..
+    } = &forked_trace.items[1]
+    else {
+        panic!("forked trace must retain the result");
+    };
+    assert_ne!(
+        forked_archive.archive_ref.as_deref(),
+        Some(archive.archive_ref.as_str())
+    );
+    assert_eq!(
+        forked_archive.content_hash.as_deref(),
+        Some(archive.content_hash.as_str())
+    );
+    let forked_archive_ref = forked_archive.archive_ref.as_deref().unwrap();
+    let ConversationTurnTraceItem::ToolResult {
+        observation: forked_history_observation,
+        ..
+    } = &forked_trace.items[3]
+    else {
+        panic!("forked trace must retain the conversation_history result");
+    };
+    let forked_trace_next = forked_history_observation["navigation"]["next"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(forked_trace_next).unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref: forked_archive_ref.to_string(),
+            start_char: 37,
+        }
+    );
+    let forked_trace_source = forked_history_observation["navigation"]["toolExchange"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(forked_trace_source)
+            .unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::ToolExchange {
+            reference: crate::storage::conversation_history_repository::ConversationHistoryRecordRef::TraceItem {
+                assistant_message_id: forked_assistant.id.clone(),
+                sequence: 1,
+            },
+        }
+    );
+    let forked_model_history =
+        serde_json::from_str::<serde_json::Value>(&forked_model_context.items[3].content).unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(
+            forked_model_history["navigation"]["next"].as_str().unwrap()
+        )
+        .unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref: forked_archive_ref.to_string(),
+            start_char: 37,
+        }
+    );
+    assert!(
+        !forked_model_context.items[3]
+            .content
+            .contains(&archive.archive_ref),
+        "forked model history must not retain the source archive identity inside an opaque open"
+    );
+    let page = service
+        .read_conversation_history_archive_page(
+            &forked.id,
+            forked_archive_ref,
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.content, exact);
+    let hits = service
+        .search_conversation_history(
+            &forked.id,
+            "fork exact history",
+            &crate::storage::conversation_history_repository::ConversationHistorySearchFilter {
+                include_archives: true,
+                tool: Some("read_file".to_string()),
+                ..Default::default()
+            },
+            10,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(matches!(
+        &hits[0].reference,
+        crate::storage::conversation_history_repository::ConversationHistoryRecordRef::Archive {
+            archive_ref
+        } if Some(archive_ref.as_str()) == forked_archive.archive_ref.as_deref()
+    ));
+
+    let ConversationTurnTraceItem::ToolResult {
+        archive: forked_managed_running,
+        ..
+    } = &forked_trace.items[5]
+    else {
+        panic!("forked trace must retain the managed running result");
+    };
+    let ConversationTurnTraceItem::CommandSessionLifecycle {
+        archive: forked_managed_terminal,
+        ..
+    } = &forked_trace.items[6]
+    else {
+        panic!("forked trace must retain the managed terminal lifecycle");
+    };
+    let forked_managed_running_ref = forked_managed_running.archive_ref.as_deref().unwrap();
+    let forked_managed_terminal_ref = forked_managed_terminal.archive_ref.as_deref().unwrap();
+    assert_ne!(forked_managed_running_ref, forked_managed_terminal_ref);
+    assert_eq!(
+        forked_managed_running.content_hash.as_deref(),
+        Some(managed_running_archive.content_hash.as_str())
+    );
+    assert_eq!(
+        forked_managed_terminal.content_hash.as_deref(),
+        Some(managed_terminal_archive.content_hash.as_str())
+    );
+    for (archive_ref, expected_call_id, expected_content) in [
+        (
+            forked_managed_running_ref,
+            managed_call_id.as_str(),
+            managed_running_exact.as_str(),
+        ),
+        (
+            forked_managed_terminal_ref,
+            "command-session:cmd_000000000000000000000000000000a1",
+            managed_terminal_exact.as_str(),
+        ),
+    ] {
+        let descriptor = {
+            let connection = service.state.connection().unwrap();
+            crate::storage::conversation_history_archive_repository::find_archive_by_ref(
+                &connection,
+                &forked.id,
+                archive_ref,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(descriptor.call_id, expected_call_id);
+        let page = service
+            .read_conversation_history_archive_page(
+                &forked.id,
+                archive_ref,
+                crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+                0,
+                u64::MAX,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.content, expected_content);
+    }
+
+    let recursively_forked = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-archive-recursive-request",
+            forked.id.clone(),
+            forked_assistant.id.clone(),
+        ))
+        .unwrap()
+        .conversation;
+    let recursive_assistant = recursively_forked.messages.last().unwrap();
+    let recursive_trace = service
+        .get_conversation_turn_trace(&recursive_assistant.id)
+        .unwrap()
+        .unwrap();
+    let recursive_refs = [&recursive_trace.items[5], &recursive_trace.items[6]]
+        .into_iter()
+        .map(|item| match item {
+            ConversationTurnTraceItem::ToolResult { archive, .. }
+            | ConversationTurnTraceItem::CommandSessionLifecycle { archive, .. } => {
+                archive.archive_ref.as_deref().unwrap()
+            }
+            _ => panic!("recursive managed archive item has the wrong type"),
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(recursive_refs[0], recursive_refs[1]);
+    let connection = service.state.connection().unwrap();
+    let recursive_call_ids = recursive_refs
+        .iter()
+        .map(|archive_ref| {
+            crate::storage::conversation_history_archive_repository::find_archive_by_ref(
+                &connection,
+                &recursively_forked.id,
+                archive_ref,
+            )
+            .unwrap()
+            .unwrap()
+            .call_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recursive_call_ids,
+        vec![
+            managed_call_id,
+            "command-session:cmd_000000000000000000000000000000a1".to_string(),
+        ]
+    );
+    for conversation_id in [&forked.id, &recursively_forked.id] {
+        assert!(history_timeline_projection_count(&connection, conversation_id) > 0);
+    }
+}
+
+#[test]
+fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let source_conversation_id = "conversation-turn-diff-source";
+    let messages = [
+        ("user-turn-1", "user", 1, None),
+        ("assistant-turn-1", "assistant", 2, Some("run-turn-1")),
+        ("user-turn-2", "user", 3, None),
+        ("assistant-turn-2", "assistant", 4, Some("run-turn-2")),
+        ("user-turn-3", "user", 5, None),
+        ("assistant-turn-3", "assistant", 6, Some("run-turn-3")),
+    ]
+    .into_iter()
+    .map(|(id, role, created_at, run_id)| ChatMessageRecord {
+        human_interaction_response: None,
+        id: id.to_string(),
+        role: role.to_string(),
+        content: format!("content {id}"),
+        created_at,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        folder_references_json: None,
+        agent_run_json: run_id.map(|run_id| {
+            serde_json::json!({
+                "runId": run_id,
+                "status": "completed"
+            })
+            .to_string()
+        }),
+        ui_state_json: None,
+    })
+    .collect::<Vec<_>>();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: source_conversation_id.to_string(),
+            project_id: Some("project-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "turn diff source".to_string(),
+            messages,
+            created_at: 1,
+            updated_at: 6,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let workspace_root = fixture.root.join("project-1").to_string_lossy().to_string();
+    let source_turns = [
+        (
+            "run-turn-1",
+            "assistant-turn-1",
+            "action-turn-1",
+            AgentTurnFileChange {
+                path: "src/first.rs".to_string(),
+                before: crate::AgentTurnFileContent::Missing,
+                after: crate::AgentTurnFileContent::Text("first\n".to_string()),
+            },
+        ),
+        (
+            "run-turn-2",
+            "assistant-turn-2",
+            "action-turn-2",
+            AgentTurnFileChange {
+                path: "src/second.rs".to_string(),
+                before: crate::AgentTurnFileContent::Text("before\n".to_string()),
+                after: crate::AgentTurnFileContent::Text("after\n".to_string()),
+            },
+        ),
+        (
+            "run-turn-3",
+            "assistant-turn-3",
+            "action-turn-3",
+            AgentTurnFileChange {
+                path: "src/after-cutoff.rs".to_string(),
+                before: crate::AgentTurnFileContent::Missing,
+                after: crate::AgentTurnFileContent::Text("excluded\n".to_string()),
+            },
+        ),
+    ];
+    for (run_id, assistant_message_id, action_id, change) in &source_turns {
+        service
+            .replace_conversation_turn_trace(
+                &ConversationTurnTrace {
+                    schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                    run_id: (*run_id).to_string(),
+                    conversation_id: source_conversation_id.to_string(),
+                    assistant_message_id: (*assistant_message_id).to_string(),
+                    terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                    terminal_error: None,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                1,
+                2,
+            )
+            .unwrap();
+        let identity = AgentTurnDiffIdentity {
+            run_id: (*run_id).to_string(),
+            conversation_id: source_conversation_id.to_string(),
+            assistant_message_id: (*assistant_message_id).to_string(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.clone(),
+        };
+        service.initialize_agent_turn_diff(&identity).unwrap();
+        assert!(service
+            .record_agent_turn_file_change(&identity, action_id, change)
+            .unwrap());
+    }
+
+    let first_fork = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-turn-diffs-through-second",
+            source_conversation_id,
+            "assistant-turn-2",
+        ))
+        .unwrap()
+        .conversation;
+    assert_eq!(first_fork.messages.len(), 4);
+    let forked_assistants = first_fork
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect::<Vec<_>>();
+    let forked_run_id = |message: &ChatMessageRecord| {
+        serde_json::from_str::<serde_json::Value>(
+            message.agent_run_json.as_deref().expect("agent run"),
+        )
+        .unwrap()["runId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let latest = service
+        .load_latest_agent_turn_diff(&first_fork.id, "project-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        latest.identity.assistant_message_id,
+        forked_assistants[1].id
+    );
+    assert_eq!(
+        latest.files,
+        vec![AgentTurnFileChange {
+            path: "src/second.rs".to_string(),
+            before: crate::AgentTurnFileContent::Text("before\n".to_string()),
+            after: crate::AgentTurnFileContent::Text("after\n".to_string()),
+        }]
+    );
+    let forked_turns = service
+        .load_agent_turn_diffs_for_messages(
+            &first_fork.id,
+            "project-1",
+            &forked_assistants
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(forked_turns.len(), 2);
+    assert_eq!(
+        forked_turns[0].identity.assistant_message_id,
+        forked_assistants[0].id
+    );
+    assert_eq!(forked_turns[0].files[0].path, "src/first.rs");
+    assert_eq!(
+        forked_turns[1].identity.assistant_message_id,
+        forked_assistants[1].id
+    );
+    assert_eq!(forked_turns[1].files[0].path, "src/second.rs");
+
+    for (message, action_id, change) in [
+        (forked_assistants[0], "action-turn-1", &source_turns[0].3),
+        (forked_assistants[1], "action-turn-2", &source_turns[1].3),
+    ] {
+        let identity = AgentTurnDiffIdentity {
+            run_id: forked_run_id(message),
+            conversation_id: first_fork.id.clone(),
+            assistant_message_id: message.id.clone(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.clone(),
+        };
+        assert!(
+            !service
+                .record_agent_turn_file_change(&identity, action_id, change)
+                .unwrap(),
+            "forked action ids must retain their idempotency evidence"
+        );
+    }
+
+    let recursive_fork = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-turn-diffs-recursively",
+            first_fork.id.clone(),
+            forked_assistants[0].id.clone(),
+        ))
+        .unwrap()
+        .conversation;
+    assert_eq!(recursive_fork.messages.len(), 2);
+    let recursive_latest = service
+        .load_latest_agent_turn_diff(&recursive_fork.id, "project-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recursive_latest.files,
+        vec![AgentTurnFileChange {
+            path: "src/first.rs".to_string(),
+            before: crate::AgentTurnFileContent::Missing,
+            after: crate::AgentTurnFileContent::Text("first\n".to_string()),
+        }]
+    );
+}

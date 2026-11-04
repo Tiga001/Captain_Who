@@ -216,7 +216,7 @@ cargo test --locked -p mycopilot-core-server workspace_instructions --bin core-s
 
 ```bash
 pnpm exec vitest run --project unit packages/protocol/src/workflows.test.ts src/main/core/coreServer.workflows.test.ts
-pnpm exec vitest run --project browser src/renderer/src/app/__tests__/WorkflowSettings.browser.test.tsx src/renderer/src/app/__tests__/WorkflowsPage.browser.test.tsx src/renderer/src/app/__tests__/useWorkflowWorkspace.browser.test.tsx
+pnpm exec vitest run --project browser src/renderer/src/app/__tests__/WorkflowSettings.browser.test.tsx src/renderer/src/app/__tests__/workflowsPage/ src/renderer/src/app/__tests__/useWorkflowWorkspace.browser.test.tsx
 cargo test --locked -p mycopilot-core workflow
 cargo test --locked -p mycopilot-core organization
 cargo test --locked -p mycopilot-core-server --bin core-server workflow_execution

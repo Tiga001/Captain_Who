@@ -175,7 +175,7 @@ const smokeSteps = [
       'mycopilot-core-server',
       '--bin',
       'core-server',
-      'application::agent::tests::command_sessions::real_registry_command_wait_and_agent_wait_are_isolated_without_shell',
+      'application::agent::tests::command_sessions::wait_isolation::real_registry_command_wait_and_agent_wait_are_isolated_without_shell',
       '--',
       '--exact',
       '--nocapture'
