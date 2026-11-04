@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AutomationDraft } from '../automationTypes'
-import {
-  notificationPolicyForDestinationChange,
-  validateAutomationDraft
-} from '../automationValidation'
+import { validateAutomationDraft } from '../automationValidation'
 
 function draft(overrides: Partial<AutomationDraft> = {}): AutomationDraft {
   return {
@@ -78,15 +75,5 @@ describe('automation draft validation', () => {
         })
       ).errors.notificationPolicy
     ).toBe('notification_incompatible')
-  })
-
-  it('maps notification defaults compatibly when switching destination', () => {
-    expect(notificationPolicyForDestinationChange('all_runs', 'existing_chat')).toBe(
-      'important_updates'
-    )
-    expect(notificationPolicyForDestinationChange('important_updates', 'new_chat')).toBe('all_runs')
-    expect(notificationPolicyForDestinationChange('unsuccessful_only', 'new_chat')).toBe(
-      'unsuccessful_only'
-    )
   })
 })

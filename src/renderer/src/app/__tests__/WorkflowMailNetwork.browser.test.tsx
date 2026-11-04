@@ -5,7 +5,6 @@ import type { WorkflowRuntimeEvent, WorkflowRuntimeSnapshot } from '@mycopilot/p
 import { createWorkflowNode } from '../../features/workflows/workflowAuthoring'
 import { WorkflowTransmissionLayer } from '../../features/workflows/project/WorkflowTransmissionLayer'
 import { useWorkflowExecution } from '../../features/workflows/project/useWorkflowExecution'
-import { workflowNodeQueue } from '../../features/workflows/project/workflowNodeQueue'
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   listeners: new Set<(value: WorkflowRuntimeSnapshot) => void>()
@@ -134,18 +133,5 @@ describe('mail network activity', () => {
     expect(view.container.querySelectorAll('[data-transmission-sequence]')).toHaveLength(0)
     await emit(snapshot(6))
     expect(view.container.querySelectorAll('[data-transmission-sequence]')).toHaveLength(1)
-  })
-  it('counts mail by authoritative state rather than a later run failure', () => {
-    const value = {
-      ...snapshot(8),
-      inputs: [
-        { id: 'pending', nodeId: 'receiver', mailStatus: 'pending', messages: [{ id: 'p' }] },
-        { id: 'done', nodeId: 'receiver', mailStatus: 'processed', messages: [{ id: 'd' }] },
-        { id: 'active', nodeId: 'receiver', mailStatus: 'processing', messages: [{ id: 'a' }] }
-      ],
-      inputRuns: [{ inputId: 'done', status: 'failed' }]
-    } as unknown as WorkflowRuntimeSnapshot
-    const queue = workflowNodeQueue(value, 'receiver')
-    expect(queue.waiting.map((input) => input.id)).toEqual(['pending'])
   })
 })

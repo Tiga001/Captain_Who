@@ -1,4 +1,4 @@
-import { RefreshCw, Settings2 } from 'lucide-react'
+import { Settings2 } from 'lucide-react'
 import type { McpServerListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { McpExternalServerIcon } from './McpPresentationIcon'
@@ -65,26 +65,5 @@ export function McpServerList({
         )
       })}
     </div>
-  )
-}
-
-export function McpServerListRefreshButton({
-  disabled,
-  onRefresh
-}: {
-  disabled: boolean
-  onRefresh: () => void
-}) {
-  const { t } = useFrontendConfig()
-  return (
-    <button
-      aria-label={t('mcp.actions.refresh')}
-      className="mcp-icon-button"
-      disabled={disabled}
-      onClick={onRefresh}
-      type="button"
-    >
-      <RefreshCw aria-hidden="true" />
-    </button>
   )
 }

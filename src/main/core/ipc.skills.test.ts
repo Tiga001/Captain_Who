@@ -31,7 +31,6 @@ vi.mock('../terminal/TerminalBridge', () => ({ TerminalBridge: class {} }))
 vi.mock('../attachments/AttachmentDialogBridge', () => ({ AttachmentDialogBridge: class {} }))
 vi.mock('../resources/FaviconResourceCache', () => ({ FaviconResourceCache: class {} }))
 vi.mock('../workspaceFiles/WorkspaceFilesService', () => ({ WorkspaceFilesService: class {} }))
-vi.mock('../webviews/managedWebviewSecurity', () => ({ clearManagedWebviewData: vi.fn() }))
 vi.mock('../appIcon', () => ({ applyAdaptiveAppIcon: vi.fn() }))
 
 import { registerHostIpc, selectInstallationDirectory } from '../ipc'

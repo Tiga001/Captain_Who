@@ -1039,6 +1039,38 @@ mod tests {
     }
 
     #[test]
+    fn workspace_directory_entry_budget_is_inclusive() {
+        let directory = tempdir().unwrap();
+        fs::write(
+            directory.path().join(SKILL_FILE_NAME),
+            document(Some("bounded"), "INSTRUCTIONS"),
+        )
+        .unwrap();
+        for index in 0..MAX_SKILL_PACKAGE_DIRECTORY_ENTRIES - 1 {
+            fs::write(
+                directory.path().join(format!("reference-{index:04}.md")),
+                "reference",
+            )
+            .unwrap();
+        }
+
+        let package =
+            PreparedSkillPackage::from_workspace_directory(directory.path(), "fixture", "bounded")
+                .unwrap();
+        assert_eq!(
+            package.resource_index().len(),
+            MAX_SKILL_PACKAGE_DIRECTORY_ENTRIES - 1
+        );
+
+        fs::write(directory.path().join("overflow.md"), "reference").unwrap();
+        let error =
+            PreparedSkillPackage::from_workspace_directory(directory.path(), "fixture", "bounded")
+                .unwrap_err();
+        assert_eq!(error.code(), SkillDiagnosticCode::TooManyEntries);
+        assert!(error.reason().contains("A Skill package directory"));
+    }
+
+    #[test]
     fn preparation_rejects_invalid_content_and_defaulted_names() {
         let invalid_utf8 = PreparedSkillPackage::from_bytes(vec![0xff], origin()).unwrap_err();
         assert_eq!(invalid_utf8.code(), SkillDiagnosticCode::InvalidUtf8);

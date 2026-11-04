@@ -11,11 +11,6 @@ export const AUTOMATION_WEEKDAYS: readonly AutomationWeekday[] = [
   'sunday'
 ]
 
-export interface AutomationTimeOption {
-  label: string
-  value: number
-}
-
 export interface ScheduleValidationResult {
   valid: boolean
   errors: AutomationFieldErrors
@@ -53,96 +48,9 @@ const DEFAULT_SUMMARY_LABELS: ScheduleSummaryLabels = {
     `Every ${interval} year(s), month ${months.join(', ')}, day ${monthDays.join(', ')} at ${time}`
 }
 
-function uniqueSortedNumbers(values: readonly number[]): number[] {
-  return [...new Set(values)].sort((left, right) => left - right)
-}
-
 function uniqueSortedWeekdays(values: readonly AutomationWeekday[]): AutomationWeekday[] {
   const selected = new Set(values)
   return AUTOMATION_WEEKDAYS.filter((weekday) => selected.has(weekday))
-}
-
-function cloneAndNormalizeSchedule(schedule: AutomationScheduleInput): AutomationScheduleInput {
-  const common = { anchorAt: schedule.anchorAt, timezone: schedule.timezone }
-  if (schedule.kind === 'interval') {
-    return { kind: 'interval', amount: schedule.amount, unit: schedule.unit, ...common }
-  }
-  if (schedule.kind === 'daily') {
-    return { kind: 'daily', timeMinutes: schedule.timeMinutes, ...common }
-  }
-  if (schedule.kind === 'weekdays') {
-    return { kind: 'weekdays', timeMinutes: schedule.timeMinutes, ...common }
-  }
-  if (schedule.kind === 'weekly') {
-    return {
-      kind: 'weekly',
-      weekdays: uniqueSortedWeekdays(schedule.weekdays),
-      timeMinutes: schedule.timeMinutes,
-      ...common
-    }
-  }
-  const custom = schedule as Extract<AutomationScheduleInput, { kind: 'custom' }>
-  if (custom.frequency === 'hourly') {
-    return {
-      kind: 'custom',
-      frequency: 'hourly',
-      interval: custom.interval,
-      minuteOfHour: custom.minuteOfHour,
-      ...common
-    }
-  }
-  if (custom.frequency === 'daily') {
-    return {
-      kind: 'custom',
-      frequency: 'daily',
-      interval: custom.interval,
-      timeMinutes: custom.timeMinutes,
-      ...common
-    }
-  }
-  if (custom.frequency === 'weekly') {
-    return {
-      kind: 'custom',
-      frequency: 'weekly',
-      interval: custom.interval,
-      weekdays: uniqueSortedWeekdays(custom.weekdays),
-      timeMinutes: custom.timeMinutes,
-      ...common
-    }
-  }
-  if (custom.frequency === 'monthly') {
-    return {
-      kind: 'custom',
-      frequency: 'monthly',
-      interval: custom.interval,
-      monthDays: uniqueSortedNumbers(custom.monthDays),
-      timeMinutes: custom.timeMinutes,
-      ...common
-    }
-  }
-  return {
-    kind: 'custom',
-    frequency: 'yearly',
-    interval: custom.interval,
-    months: uniqueSortedNumbers(custom.months),
-    monthDays: uniqueSortedNumbers(custom.monthDays),
-    timeMinutes: custom.timeMinutes,
-    ...common
-  }
-}
-
-/** Removes hidden/stale form fields and returns the exact public protocol shape. */
-export function structuredScheduleToProtocol(
-  schedule: StructuredAutomationSchedule
-): AutomationScheduleInput {
-  return cloneAndNormalizeSchedule(schedule)
-}
-
-/** Creates a form-owned clone so editing never mutates an authoritative task object. */
-export function protocolScheduleToStructured(
-  schedule: AutomationScheduleInput
-): StructuredAutomationSchedule {
-  return cloneAndNormalizeSchedule(schedule)
 }
 
 export function getSystemTimeZone(): string {
@@ -184,13 +92,6 @@ export function createDefaultAutomationSchedule(
 export function formatTimeMinutes(timeMinutes: number): string {
   const normalized = Math.max(0, Math.min(1439, Math.trunc(timeMinutes)))
   return `${String(Math.floor(normalized / 60)).padStart(2, '0')}:${String(normalized % 60).padStart(2, '0')}`
-}
-
-export function generateQuarterHourOptions(): AutomationTimeOption[] {
-  return Array.from({ length: 96 }, (_, index) => ({
-    value: index * 15,
-    label: formatTimeMinutes(index * 15)
-  }))
 }
 
 export function isValidIanaTimeZone(timezone: string): boolean {

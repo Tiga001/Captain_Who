@@ -19,9 +19,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use super::workspace::{
-    find_exact_skill_file, normalize_windows_path_units, read_bounded_verified,
-    read_open_file_bounded, BoundedReadError, ExactSkillFile, AGENTS_DIRECTORY,
-    MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY,
+    normalize_windows_path_units, read_bounded_verified, read_open_file_bounded, BoundedReadError,
+    AGENTS_DIRECTORY, MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY,
 };
 #[cfg(test)]
 use std::fs::File;
@@ -941,15 +940,33 @@ mod tests {
     }
 
     #[test]
-    fn exact_file_lookup_consumes_a_global_entry_budget() {
+    fn skill_directory_collection_consumes_a_global_entry_budget() {
         let directory = tempdir().unwrap();
-        fs::write(directory.path().join(SKILL_FILE_NAME), "skill").unwrap();
-        fs::write(directory.path().join("reference.md"), "reference").unwrap();
-        let mut budget = ScanBudget::new(1);
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let mut exact_budget = ScanBudget::new(2);
 
-        let result = find_exact_skill_file(directory.path(), &mut budget).unwrap();
+        let (candidates, diagnostics, truncated) =
+            collect_skill_directories(directory.path(), &mut exact_budget);
 
-        assert!(matches!(result, ExactSkillFile::ScanBudgetExceeded));
+        assert_eq!(candidates, vec![first, second]);
+        assert!(diagnostics.is_empty());
+        assert!(!truncated);
+        assert!(!exact_budget.consume_entry());
+
+        let mut insufficient_budget = ScanBudget::new(1);
+        let (candidates, diagnostics, truncated) =
+            collect_skill_directories(directory.path(), &mut insufficient_budget);
+
+        assert!(candidates.is_empty());
+        assert!(truncated);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            SkillDiagnosticCode::ScanBudgetExceeded
+        );
     }
 
     #[cfg(unix)]

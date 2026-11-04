@@ -3,16 +3,13 @@ import type { AutomationScheduleInput } from '@mycopilot/protocol'
 import {
   createDefaultAutomationSchedule,
   formatTimeMinutes,
-  generateQuarterHourOptions,
-  protocolScheduleToStructured,
-  structuredScheduleToProtocol,
   validateSchedule,
   withSystemTimeZone
 } from '../automationSchedule'
 
 const common = { anchorAt: 1_777_777_777_000, timezone: 'Asia/Shanghai' }
 
-describe('automation schedule form protocol adapter', () => {
+describe('automation schedule validation and presentation', () => {
   it.each([0, 30, 59])('supports hourly schedules at minute %s', (minuteOfHour) => {
     const schedule = {
       kind: 'custom',
@@ -22,69 +19,6 @@ describe('automation schedule form protocol adapter', () => {
       ...common
     } satisfies AutomationScheduleInput
     expect(validateSchedule(schedule)).toEqual({ valid: true, errors: {} })
-    expect(structuredScheduleToProtocol(schedule)).toEqual(schedule)
-  })
-
-  it('round-trips every three days without adding unrelated fields', () => {
-    const schedule = {
-      kind: 'custom',
-      frequency: 'daily',
-      interval: 3,
-      timeMinutes: 150,
-      ...common
-    } satisfies AutomationScheduleInput
-    const roundTrip = structuredScheduleToProtocol(protocolScheduleToStructured(schedule))
-    expect(roundTrip).toEqual(schedule)
-    expect(roundTrip).not.toHaveProperty('minuteOfHour')
-    expect(roundTrip).not.toHaveProperty('weekdays')
-  })
-
-  it('normalizes selected weekdays into canonical order', () => {
-    const schedule = {
-      kind: 'custom',
-      frequency: 'weekly',
-      interval: 2,
-      weekdays: ['friday', 'monday', 'wednesday'],
-      timeMinutes: 540,
-      ...common
-    } satisfies AutomationScheduleInput
-    expect(structuredScheduleToProtocol(schedule)).toMatchObject({
-      weekdays: ['monday', 'wednesday', 'friday']
-    })
-  })
-
-  it('preserves monthly dates including the 31st for backend skip semantics', () => {
-    const schedule = {
-      kind: 'custom',
-      frequency: 'monthly',
-      interval: 1,
-      monthDays: [31, 1, 12],
-      timeMinutes: 540,
-      ...common
-    } satisfies AutomationScheduleInput
-    expect(structuredScheduleToProtocol(schedule)).toMatchObject({ monthDays: [1, 12, 31] })
-  })
-
-  it('preserves February 29 for backend leap-year skip semantics', () => {
-    const schedule = {
-      kind: 'custom',
-      frequency: 'yearly',
-      interval: 1,
-      months: [2],
-      monthDays: [29],
-      timeMinutes: 540,
-      ...common
-    } satisfies AutomationScheduleInput
-    expect(structuredScheduleToProtocol(schedule)).toEqual(schedule)
-  })
-
-  it('keeps the saved IANA timezone across protocol conversion', () => {
-    const schedule = {
-      kind: 'weekdays',
-      timeMinutes: 540,
-      ...common
-    } satisfies AutomationScheduleInput
-    expect(protocolScheduleToStructured(schedule).timezone).toBe('Asia/Shanghai')
   })
 
   it('uses the system IANA timezone for a newly created schedule', () => {
@@ -125,11 +59,7 @@ describe('automation schedule form protocol adapter', () => {
     })
   })
 
-  it('provides exactly 96 quarter-hour options while formatting backend non-quarter values', () => {
-    const options = generateQuarterHourOptions()
-    expect(options).toHaveLength(96)
-    expect(options[0]).toEqual({ value: 0, label: '00:00' })
-    expect(options[95]).toEqual({ value: 1425, label: '23:45' })
+  it('formats backend non-quarter values without rounding', () => {
     expect(formatTimeMinutes(547)).toBe('09:07')
   })
 })

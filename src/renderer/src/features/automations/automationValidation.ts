@@ -45,13 +45,3 @@ export function validateAutomationDraft(draft: AutomationDraft): AutomationValid
   Object.assign(errors, validateSchedule(draft.schedule).errors)
   return { valid: Object.keys(errors).length === 0, errors }
 }
-
-export function notificationPolicyForDestinationChange(
-  current: AutomationDraft['notificationPolicy'],
-  destinationKind: AutomationDraft['destination']['kind']
-): AutomationDraft['notificationPolicy'] {
-  if (destinationKind === 'new_chat') {
-    return current === 'important_updates' ? 'all_runs' : current
-  }
-  return current === 'all_runs' ? 'important_updates' : current
-}

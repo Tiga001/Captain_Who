@@ -277,32 +277,6 @@ pub(crate) fn prepare_reserved_human_response_turn(
 /// A trusted workflow delivery shares root admission and permissions, but never creates a
 /// HumanText model input. Its content enters the model via the workflow sampling inbox.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-#[allow(dead_code)] // Retain the cold-preparation test helper alongside the cached entry point.
-pub(crate) fn prepare_reserved_workflow_turn(
-    storage: &StorageService,
-    skills_service: &SkillsService,
-    input: AgentConversationTurnInput,
-    run_id: &str,
-    existing: Option<ChatConversationRecord>,
-    expected_revision: Option<i64>,
-    workflow: mycopilot_core::workflow_execution::Input,
-    check_execution_access: &(dyn Fn() -> Result<(), AgentServiceError> + Sync),
-) -> Result<PreparedConversationTurn, AgentServiceError> {
-    prepare_reserved_workflow_turn_with_history(
-        storage,
-        skills_service,
-        input,
-        run_id,
-        existing,
-        expected_revision,
-        workflow,
-        check_execution_access,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_reserved_workflow_turn_with_history(
     storage: &StorageService,
     skills_service: &SkillsService,

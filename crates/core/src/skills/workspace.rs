@@ -1,11 +1,10 @@
 //! Workspace-backed Skill source access.
 //!
 //! Discovery and resolution deliberately share this module. It owns layout
-//! validation, exact-case file lookup, bounded reads, and platform-specific
-//! no-follow/identity checks so the two phases cannot drift apart.
+//! validation, bounded reads, and platform-specific no-follow/identity checks
+//! so the two phases cannot drift apart.
 
 use super::model::{SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscoveryError};
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -35,8 +34,6 @@ pub(super) const AGENTS_DIRECTORY: &str = ".agents";
 pub(super) const SKILL_FILE_NAME: &str = "SKILL.md";
 pub(super) const MAX_SKILL_FILE_BYTES: usize = 256 * 1024;
 pub(super) const MAX_SKILL_ROOT_ENTRIES: usize = 2_000;
-#[allow(dead_code)]
-pub(super) const MAX_SKILL_DIRECTORY_ENTRIES: usize = 1_024;
 pub(super) const MAX_SKILL_SCAN_ENTRIES: usize = 10_000;
 pub(super) const MAX_SKILL_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 
@@ -304,40 +301,6 @@ impl ByteBudget {
     fn consume(&mut self, bytes: usize) {
         self.remaining_bytes = self.remaining_bytes.saturating_sub(bytes);
     }
-}
-
-#[allow(dead_code)]
-pub(super) enum ExactSkillFile {
-    Found(PathBuf),
-    Missing,
-    TooManyEntries,
-    ScanBudgetExceeded,
-}
-
-#[allow(dead_code)]
-pub(super) fn find_exact_skill_file(
-    skill_directory: &Path,
-    scan_budget: &mut ScanBudget,
-) -> io::Result<ExactSkillFile> {
-    let entries = fs::read_dir(skill_directory)?;
-    let mut exact_skill_file = None;
-    let mut observed_entries = 0usize;
-    for entry in entries {
-        if !scan_budget.consume_entry() {
-            return Ok(ExactSkillFile::ScanBudgetExceeded);
-        }
-        observed_entries = observed_entries.saturating_add(1);
-        if observed_entries > MAX_SKILL_DIRECTORY_ENTRIES {
-            return Ok(ExactSkillFile::TooManyEntries);
-        }
-        let entry = entry?;
-        if entry.file_name() == OsStr::new(SKILL_FILE_NAME) {
-            exact_skill_file = Some(entry.path());
-        }
-    }
-    Ok(exact_skill_file
-        .map(ExactSkillFile::Found)
-        .unwrap_or(ExactSkillFile::Missing))
 }
 
 pub(super) enum BoundedReadError {

@@ -90,14 +90,6 @@ export function initializeManagedWebviewSessions(options: ManagedWebviewSessionO
   }
 }
 
-export async function clearManagedWebviewData(partition: string): Promise<void> {
-  const policy = getManagedWebviewPolicy(partition)
-  if (!policy) throw new Error('Unknown managed webview partition')
-
-  const managedSession = session.fromPartition(policy.partition)
-  await Promise.all([managedSession.clearCache(), managedSession.clearStorageData()])
-}
-
 export function configureManagedWebviewHost(
   host: WebContents,
   options: ManagedWebviewHostOptions = {}

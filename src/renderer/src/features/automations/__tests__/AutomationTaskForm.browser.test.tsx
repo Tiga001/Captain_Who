@@ -54,8 +54,14 @@ describe('AutomationTaskForm', () => {
   })
 
   it('shows only fields for the selected destination and keeps chat selection bidirectional', async () => {
+    const onSubmit = vi.fn(async () => undefined)
     const screen = await render(
-      <AutomationTaskForm {...commonProps} initialDraft={makeAutomationDraft()} mode="create" />
+      <AutomationTaskForm
+        {...commonProps}
+        initialDraft={makeAutomationDraft()}
+        mode="create"
+        onSubmit={onSubmit}
+      />
     )
 
     await expect.element(screen.getByRole('button', { name: /automation.project/ })).toBeVisible()
@@ -78,7 +84,6 @@ describe('AutomationTaskForm', () => {
     await screen.getByRole('button', { name: /automation.chat:/ }).click()
     await screen.getByRole('option', { name: /Automation chat/ }).click()
     await expect.element(screen.getByRole('button', { name: /Automation chat/ })).toBeVisible()
-
     await screen.getByRole('button', { name: /Automation chat/ }).click()
     await screen.getByRole('option', { name: 'automation.destinationNewChat' }).click()
     await expect.element(screen.getByRole('button', { name: /automation.project:/ })).toBeVisible()
@@ -89,7 +94,156 @@ describe('AutomationTaskForm', () => {
         })
       )
       .toBeVisible()
+    await screen.getByRole('button', { name: 'automation.createTask' }).click()
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        destination: {
+          kind: 'new_chat',
+          projectBinding: 'none',
+          projectId: null,
+          modelId: testModel.id
+        },
+        notificationPolicy: 'all_runs'
+      })
+    )
   })
+
+  it.each([
+    { source: 'new_chat', policy: 'all_runs', expected: 'important_updates' },
+    { source: 'existing_chat', policy: 'important_updates', expected: 'all_runs' },
+    { source: 'new_chat', policy: 'unsuccessful_only', expected: 'unsuccessful_only' },
+    { source: 'existing_chat', policy: 'unsuccessful_only', expected: 'unsuccessful_only' }
+  ] as const)(
+    'submits $policy as $expected when switching away from $source',
+    async ({ source, policy, expected }) => {
+      const onSubmit = vi.fn(async () => undefined)
+      const screen = await render(
+        <AutomationTaskForm
+          {...commonProps}
+          initialDraft={makeAutomationDraft({
+            notificationPolicy: policy,
+            ...(source === 'existing_chat'
+              ? { destination: { kind: 'existing_chat', conversationId: testConversation.id } }
+              : {})
+          })}
+          mode="create"
+          onSubmit={onSubmit}
+        />
+      )
+
+      if (source === 'new_chat') {
+        await screen.getByRole('button', { name: /automation.destination:/ }).click()
+        await screen.getByRole('option', { name: 'automation.destinationExistingChat' }).click()
+        await screen.getByRole('button', { name: /automation.chat:/ }).click()
+        await screen.getByRole('option', { name: /Automation chat/ }).click()
+      } else {
+        await screen.getByRole('button', { name: /Automation chat/ }).click()
+        await screen.getByRole('option', { name: 'automation.destinationNewChat' }).click()
+      }
+      await screen.getByRole('button', { name: 'automation.createTask' }).click()
+      await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+      expect(onSubmit).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          destination:
+            source === 'new_chat'
+              ? { kind: 'existing_chat', conversationId: testConversation.id }
+              : {
+                  kind: 'new_chat',
+                  projectBinding: 'none',
+                  projectId: null,
+                  modelId: testModel.id
+                },
+          notificationPolicy: expected
+        })
+      )
+    }
+  )
+
+  it.each([0, 30, 59])(
+    'submits an hourly schedule at minute %s unchanged',
+    async (minuteOfHour) => {
+      const initialDraft = makeAutomationDraft({
+        schedule: {
+          kind: 'custom',
+          frequency: 'hourly',
+          interval: 1,
+          minuteOfHour,
+          anchorAt: 1_800_000_000_000,
+          timezone: 'Etc/GMT+12'
+        }
+      })
+      const onSubmit = vi.fn(async () => undefined)
+      const screen = await render(
+        <AutomationTaskForm
+          {...commonProps}
+          initialDraft={initialDraft}
+          mode="create"
+          onSubmit={onSubmit}
+        />
+      )
+      await screen.getByRole('button', { name: 'automation.createTask' }).click()
+      await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...initialDraft,
+        schedule: {
+          ...initialDraft.schedule,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+        }
+      })
+      expect(initialDraft.schedule.timezone).toBe('Etc/GMT+12')
+    }
+  )
+
+  it.each([
+    {
+      name: 'every three days',
+      schedule: { kind: 'custom', frequency: 'daily', interval: 3, timeMinutes: 150 }
+    },
+    {
+      name: 'February 29',
+      schedule: {
+        kind: 'custom',
+        frequency: 'yearly',
+        interval: 1,
+        months: [2],
+        monthDays: [29],
+        timeMinutes: 540
+      }
+    },
+    { name: 'non-quarter time 09:07', schedule: { kind: 'daily', timeMinutes: 547 } }
+  ] as const)(
+    'submits $name without changing saved fields or adding hidden fields',
+    async ({ schedule }) => {
+      const initialDraft = makeAutomationDraft({
+        schedule: {
+          ...structuredClone(schedule),
+          anchorAt: 1_800_000_000_000,
+          timezone: 'Etc/GMT+12'
+        } as AutomationScheduleInput
+      })
+      const original = structuredClone(initialDraft)
+      const onSubmit = vi.fn(async () => undefined)
+      const screen = await render(
+        <AutomationTaskForm
+          {...commonProps}
+          initialDraft={initialDraft}
+          mode="create"
+          onSubmit={onSubmit}
+        />
+      )
+      await screen.getByRole('button', { name: 'automation.createTask' }).click()
+      await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce())
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...initialDraft,
+        schedule: {
+          ...initialDraft.schedule,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+        }
+      })
+      expect(initialDraft).toEqual(original)
+    }
+  )
 
   it('truncates long project names in the trigger and menu without stretching the form', async () => {
     const longProjectName = `Long project ${'workspace-'.repeat(40)}`

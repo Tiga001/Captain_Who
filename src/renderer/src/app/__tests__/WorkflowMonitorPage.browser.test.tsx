@@ -1,4 +1,8 @@
-import type { WorkflowDefinition, WorkflowInstance } from '@mycopilot/protocol'
+import type {
+  WorkflowDefinition,
+  WorkflowInstance,
+  WorkflowRuntimeInput
+} from '@mycopilot/protocol'
 import { page, userEvent } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -143,6 +147,55 @@ beforeEach(async () => {
 })
 
 describe('organization read-only monitor', () => {
+  it('counts pending mail per node by authoritative state despite a later run failure', async () => {
+    const input = (
+      id: string,
+      mailStatus: WorkflowRuntimeInput['mailStatus'],
+      status: WorkflowRuntimeInput['status'],
+      nodeId = 'plan'
+    ): WorkflowRuntimeInput => ({
+      id,
+      instanceId: instance.id,
+      nodeId,
+      conversationId: `chat-${nodeId}`,
+      executionVersion: 'v1',
+      content: id,
+      messages: [],
+      mailStatus,
+      status,
+      runId: null,
+      deliveryId: null,
+      createdAt: 1,
+      error: null
+    })
+    execution.snapshot = {
+      instanceId: instance.id,
+      sequence: 1,
+      inputs: [
+        input('pending', 'pending', 'pending'),
+        input('done', 'processed', 'completed'),
+        input('active', 'processing', 'claimed'),
+        input('build-first', 'pending', 'pending', 'build'),
+        input('build-second', 'pending', 'pending', 'build')
+      ],
+      inputRuns: [{ inputId: 'done', status: 'completed' }],
+      events: []
+    }
+    const view = await render(renderPage())
+    const plan = view.getByRole('button', { name: '双击打开对话 · 拆解新功能需求', exact: true })
+    const build = view.getByRole('button', { name: '双击打开对话 · 开发设置页面', exact: true })
+    await expect.element(plan.getByLabelText('1 封未处理邮件')).toBeVisible()
+    await expect.element(build.getByLabelText('2 封未处理邮件')).toBeVisible()
+
+    execution.snapshot = {
+      ...execution.snapshot,
+      sequence: 2,
+      inputRuns: [{ inputId: 'done', status: 'failed' }]
+    }
+    await view.rerender(renderPage())
+    await expect.element(plan.getByLabelText('1 封未处理邮件')).toBeVisible()
+    await expect.element(build.getByLabelText('2 封未处理邮件')).toBeVisible()
+  })
   it('shows pending counts and stopped markers from a summary without mail envelopes', async () => {
     execution.snapshot = {
       instanceId: instance.id,

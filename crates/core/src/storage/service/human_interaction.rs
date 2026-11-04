@@ -132,37 +132,6 @@ impl StorageService {
             )
             .map_err(repository::unavailable)?
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn save_human_interaction_suspension(
-        &self,
-        input: &repository::HumanInteractionSuspension,
-    ) -> Result<(), HumanInteractionError> {
-        self.state
-            .write_sync(
-                estimated(&input.checkpoint)?.saturating_add(
-                    input.request_id.len()
-                        + input.run_id.len()
-                        + input.assistant_message_id.len()
-                        + input.tool_call_id.len(),
-                ),
-                crate::storage::StorageWriteClass::Control,
-                |connection| repository::save_suspension(connection, input, now_ms()),
-            )
-            .map_err(repository::unavailable)?
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn load_human_interaction_suspension(
-        &self,
-        request_id: &str,
-    ) -> Result<Option<repository::HumanInteractionSuspension>, HumanInteractionError> {
-        let connection = self
-            .state
-            .read_connection()
-            .map_err(repository::unavailable)?;
-        repository::load_suspension(&connection, request_id)
-    }
 }
 
 impl StorageService {

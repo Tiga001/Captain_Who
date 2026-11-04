@@ -3,7 +3,6 @@ import { actionDiagnostics } from '../../diagnostics/actionDiagnostics'
 import type {
   AgentApprovalScope,
   AgentEvent,
-  AgentFileChangeContentPage,
   AgentFileChangeDiffPage,
   AgentFileChangeHistoryDiffInput,
   AgentFileChangeHistoryDiffPage,
@@ -37,9 +36,7 @@ import type {
   AgentUsageClearInput,
   AgentUsageClearOutput,
   AgentUsageDashboardInput,
-  AgentUsageDashboardOutput,
-  AgentUsageSummaryInput,
-  AgentUsageSummaryOutput
+  AgentUsageDashboardOutput
 } from '@mycopilot/protocol'
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import { hostClient } from '../../host/hostClient'
@@ -203,12 +200,6 @@ export async function steerAgentRun(input: AgentSteerRunInput): Promise<AgentSte
   return hostClient.agent.steerRun(input)
 }
 
-export async function getAgentUsageSummary(
-  input: AgentUsageSummaryInput
-): Promise<AgentUsageSummaryOutput> {
-  return hostClient.agent.getUsageSummary(input)
-}
-
 export async function getAgentUsageDashboard(
   input: AgentUsageDashboardInput
 ): Promise<AgentUsageDashboardOutput> {
@@ -228,20 +219,6 @@ export async function clearAgentUsageRecords(
 
 export function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
   return hostClient.agent.onEvent(handler)
-}
-
-export function readAgentFileChange(
-  transactionId: string,
-  offset = 0,
-  maxChars = 50_000,
-  observerRootConversationId?: string
-): Promise<AgentFileChangeContentPage> {
-  return hostClient.agent.readFileChange({
-    transactionId,
-    offset,
-    maxChars,
-    ...(observerRootConversationId ? { observerRootConversationId } : {})
-  })
 }
 
 export function getAgentFileChangeDiff(
