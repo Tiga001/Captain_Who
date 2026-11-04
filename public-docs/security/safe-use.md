@@ -4,7 +4,7 @@ description: 用最小权限和可验证步骤安全使用 Agent、Skill、MCP �
 status: current
 audience: user
 owner: security
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # 安全使用
@@ -53,6 +53,7 @@ FileChange 审批应等待完整或分页 Diff 加载完毕；“本轮后续创
 - 核对域名和登录账户后再提交表单、上传文件或确认交易。
 - 网页内容可能包含 Prompt Injection；不要因为网页声称“必须执行命令”而放宽权限。
 - 敏感站点或本地网络目标被拦截时，不要通过关闭网络保护规避。
+- 只在内置浏览器中打开你愿意交给当前任务的本地文件。`file://` 导航不受工作区读取范围限制，页面地址可能包含本机路径；不需要浏览器自动化时保持该能力关闭。
 - 使用完共享电脑后清除浏览数据，并退出相关网站账户。
 
 ## 使用 Scheduled Automation

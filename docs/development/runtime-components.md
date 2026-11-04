@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-30
+last_verified: 2026-11-04
 ---
 
 # 受管运行时组件
@@ -41,7 +41,7 @@ OfficeCLI、Office renderer 和 Artifact Runtime manifest 当前都登记：
 - `win32-arm64`
 - `win32-x64`
 
-Word/PDF renderer 也为上述六个 target 锁定 LibreOffice archive/layout。prepare 脚本只允许准备当前 host target，正式 package 必须在目标 OS 原生执行。
+Word/PDF renderer 也为上述六个 target 锁定 LibreOffice archive/layout。prepare 脚本只允许准备当前 host target，正式 package 的 OS 和 CPU 架构必须同时与 host 一致；冻结组件校验会拒绝跨 OS 或跨架构打包。
 
 “manifest 有 target”只说明 source、size、hash 和布局已登记，不等于该 target 已完成 release acceptance。当前主要实测平台仍是 macOS。
 
@@ -141,13 +141,15 @@ Main 在没有显式开发 override 时设置：
 | 组件               | prepare 时验证            | afterPack/afterSign                         | 运行 smoke                                               |
 | ------------------ | ------------------------- | ------------------------------------------- | -------------------------------------------------------- |
 | Core Server        | native magic + executable | macOS codesign 覆盖；无通用 content receipt | Core Server startup smoke / packaged process observation |
-| OfficeCLI          | 完整 receipt              | 当前无专用 packaged verifier hook           | ignored real provider tests                              |
+| OfficeCLI          | 完整 receipt              | afterPack + afterSign，签名状态分别校验     | ignored real provider tests                              |
 | Office renderer    | 完整 receipt              | afterPack + afterSign                       | browser tests / component smoke                          |
 | Word/PDF renderer  | 完整 receipt              | afterPack + afterSign                       | ignored real component tests                             |
-| Artifact Runtime   | 完整 supply-chain receipt | 当前无专用 packaged verifier hook           | artifact runtime smoke/ignored real tests                |
+| Artifact Runtime   | 完整 supply-chain receipt | afterPack + afterSign                       | artifact runtime smoke/ignored real tests                |
 | Managed Playwright | lock + manifest/digests   | app.asar package/entry verifier             | unit、stress、Electron E2E、limited packaged startup     |
 
-OfficeCLI、Artifact Runtime 和非 macOS Core Server 的“最终 package 内容复验”是当前缺口，发布文档不得暗示所有 extraResources 都已 afterPack 逐字验证。
+[打包 hook](../../scripts/verify-packaged-app.mjs)已在 afterPack 和 afterSign 调用[冻结组件校验器](../../scripts/verify-packaged-frozen-components.mjs)，针对最终 Resources 中的 OfficeCLI 与 Artifact Runtime 核对目标平台/架构、文件和 receipt。正式 macOS 签名只允许修改冻结 Mach-O 集并刷新对应 hash，afterSign 使用签名后的 receipt 复验；这不是跳过完整性检查。Word/PDF renderer 在 macOS 显式 `identity=null` 的 afterSign 路径不重复校验，afterPack 仍会校验。
+
+Core Server 仍没有通用的 packaged content digest/receipt 绑定；macOS 的独立 codesign 验证不能扩展成 Windows/Linux 的内容验证证据。以上脚本存在也不代表每个平台已经完成真实发布验收。
 
 ## 8. 升级流程
 
@@ -177,6 +179,7 @@ OfficeCLI、Artifact Runtime 和非 macOS Core Server 的“最终 package 内�
 pnpm test:officecli
 pnpm test:office-renderer
 pnpm test:artifact-runtime
+pnpm test:mac-signing
 pnpm verify:officecli
 pnpm verify:office-renderer
 pnpm verify:word-pdf-renderer
@@ -191,7 +194,7 @@ pnpm test:playwright-fixed-catalog
 
 - 组件准备可能联网；仓库没有集中 artifact mirror 或离线 release bundle 流程。
 - manifest 覆盖六个平台/架构，但没有 CI 自动逐 target prepare/package/acceptance。
-- OfficeCLI 与 Artifact Runtime 缺少最终 package afterPack 完整校验；Core Server 的通用内容 receipt 也未建立。
+- OfficeCLI 与 Artifact Runtime 已有最终 package 校验；Core Server 的通用内容 receipt 仍未建立。
 - `.cache/*/current` 只表示当前已验证组件，没有仓库管理的多版本 cache/rollback catalog。
 - Word/PDF 与 Artifact Runtime 体积大，当前文档不提供正式 package size budget。
 - Managed Playwright 完整 61-exposed-Tool 行为矩阵和 packaged Agent E2E 仍未完成；69 是 upstream 总数。

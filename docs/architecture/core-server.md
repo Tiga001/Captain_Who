@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-04
 ---
 
 # Core Server 架构与运行时
@@ -116,6 +116,7 @@ request loop 当前按风险与阻塞特征分流：
 | ---------------------- | ----------------------------------------: | ---------------------------------------------------------------------------------------- |
 | MCP management         |                                   16 并发 | `McpManagementRequestTracker`，关停停止 admission 并 join/abort                          |
 | Browser risk           |                                   32 并发 | 独立 tracker；关停先取消授权                                                             |
+| 下一条消息预测 RPC     |                      最多 16 个未结束请求 | 独立 JoinSet，不占普通 RPC worker；协调器另以 3 个许可限制采样，关停取消并收口           |
 | 大型图片 Artifact 读取 |                                    2 并发 | 有界 semaphore + 有界 outbound channel，permit 持有至 stdout flush                       |
 | 普通查询 RPC           |              4 并发，运行与排队合计 64 项 | 包含 SQLite/历史、交互摘要、组织只读、Automation/Notification 查询；阻塞处理离开接收循环 |
 | 普通修改 RPC           |              2 并发，运行与排队合计 64 项 | 按完整资源集合保留冲突顺序，同 lane 按 root 轮转；保留业务准入、CAS 与幂等               |
@@ -212,7 +213,7 @@ Managed Playwright 的 Tool execution 预算由 Electron Main 拥有：显式 Br
 
 `core.shutdown` 的顺序由 `request_loop.rs` 与 `bootstrap.rs` 共同拥有：
 
-1. request loop 关闭普通 RPC/fork admission，拒绝尚未开始的普通任务，并停止新的组织准入；取消 Browser risk，给已接纳的 Browser risk 请求 1 秒收口。
+1. request loop 先停止预测准入、取消在途采样并等待已接纳的预测 RPC 收口，再关闭普通 RPC/fork admission，拒绝尚未开始的普通任务，并停止新的组织准入；取消 Browser risk，给已接纳的 Browser risk 请求 1 秒收口。
 2. 在 stdin 仍可读时关闭 Managed Playwright runtime；此阶段只处理 `mcp.builtinPlaywright.complete` 与 `mcp.builtinPlaywright.dispatchPhase`。若 stdin EOF，则先关闭精确 bridge 再等待 runtime 结束。
 3. 已经开始的普通阻塞 handler 和受管图片响应由各自 owner 等待完成，再离开 request loop；不能 abort 外层 future 后假称 SQLite 修改已经取消。组织 scheduler 停止准入并 drain 已开始的扫描，然后停止 Automation 的新 due scan/claim admission。已 admission 的 Automation HumanRoot Turn 和 observer 暂时保留，让后续 Agent shutdown 写出权威 Trace 终态。
 4. Core Server 停止 MCP management admission，终止 collaboration notifier 和可选 MCP startup coordinator，关闭短生命周期执行材料 reconciler，并使仅进程内可恢复的 MCP action 失效。Automation 与 shared Notification notifier 此时仍保持工作，以发送关停结算产生的持久事件。

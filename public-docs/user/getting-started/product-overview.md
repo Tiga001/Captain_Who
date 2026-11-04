@@ -4,7 +4,7 @@ description: 了解 Captain Who 是什么、适合哪些工作，以及目前不
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-04
 ---
 
 # 产品概览
@@ -40,7 +40,7 @@ Captain Who 是一款本地优先的桌面 Agent 工作助手。它不只生成�
 
 对话、项目记录、设置、审批状态和任务历史主要保存在本机；项目文件也不会因为添加到 Captain Who 就自动上传到某个 Captain Who 云端。模型密钥和本机 Token 活动同样不会随账户同步。
 
-账户资料和软件许可是例外：它们需要与 Captain Who 的账户服务交互，用于登录和判断能否启动新的 Agent 回合。这不等于把项目、对话或模型密钥同步到该账户。
+使用云端账户时，账户资料、登录和软件许可会与 Captain Who 的账户服务交互，用于判断能否启动新的 Agent 回合；这不等于同步项目、对话或模型密钥。当前源码还提供不访问云端身份与许可服务的内置本地账户，但不提供模型额度或云端身份；旧安装包是否包含该入口，请查[账户与软件许可](account-and-license.md)。
 
 但是以下数据会离开本机：
 

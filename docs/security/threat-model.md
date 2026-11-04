@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-04
+last_verified: 2026-11-04
 ---
 
 # 威胁模型
@@ -105,6 +105,12 @@ Main 持有登录会话与进程内许可，Renderer 和 Core Server 不取得�
 两类账号的 Core Server 新根回合与 Automation admission 都验证 Main 同步的有界 execution lease。既有 Run、审批和
 子任务不会因退出或许可变化被取消。该 lease 信任 Main，不是服务端签名 DRM；掌控本机程序的管理员仍在边界之外。
 账号之间共享现有本机数据库，不构成账号级本地数据隔离。详见[本机 Token 与许可](../subsystems/local-token-usage-and-license.md)。
+
+### 下一条用户消息预测
+
+预测默认关闭；开启后，即使用户尚未发送新消息，也会按当前模型连接发出独立采样，可能包含该模型上下文中的历史、文件、图片与工具结果。请求保留 Tool 定义以维持前缀，但不运行 Runtime、工具注册表或事件发射器；返回建议不能成为用户输入、审批或执行授权。
+
+Host 在准备与返回时核验会话历史、配置、开关代次和 execution lease；来源变化后取消或丢弃旧结果。未采用建议只保存在有界内存中，接受后才进入普通草稿路径。已经发出的请求仍单独记录用量，关闭功能不能撤回远端已接收的数据或计费。安全边界与代码真源见[下一条用户消息预测](../subsystems/prompt-prediction.md)、[Host 采样](../../crates/core-server/src/application/agent/message_prediction.rs)和[只读预测请求](../../crates/core/src/runtime/prompt_prediction.rs)。
 
 ### Scheduled Automation 与无人值守权限
 

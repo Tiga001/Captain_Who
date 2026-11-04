@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # 构建与发布
@@ -18,7 +18,7 @@ last_verified: 2026-11-03
 - Rust/Cargo `1.99.0`（以 `rust-toolchain.toml` 为准）
 - `pnpm install --frozen-lockfile`
 - 组件准备阶段需要访问各锁定 manifest 指定的下载源；已完整缓存且 receipt 有效时可复用
-- 目标平台 package 必须在目标 OS 原生构建；脚本会拒绝在其他 OS 执行 `build:win/mac/linux`
+- 目标 package 必须在相同 OS 和 CPU 架构的 host 原生构建；平台入口拒绝跨 OS，冻结组件打包校验还会拒绝跨架构。`build:mac` 固定生成 arm64 包，因此需要原生 arm64 Node 环境，不能在 Intel Mac 或 x64 Node 环境中交叉打包
 - macOS distribution 需要钥匙串中可用的真实 `Developer ID Application` identity
 - macOS arm64 可更新发行构建需要通过外部环境提供 `CAPTAIN_WHO_UPDATE_URL`；仅允许无凭据、无 query/fragment 的 HTTPS 目录 URL
 

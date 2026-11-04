@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-04
 ---
 
 # 上下文管理
@@ -146,11 +146,11 @@ pending assistant message 初始持久正文为空，随后可由 Core Server-ow
     ├─ 2. 初始 Skill 简短目录
     ├─ 3–4. 当前已启用能力的使用指南（RequestOnly）
     │      联网搜索 / 人机交互 / 浏览器 / 协作规则与目录
-    │      关闭能力后，对应指南撤下
+    │      按各能力的生效边界更新；协作沿用本 Run 冻结策略
     │
     ├─ 5. 会话 World State full 基线
     │      工作区、权限、环境、模型选择等
-    │      联网搜索、人机交互、浏览器、多智能体设置开关状态
+    │      联网搜索、人机交互、浏览器状态及本 Run 的子 Agent 可用性
     │
     ├─ 6. 当前有效压缩摘要（若存在）
     │
@@ -203,7 +203,7 @@ pending assistant message 初始持久正文为空，随后可由 Core Server-ow
 
 当前布局将初始目录与能力指南放在 Conversation full 之前，并让旧历史紧接本次连续用户输入，再接预激活 Skill 与初始 Run 状态。这两项调整只移动发送位置，增加不变内容形成连续前缀的机会。
 
-本次输入可能包含多条连续 User 消息，不能只把最后一条抽到任务位置；它们之间的 anchored diff 随输入一起保留顺序。顶部 Skill/协作目录和预激活说明只来自 Run 初始组装；后来发生的 Skill 激活、恢复 full snapshot、状态 diff、同步 ToolResult 和异步 User 回应都留在当前 Run 的因果时间线，不能按内容类型全局提前。
+本次输入可能包含多条连续 User 消息，不能只把最后一条抽到任务位置；它们之间的 anchored diff 随输入一起保留顺序。顶部 Skill 目录和预激活 Skill 说明来自 Run 初始组装；协作规则与目录则由扩展按本 Run 冻结的策略和 selector 目录生成 RequestOnly 指南，不是持久初始材料。后来发生的 Skill 激活、恢复 full snapshot、状态 diff、同步 ToolResult 和异步 User 回应都留在当前 Run 的因果时间线，不能按内容类型全局提前。
 
 Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户消息、正文和工具日志继续保留；附件的已提取文本与图片引用、预激活 Skill 完整说明、初始和后续 Run 状态则通过 `ContextMaterial` 在原位置重放，不再次读取当前 Skill 文件或重新提取旧附件。运行过程中激活的 Skill、恢复状态及观察以同一种记录追加。旧 Run 的状态是历史观察，当前有效权限仍只由当前能力快照、Run State 和 Host 校验决定。
 
@@ -225,7 +225,9 @@ Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户
 
 工具 Schema 不放入上述消息序列。请求的独立 `tools` 字段保持“稳定工具按名称排序，再拼接动态工具按名称排序”；稳定工具的使用指导继续位于稳定 system，动态能力专项指导只来自对应扩展。
 
-每次自然请求边界先冻结能力快照，再由同一快照生成 Schema、能力指南和 World State。会话中关闭能力后，下一次请求撤下对应 Schema 与指南，通过原时间位置的 World State diff 表达不可用及原因；diff 只记录状态，不重新携带指南。已经发出的请求无法追溯撤回，迟到执行仍由 Host 重新检查实时策略；设置切换本身不额外调用模型。人机交互关闭也不撤销已接纳问题的回答与恢复。
+联网搜索、人机交互和浏览器在每次自然请求边界读取一致的能力快照，由它生成 Schema、能力指南和 World State。关闭后，下一次请求撤下对应 Schema 与指南，通过原时间位置的 World State diff 表达不可用及原因；diff 只记录状态，不重新携带指南。已经发出的请求无法追溯撤回，迟到执行仍由 Host 重新检查实时策略；设置切换本身不额外调用模型。人机交互关闭也不撤销已接纳问题的回答与恢复。
+
+子 Agent 协作使用相同投影机制，但策略在根 Turn admission 冻结，并由本轮委派的 Wake 继承。运行中关闭总开关不会撤下本 Run 的协作工具或指南；新根 Turn 才采用新设置，审批与进程恢复仍验证原冻结策略。其 RequestOnly 指南不写入历史，不代表每次请求重新采用全局开关。实现与回归见[协作扩展](../../crates/core/src/runtime/extensions/agent_collaboration.rs)及[Multi-Agent 配置边界](multi-agent.md#4-六个模型工具)。
 
 此布局改善出现相同前缀的机会，不保证缓存命中或命中率提升。目录或能力指南变化时，其后长历史的共同前缀也可能失效；能力指南每次重建而不为缓存冻结。此次没有添加 Provider `cache_control`，厂商内部如何组合 tools/system/messages 仍由对应服务决定。
 

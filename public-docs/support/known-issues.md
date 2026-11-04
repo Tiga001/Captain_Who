@@ -4,7 +4,7 @@ description: Captain Who 当前已确认的产品限制与尚未完成的发布�
 status: current
 audience: user
 owner: product
-last_verified: 2026-09-14
+last_verified: 2026-11-04
 ---
 
 # 已知问题
@@ -28,7 +28,7 @@ last_verified: 2026-09-14
 ## 模型与上下文
 
 - 兼容 Provider 是否真正支持 Tool、流式响应和 Usage，需要逐端点验证。
-- 模型上下文窗口、图片能力和价格主要由用户配置，错误值可能产生失败或不准确估算。
+- 模型上下文窗口和估算价格由用户填写，错误值可能产生失败或不准确估算；专用厂商的图片能力由所选型号决定，通用兼容配置可手动声明。
 - Provider 专属续接状态不能保证跨 Provider 无损迁移。
 - 极长任务仍可能达到上下文、Tool 迭代或压缩边界。
 
@@ -46,7 +46,7 @@ last_verified: 2026-09-14
 - 浏览器自动化不连接系统浏览器，只操作应用管理的浏览器环境。
 - 浏览器下载会持久保存，但当前没有自动清理或统一保留期限；清除下载历史不删除磁盘文件。
 - 截图等非下载 Browser Artifact 仍是 Run 生命周期资源；要长期保留必须显式导出。
-- 扫描 PDF 没有文本层时可能无法读取；旧版 `.ppt`、`.xls` 不支持，`.doc` 读取仅限 macOS。
+- 扫描 PDF 没有文本层时无法直接提取正文，需用 PDF Skill 渲染页面并结合视觉能力检查；旧版 `.ppt`、`.xls` 不支持，`.doc` 读取仅限 macOS。
 
 ## Scheduled Automation
 

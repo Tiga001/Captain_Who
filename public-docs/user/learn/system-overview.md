@@ -4,7 +4,7 @@ description: 从桌面界面到本地 Core、模型服务和外部工具，理�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-11-04
 ---
 
 # 通俗系统总览
@@ -20,8 +20,8 @@ Captain Who 是一个本地优先的桌面 Agent 应用。“本地优先”表�
 本地 Host 与 Core
   负责窗口、文件选择、Agent Loop、权限、工具和持久化
         ↓
-两类网络服务
-  Captain Who 账户与许可服务（登录、资料、许可校验）
+按需连接的服务与进程
+  Captain Who 账户与许可服务（云端账户的登录、资料、许可校验）
   你配置或访问的服务（模型 API、Tavily、本地 MCP Server、目标网页等）
 ```
 
@@ -35,7 +35,9 @@ Captain Who 是一个本地优先的桌面 Agent 应用。“本地优先”表�
 
 ### 账户与外部能力
 
-Captain Who 账户与许可服务处理登录、账户资料和启动新 Agent 回合所需的许可校验；它不会接收桌面项目、对话、文件、Agent 轨迹或模型密钥。模型请求会发送到你配置的模型 API URL；联网搜索把查询或目标 URL 发送给 Tavily；用户 MCP Server 是在本机启动的 stdio 子进程，但它自身可能继续访问网络或其他数据源。使用前应分别了解这些服务的隐私和安全边界。
+使用云端账户时，Captain Who 账户与许可服务处理登录、资料和启动新 Agent 回合所需的许可校验；它不会因此接收桌面项目、对话、文件、Agent 轨迹或模型密钥。当前源码的内置本地账户不访问这些云端身份与许可服务，也不提供云端身份或模型额度；具体步骤与安装包范围见[账户与软件许可](../getting-started/account-and-license.md)。
+
+模型请求会发送到你配置的模型 API URL；联网搜索把查询或目标 URL 发送给 Tavily；用户 MCP Server 是在本机启动的 stdio 子进程，但它自身可能继续访问网络或其他数据源。使用前应分别了解这些服务的隐私和安全边界。
 
 ## 一条任务怎样流动
 
@@ -54,7 +56,7 @@ Multi-Agent 只是在这条链路上增加持久的父子任务树；Scheduled A
 
 模型 Token、Tavily Key 和图片生成 API Key 与 SQLite 配置分离：数据库只保存不透明引用与状态，密钥由独立 Credential Store 保存。具备稳定签名身份的发行构建使用操作系统凭据存储，未签名 macOS 开发构建使用数据目录内权限收紧的私有文件。不要把凭据写进 Prompt、MCP 参数、项目文件或截图。
 
-账户会话在本机使用可用的系统加密能力保存；它与项目、对话和模型凭据的本地数据边界不同。完整的数据接收方和保留边界见[数据与权限](../../security/data-and-permissions.md)。
+云端账户会话在本机使用可用的系统加密能力保存；内置本地账户只保存本地登录状态，不保存云端访问令牌。登录不会为同一电脑用户的不同账户建立独立项目数据空间。完整的数据接收方和保留边界见[数据与权限](../../security/data-and-permissions.md)。
 
 ## 用户最重要的三个判断
 

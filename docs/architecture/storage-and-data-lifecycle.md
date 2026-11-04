@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 ---
 
 # SQLite 存储与数据生命周期
@@ -150,22 +150,22 @@ Renderer 只在内存中缓存有界缩略图，点击再请求较大派生预�
 
 DDL 按领域大致分为：
 
-| 领域                  | 代表数据                                                                                                  | 生命周期要点                                          |
-| --------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| 配置与目录            | Provider/model、MCP Server registry/policy、image profile、项目、模板、偏好                               | revision/CAS；secret 与公开配置分离                   |
-| 会话内容              | conversations、messages、attachments、drafts、guidance                                                    | 会话/项目归属；附件文件与行记录一致提交               |
-| Agent Run             | usage、pending actions、action audit、Turn diff、world state                                              | Run/call/action identity 幂等；审批状态单向推进       |
-| FileChange            | Staged transaction/chunk/operation、Run grant、terminal action audit                                      | Direct/Staged 共用 receipt；grant runtime-only        |
-| Trace 与上下文        | Turn Trace/items、model-context、history blob/chunk、compaction summary/head/receipt、request observation | append-only 或 immutable 派生；rewrite/fork 显式事务  |
-| Provider continuation | encrypted envelopes、Tool Call bindings、transition records                                               | 私有、加密、绑定 profile/revision；promotion/release  |
-| Command Session       | session、output chunks、published outputs、read receipts、lifecycle                                       | 顺序 transcript；重启后保守结算/恢复                  |
-| Skills                | enablement override、安装/来源相关持久快照                                                                | Skill 包内容寻址；安装发布 CAS 与 tombstone           |
-| Artifacts/图像        | managed Artifacts/grants、generation execution/Artifact/config staging                                    | 内容寻址；授权与私有路径分开；启动清理                |
-| Browser               | download settings/preferences/history、durable downloads                                                  | Host 捕获字节；Rust Core 保存身份、hash、scope 与历史 |
-| 多 Agent              | nodes、mailbox、wake/interrupt、delivery receipt/replay、context snapshot、collaboration event            | 图和队列限制在事务内复核；cursor/receipt 幂等         |
-| Scheduled Automation  | Task、Run、Event、Automation notification producer ledger                                                 | CAS、非重叠 Run、lease、Trace 恢复与 tombstone        |
-| Shared Notification   | settings、immutable event、batch/item、change event                                                       | HumanRoot/Automation 共用；batch 是原生投递 authority |
-| 搜索索引              | message/archive FTS 等                                                                                    | 可重建，不是权威内容                                  |
+| 领域                  | 代表数据                                                                                                  | 生命周期要点                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 配置与目录            | Provider/model、MCP Server registry/policy、image profile、项目、模板、偏好                               | revision/CAS；secret 与公开配置分离                                   |
+| 会话内容              | conversations、messages、attachments、drafts、guidance                                                    | 会话/项目归属；附件文件与行记录一致提交                               |
+| Agent Run             | usage、pending actions、action audit、Turn diff、world state                                              | Run/call/action identity 幂等；审批状态单向推进                       |
+| FileChange            | Staged transaction/chunk/operation、Run grant、terminal action audit                                      | Direct/Staged 共用 receipt；grant 持久化但仅本 Run 有效，不随分叉继承 |
+| Trace 与上下文        | Turn Trace/items、model-context、history blob/chunk、compaction summary/head/receipt、request observation | append-only 或 immutable 派生；rewrite/fork 显式事务                  |
+| Provider continuation | encrypted envelopes、Tool Call bindings、transition records                                               | 私有、加密、绑定 profile/revision；promotion/release                  |
+| Command Session       | session、output chunks、published outputs、read receipts、lifecycle                                       | 顺序 transcript；重启后保守结算/恢复                                  |
+| Skills                | enablement override、安装/来源相关持久快照                                                                | Skill 包内容寻址；安装发布 CAS 与 tombstone                           |
+| Artifacts/图像        | managed Artifacts/grants、generation execution/Artifact/config staging                                    | 内容寻址；授权与私有路径分开；启动清理                                |
+| Browser               | download settings/preferences/history、durable downloads                                                  | Host 捕获字节；Rust Core 保存身份、hash、scope 与历史                 |
+| 多 Agent              | nodes、mailbox、wake/interrupt、delivery receipt/replay、context snapshot、collaboration event            | 图和队列限制在事务内复核；cursor/receipt 幂等                         |
+| Scheduled Automation  | Task、Run、Event、Automation notification producer ledger                                                 | CAS、非重叠 Run、lease、Trace 恢复与 tombstone                        |
+| Shared Notification   | settings、immutable event、batch/item、change event                                                       | HumanRoot/Automation 共用；batch 是原生投递 authority                 |
+| 搜索索引              | message/archive FTS 等                                                                                    | 可重建，不是权威内容                                                  |
 
 新增表前先确定领域 owner、父对象、删除策略、敏感级别、幂等键和恢复行为。不要把跨领域工作流塞进单个 repository。
 

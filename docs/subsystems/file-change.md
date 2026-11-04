@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-10-05
+last_verified: 2026-11-04
 ---
 
 # FileChange 子系统
@@ -216,7 +216,7 @@ summary、settlements、固定操作长文或已终态事务。没有未完成�
 
 三类分页默认 50,000 字符，`maxChars` 被夹在 1,000–100,000。当前 Conversation 的用户写权限或“精确根 Conversation 观察精确子 Conversation”才能读取；调用方不能用猜测 ID 探测其他会话。
 
-Conversation fork 会复制并重映射可见的 Staged tables，以及已完成/失败/取消/拒绝的 terminal FileChange action audit；pending/executing action 不复制。`agent_file_change_run_grants` 是 runtime-only，分叉绝不继承。引用继承的非阻塞问题的 digest 谱系与 durable Trace 使用同一替换集重算，重复分叉不会因身份改写而拒绝历史。历史卡片使用 lazy-loaded、分页的 split Diff review；Git review 中的路径展示保持 project-relative，但展示路径不参与 FileChange 授权。
+Conversation fork 会复制并重映射可见的 Staged tables，以及已完成/失败/取消/拒绝的 terminal FileChange action audit；pending/executing action 不复制。`agent_file_change_run_grants` 持久化在 SQLite 中用于当前 Run 的执行与恢复，不是可继承的聊天历史，分叉绝不复制其授权。引用继承的非阻塞问题的 digest 谱系与 durable Trace 使用同一替换集重算，重复分叉不会因身份改写而拒绝历史。历史卡片使用 lazy-loaded、分页的 split Diff review；Git review 中的路径展示保持 project-relative，但展示路径不参与 FileChange 授权。
 
 Staged `begin/append/edit` 的 `source_tool_arguments_digest` 绑定实际调用参数，不能与去掉正文和
 Observation 的 Trace operation 混算。分叉从同一回复、同一 sequence、同一 Tool Call 的持久模型
@@ -278,5 +278,5 @@ digest 必须在连续分叉后仍一致。这里不提供旧格式迁移或缺�
 - [ ] AutoApprove 与 Run grant 是否仍走完整 prepare/claim/revalidate 路径？
 - [ ] Event/Trace/Archive 是否继续去除正文和 Observation authority？
 - [ ] crash window 是否可判定 definitely-not-executed、applied 或 outcome-unknown，且不盲重放？
-- [ ] fork/delete/rewrite 是否明确处理 Staged history、terminal audit 和 runtime-only grant？
+- [ ] fork/delete/rewrite 是否明确处理 Staged history、terminal audit 和仅本 Run 有效的持久 grant？
 - [ ] 修改限额后是否同步消费者矩阵、上限文档、Renderer 分页与边界测试？
