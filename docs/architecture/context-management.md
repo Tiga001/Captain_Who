@@ -350,9 +350,12 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 | DeepSeek Flash / Pro      | 不发送 `max_tokens`            | 非思考 8,192；思考默认 65,536；max effort 131,072 |
 | Moonshot K3               | 不发送 `max_completion_tokens` | 131,072                                           |
 | Moonshot K2.6 / K2.7 Code | 不发送 `max_completion_tokens` | 30,000，未确认默认值的估计                        |
+| 智谱 GLM-5.3 / Flash 系列 | 不发送 `max_tokens`            | 65,536                                            |
 | 通用 Anthropic Messages   | 必填 `max_tokens: 30000`       | 30,000，保留现有兼容值                            |
 
 以上已知默认值依据 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/) 和 [Kimi API 错误说明](https://www.kimi.com/help/kimi-api/api-troubleshooting) 核对；[Kimi API 概览](https://www.kimi.com/help/kimi-api/api-overview) 允许采用服务端默认输出参数。[Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) 仍要求显式输出上限。DeepSeek 的 disabled thinking 与非默认 effort 冲突组合继续由既有 Profile 校验拒绝。通用兼容 Profile 不按模型名猜测厂商；第三方转发服务的实际默认值仍可能不同。
+
+智谱默认预留依据[核心参数](https://docs.bigmodel.cn/cn/guide/start/concept-param)，FlashX-Legal 按[Flash 系列共同参数](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)继承。显式 GLM 请求上限不得超过 131,072；默认预留不会随 low/high/max 推理强度变化。
 
 省略参数不等于无限输出，也不保证所有服务的默认值都更大。旧任务/审批恢复快照中明确保存的正整数上限保持原值，包括大于原 128,000 通用截断值的预算；0 明确拒绝，不变成默认值。参数省略与显式 30,000 即使预留相同，也有不同配置指纹。工具续接始终使用本轮冻结的模板；审批、重启、自动化和子 Agent 不额外补预算参数。
 

@@ -137,6 +137,44 @@ fn profile_cases() -> Vec<(AgentChatInput, Option<u32>, u32)> {
             reserve,
         ));
     }
+    for model in [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.3-flashx-legal",
+    ] {
+        for reasoning_effort in [
+            ProviderReasoningEffort::ProviderDefault,
+            ProviderReasoningEffort::Low,
+            ProviderReasoningEffort::High,
+            ProviderReasoningEffort::Max,
+        ] {
+            let (profile, settings) = if model == "glm-5.3" {
+                (
+                    ProviderProfileRef::zhipu_glm5_3_chat(),
+                    ProviderFamilySettings::ZhipuGlm53Chat { reasoning_effort },
+                )
+            } else {
+                (
+                    ProviderProfileRef::zhipu_glm5_3_flash_chat(),
+                    ProviderFamilySettings::ZhipuGlm53FlashChat { reasoning_effort },
+                )
+            };
+            cases.push((
+                input_for_profile(
+                    ProviderProfileConfig::from_family_settings(
+                        profile,
+                        ProviderVendorId::Zhipu,
+                        settings,
+                    ),
+                    model,
+                    AgentApiStyle::OpenAiCompatible,
+                ),
+                None,
+                65_536,
+            ));
+        }
+    }
     cases
 }
 
@@ -178,6 +216,11 @@ fn all_profiles_share_output_reservations_between_preview_and_execution() {
 fn explicit_legacy_and_large_limits_are_preserved_without_a_universal_clamp() {
     for (mut input, _, _) in profile_cases() {
         for limit in [1_024, 30_000, 131_072, 256_000] {
+            if input.model.starts_with("glm-5.3") && limit > 131_072 {
+                // This provider has an explicit maximum; the universal runtime budget still
+                // preserves larger values for providers that can accept them.
+                continue;
+            }
             input.max_tokens = Some(limit);
             let prepared = build_llm_request(input.clone(), &[], None, None, None).unwrap();
             let snapshot = create_conversation_context_state(input.clone())

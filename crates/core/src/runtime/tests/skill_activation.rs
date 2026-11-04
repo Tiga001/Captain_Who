@@ -518,6 +518,8 @@ async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_nex
 enum SkillApprovalResumeProviderCase {
     Generic,
     DeepSeekExactGrouped,
+    ZhipuGlm53,
+    ZhipuFlash,
 }
 
 impl SkillApprovalResumeProviderCase {
@@ -525,7 +527,13 @@ impl SkillApprovalResumeProviderCase {
         match self {
             Self::Generic => "generic",
             Self::DeepSeekExactGrouped => "deepseek",
+            Self::ZhipuGlm53 => "zhipu-glm53",
+            Self::ZhipuFlash => "zhipu-flash",
         }
+    }
+
+    fn exact_grouped(self) -> bool {
+        !matches!(self, Self::Generic)
     }
 }
 
@@ -558,6 +566,8 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     let model_id = match case {
         SkillApprovalResumeProviderCase::Generic => format!("model-skill-approval-{label}"),
         SkillApprovalResumeProviderCase::DeepSeekExactGrouped => "deepseek-flash".to_string(),
+        SkillApprovalResumeProviderCase::ZhipuGlm53 => "glm-5.3".to_string(),
+        SkillApprovalResumeProviderCase::ZhipuFlash => "glm-5.3-flash".to_string(),
     };
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
@@ -601,6 +611,20 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
         SkillApprovalResumeProviderCase::DeepSeekExactGrouped => {
             deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::Max)
         }
+        SkillApprovalResumeProviderCase::ZhipuGlm53 => ProviderProfileConfig::from_family_settings(
+            crate::ProviderProfileRef::zhipu_glm5_3_chat(),
+            crate::ProviderVendorId::Zhipu,
+            crate::ProviderFamilySettings::ZhipuGlm53Chat {
+                reasoning_effort: crate::ProviderReasoningEffort::Max,
+            },
+        ),
+        SkillApprovalResumeProviderCase::ZhipuFlash => ProviderProfileConfig::from_family_settings(
+            crate::ProviderProfileRef::zhipu_glm5_3_flash_chat(),
+            crate::ProviderVendorId::Zhipu,
+            crate::ProviderFamilySettings::ZhipuGlm53FlashChat {
+                reasoning_effort: crate::ProviderReasoningEffort::Max,
+            },
+        ),
     };
     let provider_configuration_revision = format!("provider-protocol-v1:skill-approval-{label}");
     let provider_protocol = ProviderProtocolKey::new(
@@ -628,10 +652,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                         "message": {
                             "role": "assistant",
                             "content": "",
-                            "reasoning_content": matches!(
-                                case,
-                                SkillApprovalResumeProviderCase::DeepSeekExactGrouped
-                            ).then_some("Observe the target before proposing the write."),
+                            "reasoning_content": case.exact_grouped().then_some("Observe the target before proposing the write."),
                             "tool_calls": [{
                                 "id": format!("{label}-observe"),
                                 "type": "function",
@@ -652,10 +673,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                         "message": {
                             "role": "assistant",
                             "content": "",
-                            "reasoning_content": matches!(
-                                case,
-                                SkillApprovalResumeProviderCase::DeepSeekExactGrouped
-                            ).then_some(PROVIDER_REASONING),
+                            "reasoning_content": case.exact_grouped().then_some(PROVIDER_REASONING),
                             "tool_calls": [
                                 {
                                     "id": format!("{label}-activate"),
@@ -715,10 +733,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                         "message": {
                             "role": "assistant",
                             "content": "Approval resumed under the frozen batch contract.",
-                            "reasoning_content": matches!(
-                                case,
-                                SkillApprovalResumeProviderCase::DeepSeekExactGrouped
-                            ).then_some("The next request now includes the activated ToolSet.")
+                            "reasoning_content": case.exact_grouped().then_some("The next request now includes the activated ToolSet.")
                         },
                         "finish_reason": "stop"
                     }]
@@ -928,13 +943,13 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     assert!(resumed_request.contains("agent.tool_requires_skill_activation"));
     assert_eq!(resumed_request.matches(INSTRUCTIONS).count(), 1);
     assert!(!resumed_request.contains("skillActivationBoundary"));
-    if matches!(case, SkillApprovalResumeProviderCase::DeepSeekExactGrouped) {
+    if case.exact_grouped() {
         let grouped_turn = requests[2]["messages"]
             .as_array()
             .unwrap()
             .iter()
             .find(|message| message["reasoning_content"].as_str() == Some(PROVIDER_REASONING))
-            .expect("DeepSeek exact grouped turn must survive Approval resume");
+            .expect("exact grouped turn must survive Approval resume");
         assert_eq!(grouped_turn["tool_calls"].as_array().unwrap().len(), 4);
         let provider_result_ids = requests[2]["messages"]
             .as_array()
@@ -946,11 +961,11 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
         assert_eq!(
             provider_result_ids,
             [
-                "deepseek-observe",
-                "deepseek-activate",
-                "deepseek-approval",
-                "deepseek-existing-sibling",
-                "deepseek-guessed-new-tool",
+                format!("{label}-observe"),
+                format!("{label}-activate"),
+                format!("{label}-approval"),
+                format!("{label}-existing-sibling"),
+                format!("{label}-guessed-new-tool"),
             ]
         );
         assert_eq!(
@@ -959,7 +974,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                 .unwrap()
                 .len(),
             2,
-            "the target observation and approval batches each retain their exact DeepSeek continuation"
+            "the target observation and approval batches each retain their exact provider continuation"
         );
     }
 }
@@ -969,6 +984,16 @@ async fn skill_activation_before_approval_restores_frozen_batch_for_generic_and_
     for case in [
         SkillApprovalResumeProviderCase::Generic,
         SkillApprovalResumeProviderCase::DeepSeekExactGrouped,
+    ] {
+        run_skill_activation_approval_resume_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn zhipu_skill_activation_before_approval_restores_frozen_batch() {
+    for case in [
+        SkillApprovalResumeProviderCase::ZhipuGlm53,
+        SkillApprovalResumeProviderCase::ZhipuFlash,
     ] {
         run_skill_activation_approval_resume_case(case).await;
     }

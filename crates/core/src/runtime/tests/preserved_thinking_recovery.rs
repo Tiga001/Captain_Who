@@ -11,24 +11,28 @@ use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-const STEER_REASONING: &str = "moonshot-private-steer-reasoning-canary";
-const FINAL_REASONING: &str = "moonshot-private-final-reasoning-canary";
-const INTERRUPTED_REASONING: &str = "moonshot-private-interrupted-reasoning-canary";
-const RECOVERED_REASONING: &str = "moonshot-private-recovered-reasoning-canary";
+const STEER_REASONING: &str = "preserved-private-steer-reasoning-canary";
+const FINAL_REASONING: &str = "preserved-private-final-reasoning-canary";
+const INTERRUPTED_REASONING: &str = "preserved-private-interrupted-reasoning-canary";
+const RECOVERED_REASONING: &str = "preserved-private-recovered-reasoning-canary";
 const STEER_VISIBLE: &str = "Visible answer before the steer boundary.";
 const FINAL_VISIBLE: &str = "Visible final answer after the steer boundary.";
 
 #[derive(Clone, Copy)]
-enum MoonshotRecoveryFamily {
+enum PreservedThinkingRecoveryFamily {
     K3,
     K27Code,
+    Glm53,
+    Glm53Flash,
 }
 
-impl MoonshotRecoveryFamily {
+impl PreservedThinkingRecoveryFamily {
     const fn slug(self) -> &'static str {
         match self {
             Self::K3 => "k3",
             Self::K27Code => "k2-7-code",
+            Self::Glm53 => "glm-5-3",
+            Self::Glm53Flash => "glm-5-3-flash",
         }
     }
 
@@ -36,6 +40,8 @@ impl MoonshotRecoveryFamily {
         match self {
             Self::K3 => "kimi-k3",
             Self::K27Code => "kimi-k2.7-code",
+            Self::Glm53 => "glm-5.3",
+            Self::Glm53Flash => "glm-5.3-flash",
         }
     }
 
@@ -52,6 +58,20 @@ impl MoonshotRecoveryFamily {
                 ProviderProfileRef::moonshot_k2_7_code_chat(),
                 ProviderVendorId::Moonshot,
                 ProviderFamilySettings::MoonshotK27CodeChat,
+            ),
+            Self::Glm53 => ProviderProfileConfig::from_family_settings(
+                ProviderProfileRef::zhipu_glm5_3_chat(),
+                ProviderVendorId::Zhipu,
+                ProviderFamilySettings::ZhipuGlm53Chat {
+                    reasoning_effort: ProviderReasoningEffort::Max,
+                },
+            ),
+            Self::Glm53Flash => ProviderProfileConfig::from_family_settings(
+                ProviderProfileRef::zhipu_glm5_3_flash_chat(),
+                ProviderVendorId::Zhipu,
+                ProviderFamilySettings::ZhipuGlm53FlashChat {
+                    reasoning_effort: ProviderReasoningEffort::Max,
+                },
             ),
         }
     }
@@ -72,7 +92,7 @@ fn pending_assistant(id: &str, created_at: i64) -> ChatMessageRecord {
     }
 }
 
-fn moonshot_runtime_input(
+fn preserved_runtime_input(
     api_url: &str,
     profile: ProviderProfileConfig,
     protocol: ProviderProtocolKey,
@@ -83,7 +103,7 @@ fn moonshot_runtime_input(
 ) -> AgentChatInput {
     let mut input = conversation_context_input(messages);
     input.api_url = api_url.to_string();
-    input.api_token = "moonshot-runtime-test-token".to_string();
+    input.api_token = "preserved-runtime-test-token".to_string();
     input.provider_profile_config = Some(profile);
     input.provider_protocol_key = Some(protocol);
     input.model = model_id.to_string();
@@ -197,13 +217,13 @@ fn durable_assistant_history(
     }
 }
 
-async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty_visible: bool) {
+async fn assert_ordinary_recovery(family: PreservedThinkingRecoveryFamily, empty_visible: bool) {
     let slug = if empty_visible {
         format!("{}-empty", family.slug())
     } else {
         family.slug().to_string()
     };
-    let conversation_id = format!("conversation-moonshot-{slug}-ordinary-recovery");
+    let conversation_id = format!("conversation-preserved-{slug}-ordinary-recovery");
     let first_assistant_id = format!("assistant-moonshot-{slug}-first");
     let interrupted_assistant_id = format!("assistant-moonshot-{slug}-interrupted");
     let recovered_assistant_id = format!("assistant-moonshot-{slug}-recovered");
@@ -221,7 +241,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
             id: conversation_id.clone(),
             project_id: None,
             model_id: Some(family.model_id().to_string()),
-            title: format!("Moonshot {slug} ordinary recovery"),
+            title: format!("Preserved thinking {slug} ordinary recovery"),
             messages: vec![
                 pending_assistant(&first_assistant_id, 1),
                 pending_assistant(&interrupted_assistant_id, 2),
@@ -351,17 +371,14 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     });
 
     let queue = AgentSteerInputQueue::new();
-    let first_input = moonshot_runtime_input(
+    let first_input = preserved_runtime_input(
         &api_url,
         profile.clone(),
         protocol.clone(),
         family.model_id(),
         &first_assistant_id,
         &conversation_id,
-        vec![message(
-            "user",
-            "Start the Moonshot preserved-thinking task.",
-        )],
+        vec![message("user", "Start the preserved-thinking task.")],
     );
     let runtime_queue = queue.clone();
     let runtime_vault = Arc::clone(&vault);
@@ -462,7 +479,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     );
     let durable_history =
         durable_assistant_history(&restarted_storage, &conversation_id, &first_assistant_id);
-    let interrupted_input = moonshot_runtime_input(
+    let interrupted_input = preserved_runtime_input(
         &api_url,
         profile.clone(),
         protocol.clone(),
@@ -470,7 +487,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
         &interrupted_assistant_id,
         &conversation_id,
         vec![
-            message("user", "Start the Moonshot preserved-thinking task."),
+            message("user", "Start the preserved-thinking task."),
             durable_history.clone(),
             message("user", "Continue after the application restart."),
         ],
@@ -519,7 +536,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     );
     let recovered_history =
         durable_assistant_history(&recovered_storage, &conversation_id, &first_assistant_id);
-    let recovered_input = moonshot_runtime_input(
+    let recovered_input = preserved_runtime_input(
         &api_url,
         profile,
         protocol,
@@ -527,7 +544,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
         &recovered_assistant_id,
         &conversation_id,
         vec![
-            message("user", "Start the Moonshot preserved-thinking task."),
+            message("user", "Start the preserved-thinking task."),
             recovered_history,
             message("user", "Retry after the interrupted terminal commit."),
         ],
@@ -577,20 +594,40 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
 
 #[tokio::test]
 async fn moonshot_k3_preserved_thinking_survives_restart_and_ignores_interrupted_stage() {
-    assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K3, false).await;
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::K3, false).await;
 }
 
 #[tokio::test]
 async fn moonshot_k2_7_preserved_thinking_survives_restart_and_ignores_interrupted_stage() {
-    assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K27Code, false).await;
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::K27Code, false).await;
 }
 
 #[tokio::test]
 async fn moonshot_k3_empty_steer_preserved_thinking_survives_terminal_and_restart() {
-    assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K3, true).await;
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::K3, true).await;
 }
 
 #[tokio::test]
 async fn moonshot_k2_7_empty_steer_preserved_thinking_survives_terminal_and_restart() {
-    assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K27Code, true).await;
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::K27Code, true).await;
+}
+
+#[tokio::test]
+async fn zhipu_glm53_preserved_thinking_survives_restart_and_ignores_interrupted_stage() {
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::Glm53, false).await;
+}
+
+#[tokio::test]
+async fn zhipu_flash_preserved_thinking_survives_restart_and_ignores_interrupted_stage() {
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::Glm53Flash, false).await;
+}
+
+#[tokio::test]
+async fn zhipu_glm53_empty_steer_preserved_thinking_survives_terminal_and_restart() {
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::Glm53, true).await;
+}
+
+#[tokio::test]
+async fn zhipu_flash_empty_steer_preserved_thinking_survives_terminal_and_restart() {
+    assert_ordinary_recovery(PreservedThinkingRecoveryFamily::Glm53Flash, true).await;
 }

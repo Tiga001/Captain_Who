@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-10-18
+last_verified: 2026-11-04
 ---
 
 # Agent Runtime 与模型 Provider
@@ -57,10 +57,13 @@ Steering 关闭守卫和文件事务 Run guard 保持在 Driver 的原有作用�
 | ---------------------------- | -------------------------- | ---------------------------------------------- |
 | `generic_openai_chat`        | Generic OpenAI Chat        | OpenAI-compatible messages/tool calls          |
 | `generic_anthropic_messages` | Generic Anthropic Messages | Anthropic-compatible content blocks/tool use   |
-| `deepseek_v4_chat`           | DeepSeek V4 Chat           | DeepSeek reasoning continuation 与成组工具交换 |
+| `deepseek_v4_1_flash_chat`   | DeepSeek V4.1 Flash Chat   | DeepSeek reasoning continuation 与成组工具交换 |
+| `deepseek_v4_pro_0813_chat`  | DeepSeek V4 Pro Chat       | DeepSeek reasoning continuation 与成组工具交换 |
 | `moonshot_k3_chat`           | Moonshot K3 Chat           | Provider reasoning continuation 与成组工具交换 |
 | `moonshot_k2_7_code_chat`    | Moonshot K2.7 Code Chat    | Provider reasoning continuation 与成组工具交换 |
 | `moonshot_k2_6_chat`         | Moonshot K2.6 Chat         | 按 thinking 配置选择 reasoning 回放范围        |
+| `zhipu_glm5_3_chat`          | Zhipu GLM-5.3 Chat         | 强制思考、完整推理续接与成组工具交换           |
+| `zhipu_glm5_3_flash_chat`    | Zhipu GLM-5.3 Flash Chat   | 同族多模态输入、完整推理续接与成组工具交换     |
 
 此表用于读者定位，不应成为新的注册真源。新增或删除 Provider 必须以 `provider_registration.rs` 和 provider contract test 为准，并同步本文。
 
@@ -68,11 +71,36 @@ Steering 关闭守卫和文件事务 Run guard 保持在 Driver 的原有作用�
 
 Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 replay、上下文投影、Usage 口径、partial Trace、Tool Call 来源、终态批次、Checkpoint 私有参数以及 continuation 要求。Runtime 应查询 `ProviderTurnRuntimePolicy`，不得按 profile 名称散落条件分支。
 
+### 智谱标准 API
+
+智谱注册使用国内标准 Chat Completions 地址 `https://open.bigmodel.cn/api/paas/v4/chat/completions`。
+旗舰 Profile 精确匹配 `glm-5.3`，仅允许文本；Flash Profile 精确匹配 `glm-5.3-flash`、
+`glm-5.3-flashx`、`glm-5.3-flashx-legal`，允许已有图片内容块。Legal 的图片与默认输出能力依据
+[Flash 官方模型页](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)的共同参数说明，
+不附加法律 MCP 或原生视频/文件上传能力。Coding Plan 与海外 Z.AI 不属于此次注册范围。
+
+两族均使用独立的智谱 Adapter，强制 `thinking.type=enabled`、`thinking.clear_thinking=false`；
+公开设置仅有 `reasoningEffort`（`provider_default`、`low`、`high`、`max`，默认 `max`）。
+请求输出上限使用 `max_tokens`；未显式指定时省略该字段，但容量规划按官方默认 65,536 预留，
+模型最大输出为 131,072，不能用 1M 上下文代替输出预算。
+流式工具调用使用 `tool_stream=true`，工具参数收齐并通过协议验证后才可交给 Runtime。
+
+推理、原始 assistant 内容及成组工具调用通过智谱私有 continuation 保存和回传，绑定冻结的
+ProviderProtocolKey，复用加密 vault 与 checkpoint 引用。普通回复和工具轮均保留原始顺序；
+不把推理写入公开正文、事件或诊断，也不借用其他厂商的 codec。恢复失败不得补造推理或重做已完成副作用。
+配置仍使用现有 schema v2；新增智谱不会自动转换已有 Generic 配置或改写其他厂商参数。
+
+Usage 读取官方 `prompt_tokens`、`completion_tokens`、`total_tokens`、
+`prompt_tokens_details.cached_tokens` 及可选 `completion_tokens_details.reasoning_tokens`。
+Completion 是含推理的输出总量，推理和缓存均为子集，不重复累加。未确认的缓存写入量保持未知，
+不能将未命中量当写入量。错误分类优先解析智谱业务码，区分暂时限流与账户/Key/权限问题；
+HTTP 200 下的异常 finish reason 或不完整工具流也不能被视为成功。
+
 ### 模型可用性与输出预算
 
 Host 的 [`ModelProjection`](../../crates/core/src/storage/service/model_projection.rs) 是所有模型选择器、协作目录、模板和 Automation 目标共同的可执行性判定。它从同一配置 revision 生成脱敏模型元数据与 typed `execution` 状态，同时检查 enabled、连接/Profile/revision/运行时身份及有效凭据；一个模型失败不使其他模型消失。目录构建复用按配置 revision 缓存的投影，同次构建中共享凭据引用只检查一次。应用外修改凭据可能暂不刷新目录，但 spawn 与实际执行仍重新解析精确模型并拒绝不可用连接，缓存不授予执行权。
 
-普通聊天不再统一设置 30,000 输出 token 上限。[`runtime/output_budget.rs`](../../crates/core/src/runtime/output_budget.rs) 分开解析可选 HTTP 上限与上下文容量预留，真实请求、预览、自动压缩触发和配置指纹使用同一结果。通用 OpenAI-compatible 与受支持的 DeepSeek/Moonshot 请求默认省略输出上限；通用 Anthropic Messages 保留必填的 30,000 兼容值。预留与厂商 allowance 不等价；明确冻结的旧任务预算原值恢复，压缩摘要继续使用独立有限预算。具体规则见[输出上限与上下文预留](./context-management.md#请求输出上限与上下文预留)。
+普通聊天不再统一设置 30,000 输出 token 上限。[`runtime/output_budget.rs`](../../crates/core/src/runtime/output_budget.rs) 分开解析可选 HTTP 上限与上下文容量预留，真实请求、预览、自动压缩触发和配置指纹使用同一结果。通用 OpenAI-compatible 与受支持的 DeepSeek/Moonshot/智谱请求默认省略输出上限；通用 Anthropic Messages 保留必填的 30,000 兼容值。预留与厂商 allowance 不等价；明确冻结的旧任务预算原值恢复，压缩摘要继续使用独立有限预算。具体规则见[输出上限与上下文预留](./context-management.md#请求输出上限与上下文预留)。
 
 ## 实时事件与输出事件日志
 
