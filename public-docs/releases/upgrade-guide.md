@@ -4,14 +4,14 @@ description: 在 macOS Apple Silicon 上使用应用内更新或官方 DMG 升�
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 升级指南
 
 本指南适用于当前正式支持的 macOS 12+ Apple Silicon（arm64）发行版。先将 `Captain Who.app` 拖入“应用程序（Applications）”等本机位置并从那里启动；直接从挂载的 DMG 或 macOS App Translocation 路径运行时，应用内更新不会启用。正式签名的 Captain Who 提供由用户发起的应用内自动更新：完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会展示下载选项；由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装更新。更新不会在你开始下载前自动下载、静默替换或强制执行，也不会自动降级。
 
-如果你希望自行控制安装时机、应用内检查失败，或需要重新获取安装文件，也可以从 [Captain Who 官网](https://captainwhoagent.com/) 或 [GitHub 官方发行页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6)下载官方 DMG 并手动替换应用。GitHub 上出现 DMG 不表示应用内更新源同时上线同一版本。
+如果你希望自行控制安装时机、应用内检查失败，或需要重新获取安装文件，也可以从 [Captain Who 官网](https://captainwhoagent.com/) 或 [GitHub 官方发行页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.7)下载官方 DMG 并手动替换应用。GitHub 上出现 DMG 不表示应用内更新源同时上线同一版本。
 
 ## 升级前
 
@@ -22,7 +22,7 @@ last_verified: 2026-11-04
 
 应用历史与配置主要保存在本机。模型、搜索和图片生成凭据与 SQLite 配置分开保存；仅复制数据库并不能保证恢复这些凭据。任何包含历史数据或凭据的备份都应按敏感数据妥善保管。
 
-9 月 23 日的正式 `1.0.6` 与[当前主分支](development-status.md)显示相同版本号，但主分支已修改本地数据库，不能据版本号判断数据兼容。不要用日常数据尝试开发构建，也不要用开发用的数据库重置命令修复正式版升级。
+`1.0.7` 相比 `1.0.6` 调整了本地数据库与运行记录，升级前应完成备份；更新后不要直接用旧版打开已升级的数据。若启动提示数据不兼容，保留原数据并停止重试，不要用开发用的数据库重置命令修复正式版升级。后续[开发构建](development-status.md)也不应直接覆盖日常使用的数据。
 
 ## 使用应用内更新
 
@@ -36,7 +36,7 @@ last_verified: 2026-11-04
 
 ## 通过官网 DMG 手动升级
 
-1. 从官网或上述 GitHub 官方发行页下载安装包。9 月 23 日的正式包为 `Captain-Who-1.0.6-arm64.dmg`；其他版本以对应发行说明中的文件名为准。
+1. 从官网或上述 GitHub 官方发行页下载安装包。当前正式包为 `Captain-Who-1.0.7-arm64.dmg`；其他版本以对应发行说明中的文件名为准。
 2. 按[下载与验证](download-and-verification.md)核对 SHA-256，并确认 macOS 没有显示来源或签名警告。
 3. 完全退出 Captain Who，双击打开 DMG，将 `Captain Who.app` 拖入“应用程序（Applications）”文件夹；系统要求替换旧应用时，确认替换。
 4. 从“应用程序”启动 Captain Who，确认项目、对话和设置可以正常加载。

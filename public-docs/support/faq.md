@@ -4,7 +4,7 @@ description: 关于 Captain Who 数据、模型、权限、扩展和自动化的
 status: current
 audience: user
 owner: support
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 常见问答
@@ -15,7 +15,7 @@ last_verified: 2026-11-04
 
 ## 必须使用某一家模型服务吗？
 
-不必。当前主分支支持 OpenAI-compatible、Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证；型号与参数见[连接模型 Provider](../integrations/model-provider-integration.md)。2026-11-04 新增的 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面不属于 2026-09-23 的 v1.0.6 安装包，参见[当前开发进展](../releases/development-status.md)。
+不必。1.0.7 支持 OpenAI-compatible、Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证；型号与参数见[连接模型 Provider](../integrations/model-provider-integration.md)。Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面已随 [1.0.7](../releases/release-notes/1-0-7.md) 发布，1.0.6 用户需先升级。
 
 ## 智谱 Coding Plan 能直接用于智谱配置吗？
 
@@ -27,11 +27,11 @@ last_verified: 2026-11-04
 
 ## 数据都只保存在本机吗？
 
-项目、对话、文件、Agent 轨迹、密钥和本机 Token 活动主要保存在本机，不会同步到 Captain Who 的账户与许可服务。使用网站或云端账户时，账户服务会处理账户、个人资料、认证/会话、许可及必要的服务安全记录；当前源码的内置本地账户不访问云端身份与许可服务。模型、搜索、图片、网页和 MCP 请求仍会发送到你选择的服务或本地进程。参见[数据与权限](../security/data-and-permissions.md)。
+项目、对话、文件、Agent 轨迹、密钥和本机 Token 活动主要保存在本机，不会同步到 Captain Who 的账户与许可服务。使用网站或云端账户时，账户服务会处理账户、个人资料、认证/会话、许可及必要的服务安全记录；1.0.7 的内置本地账户不访问云端身份与许可服务。模型、搜索、图片、网页和 MCP 请求仍会发送到你选择的服务或本地进程。参见[数据与权限](../security/data-and-permissions.md)。
 
 ## 为什么需要登录和软件许可？
 
-登录状态和软件许可决定能否启动新的 Agent 回合，不会因此上传本机项目、对话、文件、模型设置或 Token 活动。云端账户无法完成许可校验时，可在应用中重新验证或打开官方账户页面管理许可；当前源码的内置本地账户登录后直接具有本地使用资格。它不是独立数据空间，也不提供模型额度，步骤和版本范围见[账户与软件许可](../user/getting-started/account-and-license.md)。
+登录状态和软件许可决定能否启动新的 Agent 回合，不会因此上传本机项目、对话、文件、模型设置或 Token 活动。云端账户无法完成许可校验时，可在应用中重新验证或打开官方账户页面管理许可；1.0.7 的内置本地账户登录后直接具有本地使用资格。它不是独立数据空间，也不提供模型额度，步骤和版本范围见[账户与软件许可](../user/getting-started/account-and-license.md)。
 
 ## Token 保存在哪里？
 
@@ -47,7 +47,7 @@ Skill 主要告诉 Agent“怎样做”；MCP Server 主要提供“可以调用
 
 ## 工作流在哪里？组织和子 Agent 有什么区别？
 
-当前开发版本已移除旧工作流，改用[组织](../user/capabilities/organizations.md)。组织成员是共享背景、按需互相发信的独立对话，你可以直接与每位成员交互；Multi-Agent 则由根 Agent 把任务分给树状子 Agent。组织没有固定连线或逻辑门，旧工作流格式不会自动转换。该说明不代表所有已发布安装包都包含该能力。
+1.0.7 已移除旧工作流，改用[组织](../user/capabilities/organizations.md)。组织成员是共享背景、按需互相发信的独立对话，你可以直接与每位成员交互；Multi-Agent 则由根 Agent 把任务分给树状子 Agent。组织没有固定连线或逻辑门，旧工作流格式不会自动转换。1.0.6 不包含这一组织能力。
 
 ## 为什么激活组织后没有开始工作？
 

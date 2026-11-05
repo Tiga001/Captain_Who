@@ -4,7 +4,7 @@ description: 了解 Tool、Skill、MCP、Multi-Agent、组织、Scheduled Automa
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 能力指南
@@ -24,7 +24,7 @@ Captain Who 的能力由几层组成。先区分它们，能避免把“有说�
 | [浏览器自动化](browser-automation.md)         | Agent 控制受管网页               | 开启能力，准备页面，审批敏感动作     |
 | [Office 与 Artifact](artifacts-and-office.md) | 处理文档、表格、演示、PDF 和图片 | 选择 Skill、提供输入并核对输出       |
 
-组织指南描述当前开发版本中取代旧工作流的能力，不代表所有已发布安装包都包含该能力；请以指南的版本范围与实际界面为准。
+组织已随 [1.0.7 正式版](../../releases/release-notes/1-0-7.md)发布，取代旧工作流；1.0.6 用户请先升级。
 
 ## 能力如何组合
 

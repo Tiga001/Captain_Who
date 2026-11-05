@@ -4,7 +4,7 @@ description: 根据需求选择模型 Provider、Skill、MCP Server 或内置能
 status: current
 audience: user
 owner: product
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 集成方式概览
@@ -28,7 +28,7 @@ Skill 可以告诉 Agent 何时调用 MCP Tool；MCP Server 也可以配合某�
 
 模型请求会发送到你配置的 API URL。端点“看起来兼容”并不保证完整支持 Tool 调用、流式响应、Usage 或推理续接；配置后应先用低风险任务验证。
 
-已适配型号、厂商固定地址和开发版范围见[连接模型 Provider](model-provider-integration.md)。新增支持不代表旧安装包自动具备对应能力。
+已适配型号、厂商固定地址和版本范围见[连接模型 Provider](model-provider-integration.md)。新增支持不代表旧安装包自动具备对应能力。
 
 ### Skill
 

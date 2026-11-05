@@ -4,14 +4,14 @@ description: 了解当前发行状态，安全获取、安装并首次启动 Cap
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-11-03
+last_verified: 2026-11-05
 ---
 
 # 安装与首次启动
 
 ## 当前正式发行
 
-想直接使用 Captain Who，请优先前往 [Captain Who 官网](https://captainwhoagent.com/)。也可以在[官方 GitHub v1.0.6 发布页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6)的 Assets 中下载 `Captain-Who-1.0.6-arm64.dmg`；同页的 Source code 压缩包是源码，不是安装程序。按[下载与验证](../../releases/download-and-verification.md)核对所选文件，不使用第三方网盘或转载安装包。
+想直接使用 Captain Who，请优先前往 [Captain Who 官网](https://captainwhoagent.com/)。也可以在[官方 GitHub v1.0.7 发布页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.7)的 Assets 中下载 `Captain-Who-1.0.7-arm64.dmg`；同页的 Source code 压缩包是源码，不是安装程序。按[下载与验证](../../releases/download-and-verification.md)核对所选文件，不使用第三方网盘或转载安装包。
 
 当前公开下载与支持范围如下：
 
@@ -29,7 +29,7 @@ last_verified: 2026-11-03
 
 首次启动时，需要先登录并取得可用的应用内软件许可，才能启动新的 Agent 回合。使用云端账户时，通过邮箱密码或验证码登录，并等待在线软件许可校验。
 
-当前仓库源码 / 开发构建另支持内置本地账户：选择“账号密码”，账号和密码都输入 `captainwho`，即可获得长期有效的本地使用资格，无需官网注册或在线许可校验。这不代表官网已发布安装包一定包含本地登录功能；请以所用版本实际提供的登录方式为准。两种方式都不包含模型 API 额度。完整步骤与边界见[账户与软件许可](account-and-license.md)。
+1.0.7 正式版也支持内置本地账户：选择“账号密码”，账号和密码都输入 `captainwho`，即可获得长期有效的本地使用资格，无需官网注册或在线许可校验。1.0.6 不包含这一本地登录方式。两种方式都不包含模型 API 额度。完整步骤与边界见[账户与软件许可](account-and-license.md)。
 
 账户和许可确认后，完成模型配置：
 

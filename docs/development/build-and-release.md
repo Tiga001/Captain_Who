@@ -2,14 +2,14 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 构建与发布
 
 本文记录当前 Electron + Core Server sidecar 的构建、打包、macOS 签名和发布证据边界。当前没有一键发布流水线；维护者必须明确区分“源码构建”“目录包”“发行包”“已签名”和“已公证”。
 
-当前 `main` 的 `package.json` 与 [GitHub `v1.0.6` 发布标签](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6) 同为 `1.0.6`，但不是同一源码快照：输入框预测及 schema v72 在标签之后提交。发版核验应比对具体 commit、平台、安装包和下载校验值，而不是只比较版本字符串；各下载渠道的已登记证据见[版本与发布](../../public-docs/releases/README.md)。
+2026-11-05 发布的 [GitHub `v1.0.7` 标签](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.7)对应 `5dc40325`，已包含输入框预测、专用模型接入及 schema v72。发版核验仍应比对具体 commit、平台、安装包和下载校验值，而不是只比较版本字符串；各下载渠道的已登记证据见[版本与发布](../../public-docs/releases/README.md)。
 
 ## 1. 前置条件
 
@@ -166,7 +166,7 @@ backend 目前仍使用 Node `child_process.fork()`，在迁移或完成专项�
 notarize: false
 ```
 
-因此只运行 `build:mac` 不能证明产物已经过 Apple notary service。已登记的正式 `1.0.5` 包已另行完成公证及 stapling；仓库脚本没有自动
+因此只运行 `build:mac` 不能证明产物已经过 Apple notary service。`1.0.7` 的官方发行记录声明已完成 Developer ID 签名、Apple 公证及票据验证，依据见[发行说明](../../public-docs/releases/release-notes/1-0-7.md)；这不是该构建命令自动完成公证的证据。仓库脚本没有自动
 stapling，notary credential 仍由发布者在本机钥匙串管理。基础 YAML 的 `publish: null` 继续禁止默认
 provider 推断；动态配置仅为有源 macOS arm64 开启 generic provider、ZIP 与更新 metadata。
 NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不意味着公证或更新发布已经完成。

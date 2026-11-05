@@ -4,12 +4,12 @@ description: 配置模型 API、管理模型能力与费用估算，并在对话
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 模型与服务商
 
-本页按 2026-11-04 的主分支实现说明。Kimi K3.1、智谱 GLM-5.3 和新的厂商型号选择界面属于开发进展，不在 2026-09-23 发布的 v1.0.6 安装包范围内；下载包与主分支的区别见[当前开发进展](../../releases/development-status.md)。
+本页适用于 [1.0.7 正式版](../../releases/release-notes/1-0-7.md)。Kimi K3.1、智谱 GLM-5.3 和新的厂商型号选择界面已随该版本发布，1.0.6 安装包不包含这些新增接入。
 
 Captain Who 不附带可直接使用的模型账户。你需要提供一个兼容的 API 地址、Token 和模型标识。
 

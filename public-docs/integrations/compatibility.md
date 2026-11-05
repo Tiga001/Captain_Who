@@ -4,7 +4,7 @@ description: 查看 Captain Who 当前对 Provider、Skill、MCP 和文件能力
 status: current
 audience: user
 owner: product
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 集成兼容性
@@ -13,7 +13,7 @@ last_verified: 2026-11-04
 
 ## 模型 Provider
 
-以下按 2026-11-04 主分支核验；新增的 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面不属于 2026-09-23 的 v1.0.6 安装包。参见[当前开发进展](../releases/development-status.md)。
+以下按 [1.0.7 正式版](../releases/release-notes/1-0-7.md)核验，包含 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面。仍使用 1.0.6 的用户需先升级才能使用这些新增接入。
 
 | 能力                                      | 当前状态                                                  |
 | ----------------------------------------- | --------------------------------------------------------- |

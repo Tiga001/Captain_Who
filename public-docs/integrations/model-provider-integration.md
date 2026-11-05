@@ -4,12 +4,12 @@ description: 配置兼容模型端点、模型资料和凭据，并验证 Tool �
 status: current
 audience: user
 owner: product
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 连接模型 Provider
 
-本页按 2026-11-04 的主分支实现说明。新增的 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面不在 2026-09-23 发布的 v1.0.6 安装包范围内；具体发布范围见[当前开发进展](../releases/development-status.md)。
+本页适用于 [1.0.7 正式版](../releases/release-notes/1-0-7.md)，包含 Kimi K3.1、智谱 GLM-5.3 和厂商型号选择界面。1.0.6 安装包不包含这些新增接入，请先升级。
 
 Captain Who 不附带可直接使用的模型账户，新安装的模型目录也为空。你需要提供自己有权使用的 API URL、Token 和模型标识，并显式新增、启用模型；相关费用、数据处理和可用性由所选服务商决定。
 

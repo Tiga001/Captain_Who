@@ -4,7 +4,7 @@ description: 判断何时使用普通 Tool、Skill、MCP、Multi-Agent、组织�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 选择合适的能力
@@ -22,7 +22,7 @@ last_verified: 2026-10-04
 | 同一任务需要按时间重复       | Scheduled Automation                     | 持久 Task 按计划触发普通根 Run    |
 | 只需一次简短回答             | 普通对话                                 | 最少配置和最低协调成本            |
 
-组织一行针对当前开发版本，不代表所有已发布安装包都包含该能力。旧工作流已由组织替代；画布没有固定执行顺序。一次主任务的并行分工仍优先考虑 Multi-Agent。
+组织能力适用于 [1.0.7 正式版](../../releases/release-notes/1-0-7.md)。旧工作流已由组织替代；画布没有固定执行顺序。一次主任务的并行分工仍优先考虑 Multi-Agent。
 
 ## 常见组合
 

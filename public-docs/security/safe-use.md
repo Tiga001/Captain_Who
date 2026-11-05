@@ -4,7 +4,7 @@ description: 用最小权限和可验证步骤安全使用 Agent、Skill、MCP �
 status: current
 audience: user
 owner: security
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 安全使用
@@ -12,7 +12,7 @@ last_verified: 2026-11-04
 ## 开始任务前
 
 - 为项目使用版本控制或其他备份，尤其是在允许文件写入前。
-- 优先从[官网](https://captainwhoagent.com/)下载安装包；使用 GitHub 时，选择[官方发布页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6)中的 DMG，不要下载源码压缩包来安装。对照[下载与验证](../releases/download-and-verification.md)检查所用版本的文件；不要用旧版签名或公证记录为新版作保证。
+- 优先从[官网](https://captainwhoagent.com/)下载安装包；使用 GitHub 时，选择[官方发布页](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.7)中的 DMG，不要下载源码压缩包来安装。对照[下载与验证](../releases/download-and-verification.md)检查所用版本的文件；不要用旧版签名或公证记录为新版作保证。
 - 从“默认权限”开始，只为确实需要的任务提高权限。
 - 不要把秘密写进 Prompt、Skill、MCP 参数或项目中可被 Agent 读取的普通文件。
 - 只在应用或 Captain Who 官方网站的正确域名中登录账户；不要把账户密码、验证码、会话信息或许可页面内容交给模型、MCP Server 或陌生网页。

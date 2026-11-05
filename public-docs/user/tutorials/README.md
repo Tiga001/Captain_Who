@@ -4,7 +4,7 @@ description: 跟随完整案例，用 Captain Who 完成项目理解、开发、
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 实战教程
@@ -20,7 +20,7 @@ last_verified: 2026-10-04
 5. [连接本地 MCP Server](connect-an-mcp-server.md)：为 Agent 增加外部工具。
 6. [创建一个 Workspace Skill](create-a-skill.md)：把稳定做法沉淀为可复用能力。
 7. [创建一项定时自动化](create-an-automation.md)：让任务按计划重复运行。
-8. [创建并运行一个组织](create-an-organization.md)：配置独立成员对话，通过邮件协作；适用于当前开发版本，不代表所有已发布安装包都包含该能力。
+8. [创建并运行一个组织](create-an-organization.md)：配置独立成员对话，通过邮件协作；适用于 [1.0.7 正式版](../../releases/release-notes/1-0-7.md)。
 
 ## 跟做前的共同原则
 

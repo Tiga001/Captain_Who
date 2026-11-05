@@ -4,7 +4,7 @@ description: 用简明语言解释 Captain Who 用户文档中的核心概念。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 术语表
@@ -99,7 +99,7 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 
 ## Organization（组织）
 
-当前开发版本中，由共享背景、成员职责和独立根对话组成的邮件协作网络，取代旧工作流功能。成员可直接交互，不属于同一棵子 Agent 树；画布不决定执行顺序。请以对应版本发行说明和实际入口为准。详见[组织](../capabilities/organizations.md)。
+1.0.7 中，由共享背景、成员职责和独立根对话组成的邮件协作网络，取代旧工作流功能。成员可直接交互，不属于同一棵子 Agent 树；画布不决定执行顺序。请以对应版本发行说明和实际入口为准。详见[组织](../capabilities/organizations.md)。
 
 ## 组织模板与已激活组织
 

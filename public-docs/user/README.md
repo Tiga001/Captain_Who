@@ -4,7 +4,7 @@ description: 从第一次启动到使用 Agent、Skill、MCP、多智能体、�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 用户指南
@@ -32,7 +32,7 @@ Captain Who 是一款**本地优先的桌面 AI 工作助手**：项目授权、
 - [参考手册](reference/README.md)：快速查询设置、状态、快捷键、能力边界和术语。
 - [常见问题](../support/faq.md)：从现象快速找到解决方法。
 
-当前开发版本新增的[组织](capabilities/organizations.md)将独立对话连接成邮件协作网络，取代旧工作流功能；按[组织教程](tutorials/create-an-organization.md)上手。该部分不代表所有已发布安装包都包含该能力相同能力。
+[1.0.7 正式版](../releases/release-notes/1-0-7.md)的[组织](capabilities/organizations.md)将独立对话连接成邮件协作网络，取代旧工作流功能；按[组织教程](tutorials/create-an-organization.md)上手。
 
 ### 从使用走向理解
 

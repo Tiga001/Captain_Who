@@ -4,7 +4,7 @@ description: 从桌面界面到本地 Core、模型服务和外部工具，理�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 通俗系统总览
@@ -35,7 +35,7 @@ Captain Who 是一个本地优先的桌面 Agent 应用。“本地优先”表�
 
 ### 账户与外部能力
 
-使用云端账户时，Captain Who 账户与许可服务处理登录、资料和启动新 Agent 回合所需的许可校验；它不会因此接收桌面项目、对话、文件、Agent 轨迹或模型密钥。当前源码的内置本地账户不访问这些云端身份与许可服务，也不提供云端身份或模型额度；具体步骤与安装包范围见[账户与软件许可](../getting-started/account-and-license.md)。
+使用云端账户时，Captain Who 账户与许可服务处理登录、资料和启动新 Agent 回合所需的许可校验；它不会因此接收桌面项目、对话、文件、Agent 轨迹或模型密钥。1.0.7 的内置本地账户不访问这些云端身份与许可服务，也不提供云端身份或模型额度；具体步骤与安装包范围见[账户与软件许可](../getting-started/account-and-license.md)。
 
 模型请求会发送到你配置的模型 API URL；联网搜索把查询或目标 URL 发送给 Tavily；用户 MCP Server 是在本机启动的 stdio 子进程，但它自身可能继续访问网络或其他数据源。使用前应分别了解这些服务的隐私和安全边界。
 

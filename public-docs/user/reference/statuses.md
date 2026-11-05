@@ -4,7 +4,7 @@ description: 解释 Agent、子 Agent、组织邮件、Scheduled Automation 和 
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-10-04
+last_verified: 2026-11-05
 ---
 
 # 状态说明
@@ -48,7 +48,7 @@ last_verified: 2026-10-04
 
 ## 组织与邮件
 
-以下适用于[组织](../capabilities/organizations.md)的当前开发版本，不代表所有已发布安装包都包含该能力。组织启用与否、成员是否正在运行、单封邮件的状态是三件事；启用且邮箱为空时仍会空闲。停用组织不会取消正在运行的成员。
+以下适用于 1.0.7 的[组织](../capabilities/organizations.md)。组织启用与否、成员是否正在运行、单封邮件的状态是三件事；启用且邮箱为空时仍会空闲。停用组织不会取消正在运行的成员。
 
 | 邮件状态 | 含义                                   |
 | -------- | -------------------------------------- |

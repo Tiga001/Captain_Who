@@ -4,7 +4,7 @@ description: 查看 Captain Who 已正式发布版本的用户可见变更与已
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-11-03
+last_verified: 2026-11-05
 ---
 
 # 发行说明
@@ -15,6 +15,7 @@ last_verified: 2026-11-03
 
 | 版本    | 发布日期   | 正式支持的平台                   | 说明                            |
 | ------- | ---------- | -------------------------------- | ------------------------------- |
+| `1.0.7` | 2026-11-05 | macOS 12+ Apple Silicon（arm64） | [查看 1.0.7 发行说明](1-0-7.md) |
 | `1.0.6` | 2026-09-23 | macOS 12+ Apple Silicon（arm64） | [查看 1.0.6 发行说明](1-0-6.md) |
 | `1.0.5` | 2026-09-17 | macOS 12+ Apple Silicon（arm64） | [查看 1.0.5 发行说明](1-0-5.md) |
 | `1.0.2` | 2026-09-14 | macOS 12+ Apple Silicon（arm64） | [查看 1.0.2 发行说明](1-0-2.md) |

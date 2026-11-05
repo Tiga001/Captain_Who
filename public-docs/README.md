@@ -4,14 +4,14 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # Captain Who 文档
 
 Captain Who 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
 
-已发布的 [`1.0.6` 安装包](releases/release-notes/1-0-6.md)适用于 macOS 12 及以上的 Apple Silicon 设备。请从 [Captain Who 官网](https://captainwhoagent.com/) 或项目的 [GitHub Release](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.6) 获取 DMG，安装前按[下载与验证](releases/download-and-verification.md)核对文件。
+已发布的 [`1.0.7` 安装包](releases/release-notes/1-0-7.md)适用于 macOS 12 及以上的 Apple Silicon 设备。请从 [Captain Who 官网](https://captainwhoagent.com/) 或项目的 [GitHub Release](https://github.com/Tiga001/Captain_Who/releases/tag/v1.0.7) 获取 DMG，安装前按[下载与验证](releases/download-and-verification.md)核对文件。
 
 Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com/Tiga001/Captain_Who)会持续更新。仓库中的开发版本可能比官网安装包更新；想直接使用软件，请从官网下载安装包。当前仅发布 macOS Apple Silicon 版本，Windows 暂无安装包。许可证与第三方声明见[法律与第三方声明](legal/README.md)。
 
@@ -40,4 +40,4 @@ Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com
 
 ## 阅读说明
 
-[发行说明](releases/release-notes/README.md)描述已经发布的安装包；[当前开发进展](releases/development-status.md)介绍标签之后的改动。11 月新增的「预测下一条用户消息」、Kimi K3.1 和智谱 GLM-5.3 专用接入不在 9 月 23 日的 `1.0.6` 安装包里，即使当前源码显示的版本号仍是 `1.0.6`。模型接入步骤见[连接模型 Provider](integrations/model-provider-integration.md)。使用第三方模型、搜索或 MCP 服务时，还需遵守相应服务商的条款、计费方式和数据政策。
+[发行说明](releases/release-notes/README.md)描述已经发布的安装包；[当前开发进展](releases/development-status.md)区分源码与发行范围。「预测下一条用户消息」、Kimi K3.1 和智谱 GLM-5.3 专用接入已随 `1.0.7` 发布，旧版 `1.0.6` 不包含这些功能。模型接入步骤见[连接模型 Provider](integrations/model-provider-integration.md)。使用第三方模型、搜索或 MCP 服务时，还需遵守相应服务商的条款、计费方式和数据政策。

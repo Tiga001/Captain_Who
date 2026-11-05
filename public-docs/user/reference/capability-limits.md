@@ -4,7 +4,7 @@ description: 汇总当前版本面向用户的重要支持范围、上限和不�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-11-04
+last_verified: 2026-11-05
 ---
 
 # 能力限制
@@ -13,7 +13,7 @@ last_verified: 2026-11-04
 
 ## 模型与网络
 
-- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱国内标准 API 配置；兼容端点仍需满足对应协议行为。此处按 2026-11-04 主分支核验，新增的 Kimi K3.1 与智谱 GLM-5.3 不属于 2026-09-23 的 v1.0.6 安装包；型号和参数范围见[连接模型 Provider](../../integrations/model-provider-integration.md)。
+- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible、DeepSeek V4 Chat、Moonshot 和智谱国内标准 API 配置；兼容端点仍需满足对应协议行为。此处按 [1.0.7 正式版](../../releases/release-notes/1-0-7.md)核验；Kimi K3.1 与智谱 GLM-5.3 需从 1.0.6 升级后使用；型号和参数范围见[连接模型 Provider](../../integrations/model-provider-integration.md)。
 - 专用厂商的型号、官方地址与图片能力受已适配目录约束；不会自动发现服务商新型号，也不会自动填写上下文或价格。智谱专用配置不接入 Coding Plan 套餐或海外 Z.AI。
 - 联网搜索依赖用户配置的 Tavily API Key；没有 Key 时不能使用搜索 Tool。
 - 模型与搜索不是离线能力，数据会发往相应配置服务。
@@ -21,7 +21,7 @@ last_verified: 2026-11-04
 
 ## 项目、文件与附件
 
-- 当前开发版本的普通附件使用分块导入，不再受旧的单文件 8 MiB 限制；向正在运行的 Agent 引导消息最多携带 8 个受管附件引用，旧的合计 32 MiB 限制已移除。文件仍受可用磁盘空间、格式解析和工具读取预算约束，图片另有像素、解码与派生图片预算。见[附件导入](../everyday-use/files-and-git.md#在输入框添加附件)。
+- 1.0.7 的普通附件使用分块导入，不再受旧的单文件 8 MiB 限制；向正在运行的 Agent 引导消息最多携带 8 个受管附件引用，旧的合计 32 MiB 限制已移除。文件仍受可用磁盘空间、格式解析和工具读取预算约束，图片另有像素、解码与派生图片预算。见[附件导入](../everyday-use/files-and-git.md#在输入框添加附件)。
 - Agent 附件支持文本、图片、PDF、`.docx`、`.pptx`、`.xlsx`、`.csv`、`.tsv` 等当前登记格式。
 - 旧 `.doc` 只在 macOS 通过系统能力解析；旧 `.ppt` 和 `.xls` 暂不支持。
 - PDF 附件不会在发送时自动提取正文；需要激活 PDF Skill 后按需提取或渲染。扫描 PDF 没有文本层时，应通过页面渲染和视觉能力检查。
@@ -65,7 +65,7 @@ last_verified: 2026-11-04
 
 ## 组织
 
-以下是截至 2026-10-04 当前开发版本的范围，不代表所有已发布安装包都包含该能力；完整说明见[组织](../capabilities/organizations.md)。
+以下是 1.0.7 的组织能力范围，完整说明见[组织](../capabilities/organizations.md)。
 
 - 旧工作流功能已移除。组织使用独立成员对话与自由邮件，没有固定执行连线、输入/输出门或批次条件。
 - 每个组织最多 128 位成员、64 个部门；职级为 1–99。上限不是推荐规模，也不代表全部成员能同时运行。
