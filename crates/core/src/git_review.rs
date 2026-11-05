@@ -1,7 +1,7 @@
 use crate::content_revision;
 use serde::Serialize;
 use similar::TextDiff;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -37,6 +37,8 @@ const MAX_SNAPSHOTS: usize = 32;
 const MAX_STATUS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NUMSTAT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_UNTRACKED_STATS_BYTES: usize = 16 * 1024 * 1024;
+const MAX_UNTRACKED_FILE_STATS_BYTES: usize = 1024 * 1024;
+const UNTRACKED_STATS_PROBE_BYTES: usize = 8 * 1024;
 const MAX_DIFF_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 20_000;
 const MAX_DIFF_HUNKS: usize = 2_000;
@@ -187,7 +189,16 @@ pub struct GitReviewFile {
     pub previous_path: Option<String>,
     pub status: GitReviewFileStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<GitReviewFileContentKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<GitReviewFileStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitReviewFileContentKind {
+    Text,
+    Binary,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -474,6 +485,7 @@ impl GitReviewService {
         let parsed_files = collected.files;
         let stats = collected.stats;
         let file_stats = collected.file_stats;
+        let binary_paths = collected.binary_paths;
         let truncated = parsed_files.len() > MAX_REVIEW_FILES;
         let files = parsed_files
             .into_iter()
@@ -522,6 +534,13 @@ impl GitReviewService {
                         .as_ref()
                         .map(|v| project::folder_workspace_path(&v.folder, &path)),
                     id,
+                    content_kind: if binary_paths.contains(&file.path) {
+                        Some(GitReviewFileContentKind::Binary)
+                    } else if file_stats.contains_key(&file.path) {
+                        Some(GitReviewFileContentKind::Text)
+                    } else {
+                        None
+                    },
                     stats: file_stats.get(&file.path).cloned(),
                     path,
                     previous_path,

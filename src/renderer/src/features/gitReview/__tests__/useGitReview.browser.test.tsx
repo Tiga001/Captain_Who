@@ -15,6 +15,7 @@ const { contentSpy, diffSpy, mutateSpy, summarySpy } = vi.hoisted(() => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  onGitReviewAgentEvent: () => () => undefined,
   inspectGitRepository: vi.fn(),
   getGitReviewFileContent: contentSpy,
   getGitReviewFileDiff: diffSpy,

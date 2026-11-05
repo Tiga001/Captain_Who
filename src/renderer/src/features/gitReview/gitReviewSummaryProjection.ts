@@ -23,8 +23,14 @@ export function projectGitReviewSummary(
   summary: GitReviewSummary,
   options: GitReviewSummaryProjectionOptions = {}
 ): GitReviewSummary {
-  const filesWithStats = summary.files.filter(hasConcreteGitReviewStats)
-  const files = options.includeFilesWithoutStats ? summary.files : filesWithStats
+  const files = options.includeFilesWithoutStats
+    ? summary.files
+    : summary.files.filter((file) => file.contentKind !== 'binary')
+  const filesWithStats = files.filter(hasConcreteGitReviewStats)
+  const lineCountsComplete =
+    summary.stats.lineCountsComplete &&
+    !summary.truncated &&
+    files.every((file) => file.contentKind === 'binary' || hasConcreteGitReviewStats(file))
   const stats = filesWithStats.reduce<GitReviewFileStats>(
     (totals, file) => ({
       additions: totals.additions + file.stats.additions,
@@ -38,7 +44,7 @@ export function projectGitReviewSummary(
     summary.stats.fileCount === files.length &&
     summary.stats.additions === stats.additions &&
     summary.stats.deletions === stats.deletions &&
-    summary.stats.lineCountsComplete
+    summary.stats.lineCountsComplete === lineCountsComplete
   ) {
     return summary
   }
@@ -49,7 +55,7 @@ export function projectGitReviewSummary(
     stats: {
       ...stats,
       fileCount: files.length,
-      lineCountsComplete: true
+      lineCountsComplete
     }
   }
 }

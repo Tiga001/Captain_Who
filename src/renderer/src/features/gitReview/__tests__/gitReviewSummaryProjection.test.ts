@@ -11,14 +11,14 @@ function summary(): GitReviewSummary {
         stats: { additions: 12, deletions: 3 },
         status: 'modified'
       },
-      { id: 'image', path: 'assets/preview.png', status: 'added' },
+      { id: 'image', path: 'assets/preview.png', status: 'added', contentKind: 'binary' },
       {
         id: 'deleted',
         path: 'src/legacy.ts',
         stats: { additions: 0, deletions: 5 },
         status: 'deleted'
       },
-      { id: 'office', path: 'report.docx', status: 'added' }
+      { id: 'office', path: 'report.docx', status: 'added', contentKind: 'binary' }
     ],
     context: {},
     repositoryId: 'repository-1',
@@ -28,14 +28,14 @@ function summary(): GitReviewSummary {
       additions: 12,
       deletions: 8,
       fileCount: 4,
-      lineCountsComplete: false
+      lineCountsComplete: true
     },
     truncated: false
   }
 }
 
 describe('projectGitReviewSummary', () => {
-  it('keeps only files with concrete line counts and recomputes the totals', () => {
+  it('hides only confirmed binary files and recomputes the totals', () => {
     const source = summary()
     const projected = projectGitReviewSummary(source)
 
@@ -73,5 +73,34 @@ describe('projectGitReviewSummary', () => {
       fileCount: 4,
       lineCountsComplete: true
     })
+  })
+
+  it('keeps unknown and text files when statistics fail, without reporting complete totals', () => {
+    const source = summary()
+    source.stats.lineCountsComplete = false
+    source.files.push(
+      { id: 'unknown', path: 'proof.md', status: 'untracked' },
+      { id: 'text', path: 'large.txt', status: 'added', contentKind: 'text' }
+    )
+    const projected = projectGitReviewSummary(source)
+    expect(projected.files.map((file) => file.id)).toEqual(['source', 'deleted', 'unknown', 'text'])
+    expect(projected.stats).toEqual({
+      additions: 12,
+      deletions: 8,
+      fileCount: 4,
+      lineCountsComplete: false
+    })
+    expect(
+      projectGitReviewSummary(source, { includeFilesWithoutStats: true }).stats.lineCountsComplete
+    ).toBe(false)
+  })
+
+  it('does not claim completeness for missing statistics or a truncated file list', () => {
+    const source = summary()
+    source.files.push({ id: 'unread', path: 'unknown.md', status: 'untracked' })
+    expect(projectGitReviewSummary(source).stats.lineCountsComplete).toBe(false)
+    source.files.pop()
+    source.truncated = true
+    expect(projectGitReviewSummary(source).stats.lineCountsComplete).toBe(false)
   })
 })

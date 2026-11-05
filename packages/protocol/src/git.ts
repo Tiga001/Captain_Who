@@ -104,6 +104,8 @@ export interface GitReviewFile {
   /** Previous path relative to the selected project root, when it remains inside that project. */
   previousPath?: string
   status: GitReviewFileStatus
+  /** Omitted when content classification is unavailable; missing statistics never imply binary. */
+  contentKind?: 'text' | 'binary'
   stats?: GitReviewFileStats
 }
 

@@ -282,6 +282,123 @@ fn parses_text_binary_and_rename_numstat() {
     );
     assert!(!parsed.files.contains_key("old.rs"));
     assert!(!parsed.files.contains_key("image.png"));
+    assert!(parsed.binary_paths.contains("image.png"));
+}
+
+#[test]
+fn large_binary_and_text_files_do_not_hide_later_untracked_markdown() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    fs::write(repo.path().join("deleted.pptx"), b"PK\0binary").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+    fs::remove_file(repo.path().join("deleted.pptx")).unwrap();
+    // Sparse binary content exceeds the entire budget but only needs one probe.
+    File::create(repo.path().join("a-large.png"))
+        .unwrap()
+        .set_len((MAX_UNTRACKED_STATS_BYTES * 2) as u64)
+        .unwrap();
+    fs::write(
+        repo.path().join("b-large.txt"),
+        vec![b'x'; MAX_UNTRACKED_FILE_STATS_BYTES + 1],
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("z-proof.md"),
+        "# Proof\n\nCauchy inequality\n",
+    )
+    .unwrap();
+    let service = GitReviewService::new();
+    for target in [
+        GitReviewTarget::Uncommitted,
+        GitReviewTarget::Unstaged,
+        GitReviewTarget::Branch {
+            base_ref: git_stdout(repo.path(), &["symbolic-ref", "HEAD"]),
+        },
+    ] {
+        let summary = service.review_summary(repo.path(), target).unwrap();
+        assert_eq!(summary.files.len(), 4);
+        assert!(!summary.stats.line_counts_complete);
+        let proof = summary
+            .files
+            .iter()
+            .find(|f| f.path == "z-proof.md")
+            .unwrap();
+        assert_eq!(proof.stats.as_ref().unwrap().additions, 3);
+        assert_eq!(proof.content_kind, Some(GitReviewFileContentKind::Text));
+        for path in ["a-large.png", "deleted.pptx"] {
+            assert_eq!(
+                summary
+                    .files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .unwrap()
+                    .content_kind,
+                Some(GitReviewFileContentKind::Binary)
+            );
+        }
+        let large = summary
+            .files
+            .iter()
+            .find(|f| f.path == "b-large.txt")
+            .unwrap();
+        assert!(large.stats.is_none());
+        assert!(large.content_kind.is_none());
+    }
+}
+
+#[test]
+fn untracked_statistics_continue_after_an_unreadable_path_and_obey_shared_budget() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    fs::write(repo.path().join("z-proof.md"), "proof\n").unwrap();
+    let repository = resolve_repository(repo.path()).unwrap();
+    let files =
+        parse_porcelain_status(b"?? missing.md\0?? z-proof.md\0", StatusSelection::Unstaged)
+            .unwrap();
+    let (stats, counts) = calculate_review_stats(&repository, StatusSelection::Unstaged, &files);
+    assert!(!stats.line_counts_complete);
+    assert_eq!(counts.files["z-proof.md"].additions, 1);
+    assert!(!counts.binary_paths.contains("missing.md"));
+
+    let mut budget = 4;
+    assert!(untracked_line_count(&repository, "z-proof.md", &mut budget).is_err());
+    assert_eq!(budget, 0);
+    assert!(untracked_line_count(&repository, "z-proof.md", &mut budget).is_err());
+    let mut budget = 32;
+    assert_eq!(
+        untracked_line_count(&repository, "z-proof.md", &mut budget),
+        Ok(Some(1))
+    );
+    assert_eq!(budget, 26);
+
+    fs::write(repo.path().join("too-much.txt"), vec![b'x'; 20 * 1024]).unwrap();
+    let mut budget = 12 * 1024;
+    assert!(untracked_line_count(&repository, "too-much.txt", &mut budget).is_err());
+    assert_eq!(budget, 4 * 1024);
+    assert_eq!(
+        untracked_line_count(&repository, "z-proof.md", &mut budget),
+        Ok(Some(1))
+    );
+}
+
+#[test]
+fn utf8_character_crossing_the_binary_probe_is_counted_as_text() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let mut content = vec![b'a'; UNTRACKED_STATS_PROBE_BYTES - 1];
+    content.extend_from_slice("证明\n".as_bytes());
+    fs::write(repo.path().join("proof.md"), &content).unwrap();
+    let repository = resolve_repository(repo.path()).unwrap();
+    let mut budget = MAX_UNTRACKED_STATS_BYTES;
+    assert_eq!(
+        untracked_line_count(&repository, "proof.md", &mut budget),
+        Ok(Some(1))
+    );
+    assert_eq!(budget, MAX_UNTRACKED_STATS_BYTES - content.len());
 }
 
 #[test]

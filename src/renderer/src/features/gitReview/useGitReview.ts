@@ -19,6 +19,7 @@ import {
   type GitReviewDiffQueueItem
 } from './gitReviewDiffRequestQueue'
 import { GitReviewPayloadCacheBudget } from './gitReviewPayloadCacheBudget'
+import { useGitReviewAutoRefresh } from './useGitReviewAutoRefresh'
 
 const MAX_CONCURRENT_DIFF_REQUESTS = 4
 const MAX_QUEUED_DIFF_REQUESTS = 64
@@ -291,6 +292,15 @@ export function useGitReview(
       }
     }
   }, [projectId, resetReviewData, target, targetKey, sourceKey, sourceKind, folderId])
+
+  useGitReviewAutoRefresh(
+    projectId,
+    isActive,
+    target,
+    sourceKey,
+    summaryState.status === 'loading',
+    refresh
+  )
 
   const drainFullContentQueue = useCallback(() => {
     while (

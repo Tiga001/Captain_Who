@@ -230,6 +230,7 @@ pub(super) struct CollectedReviewFiles {
     pub(super) files: Vec<ParsedStatusFile>,
     pub(super) stats: GitReviewStats,
     pub(super) file_stats: HashMap<String, GitReviewFileStats>,
+    pub(super) binary_paths: HashSet<String>,
 }
 
 pub(super) fn parse_porcelain_status(
@@ -301,52 +302,26 @@ pub(super) fn calculate_review_stats(
     repository: &RepositoryContext,
     selection: StatusSelection,
     files: &[ParsedStatusFile],
-) -> (GitReviewStats, HashMap<String, GitReviewFileStats>) {
+) -> (GitReviewStats, ParsedNumstat) {
     let mut stats = GitReviewStats {
         file_count: files.len(),
         additions: 0,
         deletions: 0,
         line_counts_complete: true,
     };
-    let mut file_stats = HashMap::new();
+    let mut file_stats = ParsedNumstat::default();
 
     match tracked_numstat(repository, selection) {
         Ok(numstat) => {
             stats.additions = numstat.additions;
             stats.deletions = numstat.deletions;
-            file_stats = numstat.files;
+            file_stats = numstat;
         }
         Err(()) => stats.line_counts_complete = false,
     }
 
     if selection == StatusSelection::Unstaged {
-        let mut remaining_bytes = MAX_UNTRACKED_STATS_BYTES;
-        for file in files
-            .iter()
-            .filter(|file| file.status == GitReviewFileStatus::Untracked)
-        {
-            match untracked_line_count(repository, &file.path, &mut remaining_bytes) {
-                Ok(Some(additions)) => {
-                    let Some(total) = stats.additions.checked_add(additions) else {
-                        stats.line_counts_complete = false;
-                        break;
-                    };
-                    stats.additions = total;
-                    file_stats.insert(
-                        file.path.clone(),
-                        GitReviewFileStats {
-                            additions,
-                            deletions: 0,
-                        },
-                    );
-                }
-                Ok(None) => {}
-                Err(()) => {
-                    stats.line_counts_complete = false;
-                    break;
-                }
-            }
-        }
+        add_untracked_stats(repository, files, &mut stats, &mut file_stats);
     }
 
     (stats, file_stats)
@@ -357,6 +332,7 @@ pub(super) struct ParsedNumstat {
     pub(super) additions: u64,
     pub(super) deletions: u64,
     pub(super) files: HashMap<String, GitReviewFileStats>,
+    pub(super) binary_paths: HashSet<String>,
 }
 
 pub(super) fn tracked_numstat(
@@ -399,7 +375,8 @@ pub(super) fn collect_review_files(
         return Ok(CollectedReviewFiles {
             files,
             stats,
-            file_stats,
+            file_stats: file_stats.files,
+            binary_paths: file_stats.binary_paths,
         });
     }
 
@@ -425,11 +402,11 @@ pub(super) fn collect_review_files(
         Ok(numstat) => {
             stats.additions = numstat.additions;
             stats.deletions = numstat.deletions;
-            numstat.files
+            numstat
         }
         Err(()) => {
             stats.line_counts_complete = false;
-            HashMap::new()
+            ParsedNumstat::default()
         }
     };
     if matches!(comparison, SnapshotComparison::TreeToWorktree { .. }) {
@@ -438,7 +415,8 @@ pub(super) fn collect_review_files(
     Ok(CollectedReviewFiles {
         files,
         stats,
-        file_stats,
+        file_stats: file_stats.files,
+        binary_paths: file_stats.binary_paths,
     })
 }
 
@@ -578,7 +556,7 @@ fn add_untracked_stats(
     repository: &RepositoryContext,
     files: &[ParsedStatusFile],
     stats: &mut GitReviewStats,
-    file_stats: &mut HashMap<String, GitReviewFileStats>,
+    file_stats: &mut ParsedNumstat,
 ) {
     let mut remaining_bytes = MAX_UNTRACKED_STATS_BYTES;
     for file in files
@@ -592,7 +570,7 @@ fn add_untracked_stats(
                     break;
                 };
                 stats.additions = total;
-                file_stats.insert(
+                file_stats.files.insert(
                     file.path.clone(),
                     GitReviewFileStats {
                         additions,
@@ -600,10 +578,11 @@ fn add_untracked_stats(
                     },
                 );
             }
-            Ok(None) => {}
+            Ok(None) => {
+                file_stats.binary_paths.insert(file.path.clone());
+            }
             Err(()) => {
                 stats.line_counts_complete = false;
-                break;
             }
         }
     }
@@ -636,6 +615,7 @@ pub(super) fn parse_numstat(output: &[u8]) -> Result<ParsedNumstat, ()> {
         };
 
         if added == b"-" || deleted == b"-" {
+            result.binary_paths.insert(path);
             continue;
         }
         let added = std::str::from_utf8(added)
@@ -664,30 +644,53 @@ pub(super) fn untracked_line_count(
     let target = repository.root.join(path);
     let metadata = fs::symlink_metadata(&target).map_err(|_| ())?;
     let bytes = if metadata.file_type().is_symlink() {
-        fs::read_link(&target)
+        let bytes = fs::read_link(&target)
             .map_err(|_| ())?
             .to_string_lossy()
             .into_owned()
-            .into_bytes()
-    } else if metadata.is_file() {
-        if *remaining_bytes == 0 {
+            .into_bytes();
+        let consumed = bytes.len().min(*remaining_bytes);
+        *remaining_bytes -= consumed;
+        if consumed < bytes.len() {
             return Err(());
         }
+        bytes
+    } else if metadata.is_file() {
+        let mut file = open_untracked_file(&target).map_err(|_| ())?;
         let mut bytes = Vec::new();
-        open_untracked_file(&target)
-            .map_err(|_| ())?
-            .take((*remaining_bytes + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ())?;
+        let eof = read_stats_bytes(
+            &mut file,
+            &mut bytes,
+            UNTRACKED_STATS_PROBE_BYTES,
+            remaining_bytes,
+        )?;
+        // Probe binary content before spending the shared budget on images and Office files.
+        if bytes.contains(&0)
+            || std::str::from_utf8(&bytes).is_err_and(|error| error.error_len().is_some())
+        {
+            return Ok(None);
+        }
+        if !eof {
+            if metadata.len() > MAX_UNTRACKED_FILE_STATS_BYTES as u64
+                || metadata.len().saturating_sub(bytes.len() as u64) > *remaining_bytes as u64
+            {
+                return Err(());
+            }
+            let eof = read_stats_bytes(
+                &mut file,
+                &mut bytes,
+                MAX_UNTRACKED_FILE_STATS_BYTES + 1,
+                remaining_bytes,
+            )?;
+            if !eof || bytes.len() > MAX_UNTRACKED_FILE_STATS_BYTES {
+                return Err(());
+            }
+        }
         bytes
     } else {
-        return Ok(None);
+        return Err(());
     };
 
-    if bytes.len() > *remaining_bytes {
-        return Err(());
-    }
-    *remaining_bytes -= bytes.len();
     if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
         return Ok(None);
     }
@@ -695,6 +698,29 @@ pub(super) fn untracked_line_count(
     let newline_count = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
     let trailing_line = u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
     Ok(Some(newline_count + trailing_line))
+}
+
+// Charge every successful read, including reads of files that later fail or exceed a limit.
+fn read_stats_bytes(
+    file: &mut File,
+    bytes: &mut Vec<u8>,
+    limit: usize,
+    remaining_bytes: &mut usize,
+) -> Result<bool, ()> {
+    let mut buffer = [0; UNTRACKED_STATS_PROBE_BYTES];
+    while bytes.len() < limit {
+        let length = buffer.len().min(limit - bytes.len()).min(*remaining_bytes);
+        if length == 0 {
+            return Err(());
+        }
+        let read = file.read(&mut buffer[..length]).map_err(|_| ())?;
+        if read == 0 {
+            return Ok(true);
+        }
+        *remaining_bytes -= read;
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    Ok(false)
 }
 
 pub(super) fn parse_git_path(bytes: &[u8]) -> Result<String, String> {

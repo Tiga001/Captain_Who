@@ -1,4 +1,5 @@
 import type {
+  AgentEvent,
   GitRepositoryInspection,
   GitReviewCommitList,
   GitReviewCommitListInput,
@@ -17,6 +18,10 @@ import type {
   WorkspaceFileRequest
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
+
+export function onGitReviewAgentEvent(handler: (event: AgentEvent) => void): () => void {
+  return hostClient.agent.onEvent(handler)
+}
 
 export function copyGitReviewFilePath(input: WorkspaceFileRequest): Promise<void> {
   return hostClient.workspaceFiles.copyPath(input)

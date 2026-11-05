@@ -41,6 +41,7 @@ vi.mock('../useGitReview', async () => {
       {
         id: 'binary-image',
         path: 'assets/preview.png',
+        contentKind: 'binary' as const,
         status: 'added' as const
       }
     ],
@@ -52,7 +53,7 @@ vi.mock('../useGitReview', async () => {
       additions: 999,
       deletions: 888,
       fileCount: files.length + 1,
-      lineCountsComplete: false
+      lineCountsComplete: true
     },
     truncated: false
   }

@@ -23,6 +23,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
   })
 }))
 vi.mock('../gitReviewClient', () => ({
+  onGitReviewAgentEvent: () => () => undefined,
   inspectGitRepository: spies.inspect,
   getGitReviewSummary: spies.summary,
   copyGitReviewFilePath: spies.copy,

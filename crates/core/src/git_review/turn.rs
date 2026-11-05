@@ -118,6 +118,7 @@ fn project_turn_review<'a>(
                 path: change.path.clone(),
                 previous_path: None,
                 status,
+                content_kind: turn_file_content_kind(change),
                 stats,
             },
         ));
@@ -226,6 +227,16 @@ pub(super) fn last_turn_file_content(
         stored_text(&file.before),
         stored_text(&file.after),
     )
+}
+
+fn turn_file_content_kind(change: &crate::AgentTurnFileChange) -> Option<GitReviewFileContentKind> {
+    match (&change.before, &change.after) {
+        (AgentTurnFileContent::Binary, _) | (_, AgentTurnFileContent::Binary) => {
+            Some(GitReviewFileContentKind::Binary)
+        }
+        (AgentTurnFileContent::TooLarge, _) | (_, AgentTurnFileContent::TooLarge) => None,
+        _ => Some(GitReviewFileContentKind::Text),
+    }
 }
 
 fn turn_file_status(change: &crate::AgentTurnFileChange) -> GitReviewFileStatus {
@@ -484,6 +495,7 @@ impl GitReviewService {
                         path,
                         previous_path: None,
                         status: turn_file_status(change),
+                        content_kind: turn_file_content_kind(change),
                         stats: file_stats,
                     });
                 }
