@@ -2,6 +2,12 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import fsPromises from 'node:fs/promises'
+import https from 'node:https'
+import { syncBuiltinESMExports } from 'node:module'
+import { Readable } from 'node:stream'
 import {
   chmod,
   cp,
@@ -18,6 +24,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { downloadPinnedFile } from './artifact-runtime/archive.mjs'
 
 import {
   createManagedNodeDependencyEvidence,
@@ -57,6 +64,48 @@ const presentationSdkPath = join(
   'presentation-sdk.mjs'
 )
 const pdfCliPath = join(repositoryRoot, 'crates', 'core', 'src', 'command', 'pdf_runtime_cli.py')
+
+test('pinned downloads publish every byte even when a single file write is short', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'artifact-download-short-write-'))
+  const destination = join(directory, 'download')
+  t.after(() => fsPromises.rm(directory, { recursive: true, force: true }))
+  const payload = Buffer.from('complete pinned component bytes')
+  const realOpen = fsPromises.open
+  t.mock.method(fsPromises, 'open', async (path, ...args) => {
+    const handle = await realOpen(path, ...args)
+    if (args[0] !== 'wx') return handle
+    return {
+      write: (chunk) => handle.write(chunk.subarray(0, 1)),
+      writeFile: (chunk) => handle.writeFile(chunk),
+      sync: () => handle.sync(),
+      close: () => handle.close()
+    }
+  })
+  t.mock.method(https, 'get', (_url, _options, callback) => {
+    const request = new EventEmitter()
+    request.setTimeout = () => request
+    const response = Readable.from([payload.subarray(0, 10), payload.subarray(10)])
+    response.statusCode = 200
+    response.headers = { 'content-length': String(payload.length) }
+    queueMicrotask(() => callback(response))
+    return request
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+
+  await downloadPinnedFile(
+    {
+      url: 'https://nodejs.org/dist/v22.23.1/fixture.tar.gz',
+      size: payload.length,
+      sha256: createHash('sha256').update(payload).digest('hex')
+    },
+    destination
+  )
+  assert.deepEqual(await readFile(destination), payload)
+})
 
 test('pip console scripts are rewritten as relocatable launchers without build paths', async () => {
   const binDirectory = await mkdtemp(join(tmpdir(), 'mycopilot-python-bin-'))

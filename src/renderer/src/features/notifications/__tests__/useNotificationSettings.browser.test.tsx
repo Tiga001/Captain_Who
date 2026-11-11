@@ -135,4 +135,43 @@ describe('notification settings hook', () => {
     await expect.poll(() => result.settings?.revision).toBe(3)
     await screen.unmount()
   })
+
+  it.each(['refresh', 'save'] as const)(
+    'keeps the latest revision when an older %s response arrives last',
+    async (lateResponse) => {
+      const refreshResponse = deferred<NotificationSettings>()
+      const saveResponse = deferred<NotificationSettings>()
+      client.getNotificationSettings
+        .mockResolvedValueOnce(settings(1, true))
+        .mockReturnValueOnce(refreshResponse.promise)
+      client.updateNotificationSettings.mockReturnValueOnce(saveResponse.promise)
+
+      let result!: NotificationSettingsResult
+      const screen = await render(<SettingsHarness onRender={(value) => (result = value)} />)
+      await expect.poll(() => result.settings?.revision).toBe(1)
+
+      const save = result.update({ enabled: false })
+      const refresh = result.refresh()
+      if (lateResponse === 'refresh') {
+        saveResponse.resolve(settings(3, false))
+        await save
+        await expect.poll(() => result.settings?.revision).toBe(3)
+        refreshResponse.resolve(settings(2, true))
+        await refresh
+      } else {
+        refreshResponse.resolve(settings(3, false))
+        await refresh
+        await expect.poll(() => result.settings?.revision).toBe(3)
+        saveResponse.resolve(settings(2, true))
+        await save
+      }
+
+      await screen.rerender(<SettingsHarness onRender={(value) => (result = value)} />)
+      await expect.poll(() => result.saving).toBe(false)
+      expect(result.settings).toMatchObject({ revision: 3, enabled: false })
+      expect(result.status).toBe('ready')
+      expect(result.error).toBeNull()
+      await screen.unmount()
+    }
+  )
 })

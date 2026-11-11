@@ -216,6 +216,13 @@ impl AgentService {
         &self,
         mut wake: mycopilot_core::ActiveAgentTreeWake,
     ) -> Result<AgentTreeWakeCancellationProgress, AgentServiceError> {
+        // A malformed batch entry must stay an item-level error. The run publication
+        // coordinator requires a real key and must not receive an empty Run identity.
+        if wake.run_id.trim().is_empty() {
+            return Err(AgentServiceError::from(
+                "子 Agent Wake 的 run_id 不能为空。".to_string(),
+            ));
+        }
         for attempt in 0..2 {
             let runtime_interrupt = self.interrupt_agent_wake_run(&wake.run_id);
             if matches!(&runtime_interrupt, Ok(outcome) if outcome.any_effect()) {

@@ -1,6 +1,87 @@
 use super::*;
 
 #[tokio::test]
+async fn streaming_explicit_end_completes_without_waiting_for_http_eof() {
+    for (style, frames) in [
+        (
+            AgentApiStyle::OpenAiCompatible,
+            vec![
+                format!(
+                    "data: {}\n\n",
+                    json!({"choices":[{"delta":{"content":"complete reply"},"finish_reason":"stop"}]})
+                ),
+                // Usage is a separate frame after finish_reason. Finishing at that earlier
+                // boundary would silently lose the provider's accounting receipt.
+                format!(
+                    "data: {}\n\n",
+                    json!({"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}})
+                ),
+                "data: [DONE]\n\n".to_string(),
+            ],
+        ),
+        (
+            AgentApiStyle::AnthropicCompatible,
+            vec![
+                format!(
+                    "event: message_start\ndata: {}\n\n",
+                    json!({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":7,"output_tokens":0}}})
+                ),
+                format!(
+                    "event: content_block_delta\ndata: {}\n\n",
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"complete reply"}})
+                ),
+                format!(
+                    "event: message_delta\ndata: {}\n\n",
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}})
+                ),
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+            ],
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+            for frame in frames {
+                stream.write_all(frame.as_bytes()).await.unwrap();
+            }
+            // The response body remains open until the client has completed or timed out.
+            let _ = release_rx.await;
+            drop(stream);
+        });
+        let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+        request.api_url = format!("http://{address}/v1/chat/completions");
+        request.provider_profile = generic_provider_profile(style);
+        request.provider_protocol = generic_provider_protocol(style, "test-model");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            complete_chat_streaming_once(
+                &request,
+                AgentCancellationToken::new(),
+                LlmResponseValidation::RequireModelAction,
+                Duration::from_millis(250),
+                None,
+                |_| {},
+            ),
+        )
+        .await;
+        let _ = release_tx.send(());
+        server.await.unwrap();
+        let response = result
+            .expect("explicit protocol end must complete before HTTP EOF")
+            .expect("a complete response must not become an idle timeout");
+        assert_eq!(response.content(), "complete reply");
+        let usage = response.usage.expect("final provider usage is retained");
+        assert_eq!(usage.input_tokens, Some(7));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.billable_request_count, Some(1));
+    }
+}
+
+#[tokio::test]
 async fn incomplete_streams_preserve_public_text_without_retry_or_commit() {
     for (style, body, expected_code) in [
         (AgentApiStyle::OpenAiCompatible,

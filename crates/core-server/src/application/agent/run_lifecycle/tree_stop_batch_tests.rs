@@ -5,12 +5,20 @@ mod tree_stop_batch_tests {
 
     #[test]
     fn one_invalid_wake_does_not_prevent_later_runtime_cancellation() {
+        for invalid_run_id in ["", " \t\n"] {
+            assert_invalid_wake_preserves_batch_cancellation(invalid_run_id);
+        }
+    }
+
+    fn assert_invalid_wake_preserves_batch_cancellation(invalid_run_id: &str) {
         let fixture = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("tree-stop-batch.sqlite")).unwrap());
         let service = AgentService::new(storage);
         let later_cancellation = AgentCancellationToken::new();
         service.register_cancellation("run-later", later_cancellation.clone());
+        let unrelated_cancellation = AgentCancellationToken::new();
+        service.register_cancellation("run-unrelated", unrelated_cancellation.clone());
 
         let progress =
             service.cancel_agent_tree_wake_batch(mycopilot_core::AgentTreeWakeCancellationBatch {
@@ -22,7 +30,7 @@ mod tree_stop_batch_tests {
                         agent_id: String::new(),
                         conversation_id: String::new(),
                         wake_id: String::new(),
-                        run_id: String::new(),
+                        run_id: invalid_run_id.to_string(),
                         assistant_message_id: String::new(),
                         claim_token: String::new(),
                         status: mycopilot_core::AgentWakeStatus::Running,
@@ -40,8 +48,10 @@ mod tree_stop_batch_tests {
             });
 
         assert!(later_cancellation.is_cancelled());
+        assert!(!unrelated_cancellation.is_cancelled());
         assert!(progress.affected);
         assert_eq!(progress.errors.len(), 1);
+        assert!(progress.errors[0].contains("run_id"));
     }
 
     #[test]

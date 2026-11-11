@@ -6,7 +6,22 @@ import eslintPluginReactHooks from 'eslint-plugin-react-hooks'
 import eslintPluginReactRefresh from 'eslint-plugin-react-refresh'
 
 export default defineConfig(
-  { ignores: ['**/.cache', '**/node_modules', '**/dist', '**/out', '**/target'] },
+  {
+    ignores: [
+      '**/.cache',
+      '**/node_modules',
+      '**/dist',
+      '**/out',
+      '**/target',
+      // Electron tests bundle dependencies here for workspace-local package resolution.
+      '.mycopilot-playwright-bridge-e2e-*/**',
+      '.mycopilot-browser-surface-fixture-*/**',
+      '.mycopilot-native-popup-fixture-*/**',
+      '.mycopilot-browser-failure-fixture-*/**',
+      // Preserve archived benchmark source snapshots and their recorded hashes.
+      'docs/performance/backend-concurrency/results/**'
+    ]
+  },
   tseslint.configs.recommended,
   eslintPluginReact.configs.flat.recommended,
   eslintPluginReact.configs.flat['jsx-runtime'],

@@ -141,7 +141,6 @@ function SettingsContent({
   if (activePage === 'workflows') {
     return (
       <WorkflowsSettingsPage
-        onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
         onEditorModeChange={onWorkflowEditorModeChange}
         onDirtyChange={onWorkflowDirtyChange}
         onSavingChange={onWorkflowSavingChange}

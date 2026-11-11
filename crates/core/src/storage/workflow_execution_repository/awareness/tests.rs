@@ -436,14 +436,17 @@ fn workflow_awareness_precise_historical_lookup_returns_only_the_owned_letter() 
 
 #[test]
 fn workflow_awareness_historical_index_does_not_deserialize_body_payloads() {
-    let (mut c, receipt) = mailbox_with_every_status();
+    let (c, receipt) = mailbox_with_every_status();
     // The compact index does not need the body schema at all; only an explicit body lookup does.
     c.execute("UPDATE workflow_mail_messages SET message_json=json_set(message_json,'$.content',json('{\"notAString\":true}')) WHERE message_id=?1",[&receipt.messages[6].id]).unwrap();
     let chat = conversation(&c, "b");
     SUMMARY_SQL.with(|statements| statements.borrow_mut().clear());
-    c.trace(Some(record_summary_sql));
+    c.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(record_summary_sql),
+    );
     let result = mailbox_for_run(&c, &chat, "run-b", &MailboxQuery::default()).unwrap();
-    c.trace(None);
+    c.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
     assert_eq!(
         result["history"]["messages"][0]["messageId"],
         receipt.messages[6].id
@@ -692,7 +695,11 @@ fn configuration_is_explicit_scoped_and_distinguishes_defaults_from_next_turn() 
 thread_local! {
     static SUMMARY_SQL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
-fn record_summary_sql(sql: &str) {
+fn record_summary_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+        return;
+    };
+    let sql = statement.expanded_sql().expect("test SQL should expand");
     SUMMARY_SQL.with(|statements| statements.borrow_mut().push(sql.to_owned()));
 }
 
@@ -725,9 +732,12 @@ fn automatic_summary_scales_without_loading_every_members_mail_details() {
     );
     let chat = conversation(&c, "a");
     SUMMARY_SQL.with(|statements| statements.borrow_mut().clear());
-    c.trace(Some(record_summary_sql));
+    c.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(record_summary_sql),
+    );
     let summary = awareness_for_run(&c, &chat, "run-a").unwrap();
-    c.trace(None);
+    c.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
     let statements = SUMMARY_SQL.with(|statements| statements.borrow().clone());
     assert_eq!(summary["totalNodeCount"], 128);
     assert_eq!(summary["nodes"].as_array().unwrap().len(), 16);

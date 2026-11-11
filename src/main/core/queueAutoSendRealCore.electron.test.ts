@@ -322,7 +322,13 @@ describe('Queue auto-send Chromium → production submission/lifecycle/IPC → r
       invocations.filter((entry) => entry.channel === HOST_CHANNELS.agent.startProviderTransition)
     ).toHaveLength(0)
     for (const preflight of preflights) {
-      expect(preflight.result).toMatchObject({ ok: true, value: { decision: 'compatible' } })
+      expect(preflight.input).toMatchObject({ forSend: true })
+      expect(preflight.result).toMatchObject({
+        ok: true,
+        value: { decision: 'ready_for_send', reason: 'same_protocol' }
+      })
+      expect(preflight.result).not.toHaveProperty('value.transitionToken')
+      expect(preflight.result).not.toHaveProperty('value.operationId')
     }
   }, 30000)
 })

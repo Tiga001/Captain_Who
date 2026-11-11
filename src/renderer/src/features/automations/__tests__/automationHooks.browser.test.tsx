@@ -314,6 +314,135 @@ describe('automation hook response ordering', () => {
     await screen.unmount()
   })
 
+  it('does not let task pagination supersede a pending first-page refresh', async () => {
+    const refreshResponse = deferred<AutomationListOutput>()
+    client.listAutomations
+      .mockResolvedValueOnce(listOutput([makeAutomationTask()], { nextCursor: 'old-cursor' }))
+      .mockReturnValueOnce(refreshResponse.promise)
+      .mockResolvedValue(listOutput([], { lastSequence: 2 }))
+
+    let result!: UseAutomationsResult
+    const screen = await render(<AutomationsHarness onRender={(value) => (result = value)} />)
+    await expect.poll(() => result.status).toBe('ready')
+
+    const refresh = result.refresh()
+    await result.loadMore()
+    refreshResponse.resolve(
+      listOutput([makeAutomationTask({ automationId: 'fresh-task' })], { lastSequence: 2 })
+    )
+    await refresh
+    await screen.rerender(<AutomationsHarness onRender={(value) => (result = value)} />)
+
+    await expect.poll(() => result.isRefreshing).toBe(false)
+    expect(client.listAutomations).toHaveBeenCalledTimes(2)
+    expect(result.tasks.map((task) => task.automationId)).toEqual(['fresh-task'])
+    await screen.unmount()
+  })
+
+  it('does not let run pagination supersede a pending first-page refresh', async () => {
+    const initial = {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runs: [makeAutomationRun()],
+      nextCursor: 'old-cursor'
+    } satisfies AutomationRunsListOutput
+    const refreshResponse = deferred<AutomationRunsListOutput>()
+    client.listAutomationRuns
+      .mockResolvedValueOnce(initial)
+      .mockReturnValueOnce(refreshResponse.promise)
+      .mockResolvedValue({ ...initial, runs: [], nextCursor: null })
+
+    let result!: UseAutomationRunsResult
+    const screen = await render(
+      <RunsHarness onRender={(value) => (result = value)} automationId="automation-1" />
+    )
+    await expect.poll(() => result.status).toBe('ready')
+
+    const refresh = result.refresh()
+    await result.loadMore()
+    refreshResponse.resolve({
+      ...initial,
+      runs: [makeAutomationRun({ runId: 'fresh-run', createdAt: 100 })],
+      nextCursor: null
+    })
+    await refresh
+    await screen.rerender(
+      <RunsHarness onRender={(value) => (result = value)} automationId="automation-1" />
+    )
+
+    await expect.poll(() => result.isRefreshing).toBe(false)
+    expect(client.listAutomationRuns).toHaveBeenCalledTimes(2)
+    expect(result.runs.map((run) => run.runId)).toContain('fresh-run')
+    await screen.unmount()
+  })
+
+  it('releases pagination after a failed refresh and blocks duplicate page requests', async () => {
+    const page = deferred<AutomationListOutput>()
+    client.listAutomations
+      .mockResolvedValueOnce(listOutput([makeAutomationTask()], { nextCursor: 'cursor-1' }))
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockReturnValueOnce(page.promise)
+
+    let result!: UseAutomationsResult
+    const screen = await render(<AutomationsHarness onRender={(value) => (result = value)} />)
+    await expect.poll(() => result.status).toBe('ready')
+    await result.refresh()
+    const first = result.loadMore()
+    const duplicate = result.loadMore()
+    expect(client.listAutomations).toHaveBeenCalledTimes(3)
+    page.resolve(listOutput([makeAutomationTask({ automationId: 'page-task' })]))
+    await Promise.all([first, duplicate])
+    await screen.rerender(<AutomationsHarness onRender={(value) => (result = value)} />)
+    expect(result.isLoadingMore).toBe(false)
+    expect(result.error).toBeNull()
+    expect(result.tasks.map((task) => task.automationId)).toContain('page-task')
+    await screen.unmount()
+  })
+
+  it('clears pagination state when changing tasks and ignores the previous task page', async () => {
+    const oldPage = deferred<AutomationRunsListOutput>()
+    const newTask = deferred<AutomationRunsListOutput>()
+    client.listAutomationRuns
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        automationId: 'automation-1',
+        runs: [makeAutomationRun()],
+        nextCursor: 'old-cursor'
+      } satisfies AutomationRunsListOutput)
+      .mockReturnValueOnce(oldPage.promise)
+      .mockReturnValueOnce(newTask.promise)
+
+    let result!: UseAutomationRunsResult
+    const screen = await render(
+      <RunsHarness onRender={(value) => (result = value)} automationId="automation-1" />
+    )
+    await expect.poll(() => result.status).toBe('ready')
+    const pendingPage = result.loadMore()
+    await expect.poll(() => result.isLoadingMore).toBe(true)
+    await screen.rerender(
+      <RunsHarness onRender={(value) => (result = value)} automationId="automation-2" />
+    )
+    expect(result.isLoadingMore).toBe(false)
+    expect(result.nextCursor).toBeNull()
+    expect(result.runs).toEqual([])
+    oldPage.resolve({
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runs: [makeAutomationRun({ runId: 'stale-page-run' })],
+      nextCursor: 'another-old-cursor'
+    })
+    await pendingPage
+    newTask.resolve({
+      schemaVersion: 1,
+      automationId: 'automation-2',
+      runs: [makeAutomationRun({ automationId: 'automation-2', runId: 'new-task-run' })],
+      nextCursor: null
+    })
+    await expect.poll(() => result.status).toBe('ready')
+    expect(result.runs.map((run) => run.runId)).toEqual(['new-task-run'])
+    await screen.unmount()
+  })
+
   it('deduplicates concurrent attention acknowledgements and converges on authority', async () => {
     const unread = attention('attention-1')
     const read = attention('attention-1', 20)

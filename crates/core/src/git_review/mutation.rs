@@ -66,37 +66,75 @@ pub(super) fn ensure_no_external_filter(
     repository: &RepositoryContext,
     file: &SnapshotFile,
 ) -> Result<(), String> {
-    let mut args = vec![
-        "check-attr".to_string(),
-        "-z".to_string(),
-        "filter".to_string(),
-        "--".to_string(),
-        file.path.clone(),
-    ];
-    if let Some(previous_path) = &file.previous_path {
-        args.push(previous_path.clone());
+    let filtered = external_filter_paths(
+        repository,
+        std::iter::once(file.path.as_str()).chain(file.previous_path.as_deref()),
+    )?;
+    if !filtered.is_empty() {
+        return Err(
+            "This file uses a Git filter and cannot be reviewed or changed safely from Review."
+                .into(),
+        );
     }
-    let output = run_git(&repository.root, &args, 64 * 1024)?;
+    Ok(())
+}
+
+pub(super) fn external_filter_paths<'a>(
+    repository: &RepositoryContext,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<HashSet<String>, String> {
+    let mut input = Vec::new();
+    let mut expected = HashSet::new();
+    for path in paths {
+        if !expected.insert(path) {
+            continue;
+        }
+        if path.as_bytes().contains(&0)
+            || input.len().saturating_add(path.len()).saturating_add(1) > 2 * MAX_STATUS_BYTES
+        {
+            return Err("The Git attribute input is too large or invalid.".into());
+        }
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    if input.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let output = run_git_with_input(
+        &repository.root,
+        &[
+            "check-attr".into(),
+            "-z".into(),
+            "--stdin".into(),
+            "filter".into(),
+        ],
+        4 * MAX_STATUS_BYTES,
+        Some(&input),
+    )?;
     if !output.status.success() || output.stdout_truncated {
         return Err(git_failure(
             "Unable to verify the file's Git filter configuration.",
             &output,
         ));
     }
-    let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
-    for entry in fields.chunks(3) {
-        if entry.len() < 3 || entry[0].is_empty() {
-            continue;
+    let invalid = || "Git returned incomplete filter attributes.".to_string();
+    let body = output.stdout.strip_suffix(&[0]).ok_or_else(invalid)?;
+    let fields = body.split(|byte| *byte == 0).collect::<Vec<_>>();
+    if fields.len() != expected.len().saturating_mul(3) {
+        return Err(invalid());
+    }
+    let mut filtered = HashSet::new();
+    for entry in fields.as_chunks::<3>().0 {
+        let path = std::str::from_utf8(entry[0]).map_err(|_| invalid())?;
+        if !expected.remove(path) || entry[1] != b"filter" {
+            return Err(invalid());
         }
         let value = entry[2];
         if value != b"unspecified" && value != b"unset" {
-            return Err(
-                "This file uses a repository-defined Git filter and cannot be changed safely from Review."
-                    .to_string(),
-            );
+            filtered.insert(path.to_string());
         }
     }
-    Ok(())
+    Ok(filtered)
 }
 
 pub(super) fn remove_untracked_file(

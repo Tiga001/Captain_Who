@@ -6,7 +6,11 @@ std::thread_local! {
     static TRACED_STORAGE_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-fn record_storage_sql(sql: &str) {
+fn record_storage_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+        return;
+    };
+    let sql = statement.expanded_sql().expect("test SQL should expand");
     TRACED_STORAGE_SQL.with(|statements| statements.borrow_mut().push(sql.to_string()));
 }
 
@@ -16,21 +20,29 @@ pub(in crate::storage::service::tests) fn trace_storage_selects<T>(
 ) -> (T, Vec<String>) {
     TRACED_STORAGE_SQL.with(|statements| statements.borrow_mut().clear());
     {
-        let mut connection = service.state.connection().unwrap();
-        connection.trace(Some(record_storage_sql));
+        let connection = service.state.connection().unwrap();
+        connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_storage_sql),
+        );
     }
     service
         .state
         .configure_read_connections_for_test(|connection| {
-            connection.trace(Some(record_storage_sql))
+            connection.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_storage_sql),
+            )
         });
     let output = operation();
     service
         .state
-        .configure_read_connections_for_test(|connection| connection.trace(None));
+        .configure_read_connections_for_test(|connection| {
+            connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None)
+        });
     {
-        let mut connection = service.state.connection().unwrap();
-        connection.trace(None);
+        let connection = service.state.connection().unwrap();
+        connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
     }
     let selects = TRACED_STORAGE_SQL.with(|statements| {
         std::mem::take(&mut *statements.borrow_mut())

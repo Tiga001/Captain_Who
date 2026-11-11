@@ -76,6 +76,7 @@ vi.mock('../../browser/useBrowserDownloadCenter', () => ({
 const { BrowserDownloadCenter } = await import('../../browser/BrowserDownloadCenter')
 
 afterEach(() => {
+  vi.useRealTimers()
   perform.mockClear()
   openDirectory.mockClear()
 })
@@ -161,16 +162,19 @@ describe('BrowserDownloadCenter', () => {
       name: 'browser.downloadCenter.openFolder'
     })
 
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     await folderButton.hover()
-    await new Promise((resolve) => window.setTimeout(resolve, 900))
+    await vi.advanceTimersByTimeAsync(999)
     expect(document.querySelector('.mc-tooltip')).toBeNull()
-    await new Promise((resolve) => window.setTimeout(resolve, 150))
+    await vi.advanceTimersByTimeAsync(1)
+    vi.useRealTimers()
     await expect
       .element(screen.getByRole('tooltip'))
       .toHaveTextContent('browser.downloadCenter.openFolder')
 
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     await screen.getByRole('button', { name: 'browser.downloadCenter.moreActions' }).hover()
-    await new Promise((resolve) => window.setTimeout(resolve, 1_050))
+    await vi.advanceTimersByTimeAsync(1_050)
     expect(document.querySelector('.mc-tooltip')).toBeNull()
   })
 })

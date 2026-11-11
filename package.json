@@ -19,7 +19,7 @@
     "lint": "eslint --cache .",
     "lint:rust": "cargo clippy --locked --workspace --all-targets -- -D warnings",
     "test": "pnpm test:test-infrastructure && pnpm test:officecli && pnpm test:office-renderer && pnpm test:mac-signing && pnpm test:dev-electron-icon && pnpm test:storage-reset-dev && pnpm test:artifact-runtime && pnpm test:playwright-packaged-startup && pnpm test:playwright-conformance-report && pnpm test:web && pnpm test:rust",
-    "test:test-infrastructure": "node --test scripts/check-vitest-project-ownership.test.mjs scripts/check-ignored-rust-tests.test.mjs scripts/run-backend-concurrency-baseline.test.mjs",
+    "test:test-infrastructure": "node --test scripts/check-vitest-project-ownership.test.mjs scripts/check-ignored-rust-tests.test.mjs scripts/run-backend-concurrency-baseline.test.mjs scripts/readme-checks.test.mjs",
     "benchmark:backend-concurrency": "node scripts/run-backend-concurrency-baseline.mjs",
     "test:officecli": "node --test scripts/prepare-officecli.test.mjs",
     "test:office-renderer": "node --test scripts/prepare-office-renderer.test.mjs scripts/verify-packaged-office-renderer.test.mjs scripts/prepare-word-pdf-renderer.test.mjs scripts/verify-packaged-word-pdf-renderer.test.mjs",

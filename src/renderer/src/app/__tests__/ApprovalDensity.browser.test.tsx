@@ -591,8 +591,9 @@ describe('Approval density in the real conversation surface', () => {
       expect(bottom.getBoundingClientRect().height).toBe(380)
       expect(messages.getBoundingClientRect().height).toBeGreaterThanOrEqual(64)
       expect(surface.getBoundingClientRect().bottom).toBeLessThanOrEqual(bottomTop)
-      expect(getComputedStyle(composer).paddingLeft).toBe('16px')
-      expect(getComputedStyle(composer).paddingRight).toBe('16px')
+      // Approval placement shares the conversation's current narrow-column gutter.
+      expect(getComputedStyle(composer).paddingLeft).toBe('24px')
+      expect(getComputedStyle(composer).paddingRight).toBe('24px')
       expect(getComputedStyle(composer).overflowY).toBe('auto')
       expect(getComputedStyle(dialog).minHeight).toBe('0px')
       expect(getComputedStyle(dialog).padding).toBe('12px 12px 10px')

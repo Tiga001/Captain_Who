@@ -4,6 +4,17 @@ dist
 target
 pnpm-lock.yaml
 Cargo.lock
+**/.cache/
+.vitest-attachments/
+
+# Root-level generated Electron bundles; keep their TypeScript fixture sources checked.
+/.mycopilot-playwright-bridge-e2e-*/
+/.mycopilot-browser-surface-fixture-*/
+/.mycopilot-native-popup-fixture-*/
+/.mycopilot-browser-failure-fixture-*/
+
+# Archived benchmark evidence includes source snapshots and hash-bound raw output.
+docs/performance/backend-concurrency/results/
 
 # Pinned generated upstream catalog; preserve its reviewed source layout and avoid formatter churn.
 crates/core-server/resources/playwright-upstream-catalog-0.0.79.json

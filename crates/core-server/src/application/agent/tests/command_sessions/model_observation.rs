@@ -1,5 +1,57 @@
 use super::*;
 
+fn observation_gate(name: &str) -> String {
+    format!(
+        "attempt=0; while [ ! -f {name} ]; do \
+         attempt=$((attempt + 1)); [ \"$attempt\" -lt 1000 ] || exit 99; sleep 0.01; done"
+    )
+}
+
+fn observation_command(fixture: &RunningFixture, script: &str) -> String {
+    // Exercise the same script entry as other command-session fixtures: shell control flow
+    // is fixture setup, while the public command boundary receives one executable command.
+    let path = fixture.workspace.path().join("observation-command.sh");
+    std::fs::write(&path, script).unwrap();
+    format!("sh '{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn release_observation_gate(fixture: &RunningFixture, name: &str) {
+    std::fs::write(fixture.workspace.path().join(name), b"").unwrap();
+}
+
+fn wait_for_observation_output(
+    registry: &AgentCommandSessionRegistry,
+    conversation_id: &str,
+    session_id: &str,
+    marker: &str,
+) {
+    let deadline = Instant::now() + TEST_WAIT;
+    loop {
+        let current = registry
+            .get(AgentCommandSessionGetInput {
+                conversation_id: conversation_id.to_string(),
+                session_id: session_id.to_string(),
+                after_sequence: None,
+                max_bytes: None,
+            })
+            .unwrap();
+        let output = current
+            .transcript
+            .chunks
+            .iter()
+            .map(|chunk| chunk.output.as_str())
+            .collect::<String>();
+        if output.contains(marker) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "output {marker:?} was not persisted"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn silent_long_command_returns_running_and_emits_started() {
     let fixture = RunningFixture::new("silent-started");
@@ -38,8 +90,27 @@ fn initial_running_output_cut_is_durable_and_replayable_before_handoff() {
         "initial-running-receipt",
         Duration::from_millis(250),
     );
-    let command = "printf initial-receipt-marker; sleep 0.50; printf later-marker; sleep 5";
-    let (snapshot, tool_result) = fixture.start(command, None);
+    let registry = fixture.registry.clone();
+    let conversation_id = fixture.conversation_id.clone();
+    fixture
+        .registry
+        .set_before_file_effect_install_hook(Arc::new(move |session_id| {
+            wait_for_observation_output(
+                &registry,
+                &conversation_id,
+                session_id,
+                "initial-receipt-marker",
+            );
+        }));
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "printf initial-receipt-marker; {}; printf later-marker; {}",
+            observation_gate("release-later"),
+            observation_gate("finish-command"),
+        ),
+    );
+    let (snapshot, tool_result) = fixture.start(&command, None);
     let result = tool_result.result.as_ref().expect("running ToolResult");
     assert!(result["output"]
         .as_str()
@@ -80,6 +151,7 @@ fn initial_running_output_cut_is_durable_and_replayable_before_handoff() {
         result["outputTruncated"].as_bool().unwrap()
     );
 
+    release_observation_gate(&fixture, "release-later");
     let deadline = Instant::now() + TEST_WAIT;
     loop {
         let host_view = fixture
@@ -121,16 +193,25 @@ fn initial_running_output_cut_is_durable_and_replayable_before_handoff() {
 #[test]
 fn model_poll_is_incremental_until_terminal() {
     let fixture = RunningFixture::new("incremental-poll");
-    let command = "sleep 0.10; printf first; sleep 0.40; printf second";
-    let (snapshot, initial_result) = fixture.start(command, None);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; printf first; {}; printf second",
+            observation_gate("release-first"),
+            observation_gate("release-second"),
+        ),
+    );
+    let (snapshot, initial_result) = fixture.start(&command, None);
     assert_eq!(initial_result.result.as_ref().unwrap()["output"], "");
-    fixture.adopt(&snapshot, command);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-first");
 
     let first = poll_until(&fixture, &snapshot.session_id, |output| {
         output.output.contains("first")
     });
     assert!(!first.output.contains("second"));
 
+    release_observation_gate(&fixture, "release-second");
     let second = poll_until(&fixture, &snapshot.session_id, |output| {
         output.output.contains("second")
     });
@@ -149,11 +230,24 @@ fn model_poll_is_incremental_until_terminal() {
 #[test]
 fn model_wait_ignores_noisy_output_until_its_deadline() {
     let fixture = RunningFixture::new("quiet-noisy-wait");
-    let command = "printf 'tick-0\\n'; sleep 0.08; printf 'tick-1\\n'; sleep 0.08; \
-                   printf 'tick-2\\n'; sleep 0.08; printf 'tick-3\\n'; sleep 0.08; \
-                   printf 'tick-4\\n'; sleep 0.40";
-    let (snapshot, _) = fixture.start(command, None);
-    fixture.adopt(&snapshot, command);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; attempt=0; while [ ! -f finish-command ]; do \
+         attempt=$((attempt + 1)); [ \"$attempt\" -lt 1000 ] || exit 99; \
+         printf 'tick-\\n'; sleep 0.02; done",
+            observation_gate("release-output"),
+        ),
+    );
+    let (snapshot, _) = fixture.start(&command, None);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-output");
+    wait_for_observation_output(
+        &fixture.registry,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+        "tick-",
+    );
 
     let started = Instant::now();
     let output = fixture.poll(&snapshot.session_id, Duration::from_millis(300));
@@ -165,6 +259,7 @@ fn model_wait_ignores_noisy_output_until_its_deadline() {
     );
     assert_eq!(output.status, AgentCommandSessionStatus::Running);
     assert!(output.output.contains("tick-"));
+    release_observation_gate(&fixture, "finish-command");
     wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,
@@ -175,9 +270,23 @@ fn model_wait_ignores_noisy_output_until_its_deadline() {
 #[test]
 fn cancelling_model_observation_does_not_terminate_handed_off_process() {
     let fixture = RunningFixture::new("cancel-observation-keeps-process");
-    let command = "sleep 0.05; printf before; sleep 0.80; printf after";
-    let (snapshot, _) = fixture.start(command, None);
-    fixture.adopt(&snapshot, command);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; printf before; {}; printf after",
+            observation_gate("release-before"),
+            observation_gate("release-after"),
+        ),
+    );
+    let (snapshot, _) = fixture.start(&command, None);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-before");
+    wait_for_observation_output(
+        &fixture.registry,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+        "before",
+    );
     let cursor_before = fixture
         .storage
         .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
@@ -245,6 +354,7 @@ fn cancelling_model_observation_does_not_terminate_handed_off_process() {
         .unwrap()
         .is_none());
 
+    release_observation_gate(&fixture, "release-after");
     let terminal = wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,
@@ -463,9 +573,17 @@ fn queued_guidance_releases_a_noisy_running_wait_without_stopping_process() {
 #[test]
 fn concurrent_model_polls_share_one_serialized_durable_cursor() {
     let fixture = RunningFixture::new("concurrent-model-poll");
-    let command = "sleep 0.08; printf serialized-marker; sleep 0.40";
-    let (snapshot, _) = fixture.start(command, None);
-    fixture.adopt(&snapshot, command);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; printf serialized-marker; {}",
+            observation_gate("release-output"),
+            observation_gate("finish-command"),
+        ),
+    );
+    let (snapshot, _) = fixture.start(&command, None);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-output");
 
     let deadline = Instant::now() + TEST_WAIT;
     loop {
@@ -533,6 +651,7 @@ fn concurrent_model_polls_share_one_serialized_durable_cursor() {
         1,
         "concurrent polls must not return the same durable output twice"
     );
+    release_observation_gate(&fixture, "finish-command");
     wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,
@@ -543,10 +662,17 @@ fn concurrent_model_polls_share_one_serialized_durable_cursor() {
 #[test]
 fn concurrent_terminal_polls_share_one_serialized_durable_cursor() {
     let fixture = RunningFixture::new("concurrent-terminal-poll");
-    let command = "sleep 0.08; printf terminal-serialized-marker";
-    let (snapshot, initial_result) = fixture.start(command, None);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; printf terminal-serialized-marker",
+            observation_gate("release-output"),
+        ),
+    );
+    let (snapshot, initial_result) = fixture.start(&command, None);
     assert_eq!(initial_result.result.as_ref().unwrap()["output"], "");
-    fixture.adopt(&snapshot, command);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-output");
     let terminal = wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,
@@ -608,10 +734,17 @@ fn concurrent_terminal_polls_share_one_serialized_durable_cursor() {
 #[test]
 fn retried_tool_call_replays_its_committed_cut_after_registry_restart() {
     let fixture = RunningFixture::new("poll-receipt-restart");
-    let command = "sleep 0.08; printf crash-safe-marker";
-    let (snapshot, initial_result) = fixture.start(command, None);
+    let command = observation_command(
+        &fixture,
+        &format!(
+            "{}; printf crash-safe-marker",
+            observation_gate("release-output"),
+        ),
+    );
+    let (snapshot, initial_result) = fixture.start(&command, None);
     assert_eq!(initial_result.result.as_ref().unwrap()["output"], "");
-    fixture.adopt(&snapshot, command);
+    fixture.adopt(&snapshot, &command);
+    release_observation_gate(&fixture, "release-output");
     wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,

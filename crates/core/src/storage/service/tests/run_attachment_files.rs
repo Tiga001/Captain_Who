@@ -25,7 +25,7 @@ fn save_read_turn(service: &StorageService, mut record: ChatConversationRecord) 
             &crate::ConversationTurnTrace {
                 schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
                 run_id: format!("{id}-run"),
-                conversation_id: id.into(),
+                conversation_id: id,
                 assistant_message_id: assistant_id,
                 terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
                 terminal_error: None,

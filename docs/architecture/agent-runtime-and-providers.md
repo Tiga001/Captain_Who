@@ -240,6 +240,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 
 - 普通聊天的 LLM transport 每个逻辑请求最多三次尝试，并按 rate limit、overload、网络/流式错误使用有上限的退避和总睡眠预算。[下一条用户消息预测](../subsystems/prompt-prediction.md)走独立的单次采样，不沿用聊天重试，也不进入 Tool 执行循环。
 - 流式请求同时受请求超时和 inactivity timeout 约束。已收到不完整 Tool arguments 时，只有明确判定为安全、可修复的 Provider 错误才可重试。
+- 收到 OpenAI Chat Completions 的 `[DONE]` 或 Anthropic 的 `message_stop` 后立即完成协议解析，不等待 HTTP EOF；单独的 `finish_reason` 不结束读取，以保留随后到达的 Usage 帧。完整回复不能因代理保持连接而再次触发 inactivity timeout。
 - 多次网络尝试的 Usage 会合并为同一逻辑请求观测，`billableRequestCount` 保留真实计费尝试数。
 - 取消令牌贯穿模型、压缩和 Tool 执行。只读且无外部承诺的 Tool 可 interrupt；可能跨过外部副作用或持久提交边界的 Tool 必须返回 authoritative settlement。
 - 已发送但无法确认 Provider/Core Server 是否执行成功的动作必须报告不确定终态，禁止自动重放。

@@ -1047,6 +1047,209 @@ fn restores_tracked_and_removes_untracked_files() {
 
 #[cfg(unix)]
 #[test]
+fn tracked_review_reads_never_execute_clean_or_process_filters() {
+    for (filter_kind, filtered) in [("clean", true), ("process", true), ("clean", false)] {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        let helpers = TempDir::new().unwrap();
+        let marker = helpers.path().join("filter-ran");
+        let helper = helpers.path().join("filter.sh");
+        fs::write(
+            &helper,
+            format!("#!/bin/sh\nprintf invoked > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        fs::write(repo.path().join("tracked.txt"), "before\n").unwrap();
+        fs::write(repo.path().join("safe.md"), "safe before\n").unwrap();
+        if filtered {
+            fs::write(
+                repo.path().join(".gitattributes"),
+                "tracked.txt filter=Audit.Driver\n",
+            )
+            .unwrap();
+        }
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "seed"]);
+        fs::write(repo.path().join("tracked.txt"), "after\nsecond\nthird\n").unwrap();
+        fs::write(repo.path().join("safe.md"), "safe after\n").unwrap();
+        // Includes are part of the effective configuration, just like global LFS defaults.
+        let config = repo.path().join(".git/filter-config");
+        git(
+            repo.path(),
+            &[
+                "config",
+                "--file",
+                config.to_str().unwrap(),
+                &format!("filter.Audit.Driver.{filter_kind}"),
+                &format!("sh '{}'", helper.display()),
+            ],
+        );
+        git(
+            repo.path(),
+            &[
+                "config",
+                "--file",
+                config.to_str().unwrap(),
+                "filter.Audit.Driver.required",
+                "true",
+            ],
+        );
+        git(
+            repo.path(),
+            &["config", "include.path", config.to_str().unwrap()],
+        );
+
+        let status = run_git(
+            repo.path(),
+            &["status".into(), "--porcelain=v1".into()],
+            MAX_STATUS_BYTES,
+        )
+        .unwrap();
+        assert!(status.status.success());
+        assert!(!marker.exists(), "status invoked a {filter_kind} filter");
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewTarget::Unstaged)
+            .unwrap();
+        assert!(!marker.exists(), "summary invoked a {filter_kind} filter");
+        let tracked = summary
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .unwrap();
+        let diff = service.review_file_diff(&summary.snapshot_id, &tracked.id);
+        let content = service.review_file_content(&summary.snapshot_id, &tracked.id);
+        if filtered {
+            assert!(diff.unwrap_err().contains("Git filter"));
+            assert!(content.unwrap_err().contains("Git filter"));
+            assert!(tracked.stats.is_none());
+            assert!(!summary.stats.line_counts_complete);
+            assert_eq!((summary.stats.additions, summary.stats.deletions), (1, 1));
+            assert!(service
+                .mutate_review_file(
+                    &summary.snapshot_id,
+                    &tracked.id,
+                    GitReviewFileMutationAction::Stage
+                )
+                .is_err());
+        } else {
+            assert_eq!(diff.unwrap().status, GitReviewFileDiffStatus::Ready);
+            assert_eq!(
+                content.unwrap().after_text.as_deref(),
+                Some("after\nsecond\nthird\n")
+            );
+            assert!(summary.stats.line_counts_complete);
+            assert_eq!((summary.stats.additions, summary.stats.deletions), (4, 2));
+        }
+        let safe = summary
+            .files
+            .iter()
+            .find(|file| file.path == "safe.md")
+            .unwrap();
+        let safe_diff = service
+            .review_file_diff(&summary.snapshot_id, &safe.id)
+            .unwrap();
+        assert!(safe_diff.patch.unwrap().contains("+safe after"));
+        assert!(!marker.exists(), "review invoked a {filter_kind} filter");
+    }
+}
+
+#[test]
+fn filter_attribute_batches_larger_than_a_pipe_buffer_complete() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let repository = resolve_repository(repo.path()).unwrap();
+    let paths = (0..1_024)
+        .map(|index| format!("directory/{index}-{}.txt", "x".repeat(240)))
+        .collect::<Vec<_>>();
+    let filtered = external_filter_paths(&repository, paths.iter().map(String::as_str)).unwrap();
+    assert!(filtered.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn inline_submodule_configuration_cannot_execute_nested_filters() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let nested = repo.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+    git(&nested, &["config", "user.name", "Review Test"]);
+    git(&nested, &["config", "user.email", "review@example.invalid"]);
+    fs::write(nested.join("tracked.txt"), "before\n").unwrap();
+    fs::write(
+        nested.join(".gitattributes"),
+        "tracked.txt filter=nested-only\n",
+    )
+    .unwrap();
+    git(&nested, &["add", "."]);
+    git(&nested, &["commit", "--quiet", "-m", "nested"]);
+    let head = git_stdout(&nested, &["rev-parse", "HEAD"]);
+    git(
+        repo.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000",
+            &head,
+            "nested",
+        ],
+    );
+    git(repo.path(), &["commit", "--quiet", "-m", "gitlink"]);
+
+    let helpers = TempDir::new().unwrap();
+    let marker = helpers.path().join("nested-filter-ran");
+    let helper = helpers.path().join("filter.sh");
+    fs::write(
+        &helper,
+        format!("printf invoked > '{}'\ncat\n", marker.display()),
+    )
+    .unwrap();
+    git(
+        &nested,
+        &[
+            "config",
+            "filter.nested-only.clean",
+            &format!("sh '{}'", helper.display()),
+        ],
+    );
+    git(repo.path(), &["config", "diff.submodule", "diff"]);
+    fs::write(nested.join("tracked.txt"), "after\n").unwrap();
+
+    let status = run_git(
+        repo.path(),
+        &["status".into(), "--porcelain=v1".into()],
+        MAX_STATUS_BYTES,
+    )
+    .unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8(status.stdout).unwrap().contains("nested"));
+    assert!(!marker.exists());
+    let output = run_git(
+        repo.path(),
+        &[
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--".into(),
+            "nested".into(),
+        ],
+        MAX_DIFF_BYTES,
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert!(!marker.exists());
+    let patch = String::from_utf8(output.stdout).unwrap();
+    assert!(patch.contains("Subproject commit"));
+    assert!(!patch.contains("tracked.txt"));
+}
+
+#[cfg(unix)]
+#[test]
 fn repository_filters_and_hooks_are_not_executed_by_stage() {
     use std::os::unix::fs::PermissionsExt;
 

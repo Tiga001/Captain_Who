@@ -362,9 +362,10 @@ export function ChatComposer({
     skillCatalogState.status === 'ready' && skillCatalogState.projectId === selectedProjectId
       ? skillCatalogState.output
       : undefined
-  const skillCatalogDescriptors = skillCatalog
-    ? filterSkillDescriptors(skillCatalog.skills, '')
-    : []
+  const skillCatalogDescriptors = useMemo(
+    () => (skillCatalog ? filterSkillDescriptors(skillCatalog.skills, '') : []),
+    [skillCatalog]
+  )
   const addMenuSkills = useMemo<ComposerAddMenuSkill[]>(() => {
     if (!skillCatalog || isGenerating) return []
     const selectedIds = new Set(draft.skills.map((selection) => selection.id))

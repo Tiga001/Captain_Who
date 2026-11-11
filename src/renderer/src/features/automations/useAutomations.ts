@@ -143,6 +143,7 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
   const [mutationError, setMutationError] = useState<AutomationErrorDetails | null>(null)
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
+  const activeReadRef = useRef<'refresh' | 'page' | null>(null)
   const stateRef = useRef(state)
   const refreshRef = useRef<() => Promise<AutomationListOutput | null>>(async () => null)
   const createInFlightRef = useRef<PendingCreate | null>(null)
@@ -155,6 +156,7 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
   const refresh = useCallback(async (): Promise<AutomationListOutput | null> => {
     if (!enabled) return null
     const request = ++requestRef.current
+    activeReadRef.current = 'refresh'
     setState((current) => ({
       ...current,
       error: null,
@@ -202,6 +204,8 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
         status: current.tasks.length > 0 ? 'ready' : 'error'
       }))
       return null
+    } finally {
+      if (request === requestRef.current) activeReadRef.current = null
     }
   }, [enabled, filter, limit, query])
 
@@ -216,6 +220,7 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
       return () => {
         mountedRef.current = false
         requestRef.current += 1
+        activeReadRef.current = null
       }
     }
     const debounce = setTimeout(() => void refresh(), query.trim() ? 180 : 0)
@@ -230,6 +235,7 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
     return () => {
       mountedRef.current = false
       requestRef.current += 1
+      activeReadRef.current = null
       clearTimeout(debounce)
       unsubscribe()
     }
@@ -237,8 +243,11 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
 
   const loadMore = useCallback(async (): Promise<void> => {
     const cursor = stateRef.current.nextCursor
-    if (!enabled || !cursor || stateRef.current.isLoadingMore) return
+    // A page belongs to the current first-page snapshot. It must never invalidate a
+    // refresh (or duplicate another page) before React commits the loading state.
+    if (!enabled || !cursor || activeReadRef.current) return
     const request = ++requestRef.current
+    activeReadRef.current = 'page'
     setState((current) => ({ ...current, isLoadingMore: true }))
     try {
       const output = await listAutomations({
@@ -277,6 +286,8 @@ export function useAutomations(options: UseAutomationsOptions = {}): UseAutomati
         error: getAutomationErrorDetails(error),
         isLoadingMore: false
       }))
+    } finally {
+      if (request === requestRef.current) activeReadRef.current = null
     }
   }, [enabled, filter, limit, query])
 

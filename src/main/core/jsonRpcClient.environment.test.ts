@@ -296,6 +296,111 @@ describe('CoreJsonRpcClient application data root', () => {
     client.stop()
   })
 
+  it.each([
+    null,
+    true,
+    1,
+    'unexpected output',
+    [],
+    {},
+    { jsonrpc: '1.0', id: 1, result: 'wrong protocol' },
+    { jsonrpc: '2.0', id: 1 },
+    { jsonrpc: '2.0', id: 1, result: 'ambiguous', error: { code: -1, message: 'error' } },
+    { jsonrpc: '2.0', id: 1, error: null },
+    { jsonrpc: '2.0', id: 1, error: { code: 'invalid', message: 'error' } },
+    { jsonrpc: '2.0', id: null, error: null },
+    { jsonrpc: '2.0', method: 1 },
+    { jsonrpc: '2.0', method: 'agent.event', id: 1, result: 'not a notification' }
+  ])(
+    'ignores a malformed JSON-RPC envelope without crashing or settling another request %#',
+    async (frame) => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'invalid-envelope') })
+      try {
+        const response = client.request('core.ping')
+        const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+        expect(() => child.stdout.write(`${JSON.stringify(frame)}\n`)).not.toThrow()
+        child.stdout.write('{"jsonrpc":"2.0","id":1,"result":{"alive":true}}\n')
+        await expect(response).resolves.toEqual({ alive: true })
+      } finally {
+        client.stop()
+        log.mockRestore()
+      }
+    }
+  )
+
+  it('logs malformed JSON without copying the response body into diagnostics', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'invalid-json') })
+    try {
+      const response = client.request('core.ping')
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      child.stdout.write('SECRET_RESPONSE_VALUE not json\n')
+      child.stdout.write('{"jsonrpc":"2.0","id":1,"result":true}\n')
+      await expect(response).resolves.toBe(true)
+      expect(log.mock.calls.flat().map(String).join(' ')).not.toContain('SECRET_RESPONSE_VALUE')
+    } finally {
+      client.stop()
+      log.mockRestore()
+    }
+  })
+
+  it('isolates a failing notification subscriber and keeps processing later frames', async () => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const client = new CoreJsonRpcClient({
+      appDataRoot: resolve('fixtures', 'notification-failure')
+    })
+    const receive = vi.fn()
+    client.onNotification('agent.workflows.runtime.changed', () => {
+      throw new Error('SECRET_CALLBACK_PAYLOAD')
+    })
+    client.onNotification('agent.workflows.runtime.changed', receive)
+    try {
+      const response = client.request('core.ping')
+      void response.catch(() => undefined)
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      expect(() =>
+        child.stdout.write(
+          '{"jsonrpc":"2.0","method":"agent.workflows.runtime.changed","params":{"revision":1}}\n'
+        )
+      ).not.toThrow()
+      expect(receive).toHaveBeenCalledExactlyOnceWith({ revision: 1 })
+      child.stdout.write('{"jsonrpc":"2.0","id":1,"result":true}\n')
+      await expect(response).resolves.toBe(true)
+      expect(log.mock.calls.flat().map(String).join(' ')).not.toContain('SECRET_CALLBACK_PAYLOAD')
+    } finally {
+      client.stop()
+      log.mockRestore()
+    }
+  })
+
+  it('does not retain requests that fail JSON serialization', async () => {
+    const original = process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS
+    process.env.CAPTAIN_PERFORMANCE_DIAGNOSTICS = '1'
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const client = new CoreJsonRpcClient({
+      appDataRoot: resolve('fixtures', 'serialization-failure')
+    })
+    try {
+      const circular: { self?: unknown } = {}
+      circular.self = circular
+      await expect(client.request('core.ping', circular)).rejects.toThrow()
+      const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+      child.stdin.resume()
+      const response = client.request('core.ping')
+      child.stdout.write('{"jsonrpc":"2.0","id":2,"result":true}\n')
+      await expect(response).resolves.toBe(true)
+      client.stop()
+      const summary = log.mock.calls.find(([prefix]) => prefix === '[core-performance]')?.[1]
+      expect(summary.pendingPeak).toBe(1)
+      expect(summary.outcomes).not.toHaveProperty('transport_failed:core.ping')
+    } finally {
+      client.stop()
+      log.mockRestore()
+      restoreEnvironmentVariable('CAPTAIN_PERFORMANCE_DIAGNOSTICS', original)
+    }
+  })
+
   it('can send the graceful shutdown RPC only to the already-running child', async () => {
     const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'graceful-shutdown') })
     client.start()

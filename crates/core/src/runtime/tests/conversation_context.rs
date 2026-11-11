@@ -46,10 +46,17 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
         preview.cost_breakdown.tool_schema_tokens,
         costs.tool_schema_tokens
     );
-    // September 2026's stable-tool, no-custom-instructions baseline, raised by the
-    // workspace.instructions convention semantics (2026-09-16). This is the local estimator, not
-    // provider billing: preserve the bound without freezing exact wording.
-    assert!(costs.system_tokens < 16_100, "{costs:?}");
+    // Preserve September 2026's stable-tool, no-custom-instructions baseline, including
+    // workspace.instructions (2026-09-16). The permanent collaboration-scope boundary added by
+    // c48112be (2026-10-10) adds at most 340 local-estimator units, including its separator.
+    // prompts::tests bounds that section independently; this is not provider billing.
+    const PRE_COLLABORATION_SCOPE_SYSTEM_BUDGET: u64 = 16_100;
+    const COLLABORATION_SCOPE_SYSTEM_ALLOWANCE: u64 = 340;
+    assert!(
+        costs.system_tokens
+            < PRE_COLLABORATION_SCOPE_SYSTEM_BUDGET + COLLABORATION_SCOPE_SYSTEM_ALLOWANCE,
+        "{costs:?}"
+    );
     assert!(costs.tool_schema_tokens < 11_641, "{costs:?}");
     eprintln!(
         "base contract local estimate: system={}, tools={}, fixed={}",

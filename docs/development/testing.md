@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-11-04
+last_verified: 2026-11-11
 ---
 
 # 测试策略与矩阵
@@ -45,7 +45,7 @@ pnpm check
 
 `pnpm test` 当前包含：
 
-- 测试布局 checker 与后端并发基准收集器自测；
+- 测试布局 checker、后端并发基准收集器与 README 结构/链接校验器自测；
 - OfficeCLI prepare 脚本测试；
 - Office renderer 与 Word/PDF renderer prepare/package verifier 测试；
 - Core Server release path-remap、macOS signing/frozen Mach-O/privacy/package verifier 的 JavaScript 逻辑测试；
@@ -53,6 +53,10 @@ pnpm check
 - packaged Playwright startup verifier 与 conformance report 的确定性脚本测试；
 - `pnpm test:web`；
 - `cargo test --locked --workspace`。
+
+Prettier 与 ESLint 排除本地 `.cache/`；Prettier 另排除 `.vitest-attachments/`。两者都排除 `docs/performance/backend-concurrency/results/` 中的历史性能证据：这些原始输出和源码快照由归档哈希绑定，不能用当前格式化规则重写。当前源码、性能报告正文和协议 fixture 仍参与检查。
+
+部分 Electron 测试为从工作区解析锁定依赖，在仓库根目录生成 `.mycopilot-playwright-bridge-e2e-*`、`.mycopilot-browser-surface-fixture-*`、`.mycopilot-native-popup-fixture-*` 和 `.mycopilot-browser-failure-fixture-*` 临时目录，并在 `finally` 中清理。这四类目录中的 bundle 包含生成代码及依赖副本，Git、Prettier 与 ESLint 均按根目录前缀排除，避免静态检查与 E2E 并行时扫描这些产物；`src/main/browser/fixtures/` 中的原始 TypeScript 和对应测试仍参与检查。
 
 这是一条覆盖广的本地门禁，但不是完整 release gate。
 
@@ -112,7 +116,7 @@ cargo test --locked --workspace
 | 命令                            | 覆盖                                                                        |
 | ------------------------------- | --------------------------------------------------------------------------- |
 | `pnpm check:test-layout`        | Vitest project 唯一归属与 Rust ignored-test registry                        |
-| `pnpm test:test-infrastructure` | 两个测试布局 checker 与并发基准参数、原始结果完整性校验的 Node 自测         |
+| `pnpm test:test-infrastructure` | 测试布局、并发基准与 README 结构/链接校验器的 Node 自测                     |
 | `pnpm test:officecli`           | manifest、下载边界、hash、receipt、原子发布                                 |
 | `pnpm test:office-renderer`     | Chromium/LibreOffice prepare 与 packaged verifier                           |
 | `pnpm test:artifact-runtime`    | runtime 构建、supply-chain evidence、PPTX notes/SDK                         |

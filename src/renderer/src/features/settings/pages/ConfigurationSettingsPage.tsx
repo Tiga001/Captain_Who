@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
@@ -43,36 +43,55 @@ export function ConfigurationSettingsPage({
   } = useModelSettings()
   const [view, setView] = useState<ConfigurationView>('settings')
   const [editingModel, setEditingModel] = useState<ModelConfig | undefined>()
+  const editorSessionRef = useRef(0)
+  const navigateToView = (nextView: ConfigurationView) => {
+    editorSessionRef.current += 1
+    setView(nextView)
+  }
+  const navigateToSettingsRoot = () => {
+    editorSessionRef.current += 1
+    onNavigateSettingsRoot()
+  }
+  useEffect(
+    () => () => {
+      editorSessionRef.current += 1
+    },
+    []
+  )
 
   useSettingsPageNavigation('configuration', (target) => {
     if (target.id === 'configuration.models') {
-      setView('manager')
+      navigateToView('manager')
     } else if (target.view?.startsWith('model')) {
       // Search never chooses or creates a model on the user's behalf.
-      if (view !== 'editModel' && view !== 'createModel') setView('manager')
+      if (view !== 'editModel' && view !== 'createModel') navigateToView('manager')
     } else {
-      setView('settings')
+      navigateToView('settings')
     }
   })
 
   const openCreateModel = () => {
     setEditingModel(undefined)
-    setView('createModel')
+    navigateToView('createModel')
   }
 
   const openEditModel = (model: ModelConfig) => {
     setEditingModel(model)
-    setView('editModel')
+    navigateToView('editModel')
   }
 
   const saveModel = async (values: ModelFormValues) => {
+    const editorSession = editorSessionRef.current
     const savedModel = editingModel
       ? modelConfigFromForm(values, editingModel)
       : modelConfigFromForm(values)
 
     await upsertModel(savedModel, { validationDialog: true })
+    // Saving remains valid after navigation, but its receipt must not close a newer
+    // draft, including a new editing session for the same model.
+    if (editorSessionRef.current !== editorSession) return
     setEditingModel(undefined)
-    setView('manager')
+    navigateToView('manager')
   }
 
   if (view === 'manager') {
@@ -84,19 +103,19 @@ export function ConfigurationSettingsPage({
             {
               id: 'settings',
               label: t('settings.breadcrumb.root'),
-              onSelect: onNavigateSettingsRoot
+              onSelect: navigateToSettingsRoot
             },
             {
               id: 'configuration',
               label: t('settings.page.configuration'),
-              onSelect: () => setView('settings')
+              onSelect: () => navigateToView('settings')
             },
             { id: 'models', label: t('configuration.modelSettings') }
           ]}
         />
         <ModelManager
           models={models}
-          onBack={() => setView('settings')}
+          onBack={() => navigateToView('settings')}
           onCreate={openCreateModel}
           onDelete={deleteModel}
           onEdit={openEditModel}
@@ -114,17 +133,17 @@ export function ConfigurationSettingsPage({
             {
               id: 'settings',
               label: t('settings.breadcrumb.root'),
-              onSelect: onNavigateSettingsRoot
+              onSelect: navigateToSettingsRoot
             },
             {
               id: 'configuration',
               label: t('settings.page.configuration'),
-              onSelect: () => setView('settings')
+              onSelect: () => navigateToView('settings')
             },
             {
               id: 'models',
               label: t('configuration.modelSettings'),
-              onSelect: () => setView('manager')
+              onSelect: () => navigateToView('manager')
             },
             {
               id: view,
@@ -139,7 +158,7 @@ export function ConfigurationSettingsPage({
           providerProfileDescriptors={providerProfileDescriptors}
           providerVendorDescriptors={providerVendorDescriptors}
           resolveProviderVendorModelPolicy={resolveProviderVendorModelPolicy}
-          onCancel={() => setView('manager')}
+          onCancel={() => navigateToView('manager')}
           onSave={saveModel}
         />
       </>
@@ -159,7 +178,7 @@ export function ConfigurationSettingsPage({
                 models={models}
                 onApiTokenCommit={updateApiToken}
                 onApiUrlChange={setApiUrl}
-                onManageModels={() => setView('manager')}
+                onManageModels={() => navigateToView('manager')}
                 onToggleModel={toggleModel}
               />
             )

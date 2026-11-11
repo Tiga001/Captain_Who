@@ -156,9 +156,7 @@ impl ProviderAdapter for ZhipuAdapter {
         profile: &ProviderProfileConfig,
     ) -> AgentResult<ProviderStreamState> {
         let _ = reasoning_effort(profile)?;
-        Ok(ProviderStreamState::Zhipu(Box::new(
-            ZhipuStreamAccumulator::default(),
-        )))
+        Ok(ProviderStreamState::Zhipu(Box::default()))
     }
 
     fn consume_streaming_event(

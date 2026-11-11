@@ -62,7 +62,6 @@ export function WorkflowSettingsSection({
   onDirtyChange,
   onSavingChange
 }: {
-  onNavigateSettingsRoot?: () => void
   onEditorModeChange?: (editing: boolean) => void
   onDirtyChange?: (dirty: boolean) => void
   onSavingChange?: (saving: boolean) => void

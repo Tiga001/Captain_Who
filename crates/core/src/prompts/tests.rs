@@ -223,11 +223,30 @@ fn minimal_profile_keeps_system_permission_and_skill_invariants_for_both_roles()
 
 #[test]
 fn collaboration_scope_remains_without_subagent_tools_in_both_profiles_and_roles() {
+    let budget = crate::context::ContextTextBudget::heuristic_default();
     let organization_tools = [
         tool_definition("organization_send"),
         tool_definition("organization_get_state"),
     ];
-    for profile in [AgentContextProfile::Full, AgentContextProfile::Minimal] {
+    for (profile, scope_section, scope_allowance) in [
+        (
+            AgentContextProfile::Full,
+            collaboration_scope_section(),
+            340,
+        ),
+        (
+            AgentContextProfile::Minimal,
+            minimal_collaboration_scope_section(),
+            192,
+        ),
+    ] {
+        // c48112be's permanent capability boundary is the only extra allowance in the runtime
+        // wording budgets. Keep its cost bounded separately, including the join separator.
+        let scope_tokens = budget.estimate(&format!("{scope_section}\n\n"));
+        assert!(
+            scope_tokens <= scope_allowance,
+            "{profile:?} collaboration scope exceeded its fixed allowance: {scope_tokens} > {scope_allowance}"
+        );
         for identity in [None, Some(collaboration_identity())] {
             for tools in [&[][..], organization_tools.as_slice()] {
                 let prompt = build_system_prompt_with_collaboration(

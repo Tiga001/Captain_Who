@@ -64,9 +64,7 @@
       "createdAt": 6
     }
   ],
-  "pausedConversationIds": [
-    "fixture-b"
-  ],
+  "pausedConversationIds": ["fixture-b"],
   "inputRuns": [],
   "summary": {
     "pendingByNode": [

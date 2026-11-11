@@ -1611,7 +1611,7 @@ fn usage_output(status: AgentRunStatus, usage: AgentUsage) -> AgentChatOutput {
 }
 
 #[test]
-fn deleting_project_cancels_runs_and_discards_usage_contexts() {
+fn deleting_project_clears_usage_only_after_cancelled_run_retires() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new_authorized_for_test(storage);
@@ -1634,9 +1634,20 @@ fn deleting_project_cancels_runs_and_discards_usage_contexts() {
         },
     );
 
+    let error = service.delete_project("project-1").unwrap_err();
+    assert!(error.contains("cancelled agent runs did not reach a safe terminal boundary"));
+    assert!(cancellation.is_cancelled());
+    assert!(!service.is_project_deleting(Some("project-1")));
+    assert!(service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key("run-1"));
+
+    // This fixture has no worker: model its retirement only after observing cancellation.
+    service.unregister_cancellation_if_current("run-1", &cancellation);
     service.delete_project("project-1").unwrap();
 
-    assert!(cancellation.is_cancelled());
     assert!(service.is_project_deleting(Some("project-1")));
     assert!(service
         .usage_contexts

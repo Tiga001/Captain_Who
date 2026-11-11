@@ -758,14 +758,14 @@ it.each([
       await vi.waitFor(() => expect(tickWidth(18)).toBeCloseTo(26, 1))
       expect(tickWidth(18)).toBeGreaterThan(hoveredMailWidth)
       expect(tickColor(18)).toBe(idleHuman.color)
-      expect(tickOpacity(18)).toBe(1)
+      await vi.waitFor(() => expect(tickOpacity(18)).toBe(1))
       expect(getComputedStyle(rows[18]).backgroundColor).toBe('rgba(0, 0, 0, 0)')
       await screenshot('human-hover')
 
       await userEvent.hover(rows[25])
       await vi.waitFor(() => expect(tickWidth(25)).toBeCloseTo(hoveredMailWidth, 1))
       expect(tickColor(25)).toBe(favoriteColor)
-      expect(tickOpacity(25)).toBe(1)
+      await vi.waitFor(() => expect(tickOpacity(25)).toBe(1))
       expect(getComputedStyle(rows[25]).backgroundColor).toBe('rgba(0, 0, 0, 0)')
       await screenshot('favorite-mail-hover')
 
@@ -809,7 +809,8 @@ it.each([
       expect(rows[3].matches(':focus-visible')).toBe(true)
       await vi.waitFor(() => expect(tickWidth(3)).toBeCloseTo(26, 1))
       expect(tickColor(3)).toBe(favoriteColor)
-      expect(tickOpacity(3)).toBe(1)
+      // The approximate width check can pass before the 120ms opacity transition finishes.
+      await vi.waitFor(() => expect(tickOpacity(3)).toBe(1))
       expect(getComputedStyle(rows[3]).backgroundColor).toBe('rgba(0, 0, 0, 0)')
       await screenshot('favorite-human-focus')
 

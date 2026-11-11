@@ -103,17 +103,23 @@ describe('mail network activity', () => {
       })
       .toBe(0)
   })
-  it('updates hidden state without accumulating or replaying animations', async () => {
+  it('defers hidden rendering and restores the latest state without replaying animations', async () => {
     const view = await render(<Harness />)
     await expect.element(view.getByTestId('sequence')).toHaveTextContent('1')
     await emit(snapshot(2))
     await view.rerender(<Harness foreground={false} />)
     expect(view.container.querySelectorAll('[data-transmission-sequence]')).toHaveLength(0)
     await emit(snapshot(3))
-    await expect.element(view.getByTestId('sequence')).toHaveTextContent('3')
-    mocks.request.mockResolvedValue({ records: [], issues: [], runtime: snapshot(3) })
+    // Hidden notifications update the retained snapshot, without rendering the graph.
+    await expect.element(view.getByTestId('sequence')).toHaveTextContent('2')
+    // Recovery must publish that retained snapshot even if the follow-up read fails.
+    mocks.request.mockRejectedValue(new Error('temporary recovery failure'))
     await view.rerender(<Harness />)
+    await expect.element(view.getByTestId('sequence')).toHaveTextContent('3')
     expect(view.container.querySelectorAll('[data-transmission-sequence]')).toHaveLength(0)
+    mocks.request.mockResolvedValue({ records: [], issues: [], runtime: snapshot(3) })
+    window.dispatchEvent(new Event('focus'))
+    await expect.poll(() => mocks.request.mock.calls.length).toBe(3)
     await emit(snapshot(4))
     expect(view.container.querySelectorAll('[data-transmission-sequence]')).toHaveLength(1)
   })

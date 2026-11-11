@@ -60,6 +60,8 @@ const REINITIALIZE_TABLES: &[&str] = &[
 const DO_NOT_COPY_TABLES: &[&str] = &[
     "agent_usage_records",
     "manual_context_compaction_usage_records",
+    // Forking history dispatches no prediction and must not duplicate its billing receipt.
+    "message_prediction_usage",
     "automation_events",
     "automation_runs",
     "automations",
@@ -248,6 +250,10 @@ fn high_risk_fork_policies_stay_explicit() {
     );
     assert_eq!(
         policies.get("agent_usage_records"),
+        Some(&ForkDataPolicy::DoNotCopy)
+    );
+    assert_eq!(
+        policies.get("message_prediction_usage"),
         Some(&ForkDataPolicy::DoNotCopy)
     );
     assert_eq!(

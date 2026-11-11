@@ -709,6 +709,7 @@ fn normalized_relative(workspace_root: &Path, path: &Path) -> String {
 fn is_test_source(relative: &str) -> bool {
     relative.contains("/tests/")
         || relative.ends_with("/tests.rs")
+        || relative.ends_with("_tests.rs")
         || relative.ends_with(".test.ts")
         || relative.ends_with(".test.tsx")
 }

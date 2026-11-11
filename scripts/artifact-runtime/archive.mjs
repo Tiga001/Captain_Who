@@ -118,7 +118,8 @@ export async function downloadPinnedFile(descriptor, destination) {
         throw new Error('Artifact runtime download exceeded its pinned size')
       }
       digest.update(chunk)
-      await handle.write(chunk)
+      // write() may consume only part of a buffer; publish only fully written chunks.
+      await handle.writeFile(chunk)
     }
     if (size !== descriptor.size || digest.digest('hex') !== descriptor.sha256) {
       throw new Error('Artifact runtime download failed size or SHA-256 verification')

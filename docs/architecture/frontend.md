@@ -139,7 +139,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 `useAgentRunLifecycle.ts` 是普通会话运行的主要协调器。关键规则包括：
 
 - submit/rewrite 请求携带会话、消息、附件、模型、权限和 Skill revision 等精确输入。
-- 普通发送在同一次前端提交中追加乐观消息并消费对应版本的草稿，受理回执不再二次清空输入框。Host 预检为 `compatible/same_protocol` 时跳过无变化的模型切换握手，仍保留预检与实际轮次受理校验。
+- 普通发送在同一次前端提交中追加乐观消息并消费对应版本的草稿，受理回执不再二次清空输入框。Host 的 `forSend: true` 预检返回 `ready_for_send/same_protocol`（兼容旧返回 `compatible/same_protocol`）时跳过无变化的模型切换握手，仍保留预检与实际轮次受理校验。
 - 明确的登录、许可或结构化 Skill 校验拒绝会撤回乐观消息并恢复原草稿；期间新增的草稿连同附件、Skill 和配置移入待发送队列，关闭自动发送。传输失败则先按原消息 ID 回读后端，已受理的轮次恢复绑定；无法确认时保留本次消息和 `admission_unconfirmed` 异常状态，不自动重发或恢复进输入框。
 - `runId` 返回前到达的事件进入有界缓冲；绑定建立后再按顺序归并。
 - command session 事件按其持久 owner 路由，不简单依赖当前活动 Run。
@@ -149,7 +149,7 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 - stop 只是请求；最终 completed/failed/cancelled 状态必须来自后端事件或权威存储对账。
 - reload 后重新加载 pending actions、command sessions 和未完成 Run，而不是根据 UI 文本推断。
 - edit/rewrite、Provider transition 和 Skill 恢复均使用 epoch/revision，迟到结果不得回退更新后的选择。
-- 队列自动发送由 Host 成功完成、权威状态恢复和队列变更驱动，不通过定时重试推断空闲。发送前等待终态对账及消息、会话保存完成；Host 预检为 `compatible/same_protocol` 时直接请求下一轮，无需创建无变化的模型切换。需要模型切换确认或压缩时，队列等待其明确完成；有错误码的 Host 拒绝不能冒充尚在运行的切换。
+- 队列自动发送由 Host 成功完成、权威状态恢复和队列变更驱动，不通过定时重试推断空闲。发送前等待终态对账及消息、会话保存完成；Host 的 `forSend: true` 预检返回 `ready_for_send/same_protocol`（兼容旧返回 `compatible/same_protocol`）时直接请求下一轮，无需创建无变化的模型切换。需要模型切换确认或压缩时，队列等待其明确完成；有错误码的 Host 拒绝不能冒充尚在运行的切换。
 - assistant message 从空正文开始；正常流式/完成路径接收模型 delta/final content。模型请求中断使用现有红色 typed interruption 提示行，无恢复按钮；输出达到上限、空响应和异常断流分别显示明确原因，即使正文为空或执行过程折叠也可见。同一原因不再同时显示灰色 Token 提示卡。消息外壳与提示行共用中断原因判定：即使终态数据库回读的 message status 为 error，中断回复的正文、图片及文件修改摘要也保持普通样式，不套用整段红框。Host 可持久化最后一次失败采样的公开部分正文；Renderer 通过终态数据库回读恢复正文及原因，不把 Done 中的诊断内容或先前工具播报当作最终回答，不自动重发整轮任务。其他受控错误或取消结算仍按权威 message/run 状态呈现。
 - 审批按钮只在提交期间锁定；Host 返回未接受或请求失败时必须重新启用，pending ticket 是否结算仍以 Rust Core 的权威决定为准，不能由一次前端点击乐观终止。
 - 流式 Markdown 保持已完成代码块的组件身份和 wrap/copy 状态；代码仅追加时可保留已高亮前缀，非追加修改必须丢弃旧 highlight snapshot，避免展示与源码不一致。

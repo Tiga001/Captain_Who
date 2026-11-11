@@ -68,6 +68,77 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
 }
 
 #[test]
+fn recursive_forks_leave_prediction_billing_with_the_original_request() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO message_prediction_usage (
+                request_id, conversation_id, created_at, model_id, model_name,
+                billable_request_count, input_tokens, output_tokens, total_tokens,
+                input_price, cached_input_price, output_price, estimated_cost
+             ) VALUES ('prediction-source', ?1, 10, 'model-1', 'Test model',
+                       1, 1000, 100, 1100, '1', '0.5', '2.5', 1.25)",
+            [&source.id],
+        )
+        .unwrap();
+
+    let fork = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-prediction-billing",
+        &source.id,
+        "assistant-a",
+        20,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &fork).unwrap();
+    let recursive = build_assistant_reply_fork_plan(
+        &connection,
+        "recursive-fork-prediction-billing",
+        &fork.target.id,
+        &fork.message_id_map["assistant-a"],
+        30,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &recursive).unwrap();
+
+    let receipt_count: u64 = connection
+        .query_row("SELECT COUNT(*) FROM message_prediction_usage", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(receipt_count, 1);
+    let receipt_owner: String = connection
+        .query_row(
+            "SELECT conversation_id FROM message_prediction_usage
+             WHERE request_id = 'prediction-source'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_owner, source.id);
+
+    let summary = crate::storage::usage_repository::usage_summary(
+        &connection,
+        &crate::AgentUsageSummaryInput {
+            range: crate::AgentUsageSummaryRange::All,
+            from: None,
+            to: None,
+        },
+        30,
+    )
+    .unwrap();
+    assert_eq!(summary.request_count, 1);
+    assert_eq!(summary.message_count, 0);
+    assert_eq!(summary.input_tokens, Some(1000));
+    assert_eq!(summary.output_tokens, Some(100));
+    assert_eq!(summary.total_tokens, Some(1100));
+    assert_eq!(summary.estimated_cost, Some(1.25));
+}
+
+#[test]
 fn unsettled_assistant_state_cannot_enter_a_fork_snapshot() {
     let mut message = ChatMessageRecord {
         human_interaction_response: None,

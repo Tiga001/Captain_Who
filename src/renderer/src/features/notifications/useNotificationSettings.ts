@@ -23,6 +23,12 @@ export function useNotificationSettings(enabled = true) {
   const requestRef = useRef(0)
   const refreshRef = useRef<() => Promise<void>>(async () => undefined)
 
+  const acceptSettings = useCallback((next: NotificationSettings) => {
+    // Reads and writes can finish in either order. The persisted revision, not
+    // arrival order, determines which projection is authoritative.
+    setSettings((current) => (current && current.revision >= next.revision ? current : next))
+  }, [])
+
   const refresh = useCallback(async () => {
     if (!effectiveEnabled) return
     const request = ++requestRef.current
@@ -30,7 +36,7 @@ export function useNotificationSettings(enabled = true) {
     try {
       const next = await getNotificationSettings()
       if (request !== requestRef.current) return
-      setSettings(next)
+      acceptSettings(next)
       setError(null)
       setStatus('ready')
     } catch (caught) {
@@ -38,7 +44,7 @@ export function useNotificationSettings(enabled = true) {
       setError(caught instanceof Error ? caught.message : String(caught))
       setStatus('error')
     }
-  }, [effectiveEnabled])
+  }, [acceptSettings, effectiveEnabled])
 
   useEffect(() => {
     refreshRef.current = refresh
@@ -79,7 +85,7 @@ export function useNotificationSettings(enabled = true) {
       requestRef.current += 1
       const operation = updateNotificationSettings(settings, draft)
         .then((next) => {
-          setSettings(next)
+          acceptSettings(next)
           setError(null)
           setStatus('ready')
           return next
@@ -97,7 +103,7 @@ export function useNotificationSettings(enabled = true) {
       setSaving(true)
       return operation
     },
-    [settings]
+    [acceptSettings, settings]
   )
 
   return { settings, status, error, refresh, update, saving }

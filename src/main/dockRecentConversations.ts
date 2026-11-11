@@ -79,16 +79,20 @@ export class DockRecentConversationsController {
   private disposed = false
   private lastSignature: string | null = null
   private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private refreshInFlight: Promise<void> | null = null
+  private refreshRequested = false
 
   constructor(private readonly dependencies: DockRecentConversationsControllerDependencies) {}
 
   start(): void {
+    if (this.disposed || this.refreshTimer) return
     this.refresh()
     this.refreshTimer = setInterval(() => this.refresh(), DOCK_RECENT_CONVERSATION_REFRESH_MS)
   }
 
   dispose(): void {
     this.disposed = true
+    this.refreshRequested = false
     if (this.refreshTimer) clearInterval(this.refreshTimer)
     this.refreshTimer = null
   }
@@ -101,6 +105,27 @@ export class DockRecentConversationsController {
   }
 
   async refreshNow(): Promise<void> {
+    if (this.disposed) return
+    this.refreshRequested = true
+    if (this.refreshInFlight) return this.refreshInFlight
+
+    this.refreshInFlight = this.drainRefreshes().finally(() => {
+      this.refreshInFlight = null
+      if (this.refreshRequested && !this.disposed) this.refresh()
+    })
+    return this.refreshInFlight
+  }
+
+  private async drainRefreshes(): Promise<void> {
+    // A slow Core read must not accumulate one request per timer tick or let an older response
+    // overwrite a newer menu. Keep one read in flight and coalesce all invalidations behind it.
+    while (this.refreshRequested && !this.disposed) {
+      this.refreshRequested = false
+      await this.loadAndApplyMenu()
+    }
+  }
+
+  private async loadAndApplyMenu(): Promise<void> {
     const records = await this.dependencies.loadConversationMetas()
     if (this.disposed) return
 

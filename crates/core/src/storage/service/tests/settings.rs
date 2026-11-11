@@ -2929,11 +2929,18 @@ fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_hi
     service
         .state
         .configure_read_connections_for_test(|connection| {
-            connection.trace(Some(|sql| {
-                if sql.trim_start().starts_with("SELECT") {
-                    SELECTS.fetch_add(1, Ordering::SeqCst);
-                }
-            }));
+            connection.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|event| {
+                    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+                        return;
+                    };
+                    let sql = statement.expanded_sql().expect("test SQL should expand");
+                    if sql.trim_start().starts_with("SELECT") {
+                        SELECTS.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+            );
             connection
                 .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
                     if matches!(
@@ -2980,7 +2987,7 @@ fn exact_workflow_configuration_reads_ignore_unrelated_drafts_and_never_touch_hi
     service
         .state
         .configure_read_connections_for_test(|connection| {
-            connection.trace(None);
+            connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
             connection
                 .authorizer(
                     None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,

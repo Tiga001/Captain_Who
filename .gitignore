@@ -15,14 +15,13 @@ coverage
 
 .pnpm-store/
 
-.cache/officecli/
-.cache/office-renderer/
-.cache/word-pdf-renderer/
-.cache/artifact-runtime/
-.cache/sidebar-menu-preview/
-.cache/frontend-locale-generation/
-.cache/update-ui.*/
-.cache/probe-pixels.mjs
+/.cache/
+
+# Temporary Electron bundles resolve pinned dependencies from the workspace.
+/.mycopilot-playwright-bridge-e2e-*/
+/.mycopilot-browser-surface-fixture-*/
+/.mycopilot-native-popup-fixture-*/
+/.mycopilot-browser-failure-fixture-*/
 
 **/__tests__/.cache/
 

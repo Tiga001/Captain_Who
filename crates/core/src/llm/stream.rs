@@ -97,6 +97,12 @@ where
             received_model_activity |=
                 process_sse_frame(&frame, &mut accumulator, &mut on_delta)
                     .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
+            if accumulator.saw_stream_end {
+                // The protocol has ended even if a proxy keeps the HTTP body open. A
+                // finish_reason alone is not enough: OpenAI usage can follow it before [DONE].
+                cancellation_token.check()?;
+                return accumulator.finish();
+            }
         }
         if received_model_activity {
             inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
@@ -142,6 +148,7 @@ where
             == crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions
         {
             accumulator.saw_terminal_signal = true;
+            accumulator.saw_stream_end = true;
             accumulator.set_activity(AgentModelActivity::Waiting, on_delta);
         }
         return Ok(false);
@@ -324,6 +331,7 @@ pub(super) struct LlmStreamAccumulator {
     provider_protocol: ProviderProtocolKey,
     state: ProviderStreamState,
     saw_terminal_signal: bool,
+    saw_stream_end: bool,
     activity: AgentModelActivity,
 }
 
@@ -363,6 +371,7 @@ impl LlmStreamAccumulator {
             provider_protocol: provider_protocol.clone(),
             state: adapter.new_stream_state(provider_profile)?,
             saw_terminal_signal: false,
+            saw_stream_end: false,
             activity: AgentModelActivity::Waiting,
         })
     }
@@ -404,7 +413,10 @@ impl LlmStreamAccumulator {
                     })
                 }),
             crate::provider_profile::ProviderProtocolDialect::AnthropicMessages => {
-                event.or_else(|| value.get("type").and_then(Value::as_str)) == Some("message_stop")
+                let ended = event.or_else(|| value.get("type").and_then(Value::as_str))
+                    == Some("message_stop");
+                self.saw_stream_end |= ended;
+                ended
             }
         };
         let activity = &mut self.activity;
@@ -948,18 +960,17 @@ impl AnthropicStreamAccumulator {
                     });
                 }
             }
-            "thinking_delta" => {
+            "thinking_delta"
                 if delta
                     .get("thinking")
                     .and_then(Value::as_str)
-                    .is_some_and(|thinking| !thinking.is_empty())
-                {
-                    block.kind = "thinking".to_string();
-                    self.reasoning_blocks.insert(index);
-                    on_delta(LlmStreamEvent::ModelActivityChanged(
-                        AgentModelActivity::Reasoning,
-                    ));
-                }
+                    .is_some_and(|thinking| !thinking.is_empty()) =>
+            {
+                block.kind = "thinking".to_string();
+                self.reasoning_blocks.insert(index);
+                on_delta(LlmStreamEvent::ModelActivityChanged(
+                    AgentModelActivity::Reasoning,
+                ));
             }
             _ => {}
         }

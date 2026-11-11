@@ -4,7 +4,7 @@ import type {
   AgentTreeSnapshot,
   CollaborationEventEnvelope
 } from '@mycopilot/protocol'
-import { expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
@@ -15,6 +15,20 @@ import type { CollaborationTimelineActivity } from '../../agentCollaboration/Col
 import type { CollaborationDataSource } from '../../agentCollaboration/collaborationClient'
 import { CollaborationStore } from '../../agentCollaboration/collaborationStore'
 import '../../../styles/global.css'
+
+let previousRootStyle: string | null
+beforeEach(() => {
+  previousRootStyle = document.documentElement.getAttribute('style')
+  for (const [key, value] of Object.entries(
+    getFrontendCssVariables(frontendConfig, classicLightTheme)
+  )) {
+    document.documentElement.style.setProperty(key, value)
+  }
+})
+afterEach(() => {
+  if (previousRootStyle === null) document.documentElement.removeAttribute('style')
+  else document.documentElement.setAttribute('style', previousRootStyle)
+})
 
 const translations: Record<string, string> = {
   'agent.processed': 'Processed in {duration}',
@@ -1060,7 +1074,8 @@ it('coalesces consecutive same-status Harness activity across hidden trace bound
   expect(rows).toHaveLength(1)
   expect(rows[0]?.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(3)
   expect(screen.getByText('Started working').elements()).toHaveLength(1)
-  expect(getComputedStyle(rows[0]!.parentElement!).marginBlockStart).toBe('0px')
+  // Visible narration owns a single separator before the following activity block.
+  expect(getComputedStyle(rows[0]!.parentElement!).marginBlockStart).toBe('4px')
   await userEvent.click(
     screen.getByRole('button', {
       name: 'View sub-agent Worker 2: Started working'

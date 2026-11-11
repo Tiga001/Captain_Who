@@ -483,9 +483,32 @@ impl GitReviewService {
         let head_oid = resolved.context.head_sha.clone().unwrap_or_default();
         let collected = collect_review_files(&repository, &resolved.target, &resolved.comparison)?;
         let parsed_files = collected.files;
-        let stats = collected.stats;
-        let file_stats = collected.file_stats;
-        let binary_paths = collected.binary_paths;
+        let mut stats = collected.stats;
+        let mut file_stats = collected.file_stats;
+        let mut binary_paths = collected.binary_paths;
+        let filtered_paths = external_filter_paths(
+            &repository,
+            parsed_files.iter().flat_map(|file| {
+                std::iter::once(file.path.as_str()).chain(file.previous_path.as_deref())
+            }),
+        )?;
+        for file in &parsed_files {
+            if filtered_paths.contains(&file.path)
+                || file
+                    .previous_path
+                    .as_ref()
+                    .is_some_and(|path| filtered_paths.contains(path))
+            {
+                // Discovery ran with external filters disabled. Its raw-byte counts must not
+                // masquerade as the repository's filtered Git representation (e.g. Git LFS).
+                stats.line_counts_complete = false;
+                if let Some(raw) = file_stats.remove(&file.path) {
+                    stats.additions = stats.additions.saturating_sub(raw.additions);
+                    stats.deletions = stats.deletions.saturating_sub(raw.deletions);
+                }
+                binary_paths.remove(&file.path);
+            }
+        }
         let truncated = parsed_files.len() > MAX_REVIEW_FILES;
         let files = parsed_files
             .into_iter()
@@ -671,6 +694,7 @@ impl GitReviewService {
         if !snapshot_file_is_current(&snapshot, &file)? {
             return Ok(expired_diff(snapshot_id, file_id));
         }
+        ensure_no_external_filter(&snapshot.repository, &file)?;
 
         if file.status == GitReviewFileStatus::Untracked {
             let diff = untracked_file_diff(snapshot_id, file_id, &snapshot.repository, &file.path)?;
@@ -762,6 +786,7 @@ impl GitReviewService {
         if !snapshot_file_is_current(&snapshot, &file)? {
             return Ok(expired_content(snapshot_id, file_id));
         }
+        ensure_no_external_filter(&snapshot.repository, &file)?;
 
         let loaded = load_review_file_content(&snapshot, &file)?;
         if !snapshot_file_is_current(&snapshot, &file)? {

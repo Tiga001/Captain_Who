@@ -2,7 +2,11 @@ thread_local! {
     static FORK_PLAN_SQL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn record_fork_plan_sql(sql: &str) {
+fn record_fork_plan_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+        return;
+    };
+    let sql = statement.expanded_sql().expect("test SQL should expand");
     FORK_PLAN_SQL.with(|statements| statements.borrow_mut().push(sql.to_string()));
 }
 
@@ -145,7 +149,10 @@ fn fork_plan_reuses_parsed_history_across_tree_identity_allocation_and_building(
     populate_reuse_test_traces(&mut connection, &child_source, 5);
 
     FORK_PLAN_SQL.with(|statements| statements.borrow_mut().clear());
-    connection.trace(Some(record_fork_plan_sql));
+    connection.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(record_fork_plan_sql),
+    );
     let plan = build_assistant_reply_fork_plan(
         &connection,
         "reuse-tree-plan",
@@ -154,7 +161,7 @@ fn fork_plan_reuses_parsed_history_across_tree_identity_allocation_and_building(
         100,
     )
     .unwrap();
-    connection.trace(None);
+    connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
     let statements = FORK_PLAN_SQL.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
     for message_id in [
         "assistant-a",

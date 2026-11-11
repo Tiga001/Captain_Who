@@ -66,7 +66,10 @@ mod tests {
     thread_local! {
         static QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
-    fn count_query(_: &str) {
+    fn count_query(event: rusqlite::trace::TraceEvent<'_>) {
+        if !matches!(event, rusqlite::trace::TraceEvent::Stmt(..)) {
+            return;
+        }
         QUERY_COUNT.with(|count| count.set(count.get() + 1));
     }
 
@@ -98,9 +101,12 @@ mod tests {
             }
             selected.insert("deleted".into(), Some("retired-run".into()));
             QUERY_COUNT.with(|count| count.set(0));
-            c.trace(Some(count_query));
+            c.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(count_query),
+            );
             let rows = read_states(&c, &serde_json::to_string(&selected).unwrap()).unwrap();
-            c.trace(None);
+            c.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
             assert_eq!(QUERY_COUNT.with(|count| count.get()), 1);
             assert_eq!(rows.len(), count);
             assert_eq!(rows["chat-0"].active_run_id.as_deref(), Some("durable-run"));

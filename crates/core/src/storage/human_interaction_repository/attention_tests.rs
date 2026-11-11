@@ -40,9 +40,16 @@ fn attention_is_sparse_metadata_only_and_uses_three_reads_for_a_thousand_chats()
         }))
         .unwrap();
     STATEMENTS.with(|statements| statements.borrow_mut().clear());
-    connection.trace(Some(|sql| {
-        STATEMENTS.with(|statements| statements.borrow_mut().push(sql.to_owned()))
-    }));
+    connection.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(|event| {
+            let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+                return;
+            };
+            let sql = statement.expanded_sql().expect("test SQL should expand");
+            STATEMENTS.with(|statements| statements.borrow_mut().push(sql.to_owned()))
+        }),
+    );
     let start = std::time::Instant::now();
     let snapshot = load_attention(&mut connection).unwrap();
     let elapsed = start.elapsed();

@@ -235,13 +235,13 @@ describe('Chat activity density in the real timeline', () => {
 
     expect(getComputedStyle(elapsed).rowGap).toBe('6px')
     expect(getComputedStyle(parentLabel).fontWeight).toBe('400')
-    expect(summary.getBoundingClientRect().height).toBe(28)
+    expect(summary.getBoundingClientRect().height).toBe(26)
     expect(
       commandGroup.getBoundingClientRect().top - attachmentList.getBoundingClientRect().bottom
-    ).toBe(4)
+    ).toBe(8)
     expect(
       attachmentList.getBoundingClientRect().top - elapsed.getBoundingClientRect().bottom
-    ).toBeCloseTo(14, 1)
+    ).toBeCloseTo(8, 1)
 
     await userEvent.click(summary)
     const children = commandGroup.querySelectorAll<HTMLElement>(
@@ -256,10 +256,10 @@ describe('Chat activity density in the real timeline', () => {
       parentLabel.getBoundingClientRect().left,
       1
     )
-    expect(commandGroup.getBoundingClientRect().height).toBe(86)
+    expect(commandGroup.getBoundingClientRect().height).toBe(84)
     await userEvent.click(summary)
     expect(commandGroup.open).toBe(false)
-    expect(commandGroup.getBoundingClientRect().height).toBe(28)
+    expect(commandGroup.getBoundingClientRect().height).toBe(26)
   })
 
   it('wraps long Chinese reasons inside narrow columns with a consistent hanging indent', async () => {

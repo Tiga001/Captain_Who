@@ -476,12 +476,19 @@ async function captureStableScreenshot(element: Element, path: string): Promise<
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     })
-    const first = await page.screenshot({ base64: true, element, path })
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-    })
-    const repeated = await page.screenshot({ element, save: false })
-    expect(repeated).toBe(first.base64)
+    // Screenshot preparation can itself settle scrolling and ResizeObserver-driven layout.
+    // Require consecutive identical captures before saving, rather than assuming two frames suffice.
+    let stableCapture: string | undefined
+    await expect
+      .poll(async () => {
+        const current = await page.screenshot({ element, save: false })
+        const stable = current === stableCapture
+        stableCapture = current
+        return stable
+      })
+      .toBe(true)
+    const saved = await page.screenshot({ base64: true, element, path })
+    expect(saved.base64).toBe(stableCapture)
   } finally {
     staticMotionStyle.remove()
   }

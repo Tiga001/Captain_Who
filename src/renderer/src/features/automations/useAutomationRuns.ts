@@ -42,6 +42,7 @@ export function useAutomationRuns(
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
+  const activeReadRef = useRef<'refresh' | 'page' | null>(null)
   const cursorRef = useRef<string | null>(null)
   const runsRef = useRef<AutomationRun[]>([])
   const refreshRef = useRef<() => Promise<void>>(async () => undefined)
@@ -57,6 +58,7 @@ export function useAutomationRuns(
   const refresh = useCallback(async (): Promise<void> => {
     if (!enabled || !automationId) return
     const request = ++requestRef.current
+    activeReadRef.current = 'refresh'
     setError(null)
     setIsRefreshing(runsRef.current.length > 0)
     if (runsRef.current.length === 0) setStatus('loading')
@@ -74,6 +76,8 @@ export function useAutomationRuns(
       setStatus(runsRef.current.length > 0 ? 'ready' : 'error')
       setIsRefreshing(false)
       setIsLoadingMore(false)
+    } finally {
+      if (request === requestRef.current) activeReadRef.current = null
     }
   }, [automationId, enabled, limit])
 
@@ -87,7 +91,10 @@ export function useAutomationRuns(
     setRuns([])
     runsRef.current = []
     setNextCursor(null)
+    cursorRef.current = null
     setError(null)
+    setIsRefreshing(false)
+    setIsLoadingMore(false)
     setStatus(enabled && automationId ? 'loading' : 'idle')
     if (enabled && automationId) void refresh()
     const unsubscribe = enabled
@@ -100,14 +107,17 @@ export function useAutomationRuns(
     return () => {
       mountedRef.current = false
       requestRef.current += 1
+      activeReadRef.current = null
       unsubscribe()
     }
   }, [automationId, enabled, refresh])
 
   const loadMore = useCallback(async (): Promise<void> => {
     const cursor = cursorRef.current
-    if (!enabled || !automationId || !cursor || isLoadingMore) return
+    // Refresh owns the next cursor; pagination cannot supersede that request.
+    if (!enabled || !automationId || !cursor || activeReadRef.current) return
     const request = ++requestRef.current
+    activeReadRef.current = 'page'
     setIsLoadingMore(true)
     try {
       const output = await listAutomationRuns(automationId, { cursor, limit })
@@ -122,8 +132,10 @@ export function useAutomationRuns(
       if (!mountedRef.current || request !== requestRef.current) return
       setError(getAutomationErrorDetails(caught))
       setIsLoadingMore(false)
+    } finally {
+      if (request === requestRef.current) activeReadRef.current = null
     }
-  }, [automationId, enabled, isLoadingMore, limit])
+  }, [automationId, enabled, limit])
 
   return {
     runs,

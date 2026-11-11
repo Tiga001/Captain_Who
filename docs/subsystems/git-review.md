@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-26
+last_verified: 2026-11-11
 ---
 
 # Git Review 子系统
@@ -52,6 +52,10 @@ Git Review 在右侧栏中提供仓库变更摘要、按文件差异、完整内
 6. 若任一请求返回 `snapshotExpired`，Renderer 丢弃该轮衍生状态并刷新摘要，而不是把新旧快照混合展示。
 
 Renderer 还有独立的渲染预算：diff 约 512 KiB 字符、12,000 行、1,000 个 hunk，单行最多 32 KiB；完整内容水合约 512 KiB 和 20,000 行。Rust Core 限制负责安全和资源上界，Renderer 预算负责界面响应性，两者不可互相替代。
+
+读取工作区状态和差异也可能触发 Git 的 `clean` 或 `process` filter；仅设置 `--no-ext-diff`、`--no-textconv` 不足以阻止这些命令。Git runner 会有界枚举当前有效配置，覆盖 `clean`、`smudge`、`process`，并清除会让配置枚举与实际操作读取不同配置的环境变量。子模块差异固定使用 gitlink 摘要，不进入子仓库生成内联 diff，变更操作也不递归进入子模块。
+
+摘要批量检查文件及重命名前路径的 filter 属性。受影响文件仍保留条目，但不报告未经转换的行数，整体 `lineCountsComplete` 为 `false`；读取其单文件差异或完整内容会返回明确错误，变更操作同样拒绝。仅配置了全局 Git LFS、但所选文件未使用 filter 的普通仓库仍可正常使用。属性检查通过有界临时输入文件传递路径，避免大批量路径同时阻塞 Git 的输入和输出管道。
 
 ### 快照一致性
 
@@ -153,4 +157,5 @@ Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser �
 - 只提供暂存、取消暂存和恢复，不提供提交、分支、合并、rebase 或 stash 工作流。
 - `lastTurn` 只读取当前会话最近一次可用 Turn，且不能用于回滚。
 - 二进制、超限和需要外部 filter 的文件只提供降级状态。
+- 外部 filter 防护依赖执行前读取的配置，不是操作系统沙箱；不能据此保证抵御配置被其他进程持续并发替换的情况。
 - UI 偏好是本机 Renderer 范围的轻量持久化，不在设备或工作区之间同步。

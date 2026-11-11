@@ -1,4 +1,9 @@
 use super::*;
+use std::io::Seek;
+
+const MAX_FILTER_CONFIG_BYTES: usize = 16 * 1024;
+const MAX_FILTER_DRIVERS: usize = 128;
+const MAX_GIT_INPUT_BYTES: usize = 2 * MAX_STATUS_BYTES;
 
 pub(super) struct GitOutput {
     pub(super) status: ExitStatus,
@@ -21,11 +26,86 @@ pub(super) fn run_git_with_input(
     stdout_limit: usize,
     stdin: Option<&[u8]>,
 ) -> Result<GitOutput, String> {
+    let mut command = git_command(cwd);
+    if matches!(
+        args.first().map(String::as_str),
+        Some("status" | "diff" | "add" | "restore" | "reset" | "rm" | "log")
+    ) {
+        // --no-ext-diff/--no-textconv do not disable clean or long-running filters.
+        // Even `status` can invoke those while refreshing tracked worktree content.
+        let mut configuration = git_command(cwd);
+        configuration.args([
+            "config",
+            "--includes",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|smudge|process|required)$",
+        ]);
+        let output = run_git_command(configuration, MAX_FILTER_CONFIG_BYTES, None)?;
+        if output.stdout_truncated || (!output.status.success() && output.status.code() != Some(1))
+        {
+            return Err("Unable to verify the Git filter configuration safely.".into());
+        }
+        let drivers = filter_drivers(&output.stdout)?;
+        let mutation = matches!(
+            args.first().map(String::as_str),
+            Some("add" | "restore" | "reset" | "rm")
+        );
+        for driver in drivers {
+            for operation in ["clean", "smudge", "process"] {
+                command
+                    .arg("-c")
+                    .arg(format!("filter.{driver}.{operation}="));
+            }
+            // Reads use raw bytes only for discovery; filtered diffs/content are rejected by
+            // the service. A mutation must fail if a filter appears after attribute validation.
+            command
+                .arg("-c")
+                .arg(format!("filter.{driver}.required={mutation}"));
+        }
+    }
+    command.args(args);
+    run_git_command(command, stdout_limit, stdin)
+}
+
+fn filter_drivers(bytes: &[u8]) -> Result<HashSet<&str>, String> {
+    let invalid = || "Unable to verify the Git filter configuration safely.".to_string();
+    if !bytes.is_empty() && bytes.last() != Some(&0) {
+        return Err(invalid());
+    }
+    let mut drivers = HashSet::new();
+    for key in bytes.split(|byte| *byte == 0).filter(|key| !key.is_empty()) {
+        let key = std::str::from_utf8(key).map_err(|_| invalid())?;
+        let (prefix, operation) = key.rsplit_once('.').ok_or_else(invalid)?;
+        let driver = prefix.strip_prefix("filter.").ok_or_else(invalid)?;
+        if driver.is_empty()
+            || driver.contains('=')
+            || driver.chars().any(char::is_control)
+            || !matches!(operation, "clean" | "smudge" | "process" | "required")
+        {
+            return Err(invalid());
+        }
+        drivers.insert(driver);
+        if drivers.len() > MAX_FILTER_DRIVERS {
+            return Err(invalid());
+        }
+    }
+    Ok(drivers)
+}
+
+fn git_command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
         .arg("-c")
         .arg("core.fsmonitor=false")
+        // Inline submodule diffs can invoke a second repository's filters, which are not part
+        // of this repository's configuration probe. Review exposes gitlinks, not nested tools.
+        .arg("-c")
+        .arg("diff.submodule=short")
+        .arg("-c")
+        .arg("submodule.recurse=false")
         .arg("-c")
         .arg(if cfg!(windows) {
             "core.hooksPath=NUL"
@@ -34,12 +114,7 @@ pub(super) fn run_git_with_input(
         })
         .arg("-C")
         .arg(cwd)
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("LC_ALL", "C")
@@ -62,6 +137,9 @@ pub(super) fn run_git_with_input(
         .env_remove("GIT_DISCOVERY_ACROSS_FILESYSTEM")
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIFF_OPTS")
+        // GIT_CONFIG redirects only `git config`, not status/diff. Inheriting it would make
+        // the filter probe inspect a different configuration from the actual operation.
+        .env_remove("GIT_CONFIG")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_SYSTEM")
         .env_remove("GIT_CONFIG_GLOBAL")
@@ -74,19 +152,30 @@ pub(super) fn run_git_with_input(
             command.env_remove(key);
         }
     }
+    command
+}
 
+fn run_git_command(
+    mut command: Command,
+    stdout_limit: usize,
+    stdin: Option<&[u8]>,
+) -> Result<GitOutput, String> {
+    if let Some(input) = stdin.filter(|input| !input.is_empty()) {
+        if input.len() > MAX_GIT_INPUT_BYTES {
+            return Err("The Git input is too large to process safely.".into());
+        }
+        // Writing a pipe before starting stdout/stderr readers can deadlock check-attr on
+        // large path batches. An anonymous bounded input file needs no detached writer task.
+        let mut file =
+            tempfile::tempfile().map_err(|_| "Unable to prepare Git input.".to_string())?;
+        file.write_all(input)
+            .and_then(|()| file.rewind())
+            .map_err(|_| "Unable to prepare Git input.".to_string())?;
+        command.stdin(Stdio::from(file));
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("Unable to start Git: {error}"))?;
-    if let Some(input) = stdin {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Git stdin was not captured.".to_string())?;
-        child_stdin
-            .write_all(input)
-            .map_err(|error| format!("Unable to write Git input: {error}"))?;
-    }
     let stdout = child
         .stdout
         .take()
@@ -193,4 +282,32 @@ pub(super) fn path_to_git_string(path: &Path) -> Option<String> {
 
 pub(super) fn literal_pathspec(path: &str) -> String {
     format!(":(top,literal){path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_driver_config_preserves_case_and_rejects_ambiguous_overrides() {
+        let drivers =
+            filter_drivers(b"filter.Driver.With.Dots.clean\0filter.Driver.With.Dots.process\0")
+                .unwrap();
+        assert_eq!(drivers, HashSet::from(["Driver.With.Dots"]));
+        for invalid in [
+            b"filter.foo=bar.clean\0".as_slice(),
+            b"filter.foo\nbar.clean\0".as_slice(),
+            b"filter.foo.clean".as_slice(),
+        ] {
+            assert!(filter_drivers(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn configuration_probe_cannot_be_redirected_by_git_config_environment() {
+        let command = git_command(Path::new("."));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "GIT_CONFIG" && value.is_none()));
+    }
 }

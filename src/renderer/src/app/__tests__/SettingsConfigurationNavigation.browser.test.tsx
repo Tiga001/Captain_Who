@@ -48,7 +48,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
     ...service,
     apiUrl: 'https://provider.example/v1/chat/completions',
     apiTokenStatus: 'configured',
-    models: [model],
+    models: [model, { ...model, id: 'other-model', displayName: 'Other model' }],
     providerProfileDescriptors: [
       {
         profileId: 'generic_openai_chat',
@@ -103,6 +103,54 @@ beforeEach(() => {
 })
 
 describe('configuration setting search navigation', () => {
+  it.each(['new model', 'other model', 'same model'] as const)(
+    'preserves a later %s editing session when an earlier save finishes',
+    async (nextEditor) => {
+      let completeSave!: () => void
+      const pendingSave = new Promise<void>((resolve) => {
+        completeSave = resolve
+      })
+      service.upsertModel.mockReturnValueOnce(pendingSave)
+      const target: SettingsNavigationTarget = {
+        page: 'configuration',
+        id: 'configuration.models',
+        revision: 1
+      }
+      const screen = await render(renderPage(target))
+      await screen.getByRole('button', { name: 'configuration.edit: Existing model' }).click()
+      await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Saved model A')
+      await screen.getByRole('button', { name: 'configuration.save', exact: true }).click()
+      await expect.poll(() => service.upsertModel.mock.calls.length).toBe(1)
+
+      await screen.getByRole('button', { name: 'configuration.modelSettings', exact: true }).click()
+      if (nextEditor === 'new model') {
+        await screen.getByRole('button', { name: 'configuration.newModel', exact: true }).click()
+      } else {
+        await screen
+          .getByRole('button', {
+            name: `configuration.edit: ${nextEditor === 'other model' ? 'Other model' : 'Existing model'}`
+          })
+          .click()
+      }
+      await screen
+        .getByPlaceholder('configuration.displayNamePlaceholder')
+        .fill('Unsaved later draft')
+
+      completeSave()
+      await pendingSave
+      await screen.rerender(renderPage(target))
+      await expect
+        .element(screen.getByPlaceholder('configuration.displayNamePlaceholder'))
+        .toHaveValue('Unsaved later draft')
+      expect(service.upsertModel).toHaveBeenCalledOnce()
+      expect(service.upsertModel.mock.calls[0]?.[0]).toMatchObject({
+        id: model.id,
+        displayName: 'Saved model A'
+      })
+      await screen.unmount()
+    }
+  )
+
   it('cancels an unresolved provider-dialog navigation when the search target is cleared', async () => {
     let resolvePolicy!: (value: ProviderVendorModelPolicyDescriptor) => void
     const pendingPolicy = new Promise<ProviderVendorModelPolicyDescriptor>((resolve) => {

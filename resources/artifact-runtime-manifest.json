@@ -17,7 +17,7 @@
     },
     "artifactRuntimeArchive": {
       "path": "scripts/artifact-runtime/archive.mjs",
-      "sha256": "6e34afa37c0dc50189273c112d81c93caf3007e370ab43f01ac1a9f456e1e27e"
+      "sha256": "7443ef69f6b84c8326e2eb9e990c1281899f1bc079e2b915fb926ece6102a02b"
     },
     "artifactRuntimeNodeDependencies": {
       "path": "scripts/artifact-runtime/node-dependencies.mjs",

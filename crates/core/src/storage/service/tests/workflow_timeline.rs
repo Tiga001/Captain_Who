@@ -11,7 +11,11 @@ thread_local! {
     static HISTORY_QUERY_COUNTS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
 
-fn count_history_queries(sql: &str) {
+fn count_history_queries(event: rusqlite::trace::TraceEvent<'_>) {
+    let rusqlite::trace::TraceEvent::Stmt(statement, _) = event else {
+        return;
+    };
+    let sql = statement.expanded_sql().expect("test SQL should expand");
     let index = if sql.contains("FROM conversation_turn_traces AS trace")
         && sql.contains("trace.completed_at")
     {
@@ -173,15 +177,17 @@ fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
         let service = fixture.service();
         seed(&service, false, true);
         HISTORY_QUERY_COUNTS.with(|counts| counts.set([0; 3]));
-        service
-            .state
-            .connection()
-            .unwrap()
-            .trace(Some(count_history_queries));
+        service.state.connection().unwrap().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_history_queries),
+        );
         service
             .state
             .configure_read_connections_for_test(|connection| {
-                connection.trace(Some(count_history_queries))
+                connection.trace_v2(
+                    rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                    Some(count_history_queries),
+                )
             });
         let view = if bulk {
             service.load_conversation_views().unwrap().remove(0)
@@ -191,10 +197,16 @@ fn workflow_timeline_view_reuses_one_durable_trace_and_origin_read() {
                 .unwrap()
                 .unwrap()
         };
-        service.state.connection().unwrap().trace(None);
         service
             .state
-            .configure_read_connections_for_test(|connection| connection.trace(None));
+            .connection()
+            .unwrap()
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        service
+            .state
+            .configure_read_connections_for_test(|connection| {
+                connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None)
+            });
         // The same trace proves there is no builtin apply_patch source. FileChange recovery
         // must skip its SQL/EXISTS query rather than re-reading bodies for this mail-only view.
         assert_eq!(

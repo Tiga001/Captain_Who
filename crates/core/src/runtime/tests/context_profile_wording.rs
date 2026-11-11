@@ -199,9 +199,14 @@ fn generic_tool_wording_stays_below_pre_cleanup_budget() {
             "{profile:?} generic guidance regrew past its pre-cleanup budget: {costs:?}"
         );
         if profile == AgentContextProfile::Minimal {
-            // A regression ceiling in production-estimator units, not a vendor token count.
+            // Preserve the pre-c48112be fixed-guidance budget. Its permanent collaboration-scope
+            // boundary (2026-10-10), including the separator, gets a separately bounded allowance
+            // in prompts::tests. These are production-estimator units, not vendor token counts.
+            const PRE_COLLABORATION_SCOPE_FIXED_BUDGET: u64 = 7_500;
+            const COLLABORATION_SCOPE_SYSTEM_ALLOWANCE: u64 = 192;
             assert!(
-                costs.system_tokens + costs.tool_schema_tokens <= 7_500,
+                costs.system_tokens + costs.tool_schema_tokens
+                    <= PRE_COLLABORATION_SCOPE_FIXED_BUDGET + COLLABORATION_SCOPE_SYSTEM_ALLOWANCE,
                 "minimal fixed guidance grew: {costs:?}"
             );
         }

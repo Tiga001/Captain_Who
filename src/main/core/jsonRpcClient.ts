@@ -1,4 +1,5 @@
 import type { HostDiagnosticContext } from '@mycopilot/host-api'
+import { isJsonRpcServerMessage } from '@mycopilot/protocol'
 import { currentRpcDiagnosticContext, withoutRpcDiagnosticContext } from './rpcDiagnosticContext'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
@@ -240,9 +241,12 @@ export class CoreJsonRpcClient {
       method,
       params
     }
+    const started = this.diagnostics.enabled ? performance.now() : 0
+    // Serialization can reject cyclic structured-clone inputs. Do not retain a response waiter
+    // (or report transport admission) until there is a complete frame to write.
+    const encoded = `${JSON.stringify(request)}\n`
 
     return new Promise<TResult>((resolve, reject) => {
-      const started = this.diagnostics.enabled ? performance.now() : 0
       this.diagnostics.requestOutcome('offered', method, id)
       this.pendingRequests.set(id, {
         resolve: (value) => resolve(value as TResult),
@@ -252,7 +256,6 @@ export class CoreJsonRpcClient {
           : undefined
       })
 
-      const encoded = `${JSON.stringify(request)}\n`
       if (this.diagnostics.enabled) {
         this.diagnostics.record(
           'request.serialize',
@@ -312,12 +315,17 @@ export class CoreJsonRpcClient {
 
   private handleLine(line: string): void {
     const parseStarted = this.diagnostics.enabled ? performance.now() : 0
-    let message: JsonRpcResponse | JsonRpcNotification
+    let message: unknown
 
     try {
-      message = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification
-    } catch (error) {
-      console.error('[core-server] invalid JSON-RPC response', error)
+      message = JSON.parse(line)
+    } catch {
+      // JSON parse errors can include a slice of the source, which may contain private payloads.
+      console.error('[core-server] invalid JSON-RPC response')
+      return
+    }
+    if (!isJsonRpcServerMessage(message)) {
+      console.error('[core-server] invalid JSON-RPC envelope')
       return
     }
     const parsedMs = this.diagnostics.enabled ? performance.now() - parseStarted : 0
@@ -487,8 +495,15 @@ export class CoreJsonRpcClient {
       return
     }
 
-    for (const handler of handlers) {
-      handler(notification.params)
+    for (const handler of [...handlers]) {
+      if (!handlers.has(handler)) continue
+      try {
+        handler(notification.params)
+      } catch {
+        // Native window delivery can fail during navigation/close. One consumer must not crash
+        // Main's stdout event handler or prevent the remaining subscriptions from receiving it.
+        console.warn('[core-server] notification handler failed')
+      }
     }
   }
 

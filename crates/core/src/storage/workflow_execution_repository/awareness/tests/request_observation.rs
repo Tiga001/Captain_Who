@@ -70,7 +70,7 @@ fn automatic_request_observation_preserves_identity_and_mailbox_across_mail_stat
 fn automatic_request_observation_has_constant_queries_and_builds_one_graph() {
     let mut counts = Vec::new();
     for member_count in [3, 128] {
-        let mut c = fixture();
+        let c = fixture();
         let mut definition: Value = serde_json::from_str(
             &c.query_row(
                 "SELECT definition_json FROM workflow_instances WHERE instance_id='instance'",
@@ -94,11 +94,14 @@ fn automatic_request_observation_has_constant_queries_and_builds_one_graph() {
         .unwrap();
         let chat = conversation(&c, "a");
         SUMMARY_SQL.with(|statements| statements.borrow_mut().clear());
-        c.trace(Some(record_summary_sql));
+        c.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_summary_sql),
+        );
         let observed = request_observation(&c, &chat, Some("run-a"))
             .unwrap()
             .unwrap();
-        c.trace(None);
+        c.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
         let statements = SUMMARY_SQL.with(|statements| statements.borrow().clone());
         assert_eq!(observed.0.members.len(), member_count);
         assert_eq!(

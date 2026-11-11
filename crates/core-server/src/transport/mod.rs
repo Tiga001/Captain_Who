@@ -4,10 +4,10 @@ use crate::application::agent;
 
 mod agent_rpc;
 mod automation_rpc;
-mod bootstrap;
-mod bounded_dispatch;
 #[cfg(test)]
 pub(crate) mod baseline_dispatch;
+mod bootstrap;
+mod bounded_dispatch;
 mod fork_dispatcher;
 mod git_rpc;
 mod human_interaction_rpc;
